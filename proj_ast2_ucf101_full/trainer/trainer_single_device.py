@@ -13,6 +13,14 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 
 
+def _as_float(val, name: str) -> float:
+    """Convert config values that might be strings into floats with a clear error."""
+    try:
+        return float(val)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
+
+
 def build_dataloaders(cfg):
     train_ds = UCF101Dataset(cfg.data.root, cfg.data.train_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=True)
     val_ds = UCF101Dataset(cfg.data.root, cfg.data.val_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=False)
@@ -42,7 +50,9 @@ def train_single_device(cfg):
         ast_cfg=cfg.ast,
     ).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    lr = _as_float(cfg.train.lr, "cfg.train.lr")
+    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
 
     for epoch in range(cfg.train.epochs):
