@@ -1,0 +1,105 @@
+model:
+  type: "VideoViT"
+  img_size: 224
+  num_frames: 8
+  num_classes: 101
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4.0
+  patch_size: 16
+  in_chans: 3
+  drop_rate: 0.0
+  attn_drop: 0.0
+  drop_path_rate: 0.0
+  use_ast_prune: true
+
+data:
+  dataset: "ucf101"
+  root: "./data/ucf101"
+  train_split: "./data/ucf101/splits/trainlist01.txt"
+  val_split: "./data/ucf101/splits/testlist01.txt"
+  clip_len: 8
+  img_size: 224
+  num_workers: 8
+
+train:
+  device: "cuda:0"
+  epochs: 50
+  batch_size: 8
+  lr: 3e-4
+  weight_decay: 0.05
+  warmup_epochs: 5
+  amp: true
+
+ast:
+  use_ast_prune: true
+  time_window_sizes: [1, 2, 4, 8]
+  entropy_tau: 1.0
+  rho_token_target: 0.5
+  token_temperature: 0.1
+  num_regions_coarse: 4
+  num_regions_fine: 8
+  alpha_time: 1.0
+  beta_space_coarse: 0.5
+  gamma_space_fine: 0.5
+  lambda_token: 0.1
+  lambda_head: 0.1
+  lambda_ch: 0.1
+  lambda_block: 0.05
+  lambda_AST: 1.0
+  space_windows:
+    - [1, 1]
+    - [2, 2]
+    - [4, 4]
+    - [-1, -1]
+
+hw:
+  mode: "version_c_full"
+  device_name: "RTX3090_FP16"
+  gpu_yaml: "./configs/gpu_data.yaml"
+  proxy_weight_dir: "./proxy_weights"
+  lambda_hw: 1.0
+  lambda_T: 1.0e-3
+  lambda_E: 1.0e-4
+  lambda_mem: 1.0e-4
+  lambda_area: 1.0e-6
+  lambda_chip: 1.0e-3
+  lambda_boundary: 1.0e-3
+  lambda_overlap: 1.0e-3
+  lambda_comm_extra: 1.0e-6
+  lambda_thermal: 1.0e-4
+  area_limit_mm2: 70000.0
+  num_slots: 16
+  wafer_radius_mm: 150.0
+  latency_mode: "balanced"
+  use_fine_split: true
+
+mapping:
+  strategy: "greedy_local"
+  mem_limit_factor: 0.9
+  seg_block_size: 2
+
+training:
+  mode: "version_c_full"
+  outer_epochs: 10
+  inner_steps_ast: 100
+  inner_steps_alpha: 20
+  inner_steps_layout: 20
+
+chiplet:
+  candidate_types: ["RTX4090_FP16", "RTX3090_FP16", "RTX2080Ti_FP16"]
+  tau_init: 5.0
+  tau_min: 0.5
+  tau_decay: 0.9
+
+partition:
+  w_latency: 1.0
+  w_comm: 1.0e-3
+  w_balance: 0.1
+  min_split_gain_ratio: 0.05
+  flops_ratio_thresh: 0.3
+  traffic_ratio_thresh: 0.3
+  max_split_layers: 4
+  max_groups_per_layer: 2
+  max_new_segments: 32

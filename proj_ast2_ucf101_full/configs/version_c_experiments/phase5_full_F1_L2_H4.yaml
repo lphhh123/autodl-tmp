@@ -1,0 +1,11 @@
+_base_: ../version_c_ucf101.yaml
+version_c:
+  num_slots: 16
+  temperature: 0.8
+  enable_alpha_learning: true
+  enable_layout: true
+  enable_mapping: true
+  lambda_T: 1.0e-3
+  lambda_E: 2.0e-3
+  lambda_mem: 1.0e-3
+  lambda_comm: 2.0e-4
