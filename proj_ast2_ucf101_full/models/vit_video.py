@@ -135,7 +135,9 @@ class VideoViT(nn.Module):
 
         if not return_intermediate:
             return logits
+        L_ast_val = ast_out.L_AST if ast_out is not None else L_AST
         info = {
+            "L_AST": L_ast_val,
             "token_feat": tokens.view(b, t, self.num_tokens, -1),
             "gates": {
                 "token_mask": ast_out.token_mask if ast_out is not None else torch.ones(b, t, self.num_tokens, device=x.device),
@@ -145,7 +147,7 @@ class VideoViT(nn.Module):
                 "sparsity": sparsity,
             },
             "ast_stats": {
-                "L_AST": ast_out.L_AST if ast_out is not None else L_AST,
+                "L_AST": L_ast_val,
                 "sparsity_token": sparsity.get("token") if sparsity else None,
                 "sparsity_head": sparsity.get("head") if sparsity else None,
                 "sparsity_ch": sparsity.get("ch") if sparsity else None,
