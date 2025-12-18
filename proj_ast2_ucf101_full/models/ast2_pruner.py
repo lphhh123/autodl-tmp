@@ -192,6 +192,10 @@ class ASTPruner(nn.Module):
         Ht_norm = self._normalize(H_time_ms)
         Hc_norm = self._normalize(H_region_coarse)
         Hf_norm = self._normalize(H_region_fine)
+        # Keep dtype consistent with input (can be fp16 under autocast).
+        Ht_norm = Ht_norm.to(x.dtype)
+        Hc_norm = Hc_norm.to(x.dtype)
+        Hf_norm = Hf_norm.to(x.dtype)
         Hc_per_token = x.new_zeros(B, T, N)
         Hf_per_token = x.new_zeros(B, T, N)
         for r in range(self.num_regions_coarse):
