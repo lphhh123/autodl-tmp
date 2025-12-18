@@ -44,8 +44,9 @@ def assign_voronoi_regions(coords: torch.Tensor, centers: torch.Tensor) -> torch
 
 def conv1d_mean_over_time(p_bt: torch.Tensor, L: int) -> torch.Tensor:
     # p_bt: [B*N, C, T]
-    weight = torch.ones(1, 1, L, device=p_bt.device, dtype=p_bt.dtype) / float(L)
-    q = F.conv1d(p_bt, weight, stride=1, padding=0, groups=1)
+    C = p_bt.shape[1]
+    weight = torch.ones(C, 1, L, device=p_bt.device, dtype=p_bt.dtype) / float(L)
+    q = F.conv1d(p_bt, weight, stride=1, padding=0, groups=C)
     return q
 
 
@@ -165,9 +166,9 @@ class ASTPruner(nn.Module):
     # SPEC §4.6
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         B = H.shape[0]
-        H_flat = H.view(B, -1)
-        H_min = H_flat.min(dim=-1, keepdim=True)[0].view(B, 1, 1)
-        H_max = H_flat.max(dim=-1, keepdim=True)[0].view(B, 1, 1)
+        H_flat = H.reshape(B, -1)
+        H_min = H_flat.min(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
+        H_max = H_flat.max(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
         return (H - H_min) / (H_max - H_min + eps)
 
     def compute_spatiotemporal_scores(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
