@@ -166,9 +166,9 @@ class ASTPruner(nn.Module):
     # SPEC §4.6
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         B = H.shape[0]
-        H_flat = H.view(B, -1)
-        H_min = H_flat.min(dim=-1, keepdim=True)[0].view(B, 1, 1)
-        H_max = H_flat.max(dim=-1, keepdim=True)[0].view(B, 1, 1)
+        H_flat = H.reshape(B, -1)
+        H_min = H_flat.min(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
+        H_max = H_flat.max(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
         return (H - H_min) / (H_max - H_min + eps)
 
     def compute_spatiotemporal_scores(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
