@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
@@ -31,6 +31,7 @@ def build_dataloaders(cfg):
 
 def train_single_device(cfg):
     device = get_device(cfg.train.device)
+    device_type = device.type
     logger = setup_logger()
     train_loader, val_loader = build_dataloaders(cfg)
     model = VideoViT(
@@ -60,7 +61,7 @@ def train_single_device(cfg):
         for step, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
             opt.zero_grad()
-            with autocast(enabled=cfg.train.amp):
+            with autocast(device_type, enabled=cfg.train.amp):
                 logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
                 loss = loss_task + cfg.ast.lambda_AST * info["L_AST"]
