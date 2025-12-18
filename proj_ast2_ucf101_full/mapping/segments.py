@@ -5,6 +5,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import torch
+
 from models.vit_video import VideoViT
 
 
