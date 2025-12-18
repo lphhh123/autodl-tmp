@@ -1,0 +1,7 @@
+_base_: ../ast2_ucf101.yaml
+train:
+  epochs: 3
+ast_loss:
+  lambda_token: 5.0e-4
+  lambda_head: 5.0e-4
+  lambda_channel: 5.0e-4

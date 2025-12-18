@@ -1,0 +1,10 @@
+_base_: ../version_c_ucf101.yaml
+version_c:
+  enable_alpha_learning: false
+  enable_layout: true
+  enable_mapping: true
+  enable_hw_loss_latency: false
+  enable_hw_loss_energy: true
+  enable_hw_loss_memory: true
+layout:
+  wafer_radius_mm: 60.0

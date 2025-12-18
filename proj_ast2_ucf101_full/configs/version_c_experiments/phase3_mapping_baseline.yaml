@@ -1,0 +1,7 @@
+_base_: ../version_c_ucf101.yaml
+version_c:
+  enable_alpha_learning: false
+  enable_layout: false
+  enable_hw_loss_latency: true
+  enable_hw_loss_energy: false
+  enable_hw_loss_memory: true
