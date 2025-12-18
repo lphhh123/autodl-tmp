@@ -44,8 +44,9 @@ def assign_voronoi_regions(coords: torch.Tensor, centers: torch.Tensor) -> torch
 
 def conv1d_mean_over_time(p_bt: torch.Tensor, L: int) -> torch.Tensor:
     # p_bt: [B*N, C, T]
-    weight = torch.ones(1, 1, L, device=p_bt.device, dtype=p_bt.dtype) / float(L)
-    q = F.conv1d(p_bt, weight, stride=1, padding=0, groups=1)
+    C = p_bt.shape[1]
+    weight = torch.ones(C, 1, L, device=p_bt.device, dtype=p_bt.dtype) / float(L)
+    q = F.conv1d(p_bt, weight, stride=1, padding=0, groups=C)
     return q
 
 
