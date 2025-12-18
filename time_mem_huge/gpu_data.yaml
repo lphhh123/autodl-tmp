@@ -1,0 +1,93 @@
+# gpu_data.yaml
+
+chiplets:
+  - name: RTX4090_FP32
+    peak_flops: 8.26e13
+    peak_bw:    1.008e12
+    sm_count:   128
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX4090_FP16
+    peak_flops: 3.30e14
+    peak_bw:    1.008e12
+    sm_count: 128
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX3090_FP32
+    peak_flops: 3.56e13
+    peak_bw:    0.936e12
+    sm_count: 82
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX3090_FP16
+    peak_flops: 1.20e14
+    peak_bw:    0.936e12
+    sm_count: 82
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX3080_10GB_FP32
+    peak_flops: 2.507e13
+    peak_bw:    0.760e12
+    sm_count: 68
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX3080_10GB_FP16
+    peak_flops: 1.00e14
+    peak_bw:    0.760e12
+    sm_count: 68
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX2080Ti_FP32
+    peak_flops: 1.345e13
+    peak_bw:    0.616e12
+    sm_count: 68
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+  - name: RTX2080Ti_FP16
+    peak_flops: 1.10e14
+    peak_bw:    0.616e12
+    sm_count: 68
+    tiles_per_sm: 8
+    tensor_tile: [16,16,16]
+    link_bw: 0
+    link_hop_ns: 0
+    size: [0.0,0.0]
+
+defaults:
+  eta_comp: 0.75
+  eta_bw:   0.75
+  c_sync:   1.10
+  f_issue:  0.90
+  t0_ms:    0.0
+  energy_per_flop:       1.0e-12
+  energy_sram_per_byte:  5.0e-12
+  energy_dram_per_byte:  5.0e-11
+  energy_comm_per_byte:  1.0e-10

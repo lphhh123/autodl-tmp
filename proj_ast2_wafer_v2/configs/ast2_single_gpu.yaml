@@ -1,0 +1,55 @@
+model:
+  type: "VideoViT"
+  img_size: 224
+  num_frames: 8
+  num_classes: 101
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4.0
+  patch_size: 16
+  in_chans: 3
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: "UCF101"        # use real UCF-101 videos
+  root: "/data/UCF101"     # !!! modify to your actual UCF-101 root path
+  clip_len: 8
+  frame_sample_strategy: "uniform"
+  num_workers: 8
+  val_ratio: 0.2           # 4:1 train/val split inside the training script
+
+train:
+  epochs: 50
+  batch_size: 8
+  lr: 3e-4
+  weight_decay: 0.05
+  warmup_epochs: 5
+  device: "cuda:0"
+  seed: 42
+
+loss:
+  lambda_sparse: 1e-3
+  lambda_hw: 1e-3
+  alpha_t: 1.0
+  alpha_m: 0.1
+  alpha_e: 0.01
+  latency_norm: 10.0     # normalize ms into a ~O(1) range
+  mem_norm: 1000.0       # MB -> GB-ish scale
+  energy_norm: 10.0      # ms * W (mJ) into ~O(1)
+  use_entropy_loss: true
+  target_keep_start: 1.0
+  target_keep_end: 0.4
+
+proxy:
+  gpu_yaml: "configs/gpu_data.yaml"
+  device_name: "3090"            # must match a key in gpu_data.yaml and proxy weights
+  weight_dir: "./proxy_weights"  # put all 9 .pt files here
+  use_hw_loss: true
+  device: "cuda:0"
+
+log:
+  out_dir: "logs/ast2_single_gpu"
+  print_freq: 10
+  save_ckpt: true\n

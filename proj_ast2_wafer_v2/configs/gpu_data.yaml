@@ -1,0 +1,24 @@
+2080ti:
+  peak_bw: 912e9
+  peak_flops: 34.1e12
+  sm_count: 80
+'3090':
+  peak_bw: 936e9
+  peak_flops: 35.6e12
+  sm_count: 82
+'4090':
+  peak_bw: 1008e9
+  peak_flops: 82.6e12
+  sm_count: 128
+RTX3080Ti_FP16:
+  peak_bw: 912e9
+  peak_flops: 34.1e12
+  sm_count: 80
+RTX3090_FP16:
+  peak_bw: 936e9
+  peak_flops: 35.6e12
+  sm_count: 82
+RTX4090_FP16:
+  peak_bw: 1008e9
+  peak_flops: 82.6e12
+  sm_count: 128
