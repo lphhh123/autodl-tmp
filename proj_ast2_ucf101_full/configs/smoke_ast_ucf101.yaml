@@ -1,0 +1,13 @@
+_base_: ./ast2_ucf101.yaml
+training:
+  mode: single_device_ast
+  epochs: 1
+  batch_size: 1
+  outer_epochs: 1
+  inner_steps_ast: 1
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+ast:
+  use_ast_prune: true
+hw:
+  mode: none

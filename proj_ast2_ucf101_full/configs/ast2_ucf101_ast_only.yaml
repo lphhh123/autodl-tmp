@@ -1,0 +1,7 @@
+_base_: ./ast2_ucf101.yaml
+training:
+  mode: single_device_ast
+  epochs: 2
+  batch_size: 2
+hw:
+  mode: none

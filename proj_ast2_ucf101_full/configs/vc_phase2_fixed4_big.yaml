@@ -1,0 +1,11 @@
+_base_: ./ast2_ucf101.yaml
+training:
+  mode: multi_chip_fixed
+  epochs: 1
+  batch_size: 2
+hw:
+  mode: version_c_full
+  num_slots: 4
+  use_fine_split: false
+layout:
+  optimize_layout: false
