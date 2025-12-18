@@ -1,14 +1,11 @@
-"""Segment definitions and builders (SPEC_version_c_full §7)."""
+"""Segment definitions and builders (SPEC §8)."""
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
-import torch
+from typing import Any, Dict, List
 
 from models.vit_video import VideoViT
-from utils.flops_estimator import estimate_attention_flops_bytes, estimate_mlp_flops_bytes
 
 
 @dataclass
@@ -40,8 +37,6 @@ class Segment:
     precision: int
     traffic_in_bytes: float
     traffic_out_bytes: float
-    can_split_fine: bool = False
-    fine_groups: Optional[int] = None
 
 
 @dataclass
@@ -58,16 +53,18 @@ class SegmentGraph:
 
 
 def _layer_flops_bytes(seq_len: int, embed_dim: int, num_heads: int, mlp_ratio: float) -> tuple[float, float]:
-    attn_flops, attn_bytes = estimate_attention_flops_bytes(seq_len, embed_dim, num_heads, precision_bytes=2)
-    mlp_flops, mlp_bytes = estimate_mlp_flops_bytes(seq_len, embed_dim, mlp_ratio, precision_bytes=2)
-    return attn_flops + mlp_flops, attn_bytes + mlp_bytes
+    # approximate per SPEC §8
+    attn_flops = 4.0 * seq_len * (embed_dim ** 2)
+    mlp_flops = 2.0 * seq_len * embed_dim * (embed_dim * mlp_ratio)
+    flops = attn_flops + mlp_flops
+    bytes_ = seq_len * embed_dim * 4.0  # simple activation estimate
+    return flops, bytes_
 
 
 def build_segments_from_model(model: VideoViT, cfg) -> List[Segment]:
+    # back-compat coarse grouping
     layer_nodes = build_layer_nodes_from_model(model)
-    segs = build_coarse_segments(layer_nodes, {}, getattr(cfg, "partition", None))
-    mark_fine_splittable_segments(segs, getattr(cfg, "partition", {}))
-    return segs
+    return build_coarse_segments(layer_nodes, {}, getattr(cfg, "partition", None))
 
 
 # SPEC v4: build LayerNodes and coarse segments
@@ -83,7 +80,8 @@ def build_layer_nodes_from_model(model: VideoViT, precision: int = 1) -> List[La
     nodes: List[LayerNode] = []
     node_id = 0
     for _ in range(depth):
-        attn_flops, attn_bytes = estimate_attention_flops_bytes(seq_len, embed_dim, num_heads, precision_bytes=bytes_per_elem)
+        attn_flops = 4.0 * seq_len * (embed_dim ** 2)
+        attn_bytes = seq_len * embed_dim * bytes_per_elem
         nodes.append(
             LayerNode(
                 id=node_id,
@@ -101,7 +99,8 @@ def build_layer_nodes_from_model(model: VideoViT, precision: int = 1) -> List[La
             )
         )
         node_id += 1
-        mlp_flops, mlp_bytes = estimate_mlp_flops_bytes(seq_len, embed_dim, mlp_ratio, precision_bytes=bytes_per_elem)
+        mlp_flops = 2.0 * seq_len * embed_dim * (embed_dim * mlp_ratio)
+        mlp_bytes = seq_len * embed_dim * bytes_per_elem
         nodes.append(
             LayerNode(
                 id=node_id,
@@ -123,7 +122,6 @@ def build_layer_nodes_from_model(model: VideoViT, precision: int = 1) -> List[La
 
 
 def build_coarse_segments(layer_nodes: List[LayerNode], eff_specs: Dict[str, torch.Tensor], partition_cfg: Any = None) -> List[Segment]:
-    segment_size = getattr(partition_cfg, "segment_size", getattr(partition_cfg, "seg_block_size", 2)) if partition_cfg else 2
     F_total = sum(ln.flops for ln in layer_nodes)
     chip_used_prob = None
     if eff_specs and isinstance(eff_specs, dict) and "mem_gb" in eff_specs:
@@ -146,7 +144,7 @@ def build_coarse_segments(layer_nodes: List[LayerNode], eff_specs: Dict[str, tor
         acc_flops += ln.flops
         acc_bytes += ln.bytes
         acc_layers.append(ln.id)
-        if (len(acc_layers) >= segment_size) or (acc_flops >= F_target and len(acc_layers) >= min_layers_per_segment):
+        if acc_flops >= F_target and len(acc_layers) >= min_layers_per_segment:
             traffic = seq_len * embed_dim * bytes_per_elem
             segments.append(
                 Segment(
@@ -185,15 +183,3 @@ def build_coarse_segments(layer_nodes: List[LayerNode], eff_specs: Dict[str, tor
             )
         )
     return segments
-
-
-def mark_fine_splittable_segments(segments: List[Segment], cfg: Any) -> None:
-    """Flag segments that are heavy in attention/traffic as fine-splittable (SPEC_version_c_full §7.3.2)."""
-    attn_ratio_thresh = getattr(cfg, "fine_split_attn_ratio_threshold", 0.4) if cfg else 0.4
-    traffic_thresh = getattr(cfg, "fine_split_traffic_threshold", 0.0) if cfg else 0.0
-    fine_groups = getattr(cfg, "fine_groups", 2) if cfg else 2
-    for seg in segments:
-        attn_ratio = 0.5  # coarse approximation since attn:mlp roughly 1:1 here
-        if attn_ratio >= attn_ratio_thresh and seg.traffic_out_bytes >= traffic_thresh:
-            seg.can_split_fine = True
-            seg.fine_groups = fine_groups

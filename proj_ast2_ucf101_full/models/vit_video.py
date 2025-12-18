@@ -120,13 +120,11 @@ class VideoViT(nn.Module):
             ch_w = [torch.ones(int(self.cfg.embed_dim * self.cfg.mlp_ratio), device=x.device) for _ in range(len(self.blocks))]
             block_w = [torch.tensor(1.0, device=x.device) for _ in range(len(self.blocks))]
             sparsity = {}
-            L_AST = torch.tensor(0.0, device=x.device)
         else:
             head_w = ast_out.head_weights
             ch_w = ast_out.ch_weights
             block_w = ast_out.block_weights
             sparsity = ast_out.sparsity
-            L_AST = ast_out.L_AST
 
         for idx, blk in enumerate(self.blocks):
             seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx])
@@ -151,7 +149,6 @@ class VideoViT(nn.Module):
                 "sparsity_head": sparsity.get("head") if sparsity else None,
                 "sparsity_ch": sparsity.get("ch") if sparsity else None,
                 "sparsity_block": sparsity.get("block") if sparsity else None,
-                "extras": getattr(ast_out, "extras", {}),
             },
         }
         return logits, info

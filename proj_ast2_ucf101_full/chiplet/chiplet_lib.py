@@ -20,19 +20,13 @@ class ChipletType:
     die_area_mm2: float
     aspect_ratio: float
     tdp_w: float = 0.0
-    width_mm_override: float = 0.0
-    height_mm_override: float = 0.0
 
     @property
     def width_mm(self) -> float:
-        if self.width_mm_override > 0:
-            return self.width_mm_override
         return math.sqrt(self.die_area_mm2 * self.aspect_ratio)
 
     @property
     def height_mm(self) -> float:
-        if self.height_mm_override > 0:
-            return self.height_mm_override
         return math.sqrt(self.die_area_mm2 / self.aspect_ratio)
 
 
@@ -52,8 +46,6 @@ class ChipletLibrary:
                 die_area_mm2=cfg["area_mm2"],
                 aspect_ratio=cfg.get("aspect_ratio", 1.0),
                 tdp_w=cfg.get("tdp_w", 0.0),
-                width_mm_override=cfg.get("width_mm", 0.0),
-                height_mm_override=cfg.get("height_mm", 0.0),
             )
 
     def get(self, name: str) -> ChipletType:

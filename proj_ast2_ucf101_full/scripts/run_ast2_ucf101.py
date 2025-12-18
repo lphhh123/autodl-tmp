@@ -6,11 +6,9 @@ from trainer.trainer_single_device import train_single_device
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cfg", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--cfg", type=str, default="./configs/ast2_ucf101.yaml")
     args = parser.parse_args()
-    cfg_path = args.config or args.cfg or "./configs/ast2_ucf101.yaml"
-    cfg = load_config(cfg_path)
+    cfg = load_config(args.cfg)
     train_single_device(cfg)
 
 

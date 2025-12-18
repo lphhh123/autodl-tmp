@@ -53,14 +53,13 @@ def train_single_device(cfg):
             with autocast(enabled=cfg.train.amp):
                 logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
-                loss = loss_task + cfg.ast.lambda_AST * info["ast_stats"]["L_AST"]
+                loss = loss_task + cfg.ast.lambda_AST * info["L_AST"]
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
             if step % 10 == 0:
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
-                sparsity_token = info["ast_stats"].get("sparsity_token", torch.tensor(0.0))
-                log_stats(logger, {"epoch": epoch, "step": step, "loss": loss.item(), "acc1": acc1.item(), "acc5": acc5.item(), "sparsity_token": float(sparsity_token)})
+                log_stats(logger, {"epoch": epoch, "step": step, "loss": loss.item(), "acc1": acc1.item(), "acc5": acc5.item(), "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()})
         validate(model, val_loader, device, logger, epoch, cfg)
 
 

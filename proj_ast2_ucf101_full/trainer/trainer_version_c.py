@@ -39,15 +39,7 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
     mapping = partition_result["mapping"]
 
     cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
-    mapping_result = mapping_solver.solve_mapping(
-        segments,
-        eff_specs,
-        hw_proxy,
-        layout_positions=wafer_layout.pos,
-        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
-        distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
-        cfg=getattr(hw_cfg, "mapping_cfg", {}),
-    )
+    mapping_result = mapping_solver.solve_mapping(segments, eff_specs, hw_proxy, layout_positions=wafer_layout.pos, strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"), distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0))
     mapping = mapping_result["mapping"]
     total_latency_ms = torch.tensor(mapping_result["total_latency_ms"], device=alpha.device, dtype=torch.float32)
     comm_ms = torch.tensor(mapping_result["comm_ms"], device=alpha.device, dtype=torch.float32)
@@ -80,21 +72,14 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
         distance_scale=1e-9,
     )
 
-    L_hw = (
-        hw_cfg.lambda_T * total_latency_ms
-        + hw_cfg.lambda_E * total_energy_j
-        + hw_cfg.lambda_mem * peak_mem_mb
-        + L_area
-        + L_chip_count
-        + L_layout
-    )
+    L_hw = hw_cfg.lambda_T * total_latency_ms + hw_cfg.lambda_E * total_energy_j + hw_cfg.lambda_mem * peak_mem_mb + L_area + L_chip_count + L_layout
     hw_stats = {
         "total_latency_ms": total_latency_ms.detach(),
         "total_energy_j": total_energy_j.detach(),
         "peak_mem_mb": peak_mem_mb.detach(),
         "total_area_mm2": total_area_mm2.detach(),
         "chip_count": chip_used_prob.sum().detach(),
-        "layout": {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in layout_stats.items()},
+        "layout": {k: v.detach() for k, v in layout_stats.items()},
         "comm_ms": comm_ms.detach(),
     }
     return L_hw, hw_stats, mapping, partition_result.get("rewrite_plan")
@@ -157,7 +142,7 @@ def train_version_c(cfg):
                 logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
-                loss = L_task + cfg.ast.lambda_AST * info["ast_stats"]["L_AST"] + cfg.hw.lambda_hw * L_hw
+                loss = L_task + cfg.ast.lambda_AST * info["L_AST"] + cfg.hw.lambda_hw * L_hw
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
             scaler.step(optimizer_alpha)

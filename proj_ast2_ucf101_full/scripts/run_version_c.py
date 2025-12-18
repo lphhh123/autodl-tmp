@@ -1,4 +1,4 @@
-"""Entry for Version-C training."""
+"""Entry for Version-C full training."""
 import argparse
 from utils.config import load_config
 from trainer.trainer_version_c import train_version_c
@@ -6,11 +6,9 @@ from trainer.trainer_version_c import train_version_c
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cfg", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--cfg", type=str, default="./configs/version_c_ucf101.yaml")
     args = parser.parse_args()
-    cfg_path = args.config or args.cfg or "./configs/vc_phase3_full_ucf101.yaml"
-    cfg = load_config(cfg_path)
+    cfg = load_config(args.cfg)
     train_version_c(cfg)
 
 

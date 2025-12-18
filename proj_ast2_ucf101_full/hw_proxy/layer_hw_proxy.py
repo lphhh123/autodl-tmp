@@ -28,8 +28,8 @@ def build_layer_features(layer_cfg: Dict, device_cfg: Dict) -> np.ndarray:
     seq_len = float(layer_cfg.get("seq_len", 0))
     precision = float(layer_cfg.get("precision", 1))
 
-    peak_flops_tflops = float(device_cfg.get("peak_flops_tflops", device_cfg.get("peak_flops", 1.0) / 1e12))
-    peak_bw_gbps = float(device_cfg.get("peak_bw_gbps", device_cfg.get("peak_bw", 1.0) / 1e9))
+    peak_flops_tflops = float(device_cfg.get("peak_flops_tflops", 1.0))
+    peak_bw_gbps = float(device_cfg.get("peak_bw_gbps", 1.0))
 
     vec = [
         math.log10(flops + 1.0),
@@ -81,22 +81,4 @@ class LayerHwProxy:
         lat = self.lat_model(x).squeeze(-1).detach().cpu().numpy()
         mem = self.mem_model(x).squeeze(-1).detach().cpu().numpy()
         power = self.power_model(x).squeeze(-1).detach().cpu().numpy()
-        return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
-
-    def predict_layer(self, layer_cfg: Dict) -> Dict[str, float]:
-        """Single layer prediction helper."""
-        res = self.predict_layers_batch([layer_cfg])
-        return {k: float(v[0]) for k, v in res.items()}
-
-    def predict_segment(self, segment_cfg: Dict, device_specs: Dict[str, float]) -> Dict[str, float]:
-        """Predict latency/mem/power for a segment using provided device specs."""
-        device_cfg = {
-            "peak_flops_tflops": device_specs.get("peak_flops", 1.0) / 1e12,
-            "peak_bw_gbps": device_specs.get("peak_bw", 1.0) / 1e9,
-        }
-        feats = build_layer_features(segment_cfg, device_cfg)
-        x = torch.tensor(feats, dtype=torch.float32).unsqueeze(0)
-        lat = self.lat_model(x).squeeze().item()
-        mem = self.mem_model(x).squeeze().item()
-        power = self.power_model(x).squeeze().item()
         return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
