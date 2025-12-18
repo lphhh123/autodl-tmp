@@ -54,7 +54,7 @@ def train_single_device(cfg):
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler(device_type, enabled=cfg.train.amp)
+    scaler = GradScaler(enabled=cfg.train.amp)
 
     for epoch in range(cfg.train.epochs):
         model.train()
