@@ -130,7 +130,8 @@ class VideoViT(nn.Module):
             seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx])
         seq = self.norm(seq)
         cls_out = seq[:, 0]
-        logits = self.head(cls_out)
+        logits = self.head(cls_out)  # [B*T, num_classes]
+        logits = logits.view(b, t, -1).mean(dim=1)  # aggregate over frames
 
         if not return_intermediate:
             return logits
