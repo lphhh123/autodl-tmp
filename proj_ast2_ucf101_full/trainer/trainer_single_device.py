@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
@@ -11,6 +11,14 @@ from models.vit_video import VideoViT
 from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
+
+
+def _as_float(val, name: str) -> float:
+    """Convert config values that might be strings into floats with a clear error."""
+    try:
+        return float(val)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
 
 
 def build_dataloaders(cfg):
@@ -23,6 +31,7 @@ def build_dataloaders(cfg):
 
 def train_single_device(cfg):
     device = get_device(cfg.train.device)
+    device_type = device.type
     logger = setup_logger()
     train_loader, val_loader = build_dataloaders(cfg)
     model = VideoViT(
@@ -42,15 +51,17 @@ def train_single_device(cfg):
         ast_cfg=cfg.ast,
     ).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
-    scaler = GradScaler(enabled=cfg.train.amp)
+    lr = _as_float(cfg.train.lr, "cfg.train.lr")
+    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = GradScaler(device_type, enabled=cfg.train.amp)
 
     for epoch in range(cfg.train.epochs):
         model.train()
         for step, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
             opt.zero_grad()
-            with autocast(enabled=cfg.train.amp):
+            with autocast(device_type, enabled=cfg.train.amp):
                 logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
                 loss = loss_task + cfg.ast.lambda_AST * info["L_AST"]
