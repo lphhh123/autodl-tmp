@@ -1,109 +1,77 @@
-
-from typing import List, Dict, Any, Tuple
+"""Wafer layout model (SPEC §10)."""
+from __future__ import annotations
 
 import math
+from typing import Dict, List, Tuple
+
 import torch
+import torch.nn as nn
+
+from mapping.segments import Segment
 
 
-class WaferLayoutOptimizer:
-    """Differentiable wafer layout optimizer (dummy but communication-aware).
-
-    - Each chip is a square with area from gpu_data.yaml (approx).
-    - We optimize chip centers (x, y) inside a circular wafer.
-    - Objective:
-        comm_loss = sum_ij traffic_ij * distance_ij
-        + boundary / overlap penalties.
-
-    This is still a simplified model, but it exposes the right hooks for
-    later replacement by a more advanced floorplanner.
-    """
-
-    def __init__(self, wafer_radius_mm: float = 50.0, lr: float = 0.1, steps: int = 80,
-                 lambda_comm: float = 1e-6):
+class WaferLayout(nn.Module):
+    def __init__(self, num_slots: int, wafer_radius_mm: float):
+        super().__init__()
+        self.pos = nn.Parameter(torch.zeros(num_slots, 2))
         self.wafer_radius_mm = wafer_radius_mm
-        self.lr = lr
-        self.steps = steps
-        self.lambda_comm = lambda_comm
 
-    def optimize(
-        self,
-        device_instances: List[Dict[str, Any]],
-        dev_edges: List[Tuple[int, int, float]],
-        device_area_mm2: Dict[str, float],
-    ) -> Dict[str, Any]:
-        """Optimize positions.
+    # SPEC §10.2
+    def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
+        centers = self.pos
+        r_center = torch.sqrt((centers ** 2).sum(dim=1) + 1e-6)
+        r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
+        violation = torch.relu(r_center + r_chip + margin - self.wafer_radius_mm)
+        return (violation ** 2).sum()
 
-        Parameters
-        ----------
-        device_instances: list of {id: str, chip_name: str}
-        dev_edges: list of (i, j, traffic_bytes) over device indices
-        device_area_mm2: dict device_id -> area_mm2
+    # SPEC §10.3
+    def overlap_penalty(self, eff_specs: Dict[str, torch.Tensor]):
+        centers = self.pos
+        r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
+        S = centers.shape[0]
+        penalty = centers.new_tensor(0.0)
+        for i in range(S):
+            for j in range(i + 1, S):
+                dist = torch.sqrt(((centers[i] - centers[j]) ** 2).sum() + 1e-6)
+                min_dist = r_chip[i] + r_chip[j]
+                overlap = torch.relu(min_dist - dist)
+                penalty = penalty + overlap ** 2
+        return penalty
 
-        Returns
-        -------
-        dict with:
-          - positions: {device_id: {x, y}}
-        """
-        if not device_instances:
-            return {"positions": {}}
+    # SPEC §10.4
+    def comm_loss(self, mapping: List[int], segments: List[Segment], eff_specs: Dict[str, torch.Tensor], distance_scale: float):
+        centers = self.pos
+        comm_cost = centers.new_tensor(0.0)
+        for k in range(len(segments) - 1):
+            d1, d2 = mapping[k], mapping[k + 1]
+            if d1 == d2:
+                continue
+            traffic = segments[k].traffic_out_bytes
+            dist = torch.sqrt(((centers[d1] - centers[d2]) ** 2).sum() + 1e-6)
+            comm_cost = comm_cost + traffic * dist * distance_scale
+        return comm_cost
 
-        device_ids = [d["id"] for d in device_instances]
-        n = len(device_ids)
+    # SPEC §10.5
+    def thermal_penalty(self, eff_specs: Dict[str, torch.Tensor], T_ambient: float = 25.0, T_limit: float = 85.0, sigma_mm: float = 50.0, alpha: float = 0.01):
+        centers = self.pos
+        power = eff_specs["tdp_w"]
+        S = centers.shape[0]
+        temps = []
+        for i in range(S):
+            r2 = ((centers - centers[i]) ** 2).sum(dim=1)
+            K = torch.exp(-r2 / (2.0 * sigma_mm ** 2))
+            T_i = T_ambient + alpha * (K * power).sum()
+            temps.append(T_i)
+        temps = torch.stack(temps)
+        T_max = temps.max()
+        return torch.relu(T_max - T_limit) ** 2
 
-        # Initial positions: place roughly on a circle
-        angles = torch.linspace(0, 2 * math.pi, steps=n + 1)[:-1]
-        radius = self.wafer_radius_mm * 0.6
-        x = radius * torch.cos(angles)
-        y = radius * torch.sin(angles)
-        pos = torch.stack([x, y], dim=1)  # [n, 2]
-        pos = torch.nn.Parameter(pos)
-
-        optimizer = torch.optim.SGD([pos], lr=self.lr, momentum=0.9)
-
-        # Chip half-sizes
-        half_sizes = []
-        for d in device_ids:
-            area = device_area_mm2.get(d, 400.0)
-            side = math.sqrt(area)
-            half_sizes.append(side / 2.0)
-        half_sizes = torch.tensor(half_sizes, dtype=torch.float32)
-
-        for _ in range(self.steps):
-            optimizer.zero_grad()
-            loss = 0.0
-
-            # 1) Communication distance loss
-            if dev_edges:
-                comm_loss = 0.0
-                for i, j, traffic_bytes in dev_edges:
-                    if i == j:
-                        continue
-                    pi = pos[i]
-                    pj = pos[j]
-                    dist = torch.norm(pi - pj) + 1e-6  # mm
-                    comm_loss = comm_loss + float(traffic_bytes) * dist
-                loss = loss + self.lambda_comm * comm_loss
-
-            # 2) Wafer boundary penalty
-            dist_from_center = torch.norm(pos, dim=1)  # [n]
-            penalty_out = torch.relu(dist_from_center + half_sizes - self.wafer_radius_mm)
-            loss = loss + (penalty_out ** 2).mean() * 1.0
-
-            # 3) Overlap penalty
-            for i in range(n):
-                for j in range(i + 1, n):
-                    dx = pos[i, 0] - pos[j, 0]
-                    dy = pos[i, 1] - pos[j, 1]
-                    center_dist = torch.sqrt(dx * dx + dy * dy + 1e-6)
-                    min_allowed = half_sizes[i] + half_sizes[j]
-                    overlap = torch.relu(min_allowed - center_dist)
-                    loss = loss + (overlap ** 2) * 0.1
-
-            loss.backward()
-            optimizer.step()
-
-        positions = {
-            dev_id: dict(x=float(pos[i, 0].item()), y=float(pos[i, 1].item()))
-            for i, dev_id in enumerate(device_ids)
-        }
-        return {"positions": positions}
+    # SPEC §10.6
+    def forward(self, mapping: List[int], segments: List[Segment], eff_specs: Dict[str, torch.Tensor], lambda_boundary: float, lambda_overlap: float, lambda_comm: float, lambda_thermal: float, distance_scale: float):
+        L_boundary = self.boundary_penalty(eff_specs)
+        L_overlap = self.overlap_penalty(eff_specs)
+        L_comm = self.comm_loss(mapping, segments, eff_specs, distance_scale)
+        L_thermal = self.thermal_penalty(eff_specs)
+        L_layout = lambda_boundary * L_boundary + lambda_overlap * L_overlap + lambda_comm * L_comm + lambda_thermal * L_thermal
+        stats = {"boundary": L_boundary.detach(), "overlap": L_overlap.detach(), "comm": L_comm.detach(), "thermal": L_thermal.detach()}
+        return L_layout, stats

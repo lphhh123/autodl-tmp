@@ -1,7 +1,7 @@
-"""Entry for AST2.0-lite single device training (SPEC)."""
+"""Entry for Version-C training."""
 import argparse
 from utils.config import load_config
-from trainer.trainer_single_device import train_single_device
+from trainer.trainer_version_c import train_version_c
 
 
 def main():
@@ -9,9 +9,9 @@ def main():
     parser.add_argument("--cfg", type=str, default=None)
     parser.add_argument("--config", type=str, default=None)
     args = parser.parse_args()
-    cfg_path = args.config or args.cfg or "./configs/ast2_ucf101.yaml"
+    cfg_path = args.config or args.cfg or "./configs/vc_phase3_full_ucf101.yaml"
     cfg = load_config(cfg_path)
-    train_single_device(cfg)
+    train_version_c(cfg)
 
 
 if __name__ == "__main__":

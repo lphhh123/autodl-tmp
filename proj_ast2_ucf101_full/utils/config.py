@@ -35,20 +35,28 @@ def _to_attr(obj: Any) -> Any:
     return obj
 
 
-def load_config(path: str) -> AttrDict:
-    """Load a YAML config file into an AttrDict.
-
-    Parameters
-    ----------
-    path: str
-        Path to the yaml file.
-
-    Returns
-    -------
-    AttrDict
-        Nested dictionary with attribute-style access.
-    """
-    path = os.path.expanduser(path)
+def _load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
+
+
+def _merge_dict(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(a)
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge_dict(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_config(path: str) -> AttrDict:
+    """Load a YAML config file into an AttrDict, supporting `_base_` includes."""
+    path = os.path.expanduser(path)
+    cfg = _load_yaml(path)
+    if "_base_" in cfg and cfg["_base_"] is not None:
+        base_path = os.path.join(os.path.dirname(path), cfg["_base_"])
+        base_cfg = _load_yaml(base_path)
+        cfg.pop("_base_")
+        cfg = _merge_dict(base_cfg, cfg)
     return _to_attr(cfg)

@@ -1,0 +1,14 @@
+_base_: ./ast2_ucf101.yaml
+training:
+  mode: version_c_full
+  outer_epochs: 1
+  inner_steps_ast: 1
+  inner_steps_alpha: 1
+  inner_steps_layout: 0
+  batch_size: 1
+hw:
+  mode: version_c_full
+  use_fine_split: true
+  num_slots: 4
+layout:
+  optimize_layout: false

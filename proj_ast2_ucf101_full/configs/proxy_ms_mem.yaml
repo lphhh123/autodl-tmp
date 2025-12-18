@@ -1,0 +1,6 @@
+proxy:
+  gpu_yaml: ./configs/gpu_data.yaml
+  weight_dir: ./proxy_weights
+  device_name: RTX3090_FP16
+train:
+  epochs: 1

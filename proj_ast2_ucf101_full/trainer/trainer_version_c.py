@@ -1,0 +1,208 @@
+"""Version-C full trainer (SPEC §12.2)."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, List
+
+import torch
+import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
+
+from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
+from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
+from hw_proxy.layer_hw_proxy import LayerHwProxy
+from layout.wafer_layout import WaferLayout
+from mapping.mapping_solver import MappingSolver
+from mapping.partitioner import PartitionPlanner
+from mapping.segments import build_segments_from_model
+from models.vit_video import VideoViT
+from utils.distributed_utils import get_device
+from utils.logging_utils import setup_logger, log_stats
+
+
+def build_dataloader(cfg):
+    ds = UCF101Dataset(cfg.data.root, cfg.data.train_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=True)
+    return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers, collate_fn=collate_video_batch)
+
+
+def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, mapping_solver: MappingSolver, wafer_layout: WaferLayout, partitioner: PartitionPlanner, hw_cfg: Dict):
+    slot_out = chiplet_slots(hard=False)
+    alpha = slot_out["alpha"]
+    eff_specs = slot_out["eff_specs"]
+    chip_used_prob = 1.0 - alpha[:, -1]
+    L_chip_count = hw_cfg.lambda_chip * chip_used_prob.sum()
+
+    partition_result = partitioner.plan(model=model, eff_specs=eff_specs, use_fine_split=getattr(hw_cfg, "use_fine_split", True))
+    segments = partition_result["segments"]
+    mapping = partition_result["mapping"]
+
+    cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
+    mapping_result = mapping_solver.solve_mapping(
+        segments,
+        eff_specs,
+        hw_proxy,
+        layout_positions=wafer_layout.pos,
+        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
+        distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
+        cfg=getattr(hw_cfg, "mapping_cfg", {}),
+    )
+    mapping = mapping_result["mapping"]
+    total_latency_ms = torch.tensor(mapping_result["total_latency_ms"], device=alpha.device, dtype=torch.float32)
+    comm_ms = torch.tensor(mapping_result["comm_ms"], device=alpha.device, dtype=torch.float32)
+
+    lat_ms = cost["lat_ms"]
+    power_w = cost["power_w"]
+    K = len(segments)
+    total_energy_j = lat_ms.new_tensor(0.0)
+    mem_mb = cost["mem_mb"]
+    S = alpha.shape[0]
+    mem_usage = torch.zeros(S, device=alpha.device)
+    for k in range(K):
+        d = mapping[k]
+        lat_s = lat_ms[k, d] / 1e3
+        p = power_w[k, d]
+        total_energy_j = total_energy_j + lat_s * p
+        mem_usage[d] = torch.maximum(mem_usage[d], mem_mb[k, d])
+    peak_mem_mb = mem_usage.max()
+    total_area_mm2 = (eff_specs["area_mm2"] * chip_used_prob).sum()
+    L_area = hw_cfg.lambda_area * torch.relu(total_area_mm2 - hw_cfg.area_limit_mm2) ** 2
+
+    L_layout, layout_stats = wafer_layout(
+        mapping,
+        segments,
+        eff_specs,
+        lambda_boundary=hw_cfg.lambda_boundary,
+        lambda_overlap=hw_cfg.lambda_overlap,
+        lambda_comm=hw_cfg.lambda_comm_extra,
+        lambda_thermal=hw_cfg.lambda_thermal,
+        distance_scale=1e-9,
+    )
+
+    L_hw = (
+        hw_cfg.lambda_T * total_latency_ms
+        + hw_cfg.lambda_E * total_energy_j
+        + hw_cfg.lambda_mem * peak_mem_mb
+        + L_area
+        + L_chip_count
+        + L_layout
+    )
+    hw_stats = {
+        "total_latency_ms": total_latency_ms.detach(),
+        "total_energy_j": total_energy_j.detach(),
+        "peak_mem_mb": peak_mem_mb.detach(),
+        "total_area_mm2": total_area_mm2.detach(),
+        "chip_count": chip_used_prob.sum().detach(),
+        "layout": {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in layout_stats.items()},
+        "comm_ms": comm_ms.detach(),
+    }
+    return L_hw, hw_stats, mapping, partition_result.get("rewrite_plan")
+
+
+def train_version_c(cfg):
+    device = get_device(cfg.train.device)
+    logger = setup_logger()
+    log_path = Path("logs/version_c_stats.jsonl")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    loader = build_dataloader(cfg)
+    data_iter = iter(loader)
+
+    model = VideoViT(
+        img_size=cfg.model.img_size,
+        num_frames=cfg.model.num_frames,
+        num_classes=cfg.model.num_classes,
+        embed_dim=cfg.model.embed_dim,
+        depth=cfg.model.depth,
+        num_heads=cfg.model.num_heads,
+        mlp_ratio=cfg.model.mlp_ratio,
+        patch_size=cfg.model.patch_size,
+        in_chans=cfg.model.in_chans,
+        drop_rate=cfg.model.drop_rate,
+        attn_drop=cfg.model.attn_drop,
+        drop_path_rate=cfg.model.drop_path_rate,
+        use_ast_prune=cfg.ast.use_ast_prune,
+        ast_cfg=cfg.ast,
+    ).to(device)
+
+    optimizer_model = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    scaler = GradScaler(enabled=cfg.train.amp)
+
+    library = ChipletLibrary(cfg.hw.gpu_yaml)
+    chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
+    optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=cfg.train.lr)
+
+    hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
+    mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
+    wafer_layout = WaferLayout(cfg.hw.num_slots, cfg.hw.wafer_radius_mm).to(device)
+    partitioner = PartitionPlanner(mapping_solver, wafer_layout, hw_proxy, cfg.partition)
+    optimizer_layout = torch.optim.Adam(wafer_layout.parameters(), lr=1e-3)
+
+    global_step = 0
+    for outer in range(cfg.training.outer_epochs):
+        tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
+        chiplet_slots.set_tau(tau)
+        for step in range(cfg.training.inner_steps_ast):
+            try:
+                x, y = next(data_iter)
+            except StopIteration:
+                data_iter = iter(loader)
+                x, y = next(data_iter)
+            x, y = x.to(device), y.to(device)
+            optimizer_model.zero_grad()
+            optimizer_alpha.zero_grad()
+            optimizer_layout.zero_grad()
+            with autocast(enabled=cfg.train.amp):
+                logits, info = model(x, return_intermediate=True)
+                L_task = F.cross_entropy(logits, y)
+                L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
+                loss = L_task + cfg.ast.lambda_AST * info["ast_stats"]["L_AST"] + cfg.hw.lambda_hw * L_hw
+            scaler.scale(loss).backward()
+            scaler.step(optimizer_model)
+            scaler.step(optimizer_alpha)
+            scaler.step(optimizer_layout)
+            scaler.update()
+            if step % 10 == 0:
+                acc1 = (logits.argmax(dim=1) == y).float().mean()
+                log_stats(logger, {"outer": outer, "step": step, "loss": loss.item(), "acc1": acc1.item(), "lat_ms": hw_stats["total_latency_ms"].item()})
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "step": int(global_step),
+                        "outer": int(outer),
+                        "loss": float(loss.item()),
+                        "lat_ms": float(hw_stats["total_latency_ms"].item()),
+                        "energy_j": float(hw_stats["total_energy_j"].item()),
+                        "mem_mb": float(hw_stats["peak_mem_mb"].item()),
+                        "area": float(hw_stats["total_area_mm2"].item()),
+                        "chip_count": float(hw_stats["chip_count"].item()),
+                    }) + "\n")
+            global_step += 1
+
+        # Step B: alpha refinement
+        for _ in range(cfg.training.inner_steps_alpha):
+            L_hw, hw_stats, mapping, _ = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
+            optimizer_alpha.zero_grad()
+            L_hw.backward()
+            optimizer_alpha.step()
+
+        # Step D: layout refinement
+        for _ in range(cfg.training.inner_steps_layout):
+            slot_out = chiplet_slots(hard=False)
+            eff_specs = slot_out["eff_specs"]
+            part_res = partitioner.plan(model, eff_specs, use_fine_split=getattr(cfg.hw, "use_fine_split", True))
+            segments = part_res["segments"]
+            mapping = part_res["mapping"]
+            L_layout, layout_stats = wafer_layout(
+                mapping,
+                segments,
+                eff_specs,
+                lambda_boundary=cfg.hw.lambda_boundary,
+                lambda_overlap=cfg.hw.lambda_overlap,
+                lambda_comm=cfg.hw.lambda_comm_extra,
+                lambda_thermal=cfg.hw.lambda_thermal,
+                distance_scale=1e-9,
+            )
+            optimizer_layout.zero_grad()
+            L_layout.backward()
+            optimizer_layout.step()

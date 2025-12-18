@@ -1,0 +1,25 @@
+chip_types:
+  - name: "RTX4090_FP16"
+    peak_flops: 82.6e12
+    peak_bw: 1000e9
+    mem_gb: 24.0
+    area_mm2: 600.0
+    width_mm: 25.0
+    height_mm: 24.0
+    tdp_w: 450.0
+  - name: "RTX3090_FP16"
+    peak_flops: 35.6e12
+    peak_bw: 936e9
+    mem_gb: 24.0
+    area_mm2: 500.0
+    width_mm: 23.0
+    height_mm: 22.0
+    tdp_w: 350.0
+  - name: "RTX2080Ti_FP16"
+    peak_flops: 13.4e12
+    peak_bw: 616e9
+    mem_gb: 11.0
+    area_mm2: 400.0
+    width_mm: 20.0
+    height_mm: 20.0
+    tdp_w: 250.0

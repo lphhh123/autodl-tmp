@@ -1,0 +1,6 @@
+_base_: ../version_c_ucf101.yaml
+version_c:
+  enable_layout: true
+  enable_mapping: true
+layout:
+  wafer_radius_mm: 55.0
