@@ -7,7 +7,7 @@ from typing import Dict, List
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
@@ -20,6 +20,14 @@ from mapping.segments import build_segments_from_model
 from models.vit_video import VideoViT
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
+
+
+def _as_float(val, name: str) -> float:
+    """Convert config values that might be strings into floats with a clear error."""
+    try:
+        return float(val)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
 
 
 def build_dataloader(cfg):
@@ -87,6 +95,7 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
 
 def train_version_c(cfg):
     device = get_device(cfg.train.device)
+    device_type = device.type
     logger = setup_logger()
     log_path = Path("logs/version_c_stats.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,12 +120,14 @@ def train_version_c(cfg):
         ast_cfg=cfg.ast,
     ).to(device)
 
-    optimizer_model = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
-    scaler = GradScaler(enabled=cfg.train.amp)
+    lr = _as_float(cfg.train.lr, "cfg.train.lr")
+    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+    optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = GradScaler(device_type, enabled=cfg.train.amp)
 
     library = ChipletLibrary(cfg.hw.gpu_yaml)
     chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
-    optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=cfg.train.lr)
+    optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
 
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
@@ -138,7 +149,7 @@ def train_version_c(cfg):
             optimizer_model.zero_grad()
             optimizer_alpha.zero_grad()
             optimizer_layout.zero_grad()
-            with autocast(enabled=cfg.train.amp):
+            with autocast(device_type, enabled=cfg.train.amp):
                 logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)

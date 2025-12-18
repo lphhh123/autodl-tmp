@@ -11,6 +11,13 @@ import torch.nn.functional as F
 import yaml
 
 
+def _to_float(val, name: str) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected numeric {name}, got {val!r}") from exc
+
+
 @dataclass
 class ChipletType:
     name: str
@@ -38,14 +45,18 @@ class ChipletLibrary:
         self.types: Dict[str, ChipletType] = {}
         for cfg in entries:
             name = cfg["name"]
+            peak_flops = _to_float(cfg.get("peak_flops", cfg.get("peak_flops_tflops", 0.0)), "peak_flops")
+            peak_flops_tflops = _to_float(cfg["peak_flops_tflops"], "peak_flops_tflops") if "peak_flops_tflops" in cfg else peak_flops / 1e12
+            peak_bw_val = cfg.get("peak_bw_gbps", cfg.get("peak_bw", 0.0))
+            peak_bw_gbps = _to_float(peak_bw_val, "peak_bw_gbps" if "peak_bw_gbps" in cfg else "peak_bw")
             self.types[name] = ChipletType(
                 name=name,
-                peak_flops_tflops=cfg["peak_flops"] / 1e12 if cfg["peak_flops"] > 1e6 else cfg["peak_flops_tflops"] if "peak_flops_tflops" in cfg else cfg["peak_flops"],
-                peak_bw_gbps=cfg.get("peak_bw_gbps", cfg.get("peak_bw", 0.0) / 1e9 if "peak_bw" in cfg else 0.0),
-                mem_gb=cfg["mem_gb"],
-                die_area_mm2=cfg["area_mm2"],
-                aspect_ratio=cfg.get("aspect_ratio", 1.0),
-                tdp_w=cfg.get("tdp_w", 0.0),
+                peak_flops_tflops=peak_flops / 1e12 if peak_flops > 1e6 else peak_flops_tflops,
+                peak_bw_gbps=peak_bw_gbps if "peak_bw_gbps" in cfg else peak_bw_gbps / 1e9,
+                mem_gb=_to_float(cfg["mem_gb"], "mem_gb"),
+                die_area_mm2=_to_float(cfg["area_mm2"], "area_mm2"),
+                aspect_ratio=_to_float(cfg.get("aspect_ratio", 1.0), "aspect_ratio"),
+                tdp_w=_to_float(cfg.get("tdp_w", 0.0), "tdp_w"),
             )
 
     def get(self, name: str) -> ChipletType:
