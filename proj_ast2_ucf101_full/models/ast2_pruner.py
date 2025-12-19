@@ -197,6 +197,24 @@ class ASTPruner(nn.Module):
             return torch.tensor(0.0, device=self.region_ids.device)
         return torch.stack(fused, dim=0).mean(dim=0)
 
+    def _expand_time_token(self, Ht: torch.Tensor, T: int, N: int) -> torch.Tensor:
+        if Ht.dim() == 2:
+            return Ht.unsqueeze(1).expand(-1, T, -1)
+        if Ht.dim() == 3:
+            if Ht.shape[1] == T and Ht.shape[2] == N:
+                return Ht
+            raise ValueError(f"Unexpected time token shape {Ht.shape}, expected [B, {T}, {N}]")
+        raise ValueError(f"Unexpected time token dims {Ht.dim()}, expected 2 or 3")
+
+    def _expand_space_token(self, Hs: torch.Tensor, T: int, N: int) -> torch.Tensor:
+        if Hs.dim() == 2:
+            return Hs.unsqueeze(2).expand(-1, T, N)
+        if Hs.dim() == 3:
+            if Hs.shape[1] == T and Hs.shape[2] == N:
+                return Hs
+            raise ValueError(f"Unexpected space token shape {Hs.shape}, expected [B, {T}, {N}]")
+        raise ValueError(f"Unexpected space token dims {Hs.dim()}, expected 2 or 3")
+
     def token_gating_single_modal(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         Ht = compute_multi_level_time_entropy(
@@ -211,8 +229,8 @@ class ASTPruner(nn.Module):
         B, T, N, _ = x.shape
         Ht_norm = self._normalize(Ht_fused).to(x.dtype)
         Hs_norm = self._normalize(Hs_fused).to(x.dtype)
-        H_time_token = Ht_norm.unsqueeze(1).expand(-1, T, -1)
-        H_space_token = Hs_norm.unsqueeze(2).expand(-1, T, N)
+        H_time_token = self._expand_time_token(Ht_norm, T, N)
+        H_space_token = self._expand_space_token(Hs_norm, T, N)
         region_score = H_space_token.mean(dim=1, keepdim=True).expand(-1, T, -1)
         score = (
             cfg.get("alpha_time", 1.0) * H_time_token
@@ -254,16 +272,16 @@ class ASTPruner(nn.Module):
                 )
                 Ht_fused = self._fuse_levels(Ht["H_time_level"]).to(x.dtype)
                 Hs_fused = self._fuse_levels(Hs["H_space_level"]).to(x.dtype)
-                H_time_token[:, :, s:e] = Ht_fused.unsqueeze(1).expand(-1, x.shape[1], -1)
-                H_space_token[:, :, s:e] = Hs_fused.unsqueeze(2)
+                H_time_token[:, :, s:e] = self._expand_time_token(Ht_fused, x.shape[1], e - s)
+                H_space_token[:, :, s:e] = self._expand_space_token(Hs_fused, x.shape[1], e - s)
                 modal_stats[name] = {"H_time_mean": Ht_fused.mean()}
             else:
                 Ht = compute_multi_level_time_entropy(
                     tokens, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
                 )
                 Ht_fused = self._fuse_levels(Ht["H_time_level"]).to(x.dtype)
-                H_time_token[:, :, s:e] = Ht_fused.unsqueeze(1).expand(-1, x.shape[1], -1)
-                H_space_token[:, :, s:e] = Ht_fused.unsqueeze(1).expand(-1, x.shape[1], -1)
+                H_time_token[:, :, s:e] = self._expand_time_token(Ht_fused, x.shape[1], e - s)
+                H_space_token[:, :, s:e] = self._expand_time_token(Ht_fused, x.shape[1], e - s)
                 modal_stats[name] = {"H_time_mean": Ht_fused.mean()}
 
         region_score = H_space_token.mean(dim=1, keepdim=True).expand(-1, x.shape[1], -1)
