@@ -1,0 +1,9 @@
+_base_: ./ast2_ucf101_ast_hw.yaml
+training:
+  model_type: "video_audio"
+data:
+  modality: "video_audio"
+ast:
+  num_modalities: 2
+  modalities: ["video", "audio"]
+  time_window_overlap: 0.5

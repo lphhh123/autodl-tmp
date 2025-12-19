@@ -7,24 +7,32 @@ from typing import Dict, List
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
-from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
+from utils.data_ucf101 import UCF101Dataset
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 from layout.wafer_layout import WaferLayout
 from mapping.mapping_solver import MappingSolver
 from mapping.partitioner import PartitionPlanner
 from mapping.segments import build_segments_from_model
-from models.vit_video import VideoViT
+from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
 
 
+def _as_float(val, name: str) -> float:
+    """Convert config values that might be strings into floats with a clear error."""
+    try:
+        return float(val)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
+
+
 def build_dataloader(cfg):
-    ds = UCF101Dataset(cfg.data.root, cfg.data.train_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=True)
-    return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers, collate_fn=collate_video_batch)
+    ds = UCF101Dataset(cfg, split="train")
+    return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
 
 
 def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, mapping_solver: MappingSolver, wafer_layout: WaferLayout, partitioner: PartitionPlanner, hw_cfg: Dict):
@@ -87,6 +95,7 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
 
 def train_version_c(cfg):
     device = get_device(cfg.train.device)
+    device_type = device.type
     logger = setup_logger()
     log_path = Path("logs/version_c_stats.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,29 +103,50 @@ def train_version_c(cfg):
     loader = build_dataloader(cfg)
     data_iter = iter(loader)
 
-    model = VideoViT(
-        img_size=cfg.model.img_size,
-        num_frames=cfg.model.num_frames,
-        num_classes=cfg.model.num_classes,
-        embed_dim=cfg.model.embed_dim,
-        depth=cfg.model.depth,
-        num_heads=cfg.model.num_heads,
-        mlp_ratio=cfg.model.mlp_ratio,
-        patch_size=cfg.model.patch_size,
-        in_chans=cfg.model.in_chans,
-        drop_rate=cfg.model.drop_rate,
-        attn_drop=cfg.model.attn_drop,
-        drop_path_rate=cfg.model.drop_path_rate,
-        use_ast_prune=cfg.ast.use_ast_prune,
-        ast_cfg=cfg.ast,
-    ).to(device)
+    if cfg.training.model_type == "video_audio":
+        model = VideoAudioAST(
+            img_size=cfg.model.img_size,
+            num_frames=cfg.model.num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            audio_feat_dim=cfg.audio.feat_dim,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
+    else:
+        model = VideoViT(
+            img_size=cfg.model.img_size,
+            num_frames=cfg.model.num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
 
-    optimizer_model = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
-    scaler = GradScaler(enabled=cfg.train.amp)
+    lr = _as_float(cfg.train.lr, "cfg.train.lr")
+    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+    optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = GradScaler(device_type, enabled=cfg.train.amp)
 
     library = ChipletLibrary(cfg.hw.gpu_yaml)
     chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
-    optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=cfg.train.lr)
+    optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
 
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
@@ -130,19 +160,24 @@ def train_version_c(cfg):
         chiplet_slots.set_tau(tau)
         for step in range(cfg.training.inner_steps_ast):
             try:
-                x, y = next(data_iter)
+                batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(loader)
-                x, y = next(data_iter)
-            x, y = x.to(device), y.to(device)
+                batch = next(data_iter)
+            x = batch["video"].to(device)
+            y = batch["label"].to(device)
             optimizer_model.zero_grad()
             optimizer_alpha.zero_grad()
             optimizer_layout.zero_grad()
-            with autocast(enabled=cfg.train.amp):
-                logits, info = model(x, return_intermediate=True)
+            with autocast(device_type, enabled=cfg.train.amp):
+                if cfg.training.model_type == "video_audio":
+                    x_audio = batch["audio"].to(device)
+                    logits, info = model(x, x_audio, return_intermediate=True)
+                else:
+                    logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
-                loss = L_task + cfg.ast.lambda_AST * info["L_AST"] + cfg.hw.lambda_hw * L_hw
+                loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + cfg.loss.lambda_hw * L_hw
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
             scaler.step(optimizer_alpha)
