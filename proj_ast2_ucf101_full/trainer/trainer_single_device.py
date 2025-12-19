@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
@@ -74,7 +73,7 @@ def train_single_device(cfg):
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler(device_type, enabled=cfg.train.amp)
+    scaler = GradScaler(enabled=cfg.train.amp)
 
     for epoch in range(cfg.train.epochs):
         model.train()
@@ -83,11 +82,7 @@ def train_single_device(cfg):
             y = batch["label"].to(device)
             opt.zero_grad()
             with autocast(device_type, enabled=cfg.train.amp):
-                if cfg.training.model_type == "video_audio":
-                    x_audio = batch["audio"].to(device)
-                    logits, info = model(x, x_audio, return_intermediate=True)
-                else:
-                    logits, info = model(x, return_intermediate=True)
+                logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
                 loss = loss_task + cfg.loss.lambda_AST * info["L_AST"]
             scaler.scale(loss).backward()

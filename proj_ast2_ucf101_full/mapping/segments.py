@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from models.video_vit import VideoViT
+from models.vit_video import VideoViT
 
 
 @dataclass
