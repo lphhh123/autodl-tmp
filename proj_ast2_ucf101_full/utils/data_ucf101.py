@@ -45,7 +45,7 @@ class UCF101Dataset(Dataset):
 
         self.audio_root = self.root / "audio"
         self.split = split
-        self.clip_lens = list(cfg.data.clip_lens)
+        self.clip_len = int(cfg.data.num_frames)
         self.modality = cfg.data.modality
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
