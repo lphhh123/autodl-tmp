@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import torch
+from functools import partial
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
