@@ -25,6 +25,7 @@ def _as_float(val, name: str) -> float:
 def build_dataloaders(cfg):
     train_ds = UCF101Dataset(cfg, split="train")
     val_ds = UCF101Dataset(cfg, split="val")
+    print(f"[DEBUG] len(train_ds)={len(train_ds)}, len(val_ds)={len(val_ds)}")
     train_loader = DataLoader(train_ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
     val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size, shuffle=False, num_workers=cfg.data.num_workers)
     return train_loader, val_loader
@@ -81,6 +82,8 @@ def train_single_device(cfg):
         for step, batch in enumerate(train_loader):
             x = batch["video"].to(device)
             y = batch["label"].to(device)
+            if epoch == 0 and step == 0:
+                logger.info("[DEBUG] train batch video.shape=%s", tuple(x.shape))
             opt.zero_grad()
             with autocast(device_type, enabled=cfg.train.amp):
                 logits, info = model(x, return_intermediate=True)

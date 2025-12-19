@@ -12,32 +12,53 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+from torchvision.io import read_video, read_video_timestamps
 
 
 @dataclass
 class ClipItem:
-    frames_dir: Path
+    source_path: Path
     label: int
     start: int
     clip_len: int
+    is_video: bool
 
 
 class UCF101Dataset(Dataset):
     def __init__(self, cfg, split: str) -> None:
         super().__init__()
         self.cfg = cfg
-        self.root = Path(cfg.data.root)
-        self.frame_root = self.root / "frames"
+        data_cfg = cfg.data
+        frames_root = getattr(data_cfg, "frames_root", None)
+        video_root = getattr(data_cfg, "video_root", None)
+        root = getattr(data_cfg, "root", None)
+        self.mode = "frames"
+        if frames_root:
+            self.root = Path(frames_root)
+        elif video_root:
+            self.root = Path(video_root)
+            self.mode = "video"
+        elif root:
+            self.root = Path(root)
+        else:
+            raise ValueError("Expected data.frames_root, data.video_root, or data.root to be set.")
+
         self.audio_root = self.root / "audio"
         self.split = split
-        self.clip_lens = list(cfg.data.clip_lens)
+        self.clip_len = int(cfg.data.num_frames)
         self.modality = cfg.data.modality
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
-
-        split_file = Path(cfg.data.train_split if self.is_train else cfg.data.val_split)
+        self.splits_root = Path(getattr(data_cfg, "splits_root", ""))
+        split_file = Path(
+            cfg.data.train_split if self.is_train else cfg.data.val_split
+        )
+        if not split_file.is_absolute() and self.splits_root:
+            split_file = self.splits_root / split_file
         if not split_file.exists():
-            raise FileNotFoundError(f"Split file not found: {split_file}")
+            raise FileNotFoundError(
+                f"Split file not found: {split_file} (splits_root={self.splits_root})"
+            )
 
         label_to_idx: Dict[str, int] = {}
         clips: List[ClipItem] = []
@@ -51,27 +72,50 @@ class UCF101Dataset(Dataset):
                 if cls_name not in label_to_idx:
                     label_to_idx[cls_name] = len(label_to_idx)
                 label = label_to_idx[cls_name]
-                video_stem = Path(rel_path).stem
-                frames_dir = self.frame_root / cls_name / video_stem
-                if not frames_dir.is_dir():
-                    continue
-                frame_files = sorted(p for p in frames_dir.glob("*.jpg") if p.is_file())
-                if not frame_files:
-                    continue
-                total_frames = len(frame_files)
-                for clip_len in self.clip_lens:
-                    stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
-                    stride = max(1, int(clip_len * stride_ratio))
-                    offset = 0
-                    if self.is_train and getattr(cfg.data, "clip_jitter", False):
-                        offset = random.randint(0, max(0, stride - 1))
-                    for start in range(offset, total_frames, stride):
-                        if start + clip_len <= total_frames:
-                            clips.append(ClipItem(frames_dir, label, start, clip_len))
-                        else:
-                            clips.append(ClipItem(frames_dir, label, max(0, total_frames - clip_len), clip_len))
-                            break
+                video_name = Path(rel_path).name
+                if self.mode == "video":
+                    source_path = self.root / cls_name / video_name
+                    if not source_path.is_file():
+                        continue
+                    total_frames = self._get_video_num_frames(source_path)
+                    if total_frames <= 0:
+                        continue
+                else:
+                    video_stem = Path(rel_path).stem
+                    source_path = self.root / cls_name / video_stem
+                    if not source_path.is_dir():
+                        continue
+                    frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
+                    if not frame_files:
+                        continue
+                    total_frames = len(frame_files)
+                stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
+                stride = max(1, int(self.clip_len * stride_ratio))
+                offset = 0
+                if self.is_train and getattr(cfg.data, "clip_jitter", False):
+                    offset = random.randint(0, max(0, stride - 1))
+                for start in range(offset, total_frames, stride):
+                    if start + self.clip_len <= total_frames:
+                        clips.append(
+                            ClipItem(source_path, label, start, self.clip_len, self.mode == "video")
+                        )
+                    else:
+                        clips.append(
+                            ClipItem(
+                                source_path,
+                                label,
+                                max(0, total_frames - self.clip_len),
+                                self.clip_len,
+                                self.mode == "video",
+                            )
+                        )
+                        break
         self.clips = clips
+        if len(self.clips) == 0:
+            raise RuntimeError(
+                "UCF101Dataset has 0 samples. "
+                f"mode={self.mode}, root={self.root}, splits_root={self.splits_root}, split={split_file}"
+            )
 
         if self.is_train:
             self.transform = transforms.Compose(
@@ -96,8 +140,29 @@ class UCF101Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.clips)
 
-    def _load_frames(self, frames_dir: Path, start: int, clip_len: int) -> List[Image.Image]:
-        frame_files = sorted(p for p in frames_dir.glob("*.jpg") if p.is_file())
+    def _get_video_num_frames(self, video_path: Path) -> int:
+        try:
+            pts, _ = read_video_timestamps(str(video_path), pts_unit="sec")
+            return len(pts)
+        except Exception:
+            frames, _, _ = read_video(str(video_path), pts_unit="sec")
+            return int(frames.shape[0])
+
+    def _load_frames(self, source_path: Path, start: int, clip_len: int, is_video: bool) -> List[Image.Image]:
+        if is_video:
+            frames, _, _ = read_video(str(source_path), pts_unit="sec")
+            if frames.numel() == 0:
+                img = Image.new("RGB", (self.img_size, self.img_size))
+                return [img for _ in range(clip_len)]
+            total_frames = frames.shape[0]
+            indices = list(range(start, start + clip_len))
+            indices = [min(i, total_frames - 1) for i in indices]
+            images: List[Image.Image] = []
+            for i in indices:
+                frame = frames[i].cpu().numpy()
+                images.append(Image.fromarray(frame))
+            return images
+        frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
         if not frame_files:
             img = Image.new("RGB", (self.img_size, self.img_size))
             return [img for _ in range(clip_len)]
@@ -109,10 +174,10 @@ class UCF101Dataset(Dataset):
                 images.append(img.convert("RGB"))
         return images
 
-    def _load_audio(self, frames_dir: Path, start: int, clip_len: int) -> Optional[torch.Tensor]:
+    def _load_audio(self, source_path: Path, start: int, clip_len: int) -> Optional[torch.Tensor]:
         if self.modality != "video_audio":
             return None
-        audio_path = self.audio_root / f"{frames_dir.name}.npy"
+        audio_path = self.audio_root / f"{source_path.stem}.npy"
         if not audio_path.is_file():
             return torch.zeros(clip_len, self.cfg.audio.feat_dim, dtype=torch.float32)
         data = np.load(audio_path)
@@ -127,11 +192,11 @@ class UCF101Dataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.clips[idx]
-        frames = self._load_frames(item.frames_dir, item.start, item.clip_len)
+        frames = self._load_frames(item.source_path, item.start, item.clip_len, item.is_video)
         tensor_frames = [self.transform(frame) for frame in frames]
         video = torch.stack(tensor_frames, dim=0)  # [T, C, H, W]
         sample = {"video": video, "label": torch.tensor(item.label, dtype=torch.long)}
-        audio = self._load_audio(item.frames_dir, item.start, item.clip_len)
+        audio = self._load_audio(item.source_path, item.start, item.clip_len)
         if audio is not None:
             sample["audio"] = audio
         return sample
