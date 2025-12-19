@@ -49,40 +49,12 @@ def build_voronoi_regions(num_patches: int, grid_hw: Tuple[int, int], num_region
     return region_ids[:num_patches], num_regions
 
 
-def compute_multi_level_time_entropy(
-    x: torch.Tensor,
-    levels: List[int],
-    tau: float,
-    eps: float,
-    overlap: float = 0.0,
-) -> Dict[str, torch.Tensor]:
-    B, T, N, _ = x.shape
-    p = _softmax_over_channels(x, tau)
-    out: Dict[str, torch.Tensor] = {"H_time_level": {}}
-    for L in levels:
-        window_size = int(math.ceil(T / L))
-        if window_size <= 0:
-            continue
-        stride = window_size if overlap <= 0 else max(1, int(window_size * (1 - overlap)))
-        windows = []
-        for start in range(0, T, stride):
-            end = min(T, start + window_size)
-            if end <= start:
-                continue
-            p_w = p[:, start:end].mean(dim=1)  # [B, N, C]
-            H_w = _entropy_from_prob(p_w, dim=-1, eps=eps)  # [B, N]
-            windows.append(H_w)
-            if end == T:
-                break
-        if not windows:
-            continue
-        H_stack = torch.stack(windows, dim=-1)  # [B, N, W]
-        out["H_time_level"][L] = H_stack.mean(dim=-1)
-    if 1 in out["H_time_level"]:
-        out["H_time_global"] = out["H_time_level"][1]
-    else:
-        out["H_time_global"] = torch.zeros(B, N, device=x.device, dtype=x.dtype)
-    return out
+def conv1d_mean_over_time(p_bt: torch.Tensor, L: int) -> torch.Tensor:
+    # p_bt: [B*N, C, T]
+    C = p_bt.shape[1]
+    weight = torch.ones(C, 1, L, device=p_bt.device, dtype=p_bt.dtype) / float(L)
+    q = F.conv1d(p_bt, weight, stride=1, padding=0, groups=C)
+    return q
 
 
 def compute_multi_level_space_entropy(
@@ -179,9 +151,10 @@ class ASTPruner(nn.Module):
         self.g_block = nn.Parameter(torch.zeros(depth))
 
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-        H_flat = H.reshape(H.shape[0], -1)
-        H_min = H_flat.min(dim=-1, keepdim=True)[0].reshape(H.shape[0], *([1] * (H.dim() - 1)))
-        H_max = H_flat.max(dim=-1, keepdim=True)[0].reshape(H.shape[0], *([1] * (H.dim() - 1)))
+        B = H.shape[0]
+        H_flat = H.reshape(B, -1)
+        H_min = H_flat.min(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
+        H_max = H_flat.max(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
         return (H - H_min) / (H_max - H_min + eps)
 
     def _fuse_levels(self, levels: Dict[int, torch.Tensor]) -> torch.Tensor:
@@ -204,13 +177,25 @@ class ASTPruner(nn.Module):
         Hs_fused = self._fuse_levels(Hs["H_space_level"])
 
         B, T, N, _ = x.shape
-        Ht_fused = Ht_fused.to(x.dtype)
-        Hs_fused = Hs_fused.to(x.dtype)
-        region_mean = Hs_fused.mean(dim=1, keepdim=True)  # [B,1]
-        region_importance = region_mean.expand(-1, self.num_regions)
-        region_ids = self.region_ids[:N].to(x.device)
-        region_score = region_importance[:, region_ids]  # [B, N]
-
+        Ht_norm = self._normalize(H_time_ms)
+        Hc_norm = self._normalize(H_region_coarse)
+        Hf_norm = self._normalize(H_region_fine)
+        # Keep dtype consistent with input (can be fp16 under autocast).
+        Ht_norm = Ht_norm.to(x.dtype)
+        Hc_norm = Hc_norm.to(x.dtype)
+        Hf_norm = Hf_norm.to(x.dtype)
+        Hc_per_token = x.new_zeros(B, T, N)
+        Hf_per_token = x.new_zeros(B, T, N)
+        for r in range(self.num_regions_coarse):
+            mask_n = region_ids_coarse == r
+            if mask_n.sum() == 0:
+                continue
+            Hc_per_token[:, :, mask_n] = Hc_norm[:, :, r : r + 1]
+        for r in range(self.num_regions_fine):
+            mask_n = region_ids_fine == r
+            if mask_n.sum() == 0:
+                continue
+            Hf_per_token[:, :, mask_n] = Hf_norm[:, :, r : r + 1]
         score = (
             cfg.get("alpha_time", 1.0) * Ht_fused.unsqueeze(1).expand(-1, T, -1)
             + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * Hs_fused.unsqueeze(2)
