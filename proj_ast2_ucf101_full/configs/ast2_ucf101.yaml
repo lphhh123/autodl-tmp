@@ -20,8 +20,6 @@ data:
   train_split: "./data/ucf101/splits/trainlist01.txt"
   val_split: "./data/ucf101/splits/testlist01.txt"
   clip_len: 8
-  num_frames: 8
-  frame_sampling: "uniform"
   clip_lens: [8, 16]
   modality: "video"
   train_stride_ratio: 0.5

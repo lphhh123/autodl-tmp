@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
@@ -74,25 +73,16 @@ def train_single_device(cfg):
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler(device_type, enabled=cfg.train.amp)
+    scaler = GradScaler(enabled=cfg.train.amp)
 
     for epoch in range(cfg.train.epochs):
         model.train()
         for step, batch in enumerate(train_loader):
-            if isinstance(batch, dict):
-                x = batch["video"].to(device)
-                y = batch["label"].to(device)
-            else:
-                x, y = batch
-                x = x.to(device)
-                y = y.to(device)
+            x = batch["video"].to(device)
+            y = batch["label"].to(device)
             opt.zero_grad()
             with autocast(device_type, enabled=cfg.train.amp):
-                if cfg.training.model_type == "video_audio":
-                    x_audio = batch["audio"].to(device) if isinstance(batch, dict) else None
-                    logits, info = model(x, x_audio, return_intermediate=True)
-                else:
-                    logits, info = model(x, return_intermediate=True)
+                logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
                 loss = loss_task + cfg.loss.lambda_AST * info["L_AST"]
             scaler.scale(loss).backward()
@@ -110,17 +100,11 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger,
     correct = 0
     with torch.no_grad():
         for batch in loader:
-            if isinstance(batch, dict):
-                x = batch["video"].to(device)
-                y = batch["label"].to(device)
-                if cfg.training.model_type == "video_audio":
-                    logits = model(x, batch["audio"].to(device))
-                else:
-                    logits = model(x)
+            x = batch["video"].to(device)
+            y = batch["label"].to(device)
+            if cfg.training.model_type == "video_audio":
+                logits = model(x, batch["audio"].to(device))
             else:
-                x, y = batch
-                x = x.to(device)
-                y = y.to(device)
                 logits = model(x)
             pred = logits.argmax(dim=1)
             total += y.size(0)
