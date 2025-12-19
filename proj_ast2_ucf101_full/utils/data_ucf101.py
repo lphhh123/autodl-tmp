@@ -31,19 +31,46 @@ class UCF101Dataset(Dataset):
         super().__init__()
         self.cfg = cfg
         data_cfg = cfg.data
+        project_root = Path(__file__).resolve().parents[1]
         frames_root = getattr(data_cfg, "frames_root", None)
+        splits_root = getattr(data_cfg, "splits_root", None)
+        audio_root = getattr(data_cfg, "audio_root", None)
         video_root = getattr(data_cfg, "video_root", None)
         root = getattr(data_cfg, "root", None)
         self.mode = "frames"
+        if frames_root is None and "root" not in data_cfg:
+            frames_root = "data/ucf101/frames"
+        if splits_root is None and "root" not in data_cfg:
+            splits_root = "data/ucf101/splits"
         if frames_root:
-            self.root = Path(frames_root)
-        elif video_root:
-            self.root = Path(video_root)
-            self.mode = "video"
-        elif root:
-            self.root = Path(root)
+            frames_root = Path(frames_root)
+        if splits_root:
+            splits_root = Path(splits_root)
+        if audio_root is not None:
+            audio_root = Path(audio_root)
+        if frames_root and not frames_root.is_absolute():
+            frames_root = project_root / frames_root
+        if splits_root and not splits_root.is_absolute():
+            splits_root = project_root / splits_root
+        if audio_root is not None and not audio_root.is_absolute():
+            audio_root = project_root / audio_root
+
+        if frames_root is None and root:
+            base = Path(root)
+            frames_root = base / "frames"
+            splits_root = base / "splits"
+            if audio_root is None:
+                audio_root = base / "audio"
+
+        if frames_root is None:
+            if video_root:
+                self.root = Path(video_root)
+                self.mode = "video"
+            else:
+                raise ValueError("Expected data.frames_root or data.root to be set.")
         else:
-            raise ValueError("Expected data.frames_root, data.video_root, or data.root to be set.")
+            self.root = frames_root
+        self.splits_root = splits_root or Path()
 
         self.split = split
         clip_lens = getattr(cfg.data, "clip_lens", None)
@@ -60,22 +87,22 @@ class UCF101Dataset(Dataset):
         self.clip_lens = [int(c) for c in clip_lens]
         self.num_frames = int(num_frames)
         self.use_audio = bool(getattr(cfg.data, "use_audio", False))
-        audio_root = getattr(cfg.data, "audio_root", None)
-        self.audio_root = Path(audio_root) if audio_root else (self.root / "audio")
+        self.audio_root = Path(audio_root) if audio_root is not None else (self.root / "audio")
         self.audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
         self._audio_missing_warned = False
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
-        self.splits_root = Path(getattr(data_cfg, "splits_root", ""))
-        split_file = Path(
-            cfg.data.train_split if self.is_train else cfg.data.val_split
-        )
-        if not split_file.is_absolute() and self.splits_root:
+        split_file = Path(cfg.data.train_split if self.is_train else cfg.data.val_split)
+        if not split_file.is_absolute():
             split_file = self.splits_root / split_file
-        if not split_file.exists():
+        if not split_file.is_file():
             raise FileNotFoundError(
                 f"Split file not found: {split_file} (splits_root={self.splits_root})"
             )
+        print(
+            "[UCF101Dataset DEBUG] "
+            f"frames_root={self.root}, splits_root={self.splits_root}, audio_root={self.audio_root}"
+        )
 
         label_to_idx: Dict[str, int] = {}
         clips: List[ClipItem] = []

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from utils.config import load_config
 
 if importlib.util.find_spec("librosa") is not None:
     librosa = importlib.import_module("librosa")
@@ -57,8 +58,10 @@ def _pool_mel_to_frames(mel: np.ndarray, num_frames: int) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--cfg", type=str, default="")
     parser.add_argument("--root", type=str, default="data/ucf101")
     parser.add_argument("--frames-root", type=str, default="")
+    parser.add_argument("--raw-video-root", type=str, default="")
     parser.add_argument("--video-root", type=str, default="")
     parser.add_argument("--audio-root", type=str, default="")
     parser.add_argument("--sample-rate", type=int, default=16000)
@@ -67,10 +70,37 @@ def main():
     parser.add_argument("--win-length", type=int, default=400)
     args = parser.parse_args()
 
+    project_root = Path(__file__).resolve().parents[1]
+    frames_root = None
+    audio_root = None
+    raw_video_root = None
+
+    if args.cfg:
+        cfg = load_config(args.cfg)
+        data_cfg = cfg.data
+        frames_root = Path(getattr(data_cfg, "frames_root", "data/ucf101/frames"))
+        audio_root = Path(getattr(data_cfg, "audio_root", "data/ucf101/audio"))
+        raw_video_root_value = getattr(data_cfg, "raw_video_root", "")
+        raw_video_root = Path(raw_video_root_value) if raw_video_root_value else None
+
+    if args.frames_root:
+        frames_root = Path(args.frames_root)
+    if args.audio_root:
+        audio_root = Path(args.audio_root)
+    if args.raw_video_root:
+        raw_video_root = Path(args.raw_video_root)
+    if args.video_root and raw_video_root is None:
+        raw_video_root = Path(args.video_root)
+
     root = Path(args.root)
-    frames_root = Path(args.frames_root) if args.frames_root else (root / "frames")
-    video_root = Path(args.video_root) if args.video_root else None
-    audio_root = Path(args.audio_root) if args.audio_root else (root / "audio")
+    if frames_root is None:
+        frames_root = root / "frames"
+    if audio_root is None:
+        audio_root = root / "audio"
+    if not frames_root.is_absolute():
+        frames_root = project_root / frames_root
+    if not audio_root.is_absolute():
+        audio_root = project_root / audio_root
     audio_root.mkdir(parents=True, exist_ok=True)
 
     for class_dir in frames_root.iterdir():
@@ -87,11 +117,11 @@ def main():
                 continue
             num_frames = len(frame_files)
             video_path = None
-            if video_root:
+            if raw_video_root:
                 candidates = [
-                    video_root / class_dir.name / f"{video_dir.name}.avi",
-                    video_root / class_dir.name / f"{video_dir.name}.mp4",
-                    video_root / class_dir.name / f"{video_dir.name}.mkv",
+                    raw_video_root / class_dir.name / f"{video_dir.name}.avi",
+                    raw_video_root / class_dir.name / f"{video_dir.name}.mp4",
+                    raw_video_root / class_dir.name / f"{video_dir.name}.mkv",
                 ]
                 for cand in candidates:
                     if cand.is_file():
