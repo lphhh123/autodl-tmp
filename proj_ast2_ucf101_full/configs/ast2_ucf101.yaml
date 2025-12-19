@@ -20,6 +20,7 @@ data:
   split_file_train: "./data/ucf101/splits/trainlist01.txt"
   split_file_test: "./data/ucf101/splits/testlist01.txt"
   train_split: "./data/ucf101/splits/trainlist01.txt"
+  test_split: "./data/ucf101/splits/testlist01.txt"
   val_split: "./data/ucf101/splits/testlist01.txt"
   clip_len: 8
   clip_lens: [8, 16]
