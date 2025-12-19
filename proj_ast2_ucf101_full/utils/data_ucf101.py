@@ -19,9 +19,11 @@ from torchvision.io import read_video, read_video_timestamps
 class ClipItem:
     source_path: Path
     label: int
-    start: int
-    clip_len: int
+    t_start: int
+    cover_len: int
     is_video: bool
+    video_id: str
+    total_frames: int
 
 
 class UCF101Dataset(Dataset):
@@ -43,22 +45,25 @@ class UCF101Dataset(Dataset):
         else:
             raise ValueError("Expected data.frames_root, data.video_root, or data.root to be set.")
 
-        self.audio_root = self.root / "audio"
         self.split = split
-        num_frames = getattr(cfg.data, "num_frames", None)
-        clip_len = getattr(cfg.data, "clip_len", None)
-        if num_frames is not None:
-            self.clip_len = int(num_frames)
-        elif clip_len is not None:
-            self.clip_len = int(clip_len)
-        else:
-            raise ValueError("Expected data.num_frames or data.clip_len to be set.")
         clip_lens = getattr(cfg.data, "clip_lens", None)
-        if clip_lens and len(clip_lens) > 1:
-            raise ValueError(
-                "Multiple clip_lens are not supported. Set data.num_frames or a single clip_len."
-            )
-        self.modality = cfg.data.modality
+        clip_len = getattr(cfg.data, "clip_len", None)
+        num_frames = getattr(cfg.data, "num_frames", None)
+        if clip_lens is None and clip_len is not None:
+            clip_lens = [int(clip_len)]
+            if num_frames is None:
+                num_frames = int(clip_len)
+        if clip_lens is None:
+            raise ValueError("Expected data.clip_lens or data.clip_len to be set.")
+        if num_frames is None:
+            raise ValueError("Expected data.num_frames to be set.")
+        self.clip_lens = [int(c) for c in clip_lens]
+        self.num_frames = int(num_frames)
+        self.use_audio = bool(getattr(cfg.data, "use_audio", False))
+        audio_root = getattr(cfg.data, "audio_root", None)
+        self.audio_root = Path(audio_root) if audio_root else (self.root / "audio")
+        self.audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
+        self._audio_missing_warned = False
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
         self.splits_root = Path(getattr(data_cfg, "splits_root", ""))
@@ -74,6 +79,7 @@ class UCF101Dataset(Dataset):
 
         label_to_idx: Dict[str, int] = {}
         clips: List[ClipItem] = []
+        self._frame_cache: Dict[str, List[Path]] = {}
         with open(split_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -92,6 +98,7 @@ class UCF101Dataset(Dataset):
                     total_frames = self._get_video_num_frames(source_path)
                     if total_frames <= 0:
                         continue
+                    video_id = source_path.stem
                 else:
                     video_stem = Path(rel_path).stem
                     source_path = self.root / cls_name / video_stem
@@ -101,25 +108,29 @@ class UCF101Dataset(Dataset):
                     if not frame_files:
                         continue
                     total_frames = len(frame_files)
+                    video_id = video_stem
+                    self._frame_cache[video_id] = frame_files
                 stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
-                stride = max(1, int(self.clip_len * stride_ratio))
-                offset = 0
-                if self.is_train and getattr(cfg.data, "clip_jitter", False):
-                    offset = random.randint(0, max(0, stride - 1))
-                for start in range(offset, total_frames, stride):
-                    if start + self.clip_len <= total_frames:
-                        clips.append(ClipItem(source_path, label, start, self.clip_len, self.mode == "video"))
-                    else:
+                for cover_len in self.clip_lens:
+                    stride = max(1, int(cover_len * stride_ratio))
+                    offset = 0
+                    if self.is_train and getattr(cfg.data, "clip_jitter", False):
+                        offset = random.randint(0, max(0, stride - 1))
+                    for start in range(offset, total_frames, stride):
+                        t_start = start
+                        if t_start >= total_frames:
+                            break
                         clips.append(
                             ClipItem(
-                                source_path,
-                                label,
-                                max(0, total_frames - self.clip_len),
-                                self.clip_len,
-                                self.mode == "video",
+                                source_path=source_path,
+                                label=label,
+                                t_start=t_start,
+                                cover_len=cover_len,
+                                is_video=self.mode == "video",
+                                video_id=video_id,
+                                total_frames=total_frames,
                             )
                         )
-                        break
         self.clips = clips
         if len(self.clips) == 0:
             raise RuntimeError(
@@ -158,55 +169,75 @@ class UCF101Dataset(Dataset):
             frames, _, _ = read_video(str(video_path), pts_unit="sec")
             return int(frames.shape[0])
 
-    def _load_frames(self, source_path: Path, start: int, clip_len: int, is_video: bool) -> List[Image.Image]:
+    def _load_frames(self, source_path: Path, frame_indices: List[int], is_video: bool, video_id: str) -> List[Image.Image]:
         if is_video:
             frames, _, _ = read_video(str(source_path), pts_unit="sec")
             if frames.numel() == 0:
                 img = Image.new("RGB", (self.img_size, self.img_size))
-                return [img for _ in range(clip_len)]
+                return [img for _ in range(len(frame_indices))]
             total_frames = frames.shape[0]
-            indices = list(range(start, start + clip_len))
-            indices = [min(i, total_frames - 1) for i in indices]
             images: List[Image.Image] = []
-            for i in indices:
+            for i in frame_indices:
+                i = min(i, total_frames - 1)
                 frame = frames[i].cpu().numpy()
                 images.append(Image.fromarray(frame))
             return images
-        frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
+        frame_files = self._frame_cache.get(video_id)
+        if frame_files is None:
+            frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
         if not frame_files:
             img = Image.new("RGB", (self.img_size, self.img_size))
-            return [img for _ in range(clip_len)]
-        indices = list(range(start, start + clip_len))
-        indices = [min(i, len(frame_files) - 1) for i in indices]
+            return [img for _ in range(len(frame_indices))]
         images: List[Image.Image] = []
-        for i in indices:
+        for i in frame_indices:
+            i = min(i, len(frame_files) - 1)
             with Image.open(frame_files[i]) as img:
                 images.append(img.convert("RGB"))
         return images
 
-    def _load_audio(self, source_path: Path, start: int, clip_len: int) -> Optional[torch.Tensor]:
-        if self.modality != "video_audio":
+    def _load_audio_clip(self, video_id: str, frame_indices: List[int]) -> Optional[torch.Tensor]:
+        if not self.use_audio:
             return None
-        audio_path = self.audio_root / f"{source_path.stem}.npy"
+        audio_path = self.audio_root / f"{video_id}.npy"
         if not audio_path.is_file():
-            return torch.zeros(clip_len, self.cfg.audio.feat_dim, dtype=torch.float32)
+            if not self._audio_missing_warned:
+                print(f"[WARN] audio feature missing at {audio_path}, returning zeros.")
+                self._audio_missing_warned = True
+            return torch.zeros(len(frame_indices), self.audio_feat_dim, dtype=torch.float32)
         data = np.load(audio_path)
         if data.ndim != 2:
             raise ValueError(f"Audio feature must be 2D [T, D], got {data.shape} for {audio_path}")
-        if data.shape[0] < start + clip_len:
-            pad_len = start + clip_len - data.shape[0]
+        max_index = max(frame_indices) if frame_indices else 0
+        if data.shape[0] <= max_index:
+            pad_len = max_index + 1 - data.shape[0]
             pad = np.repeat(data[-1:, :], pad_len, axis=0)
             data = np.concatenate([data, pad], axis=0)
-        clip = data[start : start + clip_len]
+        clip = data[frame_indices]
         return torch.from_numpy(clip).float()
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.clips[idx]
-        frames = self._load_frames(item.source_path, item.start, item.clip_len, item.is_video)
+        t_end = min(item.t_start + item.cover_len, item.total_frames)
+        window_indices = list(range(item.t_start, t_end))
+        if len(window_indices) >= self.num_frames:
+            select = np.linspace(0, len(window_indices) - 1, self.num_frames)
+            select = np.round(select).astype(int).tolist()
+            frame_indices = [window_indices[i] for i in select]
+        else:
+            frame_indices = window_indices.copy()
+            if not frame_indices:
+                frame_indices = [max(0, item.total_frames - 1)]
+            while len(frame_indices) < self.num_frames:
+                frame_indices.append(frame_indices[-1])
+        frames = self._load_frames(item.source_path, frame_indices, item.is_video, item.video_id)
         tensor_frames = [self.transform(frame) for frame in frames]
         video = torch.stack(tensor_frames, dim=0)  # [T, C, H, W]
-        sample = {"video": video, "label": torch.tensor(item.label, dtype=torch.long)}
-        audio = self._load_audio(item.source_path, item.start, item.clip_len)
+        sample = {
+            "video": video,
+            "label": torch.tensor(item.label, dtype=torch.long),
+            "video_id": item.video_id,
+        }
+        audio = self._load_audio_clip(item.video_id, frame_indices)
         if audio is not None:
             sample["audio"] = audio
         return sample

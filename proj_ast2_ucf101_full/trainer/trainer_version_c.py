@@ -104,22 +104,44 @@ def train_version_c(cfg):
     loader = build_dataloader(cfg)
     data_iter = iter(loader)
 
-    model = VideoViT(
-        img_size=cfg.model.img_size,
-        num_frames=cfg.model.num_frames,
-        num_classes=cfg.model.num_classes,
-        embed_dim=cfg.model.embed_dim,
-        depth=cfg.model.depth,
-        num_heads=cfg.model.num_heads,
-        mlp_ratio=cfg.model.mlp_ratio,
-        patch_size=cfg.model.patch_size,
-        in_chans=cfg.model.in_chans,
-        drop_rate=cfg.model.drop_rate,
-        attn_drop=cfg.model.attn_drop,
-        drop_path_rate=cfg.model.drop_path_rate,
-        use_ast_prune=cfg.ast.use_ast_prune,
-        ast_cfg=cfg.ast,
-    ).to(device)
+    model_type = getattr(cfg.training, "model_type", "video")
+    num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
+    audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
+    if model_type == "video_audio":
+        model = VideoAudioAST(
+            img_size=cfg.model.img_size,
+            num_frames=num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            audio_feat_dim=audio_feat_dim,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
+    else:
+        model = VideoViT(
+            img_size=cfg.model.img_size,
+            num_frames=num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
 
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
@@ -152,7 +174,10 @@ def train_version_c(cfg):
             optimizer_alpha.zero_grad()
             optimizer_layout.zero_grad()
             with autocast(device_type, enabled=cfg.train.amp):
-                logits, info = model(x, return_intermediate=True)
+                if model_type == "video_audio":
+                    logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
+                else:
+                    logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + cfg.loss.lambda_hw * L_hw

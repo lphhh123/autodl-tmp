@@ -2,7 +2,7 @@ _base_: ./ast2_ucf101_ast_only.yaml
 training:
   model_type: "video_audio"
 data:
-  modality: "video_audio"
+  use_audio: true
 ast:
   num_modalities: 2
   modalities: ["video", "audio"]

@@ -68,6 +68,7 @@ class VideoViT(nn.Module):
         super().__init__()
         cfg = VideoViTConfig(**kwargs)
         self.cfg = cfg
+        self.num_frames = cfg.num_frames
         patch_dim = cfg.in_chans * cfg.patch_size * cfg.patch_size
         self.patch_embed = nn.Linear(patch_dim, cfg.embed_dim)
         num_patches = (cfg.img_size // cfg.patch_size) ** 2
@@ -130,6 +131,7 @@ class VideoViT(nn.Module):
 
     def forward(self, x: torch.Tensor, return_intermediate: bool = False):
         b, t, c, h, w = x.shape
+        assert t == self.num_frames, f"Expected num_frames={self.num_frames}, got {t}"
         tokens = self._embed_video(x)  # [B, T, N, C]
         ast_out: Optional[ASTOutputs] = None
         L_AST = torch.tensor(0.0, device=x.device)
@@ -242,6 +244,10 @@ class VideoAudioAST(nn.Module):
 
     def forward(self, x_video: torch.Tensor, x_audio: torch.Tensor, return_intermediate: bool = False):
         b, t, c, h, w = x_video.shape
+        assert t == self.cfg.num_frames, f"Expected num_frames={self.cfg.num_frames}, got {t}"
+        assert x_audio.shape[1] == self.cfg.num_frames, (
+            f"Expected audio num_frames={self.cfg.num_frames}, got {x_audio.shape[1]}"
+        )
         v_tokens = self._embed_video(x_video)
         a_tokens = self.audio_proj(x_audio).unsqueeze(2)  # [B, T, 1, C]
         tokens = torch.cat([v_tokens, a_tokens], dim=2)

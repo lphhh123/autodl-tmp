@@ -2,6 +2,6 @@ _base_: ./ast2_ucf101_dense.yaml
 training:
   model_type: "video_audio"
 data:
-  modality: "video_audio"
+  use_audio: true
 ast:
   use_ast_prune: false
