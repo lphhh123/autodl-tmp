@@ -212,6 +212,9 @@ class ASTPruner(nn.Module):
         if Hs.dim() == 3:
             if Hs.shape[1] == T and Hs.shape[2] == N:
                 return Hs
+            if Hs.shape[1] == T and Hs.shape[2] == self.num_regions:
+                region_ids = self.region_ids.to(device=Hs.device)
+                return Hs[:, :, region_ids]
             raise ValueError(f"Unexpected space token shape {Hs.shape}, expected [B, {T}, {N}]")
         raise ValueError(f"Unexpected space token dims {Hs.dim()}, expected 2 or 3")
 
