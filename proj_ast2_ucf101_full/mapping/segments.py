@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from models.vit_video import VideoViT
+import torch
+
+from models.video_vit import VideoViT
 
 
 @dataclass
@@ -37,6 +39,8 @@ class Segment:
     precision: int
     traffic_in_bytes: float
     traffic_out_bytes: float
+    can_split_fine: bool = False
+    fine_groups: Optional[int] = None
 
 
 @dataclass
