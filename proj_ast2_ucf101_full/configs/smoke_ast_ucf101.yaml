@@ -8,11 +8,6 @@ training:
   inner_steps_alpha: 0
   inner_steps_layout: 0
 data:
-  video_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/UCF-101"
-  frames_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101_frames"
-  splits_root: "./data/ucf101/splits"
-  split_file_train: "trainlist01.txt"
-  split_file_test: "testlist01.txt"
   num_frames: 8
   frame_sampling: "uniform"
 ast:
