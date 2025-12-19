@@ -3,57 +3,98 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+import torch.nn as nn
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
-from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
-from models.vit_video import VideoViT
+from models.video_vit import VideoViT, VideoAudioAST
+from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 
 
+def _as_float(val, name: str) -> float:
+    """Convert config values that might be strings into floats with a clear error."""
+    try:
+        return float(val)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
+
+
 def build_dataloaders(cfg):
-    train_ds = UCF101Dataset(cfg.data.root, cfg.data.train_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=True)
-    val_ds = UCF101Dataset(cfg.data.root, cfg.data.val_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=False)
-    train_loader = DataLoader(train_ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers, collate_fn=collate_video_batch)
-    val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size, shuffle=False, num_workers=cfg.data.num_workers, collate_fn=collate_video_batch)
+    train_ds = UCF101Dataset(cfg, split="train")
+    val_ds = UCF101Dataset(cfg, split="val")
+    train_loader = DataLoader(train_ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
+    val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size, shuffle=False, num_workers=cfg.data.num_workers)
     return train_loader, val_loader
 
 
 def train_single_device(cfg):
     device = get_device(cfg.train.device)
+    device_type = device.type
     logger = setup_logger()
     train_loader, val_loader = build_dataloaders(cfg)
-    model = VideoViT(
-        img_size=cfg.model.img_size,
-        num_frames=cfg.model.num_frames,
-        num_classes=cfg.model.num_classes,
-        embed_dim=cfg.model.embed_dim,
-        depth=cfg.model.depth,
-        num_heads=cfg.model.num_heads,
-        mlp_ratio=cfg.model.mlp_ratio,
-        patch_size=cfg.model.patch_size,
-        in_chans=cfg.model.in_chans,
-        drop_rate=cfg.model.drop_rate,
-        attn_drop=cfg.model.attn_drop,
-        drop_path_rate=cfg.model.drop_path_rate,
-        use_ast_prune=cfg.ast.use_ast_prune,
-        ast_cfg=cfg.ast,
-    ).to(device)
+    if cfg.training.model_type == "video_audio":
+        model = VideoAudioAST(
+            img_size=cfg.model.img_size,
+            num_frames=cfg.model.num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            audio_feat_dim=cfg.audio.feat_dim,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
+    else:
+        model = VideoViT(
+            img_size=cfg.model.img_size,
+            num_frames=cfg.model.num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
-    scaler = GradScaler(enabled=cfg.train.amp)
+    lr = _as_float(cfg.train.lr, "cfg.train.lr")
+    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = GradScaler(device_type, enabled=cfg.train.amp)
 
     for epoch in range(cfg.train.epochs):
         model.train()
-        for step, (x, y) in enumerate(train_loader):
-            x, y = x.to(device), y.to(device)
+        for step, batch in enumerate(train_loader):
+            if isinstance(batch, dict):
+                x = batch["video"].to(device)
+                y = batch["label"].to(device)
+            else:
+                x, y = batch
+                x = x.to(device)
+                y = y.to(device)
             opt.zero_grad()
-            with autocast(enabled=cfg.train.amp):
-                logits, info = model(x, return_intermediate=True)
+            with autocast(device_type, enabled=cfg.train.amp):
+                if cfg.training.model_type == "video_audio":
+                    x_audio = batch["audio"].to(device) if isinstance(batch, dict) else None
+                    logits, info = model(x, x_audio, return_intermediate=True)
+                else:
+                    logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
-                loss = loss_task + cfg.ast.lambda_AST * info["L_AST"]
+                loss = loss_task + cfg.loss.lambda_AST * info["L_AST"]
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -63,14 +104,24 @@ def train_single_device(cfg):
         validate(model, val_loader, device, logger, epoch, cfg)
 
 
-def validate(model: VideoViT, loader: DataLoader, device: torch.device, logger, epoch: int, cfg):
+def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg):
     model.eval()
     total = 0
     correct = 0
     with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            logits = model(x)
+        for batch in loader:
+            if isinstance(batch, dict):
+                x = batch["video"].to(device)
+                y = batch["label"].to(device)
+                if cfg.training.model_type == "video_audio":
+                    logits = model(x, batch["audio"].to(device))
+                else:
+                    logits = model(x)
+            else:
+                x, y = batch
+                x = x.to(device)
+                y = y.to(device)
+                logits = model(x)
             pred = logits.argmax(dim=1)
             total += y.size(0)
             correct += (pred == y).sum().item()
