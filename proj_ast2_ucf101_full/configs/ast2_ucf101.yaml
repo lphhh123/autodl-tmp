@@ -16,22 +16,23 @@ model:
 
 data:
   dataset: "ucf101"
-  video_root: ""
-  frames_root: "./data/ucf101/frames"
-  splits_root: "./data/ucf101/splits"
+  root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101"
+  frames_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/frames"
+  splits_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/splits"
+  video_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/UCF-101"
+  audio_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/audio"
   train_split: "trainlist01.txt"
   test_split: "testlist01.txt"
   val_split: "testlist01.txt"
-  root: "./data/ucf101/frames"
-  split_file_train: "./data/ucf101/splits/trainlist01.txt"
-  split_file_test: "./data/ucf101/splits/testlist01.txt"
-  clip_len: 8
-  modality: "video"
+  clip_lens: [8, 16]
+  num_frames: 8
+  use_audio: false
   train_stride_ratio: 0.5
   eval_stride_ratio: 0.5
   clip_jitter: true
   img_size: 224
   num_workers: 8
+  audio_feat_dim: 128
 
 audio:
   feat_dim: 128

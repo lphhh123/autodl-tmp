@@ -36,17 +36,20 @@ def train_single_device(cfg):
     device_type = device.type
     logger = setup_logger()
     train_loader, val_loader = build_dataloaders(cfg)
-    if cfg.training.model_type == "video_audio":
+    model_type = getattr(cfg.training, "model_type", "video")
+    num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
+    audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
+    if model_type == "video_audio":
         model = VideoAudioAST(
             img_size=cfg.model.img_size,
-            num_frames=cfg.model.num_frames,
+            num_frames=num_frames,
             num_classes=cfg.model.num_classes,
             embed_dim=cfg.model.embed_dim,
             depth=cfg.model.depth,
             num_heads=cfg.model.num_heads,
             mlp_ratio=cfg.model.mlp_ratio,
             patch_size=cfg.model.patch_size,
-            audio_feat_dim=cfg.audio.feat_dim,
+            audio_feat_dim=audio_feat_dim,
             in_chans=cfg.model.in_chans,
             drop_rate=cfg.model.drop_rate,
             attn_drop=cfg.model.attn_drop,
@@ -57,7 +60,7 @@ def train_single_device(cfg):
     else:
         model = VideoViT(
             img_size=cfg.model.img_size,
-            num_frames=cfg.model.num_frames,
+            num_frames=num_frames,
             num_classes=cfg.model.num_classes,
             embed_dim=cfg.model.embed_dim,
             depth=cfg.model.depth,
@@ -86,7 +89,10 @@ def train_single_device(cfg):
                 logger.info("[DEBUG] train batch video.shape=%s", tuple(x.shape))
             opt.zero_grad()
             with autocast(device_type, enabled=cfg.train.amp):
-                logits, info = model(x, return_intermediate=True)
+                if model_type == "video_audio":
+                    logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
+                else:
+                    logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
                 loss = loss_task + cfg.loss.lambda_AST * info["L_AST"]
             scaler.scale(loss).backward()
