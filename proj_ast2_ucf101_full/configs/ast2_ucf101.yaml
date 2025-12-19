@@ -25,7 +25,6 @@ data:
   root: "./data/ucf101/frames"
   split_file_train: "./data/ucf101/splits/trainlist01.txt"
   split_file_test: "./data/ucf101/splits/testlist01.txt"
-  num_frames: 8
   clip_len: 8
   clip_lens: [8, 16]
   modality: "video"
