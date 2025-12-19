@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+import torch
+
 from models.video_vit import VideoViT
 
 
