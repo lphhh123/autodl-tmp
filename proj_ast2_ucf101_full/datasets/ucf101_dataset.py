@@ -12,12 +12,14 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+from torchvision.io import read_video
 
 
 @dataclass
 class UCF101Sample:
-    frames_dir: Path
+    source_path: Path
     label: int
+    is_video: bool
 
 
 def sample_frame_indices(num_total: int, num_frames: int, mode: str = "uniform") -> np.ndarray:
@@ -82,10 +84,11 @@ class UCF101Dataset(Dataset):
             split = split or ("train" if is_train else "val")
             root = data_cfg.get("frames_root") or data_cfg.get("video_root") or data_cfg.get("root")
             splits_root = Path(data_cfg.get("splits_root", ""))
+            self.is_video = bool(data_cfg.get("video_root")) and not data_cfg.get("frames_root")
             if split == "train":
                 split_file = data_cfg.get("split_file_train", data_cfg.get("train_split"))
             else:
-                split_file = data_cfg.get("split_file_test", data_cfg.get("val_split"))
+                split_file = data_cfg.get("split_file_test", data_cfg.get("val_split", data_cfg.get("test_split")))
             if split_file and splits_root and not Path(split_file).is_absolute():
                 split_file = splits_root / split_file
             self.clip_len = int(data_cfg.get("num_frames", clip_len))
@@ -95,12 +98,12 @@ class UCF101Dataset(Dataset):
             self.clip_len = clip_len
             self.is_train = is_train
             self.frame_sampling = "uniform"
+            self.is_video = False
 
         if root is None or split_file is None:
             raise ValueError("root and split_file must be provided when cfg is None.")
 
         self.root = Path(root)
-        self.frame_root = self.root
         self.img_size = img_size
 
         self.samples: List[UCF101Sample] = []
@@ -121,10 +124,26 @@ class UCF101Dataset(Dataset):
                 if cls_name not in label_to_idx:
                     label_to_idx[cls_name] = len(label_to_idx)
                 label = label_to_idx[cls_name]
-                video_stem = Path(rel_path).stem
-                frames_dir = self.frame_root / cls_name / video_stem
-                if frames_dir.is_dir():
-                    self.samples.append(UCF101Sample(frames_dir=frames_dir, label=label))
+                if self.is_video:
+                    video_name = Path(rel_path).name
+                    source_path = self.root / cls_name / video_name
+                    if source_path.is_file():
+                        self.samples.append(
+                            UCF101Sample(source_path=source_path, label=label, is_video=True)
+                        )
+                else:
+                    video_stem = Path(rel_path).stem
+                    source_path = self.root / cls_name / video_stem
+                    if source_path.is_dir():
+                        self.samples.append(
+                            UCF101Sample(source_path=source_path, label=label, is_video=False)
+                        )
+
+        if len(self.samples) == 0:
+            raise RuntimeError(
+                "UCF101Dataset has 0 samples. "
+                f"root={self.root}, split_file={split_path}, is_video={self.is_video}"
+            )
 
         if transform is not None:
             self.transform = transform
@@ -156,8 +175,19 @@ class UCF101Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _load_frames(self, frames_dir: Path) -> List[Image.Image]:
-        frame_files = sorted(p for p in frames_dir.glob("*.jpg") if p.is_file())
+    def _load_frames(self, source_path: Path, is_video: bool) -> List[Image.Image]:
+        if is_video:
+            frames, _, _ = read_video(str(source_path), pts_unit="sec")
+            if frames.numel() == 0:
+                return []
+            mode = self.frame_sampling if self.is_train else "center"
+            indices = sample_frame_indices(frames.shape[0], self.clip_len, mode=mode)
+            images: List[Image.Image] = []
+            for idx in indices:
+                frame = frames[int(idx)].cpu().numpy()
+                images.append(Image.fromarray(frame))
+            return images
+        frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
         if len(frame_files) == 0:
             return []
         mode = self.frame_sampling if self.is_train else "center"
@@ -172,7 +202,7 @@ class UCF101Dataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
-        frames = self._load_frames(sample.frames_dir)
+        frames = self._load_frames(sample.source_path, sample.is_video)
         if len(frames) == 0:
             img = Image.new("RGB", (self.img_size, self.img_size))
             frames = [img for _ in range(self.clip_len)]
