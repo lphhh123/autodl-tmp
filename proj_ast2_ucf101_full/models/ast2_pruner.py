@@ -10,36 +10,43 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # -----------------------------------------------------------------------------
-# Utility functions (SPEC §4.1, §4.3, §4.4, §4.7)
+# Utility functions (SPEC §4.2 - §4.7)
 # -----------------------------------------------------------------------------
 
 
-def get_patch_coords(H_p: int, W_p: int, device=None) -> torch.Tensor:
+def _softmax_over_channels(x: torch.Tensor, tau: float) -> torch.Tensor:
+    return torch.softmax(x / tau, dim=-1)
+
+
+def _entropy_from_prob(p: torch.Tensor, dim: int, eps: float) -> torch.Tensor:
+    return -(p * (p + eps).log()).sum(dim=dim)
+
+
+def build_voronoi_regions(num_patches: int, grid_hw: Tuple[int, int], num_regions: int) -> Tuple[torch.Tensor, int]:
+    H_p, W_p = grid_hw
     coords = []
     for i in range(H_p):
         for j in range(W_p):
-            u = (i + 0.5) / H_p
-            v = (j + 0.5) / W_p
-            coords.append([u, v])
-    return torch.tensor(coords, dtype=torch.float32, device=device)
-
-
-def init_voronoi_centers(coords: torch.Tensor, num_regions: int, jitter: bool = False) -> torch.Tensor:
-    N = coords.shape[0]
-    idx = torch.randperm(N)[:num_regions]
-    centers = coords[idx].clone()
-    if jitter:
-        centers = centers + 0.02 * torch.randn_like(centers)
-        centers = centers.clamp(0.0, 1.0)
-    return centers
-
-
-def assign_voronoi_regions(coords: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
-    # coords: [N,2], centers: [R,2]
-    # distance matrix [N,R]
-    dists = torch.cdist(coords, centers)
+            coords.append([i, j])
+    coords_t = torch.tensor(coords, dtype=torch.float32)
+    if num_regions <= 0:
+        num_regions = 1
+    k = int(math.ceil(math.sqrt(num_regions)))
+    seeds = []
+    for i in range(k):
+        for j in range(k):
+            seeds.append([i * (H_p / k), j * (W_p / k)])
+            if len(seeds) >= num_regions:
+                break
+        if len(seeds) >= num_regions:
+            break
+    seeds_t = torch.tensor(seeds, dtype=torch.float32)
+    dists = torch.cdist(coords_t, seeds_t)
     region_ids = torch.argmin(dists, dim=1)
-    return region_ids
+    if num_patches > region_ids.numel():
+        pad = torch.zeros(num_patches - region_ids.numel(), dtype=region_ids.dtype)
+        region_ids = torch.cat([region_ids, pad], dim=0)
+    return region_ids[:num_patches], num_regions
 
 
 def conv1d_mean_over_time(p_bt: torch.Tensor, L: int) -> torch.Tensor:
@@ -50,76 +57,42 @@ def conv1d_mean_over_time(p_bt: torch.Tensor, L: int) -> torch.Tensor:
     return q
 
 
-def compute_multi_scale_temporal_entropy(x: torch.Tensor, window_sizes: List[int], tau: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
-    B, T, N, C = x.shape
-    p = torch.softmax(x / tau, dim=-1)
-    H_list = []
-    p_bt = p.permute(0, 2, 3, 1).reshape(B * N, C, T)
-    for L in window_sizes:
-        if L > T:
-            continue
-        q = conv1d_mean_over_time(p_bt, L)  # [B*N, C, T-L+1]
-        T_prime = q.shape[-1]
-        q_bnct = q.reshape(B, N, C, T_prime).permute(0, 3, 1, 2)  # [B,T',N,C]
-        H_center = - (q_bnct * (q_bnct + eps).log()).sum(dim=-1)  # [B,T',N]
-        H_flat = H_center.permute(0, 2, 1).reshape(B * N, 1, T_prime)
-        H_interp = F.interpolate(H_flat, size=T, mode="linear", align_corners=False)
-        H_full = H_interp.reshape(B, N, T).permute(0, 2, 1)  # [B,T,N]
-        H_list.append(H_full)
-    if len(H_list) == 0:
-        return torch.zeros(B, T, N, device=x.device, dtype=x.dtype)
-    H_time_ms = sum(H_list) / len(H_list)
-    return H_time_ms
-
-
-def compute_multi_scale_spatial_entropy(
+def compute_multi_level_space_entropy(
     x: torch.Tensor,
-    region_ids_coarse: torch.Tensor,
-    region_ids_fine: torch.Tensor,
-    num_regions_coarse: int,
-    num_regions_fine: int,
-    tau: float = 1.0,
-    eps: float = 1e-6,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    p = torch.softmax(x / tau, dim=-1)  # [B,T,N,C]
-    B, T, N, C = p.shape
-    R_c = num_regions_coarse
-    R_f = num_regions_fine
-    p_region_coarse = x.new_zeros(B, T, R_c, C)
-    p_region_fine = x.new_zeros(B, T, R_f, C)
-    for r in range(R_c):
-        mask_n = (region_ids_coarse == r).to(p.dtype)
-        if mask_n.sum() == 0:
+    H_p: int,
+    W_p: int,
+    levels: List[int],
+    tau: float,
+    eps: float,
+) -> Dict[str, torch.Tensor]:
+    B, T, N, C = x.shape
+    p = _softmax_over_channels(x, tau)
+    p_hw = p.view(B, T, H_p, W_p, C)
+    out: Dict[str, torch.Tensor] = {"H_space_level": {}}
+    for L in levels:
+        block_h = int(math.ceil(H_p / L))
+        block_w = int(math.ceil(W_p / L))
+        blocks = []
+        for u in range(L):
+            for v in range(L):
+                h_start = u * block_h
+                h_end = min(H_p, h_start + block_h)
+                w_start = v * block_w
+                w_end = min(W_p, w_start + block_w)
+                if h_start >= h_end or w_start >= w_end:
+                    continue
+                p_block = p_hw[:, :, h_start:h_end, w_start:w_end].mean(dim=(2, 3))
+                H_block = _entropy_from_prob(p_block, dim=-1, eps=eps)  # [B, T]
+                blocks.append(H_block)
+        if not blocks:
             continue
-        mask = mask_n.view(1, 1, N, 1)
-        sel = p * mask
-        p_sum = sel.sum(dim=2)
-        cnt = mask_n.sum().item()
-        p_region_coarse[:, :, r, :] = p_sum / (cnt + eps)
-    for r in range(R_f):
-        mask_n = (region_ids_fine == r).to(p.dtype)
-        if mask_n.sum() == 0:
-            continue
-        mask = mask_n.view(1, 1, N, 1)
-        sel = p * mask
-        p_sum = sel.sum(dim=2)
-        cnt = mask_n.sum().item()
-        p_region_fine[:, :, r, :] = p_sum / (cnt + eps)
-    H_region_coarse = - (p_region_coarse * (p_region_coarse + eps).log()).sum(dim=-1)
-    H_region_fine = - (p_region_fine * (p_region_fine + eps).log()).sum(dim=-1)
-    return H_region_coarse, H_region_fine
-
-
-def build_soft_token_mask(score: torch.Tensor, rho: float, temperature: float = 0.1, eps: float = 1e-6) -> torch.Tensor:
-    B, T, N = score.shape
-    mask_list = []
-    for b in range(B):
-        flat = score[b].reshape(-1)
-        k = max(1, int(rho * flat.numel()))
-        kth = torch.kthvalue(-flat, k).values * -1
-        mask_b = torch.sigmoid((score[b] - kth) / temperature)
-        mask_list.append(mask_b)
-    return torch.stack(mask_list, dim=0)
+        H_stack = torch.stack(blocks, dim=-1)  # [B, T, L*L]
+        out["H_space_level"][L] = H_stack.mean(dim=-1)
+    if 1 in out["H_space_level"]:
+        out["H_space_global"] = out["H_space_level"][1]
+    else:
+        out["H_space_global"] = torch.zeros(B, T, device=x.device, dtype=x.dtype)
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -143,27 +116,40 @@ class ASTOutputs:
 
 
 class ASTPruner(nn.Module):
-    """AST2.0-v2 pruning module (SPEC §4)."""
+    """AST2.0-lite pruning module (multi-scale sliding window + multi-modal)."""
 
-    def __init__(self, cfg: Any, embed_dim: int, num_heads: int, depth: int, H_p: int, W_p: int):
+    def __init__(self, cfg: Any, embed_dim: int, num_heads: int, depth: int, num_patches: int):
         super().__init__()
         self.cfg = cfg
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.depth = depth
+        self.num_patches = num_patches
+
+        self.time_window_levels = cfg.get("time_window_levels", [1, 2, 4])
+        self.space_window_levels = cfg.get("space_window_levels", [1, 2, 4])
+        self.time_window_overlap = cfg.get("time_window_overlap", 0.0)
+        self.entropy_tau = cfg.get("entropy_tau", 1.0)
+        self.entropy_eps = 1e-6
+
+        H_p = cfg.get("patch_grid_h", 14)
+        W_p = cfg.get("patch_grid_w", 14)
+        num_regions = cfg.get("num_regions", 8)
+        region_ids, num_regions = build_voronoi_regions(num_patches, (H_p, W_p), num_regions)
+        self.register_buffer("region_ids", region_ids, persistent=False)
+        self.num_regions = num_regions
         self.H_p = H_p
         self.W_p = W_p
-        num_tokens = H_p * W_p
-        coords = get_patch_coords(H_p, W_p)
-        self.register_buffer("patch_coords", coords, persistent=False)
-        self.num_regions_coarse = cfg.get("num_regions_coarse", 4)
-        self.num_regions_fine = cfg.get("num_regions_fine", 8)
-        self.centers_coarse = nn.Parameter(init_voronoi_centers(coords, self.num_regions_coarse, jitter=False))
-        self.centers_fine = nn.Parameter(init_voronoi_centers(coords, self.num_regions_fine, jitter=True))
+
+        self.num_modalities = cfg.get("num_modalities", 1)
+        self.modalities = cfg.get("modalities", ["video"])
+        self.modality_logit = nn.Parameter(torch.zeros(self.num_modalities))
 
         hidden_dim = int(embed_dim * cfg.get("mlp_ratio", 4.0)) if "mlp_ratio" in cfg else int(embed_dim * 4)
         self.g_head = nn.Parameter(torch.zeros(depth, num_heads))
         self.g_ch = nn.Parameter(torch.zeros(depth, hidden_dim))
         self.g_block = nn.Parameter(torch.zeros(depth))
 
-    # SPEC §4.6
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         B = H.shape[0]
         H_flat = H.reshape(B, -1)
@@ -171,23 +157,25 @@ class ASTPruner(nn.Module):
         H_max = H_flat.max(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
         return (H - H_min) / (H_max - H_min + eps)
 
-    def compute_spatiotemporal_scores(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        cfg_ast = self.cfg
-        H_time_ms = compute_multi_scale_temporal_entropy(
-            x,
-            cfg_ast.get("time_window_sizes", [1, 2, 4]),
-            tau=cfg_ast.get("entropy_tau", 1.0),
-        )  # [B,T,N]
-        region_ids_coarse = assign_voronoi_regions(self.patch_coords, self.centers_coarse)
-        region_ids_fine = assign_voronoi_regions(self.patch_coords, self.centers_fine)
-        H_region_coarse, H_region_fine = compute_multi_scale_spatial_entropy(
-            x,
-            region_ids_coarse,
-            region_ids_fine,
-            self.num_regions_coarse,
-            self.num_regions_fine,
-            tau=cfg_ast.get("entropy_tau", 1.0),
+    def _fuse_levels(self, levels: Dict[int, torch.Tensor]) -> torch.Tensor:
+        fused = []
+        for H in levels.values():
+            fused.append(self._normalize(H))
+        if not fused:
+            return torch.tensor(0.0, device=self.region_ids.device)
+        return torch.stack(fused, dim=0).mean(dim=0)
+
+    def token_gating_single_modal(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        cfg = self.cfg
+        Ht = compute_multi_level_time_entropy(
+            x, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
         )
+        Hs = compute_multi_level_space_entropy(
+            x, self.H_p, self.W_p, self.space_window_levels, self.entropy_tau, self.entropy_eps
+        )
+        Ht_fused = self._fuse_levels(Ht["H_time_level"])
+        Hs_fused = self._fuse_levels(Hs["H_space_level"])
+
         B, T, N, _ = x.shape
         Ht_norm = self._normalize(H_time_ms)
         Hc_norm = self._normalize(H_region_coarse)
@@ -209,45 +197,107 @@ class ASTPruner(nn.Module):
                 continue
             Hf_per_token[:, :, mask_n] = Hf_norm[:, :, r : r + 1]
         score = (
-            cfg_ast.get("alpha_time", 1.0) * Ht_norm
-            + cfg_ast.get("beta_space_coarse", 0.5) * Hc_per_token
-            + cfg_ast.get("gamma_space_fine", 0.5) * Hf_per_token
+            cfg.get("alpha_time", 1.0) * Ht_fused.unsqueeze(1).expand(-1, T, -1)
+            + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * Hs_fused.unsqueeze(2)
+            + cfg.get("gamma_region", cfg.get("gamma_space_fine", 0.5)) * region_score.unsqueeze(1)
         )
-        return score, {
-            "Ht": Ht_norm,
-            "Hc": Hc_norm,
-            "Hf": Hf_norm,
-            "region_ids_coarse": region_ids_coarse,
-            "region_ids_fine": region_ids_fine,
-        }
-
-    def forward_token_gating(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        score, _ = self.compute_spatiotemporal_scores(x)
-        mask_soft = build_soft_token_mask(
-            score,
-            rho=self.cfg.get("rho_token_target", 0.5),
-            temperature=self.cfg.get("token_temperature", 0.1),
-        )
-        x_gated = x * mask_soft.unsqueeze(-1)
+        mask_soft = []
+        rho = cfg.get("rho_token_target", 0.5)
+        temperature = cfg.get("token_temperature", 0.1)
+        for b in range(B):
+            flat = score[b].reshape(-1)
+            k = max(1, int(rho * flat.numel()))
+            kth = torch.kthvalue(-flat, k).values * -1
+            mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
+        mask_soft = torch.stack(mask_soft, dim=0)
         sparsity_token = 1.0 - mask_soft.mean()
-        return x_gated, {"sparsity_token": sparsity_token, "mask": mask_soft}
+        return mask_soft, sparsity_token
 
-    def forward(self, token_feat: torch.Tensor) -> ASTOutputs:
-        # token_feat: [B,T,N,C]
-        x_gated, stats_token = self.forward_token_gating(token_feat)
-        # head/channel/block gates
+    def token_gating_multi_modal(
+        self, x: torch.Tensor, modality_slices: Dict[str, Tuple[int, int]]
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        modal_stats = {}
+        H_time_token = torch.zeros(x.shape[:3], device=x.device, dtype=x.dtype)
+        H_space_token = torch.zeros_like(H_time_token)
+        region_ids = self.region_ids.to(x.device)
+        w_modal = torch.sigmoid(self.modality_logit)
+        modal_id_for_token = torch.zeros(x.shape[2], device=x.device, dtype=torch.long)
+
+        for idx, name in enumerate(self.modalities):
+            s, e = modality_slices[name]
+            modal_id_for_token[s:e] = idx
+            tokens = x[:, :, s:e, :]
+            if name == "video":
+                Ht = compute_multi_level_time_entropy(
+                    tokens, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
+                )
+                Hs = compute_multi_level_space_entropy(
+                    tokens, self.H_p, self.W_p, self.space_window_levels, self.entropy_tau, self.entropy_eps
+                )
+                Ht_fused = self._fuse_levels(Ht["H_time_level"]).to(x.dtype)
+                Hs_fused = self._fuse_levels(Hs["H_space_level"]).to(x.dtype)
+                H_time_token[:, :, s:e] = Ht_fused.unsqueeze(1).expand(-1, x.shape[1], -1)
+                H_space_token[:, :, s:e] = Hs_fused.unsqueeze(2)
+                modal_stats[name] = {"H_time_mean": Ht_fused.mean()}
+            else:
+                Ht = compute_multi_level_time_entropy(
+                    tokens, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
+                )
+                Ht_fused = self._fuse_levels(Ht["H_time_level"]).to(x.dtype)
+                H_time_token[:, :, s:e] = Ht_fused.unsqueeze(1).expand(-1, x.shape[1], -1)
+                H_space_token[:, :, s:e] = Ht_fused.unsqueeze(1).expand(-1, x.shape[1], -1)
+                modal_stats[name] = {"H_time_mean": Ht_fused.mean()}
+
+        region_score = H_space_token.mean(dim=1, keepdim=True).expand(-1, x.shape[1], -1)
+        score = (
+            self.cfg.get("alpha_time", 1.0) * H_time_token
+            + self.cfg.get("beta_space", self.cfg.get("beta_space_coarse", 0.5)) * H_space_token
+            + self.cfg.get("gamma_region", self.cfg.get("gamma_space_fine", 0.5)) * region_score
+        )
+        score = score + self.cfg.get("d_modal", 1.0) * w_modal[modal_id_for_token][None, None, :]
+
+        mask_soft = []
+        rho = self.cfg.get("rho_token_target", 0.5)
+        temperature = self.cfg.get("token_temperature", 0.1)
+        for b in range(x.shape[0]):
+            flat = score[b].reshape(-1)
+            k = max(1, int(rho * flat.numel()))
+            kth = torch.kthvalue(-flat, k).values * -1
+            mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
+        mask_soft = torch.stack(mask_soft, dim=0)
+        sparsity_token = 1.0 - mask_soft.mean()
+        for name, (s, e) in modality_slices.items():
+            modal_stats[name]["sparsity"] = 1.0 - mask_soft[:, :, s:e].mean()
+        return mask_soft, sparsity_token, modal_stats
+
+    def forward_token_gating(
+        self, x: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if modality_slices:
+            mask_soft, sparsity_token, modal_stats = self.token_gating_multi_modal(x, modality_slices)
+        else:
+            mask_soft, sparsity_token = self.token_gating_single_modal(x)
+            modal_stats = {}
+        x_gated = x * mask_soft.unsqueeze(-1)
+        return x_gated, {"sparsity_token": sparsity_token, "mask": mask_soft, "modal_stats": modal_stats}
+
+    def compute_L_AST(self, sparsity_token: torch.Tensor, sparsity_head: torch.Tensor, sparsity_ch: torch.Tensor, sparsity_block: torch.Tensor) -> torch.Tensor:
+        loss_cfg = self.cfg.get("loss", self.cfg)
+        lambda_token = loss_cfg.get("lambda_token", 1.0)
+        lambda_head = loss_cfg.get("lambda_head", 0.1)
+        lambda_ch = loss_cfg.get("lambda_ch", 0.1)
+        lambda_block = loss_cfg.get("lambda_block", 0.1)
+        return lambda_token * sparsity_token + lambda_head * sparsity_head + lambda_ch * sparsity_ch + lambda_block * sparsity_block
+
+    def forward(self, token_feat: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None) -> ASTOutputs:
+        x_gated, stats_token = self.forward_token_gating(token_feat, modality_slices=modality_slices)
         head_weights = torch.sigmoid(self.g_head)
         ch_weights = torch.sigmoid(self.g_ch)
         block_weights = torch.sigmoid(self.g_block)
         sparsity_head = 1.0 - head_weights.mean()
         sparsity_ch = 1.0 - ch_weights.mean()
         sparsity_block = 1.0 - block_weights.mean()
-        L_AST = (
-            self.cfg.get("lambda_token", 0.0) * stats_token["sparsity_token"]
-            + self.cfg.get("lambda_head", 0.0) * sparsity_head
-            + self.cfg.get("lambda_ch", 0.0) * sparsity_ch
-            + self.cfg.get("lambda_block", 0.0) * sparsity_block
-        )
+        L_AST = self.compute_L_AST(stats_token["sparsity_token"], sparsity_head, sparsity_ch, sparsity_block)
         return ASTOutputs(
             token_mask=stats_token["mask"],
             head_weights=head_weights,
@@ -258,6 +308,7 @@ class ASTPruner(nn.Module):
                 "head": sparsity_head,
                 "ch": sparsity_ch,
                 "block": sparsity_block,
+                "modal": stats_token.get("modal_stats", {}),
             },
             L_AST=L_AST,
         )

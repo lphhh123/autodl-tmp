@@ -11,13 +11,13 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
-from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
+from utils.data_ucf101 import UCF101Dataset
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 from layout.wafer_layout import WaferLayout
 from mapping.mapping_solver import MappingSolver
 from mapping.partitioner import PartitionPlanner
 from mapping.segments import build_segments_from_model
-from models.vit_video import VideoViT
+from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
 
@@ -31,8 +31,8 @@ def _as_float(val, name: str) -> float:
 
 
 def build_dataloader(cfg):
-    ds = UCF101Dataset(cfg.data.root, cfg.data.train_split, clip_len=cfg.data.clip_len, img_size=cfg.data.img_size, is_train=True)
-    return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers, collate_fn=collate_video_batch)
+    ds = UCF101Dataset(cfg, split="train")
+    return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
 
 
 def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, mapping_solver: MappingSolver, wafer_layout: WaferLayout, partitioner: PartitionPlanner, hw_cfg: Dict):
@@ -141,11 +141,12 @@ def train_version_c(cfg):
         chiplet_slots.set_tau(tau)
         for step in range(cfg.training.inner_steps_ast):
             try:
-                x, y = next(data_iter)
+                batch = next(data_iter)
             except StopIteration:
                 data_iter = iter(loader)
-                x, y = next(data_iter)
-            x, y = x.to(device), y.to(device)
+                batch = next(data_iter)
+            x = batch["video"].to(device)
+            y = batch["label"].to(device)
             optimizer_model.zero_grad()
             optimizer_alpha.zero_grad()
             optimizer_layout.zero_grad()
@@ -153,7 +154,7 @@ def train_version_c(cfg):
                 logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
-                loss = L_task + cfg.ast.lambda_AST * info["L_AST"] + cfg.hw.lambda_hw * L_hw
+                loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + cfg.loss.lambda_hw * L_hw
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
             scaler.step(optimizer_alpha)
