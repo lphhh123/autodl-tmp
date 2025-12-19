@@ -8,7 +8,7 @@ from torch.cuda.amp import GradScaler, autocast
 
 from datasets.ucf101_dataset import UCF101Dataset, collate_video_batch
 from models.ast_losses import ASTRegularizer
-from models.vit_video import VideoViT
+from models.video_vit import VideoViT
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger
 from version_c.chip_slots import ChipSlotManager, chip_count_regularizer
