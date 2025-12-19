@@ -16,12 +16,28 @@ model:
 
 data:
   dataset: "ucf101"
-  root: "./data/ucf101"
+  root: "./data/ucf101/frames"
+  video_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/UCF-101"
+  frames_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101_frames"
+  splits_root: "./data/ucf101/splits"
+  split_file_train: "./data/ucf101/splits/trainlist01.txt"
+  split_file_test: "./data/ucf101/splits/testlist01.txt"
   train_split: "./data/ucf101/splits/trainlist01.txt"
+  test_split: "./data/ucf101/splits/testlist01.txt"
   val_split: "./data/ucf101/splits/testlist01.txt"
   clip_len: 8
+  num_frames: 8
+  frame_sampling: "uniform"
+  clip_lens: [8, 16]
+  modality: "video"
+  train_stride_ratio: 0.5
+  eval_stride_ratio: 0.5
+  clip_jitter: true
   img_size: 224
   num_workers: 8
+
+audio:
+  feat_dim: 128
 
 train:
   device: "cuda:0"
@@ -34,25 +50,21 @@ train:
 
 ast:
   use_ast_prune: true
-  time_window_sizes: [1, 2, 4, 8]
+  time_window_levels: [1, 2, 4]
+  space_window_levels: [1, 2, 4]
+  time_window_overlap: 0.5
   entropy_tau: 1.0
   rho_token_target: 0.5
   token_temperature: 0.1
-  num_regions_coarse: 4
-  num_regions_fine: 8
+  num_regions: 8
   alpha_time: 1.0
-  beta_space_coarse: 0.5
-  gamma_space_fine: 0.5
-  lambda_token: 0.1
-  lambda_head: 0.1
-  lambda_ch: 0.1
-  lambda_block: 0.05
-  lambda_AST: 1.0
-  space_windows:
-    - [1, 1]
-    - [2, 2]
-    - [4, 4]
-    - [-1, -1]
+  beta_space: 0.5
+  gamma_region: 0.5
+  loss:
+    lambda_token: 0.1
+    lambda_head: 0.1
+    lambda_ch: 0.1
+    lambda_block: 0.05
 
 hw:
   mode: "version_c_full"
@@ -82,10 +94,15 @@ mapping:
 
 training:
   mode: "version_c_full"
+  model_type: "video"
   outer_epochs: 10
   inner_steps_ast: 100
   inner_steps_alpha: 20
   inner_steps_layout: 20
+
+loss:
+  lambda_AST: 1.0
+  lambda_hw: 1.0
 
 chiplet:
   candidate_types: ["RTX4090_FP16", "RTX3090_FP16", "RTX2080Ti_FP16"]
