@@ -45,7 +45,19 @@ class UCF101Dataset(Dataset):
 
         self.audio_root = self.root / "audio"
         self.split = split
-        self.clip_len = int(cfg.data.num_frames)
+        num_frames = getattr(cfg.data, "num_frames", None)
+        clip_len = getattr(cfg.data, "clip_len", None)
+        if num_frames is not None:
+            self.clip_len = int(num_frames)
+        elif clip_len is not None:
+            self.clip_len = int(clip_len)
+        else:
+            raise ValueError("Expected data.num_frames or data.clip_len to be set.")
+        clip_lens = getattr(cfg.data, "clip_lens", None)
+        if clip_lens:
+            self.clip_lens = [int(value) for value in clip_lens]
+        else:
+            self.clip_lens = [self.clip_len]
         self.modality = cfg.data.modality
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
