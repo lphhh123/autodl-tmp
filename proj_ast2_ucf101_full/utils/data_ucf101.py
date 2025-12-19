@@ -49,15 +49,16 @@ class UCF101Dataset(Dataset):
         clip_len = getattr(cfg.data, "clip_len", None)
         if num_frames is not None:
             self.clip_len = int(num_frames)
+            self.clip_lens = [self.clip_len]
         elif clip_len is not None:
             self.clip_len = int(clip_len)
+            clip_lens = getattr(cfg.data, "clip_lens", None)
+            if clip_lens:
+                self.clip_lens = [int(value) for value in clip_lens]
+            else:
+                self.clip_lens = [self.clip_len]
         else:
             raise ValueError("Expected data.num_frames or data.clip_len to be set.")
-        clip_lens = getattr(cfg.data, "clip_lens", None)
-        if clip_lens:
-            self.clip_lens = [int(value) for value in clip_lens]
-        else:
-            self.clip_lens = [self.clip_len]
         self.modality = cfg.data.modality
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
