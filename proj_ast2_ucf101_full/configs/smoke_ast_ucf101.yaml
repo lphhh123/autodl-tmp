@@ -8,10 +8,8 @@ training:
   inner_steps_alpha: 0
   inner_steps_layout: 0
 data:
-  root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101"
-  frames_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/frames"
-  splits_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/splits"
-  video_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/UCF-101"
+  frames_root: "data/ucf101/frames"
+  splits_root: "data/ucf101/splits"
   train_split: "trainlist01.txt"
   test_split: "testlist01.txt"
   val_split: "testlist01.txt"

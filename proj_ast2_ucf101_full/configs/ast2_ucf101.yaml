@@ -16,11 +16,9 @@ model:
 
 data:
   dataset: "ucf101"
-  root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101"
-  frames_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/frames"
-  splits_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/splits"
-  video_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/UCF-101"
-  audio_root: "/root/autodl-tmp/proj_ast2_wafer_v2/data/ucf101/audio"
+  frames_root: "data/ucf101/frames"
+  splits_root: "data/ucf101/splits"
+  audio_root: "data/ucf101/audio"
   train_split: "trainlist01.txt"
   test_split: "testlist01.txt"
   val_split: "testlist01.txt"
