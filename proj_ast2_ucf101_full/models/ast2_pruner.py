@@ -49,12 +49,44 @@ def build_voronoi_regions(num_patches: int, grid_hw: Tuple[int, int], num_region
     return region_ids[:num_patches], num_regions
 
 
-def conv1d_mean_over_time(p_bt: torch.Tensor, L: int) -> torch.Tensor:
+def conv1d_mean_over_time(p_bt: torch.Tensor, L: int, stride: int = 1) -> torch.Tensor:
     # p_bt: [B*N, C, T]
     C = p_bt.shape[1]
     weight = torch.ones(C, 1, L, device=p_bt.device, dtype=p_bt.dtype) / float(L)
-    q = F.conv1d(p_bt, weight, stride=1, padding=0, groups=C)
+    q = F.conv1d(p_bt, weight, stride=stride, padding=0, groups=C)
     return q
+
+
+def compute_multi_level_time_entropy(
+    x: torch.Tensor,
+    levels: List[int],
+    tau: float,
+    eps: float,
+    overlap: float = 0.0,
+) -> Dict[str, torch.Tensor]:
+    B, T, N, C = x.shape
+    p = _softmax_over_channels(x, tau)
+    p_bt = p.permute(0, 2, 3, 1).reshape(B * N, C, T)
+    H_time_level: Dict[int, torch.Tensor] = {}
+    H_time_ms_list = []
+    for L in levels:
+        if L <= 0 or T < L:
+            continue
+        stride = max(1, int(round(L * (1.0 - overlap))))
+        q = conv1d_mean_over_time(p_bt, L, stride=stride)
+        T_prime = q.shape[-1]
+        q_bnct = q.reshape(B, N, C, T_prime).permute(0, 3, 1, 2)
+        H_L_center = _entropy_from_prob(q_bnct, dim=-1, eps=eps)
+        H_flat = H_L_center.permute(0, 2, 1).reshape(B * N, 1, T_prime)
+        H_interp = F.interpolate(H_flat, size=T, mode="linear", align_corners=False)
+        H_L_full = H_interp.reshape(B, N, T).permute(0, 2, 1)
+        H_time_ms_list.append(H_L_full)
+        H_time_level[L] = H_L_full.mean(dim=1)
+    if H_time_ms_list:
+        H_time_ms = torch.stack(H_time_ms_list, dim=0).mean(dim=0)
+    else:
+        H_time_ms = torch.zeros(B, T, N, device=x.device, dtype=x.dtype)
+    return {"H_time_level": H_time_level, "H_time_ms": H_time_ms}
 
 
 def compute_multi_level_space_entropy(
@@ -177,29 +209,15 @@ class ASTPruner(nn.Module):
         Hs_fused = self._fuse_levels(Hs["H_space_level"])
 
         B, T, N, _ = x.shape
-        Ht_norm = self._normalize(H_time_ms)
-        Hc_norm = self._normalize(H_region_coarse)
-        Hf_norm = self._normalize(H_region_fine)
-        # Keep dtype consistent with input (can be fp16 under autocast).
-        Ht_norm = Ht_norm.to(x.dtype)
-        Hc_norm = Hc_norm.to(x.dtype)
-        Hf_norm = Hf_norm.to(x.dtype)
-        Hc_per_token = x.new_zeros(B, T, N)
-        Hf_per_token = x.new_zeros(B, T, N)
-        for r in range(self.num_regions_coarse):
-            mask_n = region_ids_coarse == r
-            if mask_n.sum() == 0:
-                continue
-            Hc_per_token[:, :, mask_n] = Hc_norm[:, :, r : r + 1]
-        for r in range(self.num_regions_fine):
-            mask_n = region_ids_fine == r
-            if mask_n.sum() == 0:
-                continue
-            Hf_per_token[:, :, mask_n] = Hf_norm[:, :, r : r + 1]
+        Ht_norm = self._normalize(Ht_fused).to(x.dtype)
+        Hs_norm = self._normalize(Hs_fused).to(x.dtype)
+        H_time_token = Ht_norm.unsqueeze(1).expand(-1, T, -1)
+        H_space_token = Hs_norm.unsqueeze(2).expand(-1, T, N)
+        region_score = H_space_token.mean(dim=1, keepdim=True).expand(-1, T, -1)
         score = (
-            cfg.get("alpha_time", 1.0) * Ht_fused.unsqueeze(1).expand(-1, T, -1)
-            + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * Hs_fused.unsqueeze(2)
-            + cfg.get("gamma_region", cfg.get("gamma_space_fine", 0.5)) * region_score.unsqueeze(1)
+            cfg.get("alpha_time", 1.0) * H_time_token
+            + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * H_space_token
+            + cfg.get("gamma_region", cfg.get("gamma_space_fine", 0.5)) * region_score
         )
         mask_soft = []
         rho = cfg.get("rho_token_target", 0.5)
