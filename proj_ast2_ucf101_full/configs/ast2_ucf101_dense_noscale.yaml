@@ -1,5 +1,4 @@
 _base_: ./ast2_ucf101_dense.yaml
 data:
-  clip_lens: [16]
   train_stride_ratio: 1.0
   eval_stride_ratio: 1.0

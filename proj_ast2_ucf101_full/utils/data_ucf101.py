@@ -49,16 +49,15 @@ class UCF101Dataset(Dataset):
         clip_len = getattr(cfg.data, "clip_len", None)
         if num_frames is not None:
             self.clip_len = int(num_frames)
-            self.clip_lens = [self.clip_len]
         elif clip_len is not None:
             self.clip_len = int(clip_len)
-            clip_lens = getattr(cfg.data, "clip_lens", None)
-            if clip_lens:
-                self.clip_lens = [int(value) for value in clip_lens]
-            else:
-                self.clip_lens = [self.clip_len]
         else:
             raise ValueError("Expected data.num_frames or data.clip_len to be set.")
+        clip_lens = getattr(cfg.data, "clip_lens", None)
+        if clip_lens and len(clip_lens) > 1:
+            raise ValueError(
+                "Multiple clip_lens are not supported. Set data.num_frames or a single clip_len."
+            )
         self.modality = cfg.data.modality
         self.is_train = split == "train"
         self.img_size = cfg.data.img_size
@@ -102,26 +101,25 @@ class UCF101Dataset(Dataset):
                     if not frame_files:
                         continue
                     total_frames = len(frame_files)
-                for clip_len in self.clip_lens:
-                    stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
-                    stride = max(1, int(clip_len * stride_ratio))
-                    offset = 0
-                    if self.is_train and getattr(cfg.data, "clip_jitter", False):
-                        offset = random.randint(0, max(0, stride - 1))
-                    for start in range(offset, total_frames, stride):
-                        if start + clip_len <= total_frames:
-                            clips.append(ClipItem(source_path, label, start, clip_len, self.mode == "video"))
-                        else:
-                            clips.append(
-                                ClipItem(
-                                    source_path,
-                                    label,
-                                    max(0, total_frames - clip_len),
-                                    clip_len,
-                                    self.mode == "video",
-                                )
+                stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
+                stride = max(1, int(self.clip_len * stride_ratio))
+                offset = 0
+                if self.is_train and getattr(cfg.data, "clip_jitter", False):
+                    offset = random.randint(0, max(0, stride - 1))
+                for start in range(offset, total_frames, stride):
+                    if start + self.clip_len <= total_frames:
+                        clips.append(ClipItem(source_path, label, start, self.clip_len, self.mode == "video"))
+                    else:
+                        clips.append(
+                            ClipItem(
+                                source_path,
+                                label,
+                                max(0, total_frames - self.clip_len),
+                                self.clip_len,
+                                self.mode == "video",
                             )
-                            break
+                        )
+                        break
         self.clips = clips
         if len(self.clips) == 0:
             raise RuntimeError(
