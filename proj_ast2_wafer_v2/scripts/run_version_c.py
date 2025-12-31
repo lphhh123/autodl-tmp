@@ -12,9 +12,11 @@ For a real experiment you will likely:
   - Tune loss weights and search spaces
 """
 import argparse
+import json
 import os
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import torch.optim as optim
@@ -25,7 +27,7 @@ from mapping.mapper_multi_gpu import (
     Chiplet, build_segments, estimate_segment_costs,
     greedy_initial_mapping, local_search_refine,
 )
-from layout.wafer_layout import ChipGeom, WaferLayout, layout_loss
+from layout.wafer_layout import build_layout_inputs
 
 from scripts.run_ast2_single import build_dataloaders  # reuse data pipeline (UCF-101)
 
@@ -45,20 +47,6 @@ def build_chiplets_from_cfg(cfg) -> List[Chiplet]:
             ))
             idx += 1
     return chips
-
-
-def build_chip_geoms_from_chips(chips: List[Chiplet], cfg) -> List[ChipGeom]:
-    area_per_chip = 1.0 / max(len(chips), 1)
-    side = (area_per_chip ** 0.5) * 0.5
-    geoms = []
-    for chip in chips:
-        geoms.append(ChipGeom(
-            idx=chip.idx,
-            width=side,
-            height=side,
-            power=cfg.layout.get("power_per_chip", 1.0),
-        ))
-    return geoms
 
 
 def build_inter_seg_bytes(segments, layer_metas) -> Dict[Tuple[int, int], float]:
@@ -96,12 +84,9 @@ def main():
     train_loader, val_loader = build_dataloaders(cfg)
     loader = train_loader
 
-
     chips = build_chiplets_from_cfg(cfg)
-    chip_geoms = build_chip_geoms_from_chips(chips, cfg)
-    layout = WaferLayout(chip_geoms).to(device)
 
-    outer_iters = cfg.mapping.get("outer_iters", 3)
+    outer_iters = cfg.mapping.get("outer_iters", 1)
     inner_epochs = cfg.mapping.get("inner_epochs", 1)
 
     optimizer = optim.AdamW(
@@ -110,16 +95,13 @@ def main():
         weight_decay=cfg.train.weight_decay,
     )
 
-    # Layout optimizer uses separate optimizer on layout parameters
-    layout_opt = optim.Adam(layout.parameters(), lr=cfg.layout.get("lr", 1e-2))
-
     best_score = -1e9
     best_state = None
 
     for outer in range(outer_iters):
         print(f"===== Outer Iter {outer+1}/{outer_iters} =====")
 
-        # (1) Train theta, s with fixed mapping & layout
+        # (1) Train theta, s with fixed mapping
         for ep in range(inner_epochs):
             print(f"  [Step1] Train epoch {ep+1}/{inner_epochs}")
             _ = train_one_epoch(
@@ -132,8 +114,8 @@ def main():
             )
 
         # Build layer metas and segments based on current keep_ratios
-        dummy_video, _ = dataset[0]
-        dummy_video = dummy_video.unsqueeze(0).to(device)
+        sample, _ = train_loader.dataset[0]
+        dummy_video = sample.unsqueeze(0).to(device)
         _ = model(dummy_video)
         layer_metas = model.get_layer_metas(tuple(dummy_video.shape), chip_name="")
 
@@ -152,44 +134,83 @@ def main():
         )
         print(f"    mapping={mapping}")
 
-        # (3) Optimize layout L via gradient descent on layout loss
-        print("  [Step3] Optimize layout L")
-        layout.train()
-        for k in range(cfg.layout.get("gd_steps", 50)):
-            layout_opt.zero_grad()
-            # Build netlist weights from segment mapping
-            netlist = {}
-            for (u, v), traffic in inter_seg_bytes.items():
-                cu = mapping[u]
-                cv = mapping[v]
-                if cu == cv:
-                    continue
-                key = (cu, cv)
-                netlist[key] = netlist.get(key, 0.0) + traffic
-            loss_L = layout_loss(
-                layout,
-                netlist=netlist,
-                alpha_wire=cfg.layout.get("alpha_wire", 1.0),
-                beta_overlap=cfg.layout.get("beta_overlap", 10.0),
-                gamma_boundary=cfg.layout.get("gamma_boundary", 10.0),
-                delta_thermal=cfg.layout.get("delta_thermal", 1.0),
-            )
-            loss_L.backward()
-            layout_opt.step()
-            if (k + 1) % 10 == 0:
-                print(f"    [layout gd step {k+1}] loss_L={loss_L.item():.4f}")
+        # (3) Generate site-based layout seeds and export layout_input.json
+        S = len(chips)
+        traffic_matrix = np.zeros((S, S), dtype=np.float64)
+        for (u, v), bytes_ in inter_seg_bytes.items():
+            cu = mapping[u]
+            cv = mapping[v]
+            if cu == cv:
+                continue
+            traffic_matrix[cu, cv] += bytes_
+
+        wafer_radius_mm = float(cfg.layout.get("wafer_radius_mm", 150.0))
+        margin_mm = float(cfg.layout.get("margin_mm", 1.0))
+        chip_w = float(cfg.layout.get("chip_max_width_mm", 20.0))
+        chip_h = float(cfg.layout.get("chip_max_height_mm", 20.0))
+        sigma_mm = float(cfg.layout.get("sigma_mm", 20.0))
+        scalar_weights = cfg.layout.get("scalar_weights", {"w_comm": 0.7, "w_therm": 0.3, "w_penalty": 1000.0})
+        chip_tdp_w = np.full((S,), float(cfg.layout.get("power_per_chip", 1.0)), dtype=np.float64)
+
+        layout_inputs = build_layout_inputs(
+            S=S,
+            wafer_radius_mm=wafer_radius_mm,
+            chip_max_width_mm=chip_w,
+            chip_max_height_mm=chip_h,
+            margin_mm=margin_mm,
+            traffic_matrix=traffic_matrix,
+            chip_tdp_w=chip_tdp_w,
+            sigma_mm=sigma_mm,
+            scalar_weights=scalar_weights,
+            seed=cfg.layout.get("seed", 0),
+        )
+
+        if getattr(cfg.layout, "export_layout_input", False):
+            out_dir = getattr(cfg.layout, "export_dir", cfg.log.out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            layout_input = {
+                "layout_version": "v4.3.2",
+                "wafer": {"radius_mm": wafer_radius_mm, "margin_mm": margin_mm},
+                "sites": {
+                    "method": "square_grid_in_circle",
+                    "grid_pitch_mm": None,
+                    "sites_xy_mm": layout_inputs["sites_xy_mm"].tolist(),
+                },
+                "slots": {"S": S, "chip_tdp_w": chip_tdp_w.tolist()},
+                "mapping": {
+                    "mapping_id": f"outer_{outer}",
+                    "traffic_matrix": traffic_matrix.tolist(),
+                },
+                "baseline": {
+                    "assign_grid": layout_inputs["assign_grid"].tolist(),
+                    "costs": layout_inputs["eval_grid"],
+                },
+                "seed": {
+                    "assign_seed": layout_inputs["assign_seed"].tolist(),
+                    "assign_micro": layout_inputs["assign_micro"].tolist(),
+                    "eval_seed": layout_inputs["eval_seed"],
+                    "eval_micro": layout_inputs["eval_micro"],
+                    "micro_place_stats": layout_inputs["micro_place_stats"].__dict__,
+                },
+                "objective_cfg": {
+                    "sigma_mm": sigma_mm,
+                    "scalar_weights": scalar_weights,
+                    "baseline": layout_inputs["baseline"],
+                },
+            }
+            with open(os.path.join(out_dir, "layout_input.json"), "w", encoding="utf-8") as f:
+                json.dump(layout_input, f, indent=2)
+            print(f"  [export] layout_input.json saved to {out_dir}")
 
         # Evaluate current configuration
         acc = evaluate(model, val_loader, cfg)
-        score = acc  # you can extend this to combine latency/power/temp
-
+        score = acc
         print(f"  [Eval] acc={acc:.4f}, score={score:.4f}")
 
         if score > best_score:
             best_score = score
             best_state = {
                 "model": model.state_dict(),
-                "layout": layout.state_dict(),
                 "mapping": mapping,
                 "acc": acc,
             }
