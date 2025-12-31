@@ -47,9 +47,9 @@ class LayoutEvaluator:
 
     def evaluate(self, st: LayoutState) -> Dict:
         pos = st.sites_xy_mm[st.assign]
-        penalty_duplicate = max(0, len(st.assign) - len(np.unique(st.assign))) * float(
-            self.scalar_w.get("w_penalty", 1.0)
-        )
+        penalty_duplicate = 0.0
+        if len(np.unique(st.assign)) < len(st.assign):
+            penalty_duplicate = float(self.scalar_w.get("w_penalty", 1.0))
         boundary_mask = np.linalg.norm(pos, axis=1) > (st.wafer_radius_mm + 1e-6)
         penalty_boundary = float(boundary_mask.sum()) * self.scalar_w.get("w_penalty", 1.0)
 
