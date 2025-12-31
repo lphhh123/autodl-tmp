@@ -96,6 +96,26 @@ class MappingSolver:
                 comm_ms += base_time + dist * distance_scale_ms
         return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
 
+    def build_traffic_matrix(self, segments: List[Segment], mapping: List[int]) -> torch.Tensor:
+        """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
+
+        For the common pipeline case, the traffic between segment k and k+1 is
+        attributed to their mapped slots. This method intentionally stays
+        simple to keep the contract explicit for downstream layout stages.
+        """
+
+        if not segments:
+            return torch.zeros((0, 0), dtype=torch.float32)
+        S = max(mapping) + 1 if mapping else 0
+        traffic = torch.zeros((S, S), dtype=torch.float32)
+        for k in range(len(segments) - 1):
+            a = mapping[k]
+            b = mapping[k + 1]
+            if a == b:
+                continue
+            traffic[a, b] += float(segments[k].traffic_out_bytes)
+        return traffic
+
     def _violates_mem(self, mapping: List[int], k_idx: int, new_d: int, mem_mb: torch.Tensor, eff_specs: Dict[str, torch.Tensor]) -> bool:
         tmp_map = mapping.copy()
         tmp_map[k_idx] = new_d
