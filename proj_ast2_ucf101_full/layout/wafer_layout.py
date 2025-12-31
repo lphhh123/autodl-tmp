@@ -26,6 +26,18 @@ class WaferLayout(nn.Module):
             self.register_buffer("assign", assign.long())
             self.pos = nn.Parameter(self.sites_xy[self.assign].clone())
 
+    @property
+    def current_pos(self) -> torch.Tensor:
+        """Return the current chiplet center positions.
+
+        When discrete sites/assign are provided, use the derived positions to
+        keep penalties tied to the latest assignment. Otherwise fall back to the
+        learnable continuous coordinates.
+        """
+        if self.sites_xy is None or self.assign is None:
+            return self.pos
+        return self.sites_xy[self.assign]
+
     # SPEC §10.2
     def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
         centers = self.current_pos
@@ -63,7 +75,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.5
     def thermal_penalty(self, eff_specs: Dict[str, torch.Tensor], T_ambient: float = 25.0, T_limit: float = 85.0, sigma_mm: float = 50.0, alpha: float = 0.01):
-        centers = self.pos
+        centers = self.current_pos
         power = eff_specs["tdp_w"]
         S = centers.shape[0]
         temps = []
