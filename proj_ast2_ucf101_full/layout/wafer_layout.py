@@ -1,8 +1,8 @@
-"""Wafer layout model (SPEC §10)."""
+"""Wafer layout model supporting discrete sites (SPEC v4.3.2 §7)."""
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,10 +11,20 @@ from mapping.segments import Segment
 
 
 class WaferLayout(nn.Module):
-    def __init__(self, num_slots: int, wafer_radius_mm: float):
+    def __init__(self, num_slots: int, wafer_radius_mm: float, sites_xy: Optional[torch.Tensor] = None, assign: Optional[torch.Tensor] = None):
         super().__init__()
-        self.pos = nn.Parameter(torch.zeros(num_slots, 2))
         self.wafer_radius_mm = wafer_radius_mm
+        if sites_xy is None:
+            # fallback to legacy continuous coordinates
+            self.pos = nn.Parameter(torch.zeros(num_slots, 2))
+            self.register_buffer("sites_xy", None)
+            self.register_buffer("assign", None)
+        else:
+            self.register_buffer("sites_xy", sites_xy.float())
+            if assign is None:
+                assign = torch.arange(num_slots, device=sites_xy.device) % sites_xy.shape[0]
+            self.register_buffer("assign", assign.long())
+            self.pos = nn.Parameter(self.sites_xy[self.assign].clone())
 
     # SPEC §10.2
     def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
