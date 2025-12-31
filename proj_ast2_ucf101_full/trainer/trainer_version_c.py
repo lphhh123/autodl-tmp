@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from functools import partial
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +16,8 @@ from torch.utils.data import DataLoader
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
 from utils.data_ucf101 import UCF101Dataset
 from hw_proxy.layer_hw_proxy import LayerHwProxy
+from layout.evaluator import LayoutEvaluator, LayoutState
+from layout.sites import build_sites
 from layout.wafer_layout import WaferLayout
 from mapping.mapping_solver import MappingSolver
 from mapping.partitioner import PartitionPlanner
@@ -34,6 +38,116 @@ def _as_float(val, name: str) -> float:
 def build_dataloader(cfg):
     ds = UCF101Dataset(cfg, split="train")
     return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
+
+
+def _export_layout_input(
+    cfg,
+    export_dir: Path,
+    chiplet_slots: ChipletSlots,
+    mapping_solver: MappingSolver,
+    segments: List,
+    mapping: List[int],
+    wafer_layout: WaferLayout,
+    seed: int = 0,
+):
+    """Export layout_input.json following SPEC v4.3.2 (§10.1).
+
+    This uses deterministic square-grid sites and the latest mapping/segments
+    from training to provide a reproducible offline entry point.
+    """
+
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build discrete sites shared by train/offline
+    chip_types = list(chiplet_slots.library.types.values())
+    chip_max_w = max(t.width_mm for t in chip_types)
+    chip_max_h = max(t.height_mm for t in chip_types)
+    sites_xy = build_sites(
+        wafer_radius_mm=float(cfg.hw.wafer_radius_mm),
+        chip_max_width_mm=chip_max_w,
+        chip_max_height_mm=chip_max_h,
+        margin_mm=float(getattr(cfg.hw, "site_margin_mm", 5.0)),
+        method="square_grid_in_circle",
+        grid_pitch_mm=None,
+        seed=int(seed),
+    )
+    S = cfg.hw.num_slots
+    Ns = sites_xy.shape[0]
+    assign_grid = np.arange(S, dtype=int) % Ns
+    assign_seed = assign_grid.copy()
+
+    eff_specs = chiplet_slots(hard=False)["eff_specs"]
+    chip_tdp = eff_specs["tdp_w"].detach().cpu().numpy().astype(float)
+
+    traffic = mapping_solver.build_traffic_matrix(segments, mapping).cpu().numpy().astype(float)
+    baseline_eval = LayoutEvaluator(
+        sigma_mm=float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0,
+        baseline={"L_comm_baseline": 1.0, "L_therm_baseline": 1.0},
+        scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+    )
+    layout_state = LayoutState(
+        S=S,
+        Ns=Ns,
+        wafer_radius_mm=float(cfg.hw.wafer_radius_mm),
+        sites_xy_mm=sites_xy,
+        assign=assign_grid,
+        chip_tdp_w=chip_tdp,
+        traffic_bytes=traffic,
+        meta={},
+    )
+    base_res = baseline_eval.evaluate(layout_state)
+    baseline = {
+        "assign_grid": assign_grid.tolist(),
+        "L_comm": base_res["L_comm"],
+        "L_therm": base_res["L_therm"],
+        "comm_norm": 1.0,
+        "therm_norm": 1.0,
+    }
+
+    # Serialize segments minimally
+    segments_json = []
+    for idx, seg in enumerate(segments):
+        segments_json.append(
+            {
+                "id": getattr(seg, "id", idx),
+                "flops": getattr(seg, "flops", 0.0),
+                "bytes": getattr(seg, "bytes", 0.0),
+                "seq_len": getattr(seg, "seq_len", 0),
+                "embed_dim": getattr(seg, "embed_dim", 0),
+                "num_heads": getattr(seg, "num_heads", 0),
+                "mlp_ratio": getattr(seg, "mlp_ratio", 0.0),
+                "traffic_out_bytes": getattr(seg, "traffic_out_bytes", 0.0),
+            }
+        )
+
+    layout_input = {
+        "layout_version": "v4.3.2",
+        "wafer": {"radius_mm": float(cfg.hw.wafer_radius_mm), "margin_mm": float(getattr(cfg.hw, "site_margin_mm", 5.0))},
+        "sites": {
+            "method": "square_grid_in_circle",
+            "pitch_mm": None,
+            "sites_xy": sites_xy.tolist(),
+        },
+        "slots": {"S": S, "tdp": chip_tdp.tolist()},
+        "mapping": {
+            "mapping_id": f"train_step_final",
+            "segments": segments_json,
+            "traffic_matrix": traffic.tolist(),
+            "mapping": mapping,
+        },
+        "baseline": baseline,
+        "seed": {"assign_seed": assign_seed.tolist(), "micro_place_stats": {}},
+        "objective_cfg": {
+            "sigma_mm": float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0,
+            "scalar_weights": {"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+        },
+    }
+
+    out_path = export_dir / "layout_input.json"
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(layout_input, f, indent=2)
+
+    return out_path
 
 
 def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, mapping_solver: MappingSolver, wafer_layout: WaferLayout, partitioner: PartitionPlanner, hw_cfg: Dict):
@@ -94,7 +208,7 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
     return L_hw, hw_stats, mapping, partition_result.get("rewrite_plan")
 
 
-def train_version_c(cfg):
+def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional[str] = None):
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
@@ -159,6 +273,9 @@ def train_version_c(cfg):
     optimizer_layout = torch.optim.Adam(wafer_layout.parameters(), lr=1e-3)
 
     global_step = 0
+    last_segments: List = []
+    last_mapping: List[int] = []
+
     for outer in range(cfg.training.outer_epochs):
         tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
         chiplet_slots.set_tau(tau)
@@ -186,6 +303,8 @@ def train_version_c(cfg):
             scaler.step(optimizer_alpha)
             scaler.step(optimizer_layout)
             scaler.update()
+            last_segments = partitioner.plan(model, chiplet_slots(hard=False)["eff_specs"], use_fine_split=getattr(cfg.hw, "use_fine_split", True))["segments"]
+            last_mapping = mapping
             if step % 10 == 0:
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 log_stats(logger, {"outer": outer, "step": step, "loss": loss.item(), "acc1": acc1.item(), "lat_ms": hw_stats["total_latency_ms"].item()})
@@ -229,3 +348,16 @@ def train_version_c(cfg):
             optimizer_layout.zero_grad()
             L_layout.backward()
             optimizer_layout.step()
+
+    if export_layout_input:
+        export_dir_path = Path(export_dir or "outputs/P3")
+        _export_layout_input(
+            cfg=cfg,
+            export_dir=export_dir_path,
+            chiplet_slots=chiplet_slots,
+            mapping_solver=mapping_solver,
+            segments=last_segments,
+            mapping=last_mapping,
+            wafer_layout=wafer_layout,
+            seed=int(getattr(cfg.train, "seed", 0)),
+        )

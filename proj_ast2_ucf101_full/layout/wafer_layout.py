@@ -1,8 +1,8 @@
-"""Wafer layout model (SPEC §10)."""
+"""Wafer layout model supporting discrete sites (SPEC v4.3.2 §7)."""
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,14 +11,30 @@ from mapping.segments import Segment
 
 
 class WaferLayout(nn.Module):
-    def __init__(self, num_slots: int, wafer_radius_mm: float):
+    def __init__(self, num_slots: int, wafer_radius_mm: float, sites_xy: Optional[torch.Tensor] = None, assign: Optional[torch.Tensor] = None):
         super().__init__()
-        self.pos = nn.Parameter(torch.zeros(num_slots, 2))
         self.wafer_radius_mm = wafer_radius_mm
+        if sites_xy is None:
+            # fallback to legacy continuous coordinates
+            self.pos = nn.Parameter(torch.zeros(num_slots, 2))
+            self.register_buffer("sites_xy", None)
+            self.register_buffer("assign", None)
+        else:
+            self.register_buffer("sites_xy", sites_xy.float())
+            if assign is None:
+                assign = torch.arange(num_slots, device=sites_xy.device) % sites_xy.shape[0]
+            self.register_buffer("assign", assign.long())
+            self.pos = nn.Parameter(self.sites_xy[self.assign].clone())
+
+    @property
+    def current_pos(self):
+        if self.sites_xy is None or self.assign is None:
+            return self.pos
+        return self.sites_xy[self.assign]
 
     # SPEC §10.2
     def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
-        centers = self.pos
+        centers = self.current_pos
         r_center = torch.sqrt((centers ** 2).sum(dim=1) + 1e-6)
         r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
         violation = torch.relu(r_center + r_chip + margin - self.wafer_radius_mm)
@@ -26,7 +42,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.3
     def overlap_penalty(self, eff_specs: Dict[str, torch.Tensor]):
-        centers = self.pos
+        centers = self.current_pos
         r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
         S = centers.shape[0]
         penalty = centers.new_tensor(0.0)
@@ -40,7 +56,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.4
     def comm_loss(self, mapping: List[int], segments: List[Segment], eff_specs: Dict[str, torch.Tensor], distance_scale: float):
-        centers = self.pos
+        centers = self.current_pos
         comm_cost = centers.new_tensor(0.0)
         for k in range(len(segments) - 1):
             d1, d2 = mapping[k], mapping[k + 1]
