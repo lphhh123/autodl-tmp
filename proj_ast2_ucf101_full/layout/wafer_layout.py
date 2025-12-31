@@ -26,12 +26,6 @@ class WaferLayout(nn.Module):
             self.register_buffer("assign", assign.long())
             self.pos = nn.Parameter(self.sites_xy[self.assign].clone())
 
-    @property
-    def current_pos(self):
-        if self.sites_xy is None or self.assign is None:
-            return self.pos
-        return self.sites_xy[self.assign]
-
     # SPEC §10.2
     def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
         centers = self.current_pos
