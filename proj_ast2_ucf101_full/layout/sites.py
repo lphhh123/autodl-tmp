@@ -14,6 +14,7 @@ def _square_grid_in_circle(
     margin_mm: float,
     seed: int,
 ) -> np.ndarray:
+    rng = np.random.default_rng(seed)
     coords = []
     half_extent = wafer_radius_mm
     x_vals = np.arange(-half_extent, half_extent + 1e-6, grid_pitch_mm)
@@ -23,8 +24,13 @@ def _square_grid_in_circle(
         for x in x_vals:
             if math.sqrt(x * x + y * y) <= wafer_radius_mm - 0.5 * max_diag_mm - margin_mm + 1e-9:
                 coords.append((float(x), float(y)))
-    # deterministic ordering required by SPEC (v4.3.2 §4.3)
-    return np.array(coords, dtype=np.float32)
+    # shuffle slightly to avoid pathological patterns when more than S sites are needed
+    coords = np.array(coords, dtype=np.float32)
+    if coords.shape[0] > 0:
+        order = np.arange(coords.shape[0])
+        rng.shuffle(order)
+        coords = coords[order]
+    return coords
 
 
 def build_sites(

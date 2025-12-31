@@ -111,12 +111,9 @@ def run_detailed_place(
     clusters: List[Cluster],
     cluster_to_region: List[int],
     pareto: ParetoSet,
-    pareto_records: List[Dict],
     cfg: Dict,
     trace_path: Path,
     seed_id: int,
-    trace_logger=None,
-    stage_name: str = "detailed",
 ):
     rng = np.random.default_rng(cfg.get("seed", 0) + seed_id)
     assign = assign_seed.copy()
@@ -129,97 +126,52 @@ def run_detailed_place(
     T = float(cfg.get("sa_T0", 1.0))
     alpha = float(cfg.get("sa_alpha", 0.999))
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    eval_out = evaluator.evaluate(layout_state)
-    added = pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy(), "total_scalar": eval_out["total_scalar"], "stage": stage_name, "iter": 0, "seed_id": seed_id})
-    if added:
-        pareto_records.append({
-            "solution_id": len(pareto_records),
-            "comm_norm": eval_out["comm_norm"],
-            "therm_norm": eval_out["therm_norm"],
-            "total_scalar": eval_out["total_scalar"],
-            "stage": stage_name,
-            "iter": 0,
-            "seed_id": seed_id,
-            "assign_hash": hash(tuple(assign.tolist())),
-        })
-    if trace_logger is not None:
-        trace_logger(
-            stage=stage_name,
-            op="none",
-            op_args={},
-            accepted=1,
-            total_scalar=eval_out["total_scalar"],
-            comm_norm=eval_out["comm_norm"],
-            therm_norm=eval_out["therm_norm"],
-            pareto_added=int(added),
-            penalty_dup=eval_out["penalty"]["duplicate"],
-            penalty_bound=eval_out["penalty"]["boundary"],
-            seed_id=seed_id,
-            iter_idx=0,
+    with trace_path.open("w", encoding="utf-8") as f_trace:
+        f_trace.write(
+            "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms\n"
         )
-    for step in range(steps):
-        # choose action
-        if planner_cfg.get("type") == "mixed" and mixed_every and step % mixed_every == 0:
-            ss = _state_summary(eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region)
-            try:
-                actions = planner.propose_actions(ss, k_actions)
-            except Exception:
-                actions = []
-            action = actions[0] if actions else _sample_action(cfg, traffic_sym, site_to_region, regions, clusters, assign)
-        else:
-            action = _sample_action(cfg, traffic_sym, site_to_region, regions, clusters, assign)
+        eval_out = evaluator.evaluate(layout_state)
+        pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy()})
+        for step in range(steps):
+            # choose action
+            if planner_cfg.get("type") == "mixed" and mixed_every and step % mixed_every == 0:
+                ss = _state_summary(eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region)
+                try:
+                    actions = planner.propose_actions(ss, k_actions)
+                except Exception:
+                    actions = []
+                action = actions[0] if actions else _sample_action(cfg, traffic_sym, site_to_region, regions, clusters, assign)
+            else:
+                action = _sample_action(cfg, traffic_sym, site_to_region, regions, clusters, assign)
 
-        new_assign = assign.copy()
-        op = action.get("op", "none")
-        if op == "swap":
-            _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
-        elif op == "relocate":
-            _apply_relocate(new_assign, int(action.get("i", 0)), int(action.get("site_id", 0)))
-        elif op == "cluster_move":
-            cid = int(action.get("cluster_id", 0))
-            rid = int(action.get("region_id", 0))
-            if cid < len(clusters):
-                cluster = clusters[cid]
-                target_sites = [s for s, r in enumerate(site_to_region) if r == rid][: len(cluster.slots)]
-                _apply_cluster_move(new_assign, cluster, target_sites)
+            new_assign = assign.copy()
+            op = action.get("op", "none")
+            if op == "swap":
+                _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
+            elif op == "relocate":
+                _apply_relocate(new_assign, int(action.get("i", 0)), int(action.get("site_id", 0)))
+            elif op == "cluster_move":
+                cid = int(action.get("cluster_id", 0))
+                rid = int(action.get("region_id", 0))
+                if cid < len(clusters):
+                    cluster = clusters[cid]
+                    target_sites = [s for s, r in enumerate(site_to_region) if r == rid][: len(cluster.slots)]
+                    _apply_cluster_move(new_assign, cluster, target_sites)
 
-        layout_state.assign = new_assign
-        eval_new = evaluator.evaluate(layout_state)
-        delta = eval_new["total_scalar"] - eval_out["total_scalar"]
-        accept = delta < 0 or math.exp(-delta / max(T, 1e-6)) > rng.random()
-        if accept:
-            assign = new_assign
-            eval_out = eval_new
-            layout_state.assign = assign
-            added = pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy(), "total_scalar": eval_out["total_scalar"], "stage": stage_name, "iter": step + 1, "seed_id": seed_id})
-            if added:
-                pareto_records.append({
-                    "solution_id": len(pareto_records),
-                    "comm_norm": eval_out["comm_norm"],
-                    "therm_norm": eval_out["therm_norm"],
-                    "total_scalar": eval_out["total_scalar"],
-                    "stage": stage_name,
-                    "iter": step + 1,
-                    "seed_id": seed_id,
-                    "assign_hash": hash(tuple(assign.tolist())),
-                })
-        else:
-            layout_state.assign = assign
-            added = False
-        T *= alpha
-        if trace_logger is not None:
-            trace_logger(
-                stage=stage_name,
-                op=op,
-                op_args=action,
-                accepted=int(accept),
-                total_scalar=eval_out["total_scalar"],
-                comm_norm=eval_out["comm_norm"],
-                therm_norm=eval_out["therm_norm"],
-                pareto_added=int(added),
-                penalty_dup=eval_out["penalty"]["duplicate"],
-                penalty_bound=eval_out["penalty"]["boundary"],
-                seed_id=seed_id,
-                iter_idx=step + 1,
+            layout_state.assign = new_assign
+            eval_new = evaluator.evaluate(layout_state)
+            delta = eval_new["total_scalar"] - eval_out["total_scalar"]
+            accept = delta < 0 or math.exp(-delta / max(T, 1e-6)) > rng.random()
+            if accept:
+                assign = new_assign
+                eval_out = eval_new
+                layout_state.assign = assign
+                added = pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy()})
+            else:
+                layout_state.assign = assign
+                added = False
+            T *= alpha
+            f_trace.write(
+                f"{step},detailed,{op},{json.dumps(action)}," f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n"
             )
     return DetailedPlaceResult(assign=assign, pareto=pareto, trace_path=trace_path)
