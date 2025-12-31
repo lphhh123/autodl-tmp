@@ -28,7 +28,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.2
     def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
-        centers = self.pos
+        centers = self.current_pos
         r_center = torch.sqrt((centers ** 2).sum(dim=1) + 1e-6)
         r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
         violation = torch.relu(r_center + r_chip + margin - self.wafer_radius_mm)
@@ -36,7 +36,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.3
     def overlap_penalty(self, eff_specs: Dict[str, torch.Tensor]):
-        centers = self.pos
+        centers = self.current_pos
         r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
         S = centers.shape[0]
         penalty = centers.new_tensor(0.0)
@@ -50,7 +50,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.4
     def comm_loss(self, mapping: List[int], segments: List[Segment], eff_specs: Dict[str, torch.Tensor], distance_scale: float):
-        centers = self.pos
+        centers = self.current_pos
         comm_cost = centers.new_tensor(0.0)
         for k in range(len(segments) - 1):
             d1, d2 = mapping[k], mapping[k + 1]
