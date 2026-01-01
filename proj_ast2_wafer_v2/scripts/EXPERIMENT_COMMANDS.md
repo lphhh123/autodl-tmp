@@ -4,8 +4,6 @@ This document lists the shell commands to run the Phase3 (A-series) and offline 
 
 ## Phase3 Layout Ablations (A0–A3)
 
-`run_version_c` now accepts `--cfg` as an alias of `--config`, and `--export_layout_input/--export_dir` can override YAML values so the commands below run without modification.
-
 Run these to export `layout_input.json` and training logs for each ablation:
 
 ```bash
