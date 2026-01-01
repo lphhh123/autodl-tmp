@@ -58,6 +58,7 @@ def _remap_top_segments(mapping: List[int], segments: List[Segment], assign: np.
 def run_alt_opt(
     rounds: int,
     segments: List[Segment],
+    eff_specs: Dict,
     traffic_sym: np.ndarray,
     sites_xy: np.ndarray,
     assign_init: np.ndarray,
@@ -65,16 +66,15 @@ def run_alt_opt(
     layout_state: LayoutState,
     pareto: ParetoSet,
     cfg: Dict,
-    trace_dir,
+    trace_path,
     chip_tdp: np.ndarray | None = None,
 ):
     assign = assign_init.copy()
-    mapping = list(range(assign.shape[0])) if not cfg.get("mapping", None) else cfg.get("mapping")
-    allow_ratio = float(cfg.get("remap", {}).get("allow_top_segment_ratio", 0.2))
-    refine_cfg = cfg.get("refine_each_round", {})
+    mapping = list(range(assign.shape[0]))
     for r in range(rounds):
-        # Step1: remap a limited portion of bottleneck segments based on current layout distances
-        mapping = _remap_top_segments(mapping, segments, assign, sites_xy, allow_ratio)
+        # Step1: optional remap (skip if segments missing)
+        if segments and eff_specs:
+            mapping = mapping_solver.solve_mapping(segments, eff_specs, cfg.get("hw_proxy"), layout_positions=None)["mapping"]
         layout_state.assign = assign
         # Step2: refine layout starting from Pareto seeds
         seeds = pareto.points[: max(1, min(5, len(pareto.points)))]
@@ -92,11 +92,10 @@ def run_alt_opt(
                 clusters=[],
                 cluster_to_region=[],
                 pareto=pareto,
-                cfg=refine_cfg,
-                trace_path=trace_dir / f"alt_opt_round_{r}_{idx}.csv",
+                cfg=cfg.get("refine_each_round", {}),
+                trace_path=trace_path.parent / f"alt_opt_round_{r}_{idx}.csv",
                 seed_id=r,
                 chip_tdp=chip_tdp,
-                stage_label=f"alt_opt_round_{r}",
             )
             assign = result.assign
     return assign, mapping
