@@ -156,7 +156,6 @@ def run_detailed_place(
     seed_id: int,
     chip_tdp: Optional[np.ndarray] = None,
     llm_usage_path: Optional[Path] = None,
-    stage_label: str = "detailed",
 ):
     rng = np.random.default_rng(cfg.get("seed", 0) + seed_id)
     assign = assign_seed.copy()
