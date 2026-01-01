@@ -142,8 +142,7 @@ def _micro_place_seed(
         T *= alpha
 
     layout_state.assign = best_assign
-    accept_rate = float(accepts) / max(1.0, float(steps))
-    return best_assign, {"steps": float(steps), "accept_rate": accept_rate, "best_scalar": float(best)}
+    return best_assign, {"steps": steps, "accepts": accepts, "best_total": float(best)}
 
 
 def _export_layout_input(
@@ -184,9 +183,8 @@ def _export_layout_input(
     eff_specs = chiplet_slots(hard=False)["eff_specs"]
     chip_tdp = eff_specs["tdp_w"].detach().cpu().numpy().astype(float)
 
-    traffic = mapping_solver.build_traffic_matrix(segments, mapping, num_slots=S).cpu().numpy().astype(float)
-    seed_cfg = getattr(cfg, "layout_seed", {})
-    sigma_mm = float(getattr(seed_cfg, "sigma_mm", 20.0))
+    traffic = mapping_solver.build_traffic_matrix(segments, mapping).cpu().numpy().astype(float)
+    sigma_mm = float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0
     rng = np.random.default_rng(seed)
     baseline_eval = LayoutEvaluator(
         sigma_mm=sigma_mm,
@@ -209,35 +207,9 @@ def _export_layout_input(
         baseline={"L_comm_baseline": base_res["L_comm"], "L_therm_baseline": base_res["L_therm"]},
         scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
     )
-    seed_method = getattr(seed_cfg, "method", "traffic_aware")
-    if seed_method == "grid":
-        assign_seed = assign_grid.copy()
-    else:
-        assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
+    assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
     layout_state.assign = assign_seed
-
-    micro_steps = int(getattr(seed_cfg, "micro_place_steps", 80))
-    micro_enabled = bool(getattr(seed_cfg, "enable_micro_place", True))
-    if micro_enabled and micro_steps > 0:
-        assign_seed, micro_stats = _micro_place_seed(
-            assign_seed,
-            sites_xy,
-            baseline_eval,
-            layout_state,
-            traffic,
-            steps=micro_steps,
-            T0=float(getattr(seed_cfg, "micro_place_T0", 1.0)),
-            alpha=float(getattr(seed_cfg, "micro_place_alpha", 0.995)),
-            rng=rng,
-        )
-    else:
-        layout_state.assign = assign_seed
-        micro_eval = baseline_eval.evaluate(layout_state)
-        micro_stats = {
-            "steps": float(micro_steps),
-            "accept_rate": 0.0,
-            "best_scalar": float(micro_eval["total_scalar"]),
-        }
+    assign_seed, micro_stats = _micro_place_seed(assign_seed, sites_xy, baseline_eval, layout_state, traffic, rng=rng)
 
     baseline = {
         "assign_grid": assign_grid.tolist(),
