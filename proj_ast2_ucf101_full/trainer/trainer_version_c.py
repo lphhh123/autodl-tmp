@@ -162,7 +162,14 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
     mapping = partition_result["mapping"]
 
     cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
-    mapping_result = mapping_solver.solve_mapping(segments, eff_specs, hw_proxy, layout_positions=wafer_layout.pos, strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"), distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0))
+    mapping_result = mapping_solver.solve_mapping(
+        segments,
+        eff_specs,
+        hw_proxy,
+        layout_positions=wafer_layout.current_pos,
+        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
+        distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
+    )
     mapping = mapping_result["mapping"]
     total_latency_ms = torch.tensor(mapping_result["total_latency_ms"], device=alpha.device, dtype=torch.float32)
     comm_ms = torch.tensor(mapping_result["comm_ms"], device=alpha.device, dtype=torch.float32)

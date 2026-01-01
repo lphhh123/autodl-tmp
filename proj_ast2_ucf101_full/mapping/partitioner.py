@@ -75,7 +75,12 @@ class PartitionPlanner:
 
     def _evaluate(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, torch.Tensor], Dict]:
         cost = self.mapping_solver.build_cost_matrix(segments, eff_specs, self.hw_proxy)
-        mapping_obj = self.mapping_solver.solve_mapping(segments, eff_specs, self.hw_proxy, layout_positions=self.wafer_layout.pos)
+        mapping_obj = self.mapping_solver.solve_mapping(
+            segments,
+            eff_specs,
+            self.hw_proxy,
+            layout_positions=self.wafer_layout.current_pos,
+        )
         objective, hw_stats = self._compute_objective(segments, mapping_obj, cost)
         return objective, cost, mapping_obj
 
