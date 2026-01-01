@@ -104,11 +104,18 @@ class MappingSolver:
         simple to keep the contract explicit for downstream layout stages.
         """
 
-        if not segments:
+        if not segments or not mapping:
             return torch.zeros((0, 0), dtype=torch.float32)
-        S = max(mapping) + 1 if mapping else 0
+        if len(mapping) < len(segments):
+            # Fallback to the common prefix to avoid crashes when mapping/segments
+            # lengths get out of sync. This keeps layout export best-effort while
+            # we align upstream producers.
+            limit = len(mapping)
+        else:
+            limit = len(segments)
+        S = max(mapping) + 1
         traffic = torch.zeros((S, S), dtype=torch.float32)
-        for k in range(len(segments) - 1):
+        for k in range(limit - 1):
             a = mapping[k]
             b = mapping[k + 1]
             if a == b:

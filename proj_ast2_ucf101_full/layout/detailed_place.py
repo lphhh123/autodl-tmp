@@ -6,7 +6,7 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -48,30 +48,59 @@ def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: List
         assign[slot] = site
 
 
-def _sample_action(cfg: Dict, traffic_sym: np.ndarray, site_to_region: np.ndarray, regions, clusters: List[Cluster], assign: np.ndarray):
+def _sample_action(
+    cfg: Dict,
+    traffic_sym: np.ndarray,
+    site_to_region: np.ndarray,
+    regions,
+    clusters: List[Cluster],
+    assign: np.ndarray,
+    sites_xy: np.ndarray,
+    chip_tdp: Optional[np.ndarray],
+    cluster_to_region: List[int],
+):
     probs = cfg.get("action_probs", {})
-    r = random.random()
-    if r < probs.get("swap", 0.5):
+    # swap: prioritize hot pairs
+    if random.random() < probs.get("swap", 0.5):
         top_pairs = _compute_top_pairs(traffic_sym, int(cfg.get("hot_sampling", {}).get("top_pairs_k", 10)))
         if top_pairs:
             i, j, _ = random.choice(top_pairs)
             return {"op": "swap", "i": int(i), "j": int(j)}
-    r = random.random()
-    if r < probs.get("relocate", 0.3):
-        i = random.randrange(traffic_sym.shape[0])
-        # prefer same region empty site
+    # relocate: prefer empty sites within the same region
+    if random.random() < probs.get("relocate", 0.3):
         same_region_prob = cfg.get("relocate", {}).get("same_region_prob", 0.8)
-        region_id = site_to_region[assign[i]]
-        candidate_sites = [idx for idx, rid in enumerate(site_to_region) if rid == region_id]
-        if not candidate_sites:
-            candidate_sites = list(range(site_to_region.shape[0]))
-        site_id = random.choice(candidate_sites)
-        return {"op": "relocate", "i": i, "site_id": int(site_id)}
-    # cluster_move fallback
+        neighbor_k = int(cfg.get("relocate", {}).get("neighbor_k", 30))
+        # pick a high-traffic or high-tdp slot to move
+        slot_scores = traffic_sym.sum(axis=1)
+        if chip_tdp is not None and len(chip_tdp) == slot_scores.shape[0]:
+            slot_scores = slot_scores + chip_tdp
+        slot = int(np.argmax(slot_scores)) if slot_scores.sum() > 0 else random.randrange(traffic_sym.shape[0])
+        current_region = site_to_region[assign[slot]]
+        empty_sites = [s for s in range(site_to_region.shape[0]) if s not in assign]
+        if not empty_sites:
+            return {"op": "none"}
+        candidates = [s for s in empty_sites if site_to_region[s] == current_region]
+        if not candidates or random.random() > same_region_prob:
+            candidates = empty_sites
+        # choose nearest candidate sites
+        dists = [(sid, np.linalg.norm(sites_xy[assign[slot]] - sites_xy[sid])) for sid in candidates]
+        dists.sort(key=lambda x: x[1])
+        chosen = dists[: max(1, min(neighbor_k, len(dists)))]
+        site_id = random.choice(chosen)[0]
+        return {"op": "relocate", "i": slot, "site_id": int(site_id)}
+    # cluster_move: move heavy cluster outward when capacity allows
     if clusters:
-        c = random.choice(clusters)
-        target_region = random.choice(regions)
-        return {"op": "cluster_move", "cluster_id": c.cluster_id, "region_id": target_region.region_id}
+        clusters_sorted = sorted(clusters, key=lambda c: c.tdp_sum, reverse=True)
+        c = clusters_sorted[0]
+        target_region = regions[-1] if regions else None
+        if target_region is not None and cluster_to_region:
+            # try a different region than current assignment
+            cur_region = cluster_to_region[c.cluster_id] if c.cluster_id < len(cluster_to_region) else -1
+            region_options = [r for r in regions if r.region_id != cur_region]
+            if region_options:
+                target_region = random.choice(region_options)
+        if target_region is not None:
+            return {"op": "cluster_move", "cluster_id": c.cluster_id, "region_id": target_region.region_id}
     return {"op": "none"}
 
 
@@ -88,13 +117,24 @@ def _init_provider(planner_cfg: Dict) -> LLMProvider:
     return HeuristicProvider()
 
 
-def _state_summary(comm_norm: float, therm_norm: float, traffic_sym: np.ndarray, assign: np.ndarray, site_to_region: np.ndarray) -> Dict:
+def _state_summary(
+    comm_norm: float,
+    therm_norm: float,
+    traffic_sym: np.ndarray,
+    assign: np.ndarray,
+    site_to_region: np.ndarray,
+    chip_tdp: Optional[np.ndarray],
+) -> Dict:
     pairs = _compute_top_pairs(traffic_sym, 5)
+    hot_slots = []
+    if chip_tdp is not None and len(chip_tdp) == traffic_sym.shape[0]:
+        order = np.argsort(chip_tdp)[::-1][:5]
+        hot_slots = [{"i": int(i), "tdp": float(chip_tdp[i]), "region": int(site_to_region[assign[i]])} for i in order]
     return {
         "comm_norm": comm_norm,
         "therm_norm": therm_norm,
         "top_hot_pairs": [{"i": i, "j": j, "traffic": t} for i, j, t in pairs],
-        "top_hot_slots": [],
+        "top_hot_slots": hot_slots,
         "violations": {"duplicate": 0, "boundary": 0},
         "hint": "prefer swap on hot pairs; push high-tdp outward; avoid duplicate sites",
     }
@@ -114,6 +154,9 @@ def run_detailed_place(
     cfg: Dict,
     trace_path: Path,
     seed_id: int,
+    chip_tdp: Optional[np.ndarray] = None,
+    llm_usage_path: Optional[Path] = None,
+    stage_label: str = "detailed",
 ):
     rng = np.random.default_rng(cfg.get("seed", 0) + seed_id)
     assign = assign_seed.copy()
@@ -126,23 +169,43 @@ def run_detailed_place(
     T = float(cfg.get("sa_T0", 1.0))
     alpha = float(cfg.get("sa_alpha", 0.999))
     trace_path.parent.mkdir(parents=True, exist_ok=True)
+    usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
     with trace_path.open("w", encoding="utf-8") as f_trace:
         f_trace.write(
             "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms\n"
         )
         eval_out = evaluator.evaluate(layout_state)
-        pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy()})
+        pareto.add(
+            eval_out["comm_norm"],
+            eval_out["therm_norm"],
+            {
+                "assign": assign.copy(),
+                "total_scalar": eval_out["total_scalar"],
+                "stage": stage_label,
+                "iter": 0,
+                "seed": seed_id,
+            },
+        )
         for step in range(steps):
             # choose action
             if planner_cfg.get("type") == "mixed" and mixed_every and step % mixed_every == 0:
-                ss = _state_summary(eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region)
+                ss = _state_summary(
+                    eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region, chip_tdp
+                )
                 try:
                     actions = planner.propose_actions(ss, k_actions)
+                    if usage_fp and hasattr(planner, "last_usage"):
+                        json.dump(planner.last_usage, usage_fp)
+                        usage_fp.write("\n")
                 except Exception:
                     actions = []
-                action = actions[0] if actions else _sample_action(cfg, traffic_sym, site_to_region, regions, clusters, assign)
+                action = actions[0] if actions else _sample_action(
+                    cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
+                )
             else:
-                action = _sample_action(cfg, traffic_sym, site_to_region, regions, clusters, assign)
+                action = _sample_action(
+                    cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
+                )
 
             new_assign = assign.copy()
             op = action.get("op", "none")
@@ -166,12 +229,26 @@ def run_detailed_place(
                 assign = new_assign
                 eval_out = eval_new
                 layout_state.assign = assign
-                added = pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy()})
+                added = pareto.add(
+                    eval_out["comm_norm"],
+                    eval_out["therm_norm"],
+                    {
+                        "assign": assign.copy(),
+                        "total_scalar": eval_out["total_scalar"],
+                        "stage": stage_label,
+                        "iter": step + 1,
+                        "seed": seed_id,
+                    },
+                )
             else:
                 layout_state.assign = assign
                 added = False
             T *= alpha
             f_trace.write(
-                f"{step},detailed,{op},{json.dumps(action)}," f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n"
+                f"{step},{stage_label},{op},{json.dumps(action)},"
+                f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},"
+                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n"
             )
+    if usage_fp:
+        usage_fp.close()
     return DetailedPlaceResult(assign=assign, pareto=pareto, trace_path=trace_path)

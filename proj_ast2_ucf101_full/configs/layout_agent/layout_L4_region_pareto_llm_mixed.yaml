@@ -1,0 +1,12 @@
+_base_: ./base_layout.yaml
+
+detailed_place:
+  planner:
+    type: mixed
+    mixed:
+      every_n_steps: 50
+      k_actions: 6
+    timeout_sec: 30
+    max_retry: 2
+alt_opt:
+  enabled: false
