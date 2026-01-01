@@ -56,7 +56,11 @@ def load_config(path: str) -> AttrDict:
     cfg = _load_yaml(path)
     if "_base_" in cfg and cfg["_base_"] is not None:
         base_path = os.path.join(os.path.dirname(path), cfg["_base_"])
-        base_cfg = _load_yaml(base_path)
+        # Recursively load base configs so nested `_base_` references (multi-level
+        # includes) are honored. This prevents missing keys like `train` when
+        # a child config points to an intermediate base that itself extends the
+        # root experiment defaults.
+        base_cfg = load_config(base_path)
         cfg.pop("_base_")
         cfg = _merge_dict(base_cfg, cfg)
     return _to_attr(cfg)
