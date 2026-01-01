@@ -425,8 +425,13 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             scaler.step(optimizer_alpha)
             scaler.step(optimizer_layout)
             scaler.update()
-            last_segments = partitioner.plan(model, chiplet_slots(hard=False)["eff_specs"], use_fine_split=getattr(cfg.hw, "use_fine_split", True))["segments"]
-            last_mapping = mapping
+            part_res = partitioner.plan(
+                model,
+                chiplet_slots(hard=False)["eff_specs"],
+                use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+            )
+            last_segments = part_res["segments"]
+            last_mapping = part_res.get("mapping", [])
             if step % 10 == 0:
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 log_stats(logger, {"outer": outer, "step": step, "loss": loss.item(), "acc1": acc1.item(), "lat_ms": hw_stats["total_latency_ms"].item()})
