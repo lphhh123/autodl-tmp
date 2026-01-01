@@ -96,7 +96,9 @@ class MappingSolver:
                 comm_ms += base_time + dist * distance_scale_ms
         return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
 
-    def build_traffic_matrix(self, segments: List[Segment], mapping: List[int]) -> torch.Tensor:
+    def build_traffic_matrix(
+        self, segments: List[Segment], mapping: List[int], num_slots: Optional[int] = None
+    ) -> torch.Tensor:
         """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
 
         For the common pipeline case, the traffic between segment k and k+1 is
