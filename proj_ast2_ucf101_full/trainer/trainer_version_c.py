@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+import math
 
 import torch
 import torch.nn.functional as F
@@ -38,6 +39,110 @@ def _as_float(val, name: str) -> float:
 def build_dataloader(cfg):
     ds = UCF101Dataset(cfg, split="train")
     return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
+
+
+def _traffic_aware_seed(sites_xy: np.ndarray, traffic: np.ndarray, S: int, rng: np.random.Generator) -> np.ndarray:
+    """Greedy placement of hot traffic pairs onto nearest site pairs (SPEC §7.1)."""
+
+    Ns = sites_xy.shape[0]
+    assign = np.full(S, -1, dtype=int)
+    used_sites: set[int] = set()
+
+    t_sym = traffic + traffic.T
+    hot_pairs: list[tuple[int, int, float]] = []
+    for i in range(S):
+        for j in range(i + 1, S):
+            hot_pairs.append((i, j, float(t_sym[i, j])))
+    hot_pairs.sort(key=lambda x: x[2], reverse=True)
+    hot_pairs = [p for p in hot_pairs if p[2] > 0][: max(4, S)]
+
+    # precompute site distances
+    site_pairs: list[tuple[int, int, float]] = []
+    for a in range(Ns):
+        for b in range(a + 1, Ns):
+            d = float(np.linalg.norm(sites_xy[a] - sites_xy[b]))
+            site_pairs.append((a, b, d))
+    site_pairs.sort(key=lambda x: x[2])
+
+    for i, j, _ in hot_pairs:
+        for a, b, _ in site_pairs:
+            if a in used_sites or b in used_sites:
+                continue
+            assign[i] = a
+            assign[j] = b
+            used_sites.update([a, b])
+            break
+
+    # fill remaining slots deterministically
+    remaining_sites = [s for s in range(Ns) if s not in used_sites]
+    for s_idx in range(S):
+        if assign[s_idx] == -1 and remaining_sites:
+            assign[s_idx] = remaining_sites.pop(0)
+    return assign
+
+
+def _micro_place_seed(
+    assign_seed: np.ndarray,
+    sites_xy: np.ndarray,
+    evaluator: LayoutEvaluator,
+    layout_state: LayoutState,
+    traffic: np.ndarray,
+    steps: int = 80,
+    T0: float = 1.0,
+    alpha: float = 0.995,
+    rng: Optional[np.random.Generator] = None,
+) -> tuple[np.ndarray, Dict[str, float]]:
+    """Lightweight SA-based micro placement for training seed export (SPEC §7.2)."""
+
+    rng = rng or np.random.default_rng()
+    assign = assign_seed.copy()
+    layout_state.assign = assign
+    eval_cur = evaluator.evaluate(layout_state)
+    best = eval_cur["total_scalar"]
+    best_assign = assign.copy()
+    traffic_sym = traffic + traffic.T
+    accepts = 0
+    T = T0
+
+    site_dists = np.linalg.norm(sites_xy[:, None, :] - sites_xy[None, :, :], axis=-1)
+    neighbor_k = min(30, sites_xy.shape[0])
+
+    for _ in range(steps):
+        action = rng.random()
+        new_assign = assign.copy()
+        if action < 0.6:
+            # swap hot pair
+            pairs = [(i, j, traffic_sym[i, j]) for i in range(layout_state.S) for j in range(i + 1, layout_state.S)]
+            pairs.sort(key=lambda x: x[2], reverse=True)
+            i, j, _ = pairs[rng.integers(0, max(1, len(pairs)) - 1)] if pairs else (0, 1, 0)
+            new_assign[i], new_assign[j] = new_assign[j], new_assign[i]
+        else:
+            # relocate to nearby empty site
+            empty_sites = [s for s in range(sites_xy.shape[0]) if s not in new_assign]
+            if empty_sites:
+                slot = int(rng.integers(0, layout_state.S))
+                dists = [(sid, site_dists[new_assign[slot], sid]) for sid in empty_sites]
+                dists.sort(key=lambda x: x[1])
+                candidate = dists[:neighbor_k]
+                if candidate:
+                    site_id = candidate[rng.integers(0, len(candidate))][0]
+                    new_assign[slot] = site_id
+
+        layout_state.assign = new_assign
+        eval_new = evaluator.evaluate(layout_state)
+        delta = eval_new["total_scalar"] - eval_cur["total_scalar"]
+        if delta < 0 or math.exp(-delta / max(T, 1e-6)) > rng.random():
+            assign = new_assign
+            eval_cur = eval_new
+            accepts += 1
+            if eval_cur["total_scalar"] < best:
+                best = eval_cur["total_scalar"]
+                best_assign = assign.copy()
+        layout_state.assign = assign
+        T *= alpha
+
+    layout_state.assign = best_assign
+    return best_assign, {"steps": steps, "accepts": accepts, "best_total": float(best)}
 
 
 def _export_layout_input(
@@ -74,14 +179,15 @@ def _export_layout_input(
     S = cfg.hw.num_slots
     Ns = sites_xy.shape[0]
     assign_grid = np.arange(S, dtype=int) % Ns
-    assign_seed = assign_grid.copy()
 
     eff_specs = chiplet_slots(hard=False)["eff_specs"]
     chip_tdp = eff_specs["tdp_w"].detach().cpu().numpy().astype(float)
 
     traffic = mapping_solver.build_traffic_matrix(segments, mapping).cpu().numpy().astype(float)
+    sigma_mm = float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0
+    rng = np.random.default_rng(seed)
     baseline_eval = LayoutEvaluator(
-        sigma_mm=float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0,
+        sigma_mm=sigma_mm,
         baseline={"L_comm_baseline": 1.0, "L_therm_baseline": 1.0},
         scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
     )
@@ -96,6 +202,15 @@ def _export_layout_input(
         meta={},
     )
     base_res = baseline_eval.evaluate(layout_state)
+    baseline_eval = LayoutEvaluator(
+        sigma_mm=sigma_mm,
+        baseline={"L_comm_baseline": base_res["L_comm"], "L_therm_baseline": base_res["L_therm"]},
+        scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+    )
+    assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
+    layout_state.assign = assign_seed
+    assign_seed, micro_stats = _micro_place_seed(assign_seed, sites_xy, baseline_eval, layout_state, traffic, rng=rng)
+
     baseline = {
         "assign_grid": assign_grid.tolist(),
         "L_comm": base_res["L_comm"],
@@ -136,9 +251,9 @@ def _export_layout_input(
             "mapping": mapping,
         },
         "baseline": baseline,
-        "seed": {"assign_seed": assign_seed.tolist(), "micro_place_stats": {}},
+        "seed": {"assign_seed": assign_seed.tolist(), "micro_place_stats": micro_stats},
         "objective_cfg": {
-            "sigma_mm": float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0,
+            "sigma_mm": sigma_mm,
             "scalar_weights": {"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
         },
     }

@@ -31,6 +31,7 @@ class VolcArkProvider(LLMProvider):
         self.model = os.getenv("VOLC_ARK_MODEL")
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
+        self.last_usage = None
         if not self.endpoint or not self.api_key or not self.model:
             raise RuntimeError("VOLC Ark credentials missing in environment variables")
 
@@ -59,6 +60,15 @@ class VolcArkProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                usage = data.get("usage", {})
+                self.last_usage = {
+                    "model": self.model,
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "total_tokens": usage.get("total_tokens"),
+                    "request_bytes": len(json.dumps(payload)),
+                    "response_bytes": len(resp.content),
+                }
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
                 parsed = json.loads(content)
                 actions = parsed.get("actions", [])
