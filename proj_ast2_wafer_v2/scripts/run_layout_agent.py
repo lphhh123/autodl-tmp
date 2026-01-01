@@ -17,6 +17,7 @@ from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.expand import expand_clusters_to_sites
 from layout.global_place_region import assign_clusters_to_regions
 from layout.legalize import legalize_assign
+from layout.llm_provider import VolcArkProvider
 from layout.pareto import ParetoSet
 from layout.regions import Region, build_regions
 from utils.config import Config, load_config
@@ -110,10 +111,15 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
 
     coarsen_cfg = cfg.get("coarsen", {})
     region_cfg = cfg.get("regions", {})
+    global_place_cfg = cfg.get("global_place_region", {})
     expand_cfg = cfg.get("expand", {})
     pareto_cfg = cfg.get("pareto", {})
     detailed_cfg = cfg.get("detailed_place", {})
+    planner_cfg = cfg.get("planner", {})
+    alt_opt_cfg = cfg.get("alt_opt", {})
+    layout_agent_cfg = cfg.get("layout_agent", {})
 
+    pareto_enabled = bool(pareto_cfg.get("enabled", True))
     pareto = ParetoSet(
         eps_comm=float(pareto_cfg.get("eps_comm", 0.01)),
         eps_therm=float(pareto_cfg.get("eps_therm", 0.01)),
@@ -121,7 +127,16 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
     )
     pareto_points: List[Dict] = []
     trace: List[Dict] = []
+    llm_usage: List[Dict] = []
+    assign_bank: Dict[str, np.ndarray] = {}
+    eval_bank: Dict[str, Dict] = {}
     iter_idx = 0
+    best_scalar: Dict[str, np.ndarray | Dict | None] = {"assign": None, "eval": None}
+
+    def update_best(assign: np.ndarray, res: Dict):
+        if best_scalar["eval"] is None or res["total_scalar"] < float(best_scalar["eval"]["total_scalar"]):
+            best_scalar["assign"] = assign.copy()
+            best_scalar["eval"] = res
 
     def eval_and_record(assign: np.ndarray, stage: str, op: str = "none", op_args: Dict | None = None, seed_id: int = 0):
         nonlocal iter_idx
@@ -137,25 +152,30 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
                 meta={"stage": stage},
             )
         )
-        added = pareto.try_add(
-            comm_norm=res["comm_norm"],
-            therm_norm=res["therm_norm"],
-            total_scalar=res["total_scalar"],
-            meta={"stage": stage, "iter": iter_idx, "seed_id": seed_id, "assign_hash": _assign_hash(assign)},
-        )
-        if added:
-            pareto_points.append(
-                {
-                    "solution_id": len(pareto_points),
-                    "comm_norm": res["comm_norm"],
-                    "therm_norm": res["therm_norm"],
-                    "total_scalar": res["total_scalar"],
-                    "stage": stage,
-                    "iter": iter_idx,
-                    "seed_id": seed_id,
-                    "assign_hash": _assign_hash(assign),
-                }
+        a_hash = _assign_hash(assign)
+        assign_bank[a_hash] = assign.copy()
+        eval_bank[a_hash] = res
+        added = False
+        if pareto_enabled:
+            added = pareto.try_add(
+                comm_norm=res["comm_norm"],
+                therm_norm=res["therm_norm"],
+                total_scalar=res["total_scalar"],
+                meta={"stage": stage, "iter": iter_idx, "seed_id": seed_id, "assign_hash": a_hash},
             )
+            if added:
+                pareto_points.append(
+                    {
+                        "solution_id": len(pareto_points),
+                        "comm_norm": res["comm_norm"],
+                        "therm_norm": res["therm_norm"],
+                        "total_scalar": res["total_scalar"],
+                        "stage": stage,
+                        "iter": iter_idx,
+                        "seed_id": seed_id,
+                        "assign_hash": a_hash,
+                    }
+                )
         _record_trace(
             trace,
             iter_idx=iter_idx,
@@ -167,6 +187,7 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
             pareto_added=int(added),
             seed_id=seed_id,
         )
+        update_best(assign, res)
         iter_idx += 1
         return res
 
@@ -216,60 +237,141 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
         clusters=clusters,
         regions=regions,
         W_cluster=W_cluster,
-        lambda_graph=float(region_cfg.get("lambda_graph", 1.0)),
-        lambda_ring=float(region_cfg.get("lambda_ring", 1.0)),
-        lambda_cap=float(region_cfg.get("lambda_cap", 10000.0)),
+        lambda_graph=float(global_place_cfg.get("lambda_graph", 1.0)),
+        lambda_ring=float(global_place_cfg.get("lambda_ring", 1.0)),
+        lambda_cap=float(global_place_cfg.get("lambda_cap", 10000.0)),
         ring_score=region_cfg.get("ring_score", [1.0, 0.5]),
-        refine_steps=int(region_cfg.get("refine_steps", 0)),
-        sa_T0=float(region_cfg.get("sa_T0", 1.0)),
-        sa_alpha=float(region_cfg.get("sa_alpha", 0.995)),
+        refine_steps=int(global_place_cfg.get("refine", {}).get("steps", 0)),
+        sa_T0=float(global_place_cfg.get("refine", {}).get("sa_T0", 1.0)),
+        sa_alpha=float(global_place_cfg.get("refine", {}).get("sa_alpha", 0.995)),
     )
 
-    # Stage: expand
-    assign = expand_clusters_to_sites(
-        clusters=clusters,
-        cluster_to_region=cluster_to_region,
-        regions=regions,
-        sites_xy_mm=sites_xy,
-        traffic_sym=T_sym,
-        intra_refine_steps=int(expand_cfg.get("intra_refine_steps", 0)),
-    )
-    expand_eval = eval_and_record(assign.copy(), stage="expand", op="cluster_to_site")
-
-    # Stage: legalize
-    if cfg.get("legalize", {}).get("enabled", True):
-        assign = legalize_assign(assign, sites_xy, wafer_radius)
-    legal_eval = eval_and_record(assign.copy(), stage="legalize", op="legalize")
-
-    # Stage: detailed place + Pareto
-    hot_pairs = []
+    seed_list = layout_agent_cfg.get("seed_list", [0])
+    hot_sampling_cfg = detailed_cfg.get("hot_sampling", {})
+    hot_pairs_all = []
     for i in range(S):
         for j in range(i + 1, S):
-            hot_pairs.append((i, j, T_sym[i, j]))
-    hot_pairs = [p for p in sorted(hot_pairs, key=lambda x: x[2], reverse=True) if p[2] > 0]
-    hot_pairs = [(i, j) for i, j, _ in hot_pairs[: int(detailed_cfg.get("top_pairs_k", 10))]]
+            hot_pairs_all.append((i, j, T_sym[i, j]))
+    hot_pairs_all = [p for p in sorted(hot_pairs_all, key=lambda x: x[2], reverse=True) if p[2] > 0]
+    hot_pairs_all = [
+        (i, j) for i, j, _ in hot_pairs_all[: int(hot_sampling_cfg.get("top_pairs_k", detailed_cfg.get("top_pairs_k", 10)))]
+    ]
+    for seed_idx, seed in enumerate(seed_list):
+        rng = np.random.default_rng(seed)
+        # Stage: expand
+        assign = expand_clusters_to_sites(
+            clusters=clusters,
+            cluster_to_region=cluster_to_region,
+            regions=regions,
+            sites_xy_mm=sites_xy,
+            traffic_sym=T_sym,
+            intra_refine_steps=int(expand_cfg.get("intra_refine_steps", 0)),
+            rng=rng,
+        )
+        eval_and_record(assign.copy(), stage="expand", op="cluster_to_site", seed_id=seed_idx)
 
-    best_assign, best_eval = run_detailed_place(
-        assign=assign,
-        evaluator=evaluator,
-        sites_xy_mm=sites_xy,
-        chip_tdp_w=chip_tdp_w,
-        traffic_bytes=traffic,
-        pareto=pareto,
-        steps=int(detailed_cfg.get("steps", 1000)),
-        sa_T0=float(detailed_cfg.get("sa_T0", 1.0)),
-        sa_alpha=float(detailed_cfg.get("sa_alpha", 0.999)),
-        action_probs=detailed_cfg.get("action_probs", {"swap": 0.6, "relocate": 0.3, "cluster_move": 0.1}),
-        hot_pairs=hot_pairs,
-        trace=trace,
-        pareto_points=pareto_points,
-        seed_id=0,
-    )
+        # Stage: legalize
+        if cfg.get("legalize", {}).get("enabled", True):
+            assign = legalize_assign(assign, sites_xy, wafer_radius)
+        eval_and_record(assign.copy(), stage="legalize", op="legalize", seed_id=seed_idx)
 
-    knee = pareto.knee_point()
+        # Stage: detailed place + Pareto
+        hot_pairs = hot_pairs_all
+
+        planner_cfg_with_stage = dict(planner_cfg)
+        planner_cfg_with_stage["stage_label"] = f"detailed_seed{seed_idx}"
+        llm_provider_instance = None
+        if planner_cfg.get("type"):
+            llm_provider_instance = VolcArkProvider(
+                timeout_sec=int(cfg.get("llm", {}).get("timeout_sec", 30)),
+                max_retry=int(cfg.get("llm", {}).get("max_retry", 2)),
+            )
+        best_assign, best_eval = run_detailed_place(
+            assign=assign,
+            evaluator=evaluator,
+            sites_xy_mm=sites_xy,
+            chip_tdp_w=chip_tdp_w,
+            traffic_bytes=traffic,
+            pareto=pareto,
+            steps=int(detailed_cfg.get("steps", 1000)),
+            sa_T0=float(detailed_cfg.get("sa_T0", 1.0)),
+            sa_alpha=float(detailed_cfg.get("sa_alpha", 0.999)),
+            action_probs=detailed_cfg.get("action_probs", {"swap": 0.6, "relocate": 0.3, "cluster_move": 0.1}),
+            hot_pairs=hot_pairs,
+            enable_pareto=pareto_enabled,
+            planner_cfg=planner_cfg_with_stage,
+            llm_provider=llm_provider_instance,
+            llm_usage=llm_usage,
+            rng=rng,
+            trace=trace,
+            pareto_points=pareto_points,
+            seed_id=seed_idx,
+        )
+        eval_and_record(best_assign.copy(), stage=f"detailed_result_seed{seed_idx}", op="best", seed_id=seed_idx)
+
+    # Stage: alt-opt refinement (layout-only placeholder when mapping remap is unavailable)
+    if alt_opt_cfg.get("enabled", False) and pareto_enabled and pareto.points:
+        rounds = int(alt_opt_cfg.get("rounds", 3))
+        refine_steps = int(alt_opt_cfg.get("refine_each_round", {}).get("steps", detailed_cfg.get("steps", 1000)))
+        top_k = int(alt_opt_cfg.get("refine_start_top_k", 3))
+        for rnd in range(rounds):
+            seeds_meta = sorted(pareto.points, key=lambda p: p.total_scalar)[:top_k]
+            for meta in seeds_meta:
+                a_hash = meta.meta.get("assign_hash")
+                if a_hash not in assign_bank:
+                    continue
+                start_assign = assign_bank[a_hash]
+                rng = np.random.default_rng(seed_list[0] + rnd + 100)
+                planner_cfg_with_stage = dict(planner_cfg)
+                planner_cfg_with_stage["stage_label"] = f"alt_opt_round_{rnd}"
+                refined_assign, refined_eval = run_detailed_place(
+                    assign=start_assign,
+                    evaluator=evaluator,
+                    sites_xy_mm=sites_xy,
+                    chip_tdp_w=chip_tdp_w,
+                    traffic_bytes=traffic,
+                    pareto=pareto,
+                    steps=refine_steps,
+                    sa_T0=float(detailed_cfg.get("sa_T0", 1.0)),
+                    sa_alpha=float(detailed_cfg.get("sa_alpha", 0.999)),
+                    action_probs=detailed_cfg.get("action_probs", {"swap": 0.6, "relocate": 0.3, "cluster_move": 0.1}),
+                    hot_pairs=hot_pairs_all,
+                    enable_pareto=pareto_enabled,
+                    planner_cfg=planner_cfg_with_stage,
+                    llm_provider=None,
+                    llm_usage=llm_usage,
+                    rng=rng,
+                    trace=trace,
+                    pareto_points=pareto_points,
+                    seed_id=rnd,
+                )
+                eval_and_record(refined_assign.copy(), stage=f"alt_opt_result_round_{rnd}", op="alt_opt", seed_id=rnd)
+
+    knee = pareto.knee_point() if pareto_enabled else None
+    if knee is not None and knee.meta.get("assign_hash") in assign_bank:
+        best_assign = assign_bank[knee.meta["assign_hash"]]
+        best_eval = eval_bank[knee.meta["assign_hash"]]
+        selection_meta = {"method": "knee_point_v1", "pareto_size": len(pareto.points)}
+    else:
+        best_assign = best_scalar["assign"] if best_scalar["assign"] is not None else np.asarray(baseline_assign)
+        best_eval = best_scalar["eval"] if best_scalar["eval"] is not None else evaluator.evaluate(
+            LayoutState(
+                S=S,
+                Ns=sites_xy.shape[0],
+                wafer_radius_mm=wafer_radius,
+                sites_xy_mm=sites_xy,
+                assign=best_assign,
+                chip_tdp_w=chip_tdp_w,
+                traffic_bytes=traffic,
+                meta={},
+            )
+        )
+        selection_meta = {"method": "best_scalar", "pareto_size": len(pareto.points)}
+
     layout_best = {
         "best": {
             "assign": best_assign.tolist(),
+            "pos_xy_mm": sites_xy[best_assign].tolist(),
             "objectives": {
                 "comm_norm": best_eval["comm_norm"],
                 "therm_norm": best_eval["therm_norm"],
@@ -277,8 +379,8 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
                 "total_scalar": best_eval["total_scalar"],
             },
         },
-        "pareto_front": [p.__dict__ for p in pareto.points],
-        "selection": {"knee": knee.__dict__ if knee else None, "pareto_size": len(pareto.points)},
+        "pareto_front": [p.__dict__ for p in pareto.points] if pareto_enabled else [],
+        "selection": {"knee": knee.__dict__ if knee else None, **selection_meta},
         "region_plan": {
             "clusters": [c.__dict__ for c in clusters],
             "cluster_to_region": cluster_to_region.tolist(),
@@ -286,6 +388,7 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
         "artifacts": {
             "trace_csv": str(Path(out_dir) / "trace.csv"),
             "pareto_csv": str(Path(out_dir) / "pareto_points.csv"),
+            "llm_usage_jsonl": str(Path(out_dir) / "llm_usage.jsonl"),
         },
     }
 
@@ -304,6 +407,10 @@ def stage_pipeline(cfg: dict | Config, layout_input: dict, out_dir: str):
         pareto_points,
         fieldnames=list(pareto_points[0].keys()) if pareto_points else [],
     )
+    if llm_usage:
+        with open(Path(out_dir) / "llm_usage.jsonl", "w", encoding="utf-8") as f:
+            for rec in llm_usage:
+                f.write(json.dumps(rec) + "\n")
     print(f"Saved layout_best.json, trace.csv and pareto_points.csv to {out_dir}")
 
 

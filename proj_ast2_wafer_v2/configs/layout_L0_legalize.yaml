@@ -1,0 +1,34 @@
+layout_agent:
+  version: v4.3.2
+  seed_list: [0]
+  export_trace: true
+
+regions:
+  enabled: false
+
+global_place_region:
+  lambda_graph: 1.0
+  lambda_ring: 1.0
+  lambda_cap: 10000.0
+
+coarsen:
+  target_num_clusters: 8
+  min_merge_traffic: 1.0e6
+
+expand:
+  intra_refine_steps: 0
+
+legalize:
+  enabled: true
+
+pareto:
+  enabled: false
+
+detailed_place:
+  enabled: false
+
+planner:
+  type: heuristic
+
+alt_opt:
+  enabled: false

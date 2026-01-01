@@ -1,0 +1,83 @@
+layout_agent:
+  version: v4.3.2
+  seed_list: [0, 1, 2, 3, 4]
+  max_runtime_sec: 1800
+  export_trace: true
+
+sites:
+  allow_override: false
+
+objective:
+  enable_therm: true
+  sigma_mm: 20.0
+  scalar_weights:
+    w_comm: 0.7
+    w_therm: 0.3
+    w_penalty: 1000.0
+
+regions:
+  enabled: true
+  ring_edges_ratio: [0.0, 0.45, 0.75, 1.0]
+  sectors_per_ring: [4, 8, 12]
+  ring_score: [1.0, 0.7, 0.4]
+  capacity_ratio: 1.0
+
+global_place_region:
+  lambda_graph: 1.0
+  lambda_ring: 1.0
+  lambda_cap: 10000.0
+  refine:
+    steps: 400
+    sa_T0: 1.0
+    sa_alpha: 0.995
+
+coarsen:
+  target_num_clusters: 8
+  min_merge_traffic: 1.0e6
+
+expand:
+  intra_refine_steps: 200
+
+legalize:
+  enabled: true
+
+pareto:
+  enabled: true
+  eps_comm: 0.01
+  eps_therm: 0.01
+  max_points: 2000
+  selection: knee_point_v1
+
+detailed_place:
+  enabled: true
+  steps: 8000
+  sa_T0: 1.0
+  sa_alpha: 0.9995
+  action_probs:
+    swap: 0.55
+    relocate: 0.35
+    cluster_move: 0.10
+  relocate:
+    same_region_prob: 0.8
+    neighbor_k: 30
+  hot_sampling:
+    top_pairs_k: 20
+    top_slots_k: 20
+
+planner:
+  type: heuristic
+
+llm:
+  provider: volc_ark
+  max_calls_per_run: 200
+  timeout_sec: 30
+  max_retry: 2
+
+alt_opt:
+  enabled: true
+  rounds: 3
+  remap:
+    enabled: true
+    allow_top_segment_ratio: 0.2
+  refine_each_round:
+    steps: 2000

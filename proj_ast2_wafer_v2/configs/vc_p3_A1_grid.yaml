@@ -1,0 +1,82 @@
+model:
+  type: "VideoViT"
+  img_size: 224
+  num_frames: 8
+  num_classes: 101
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4.0
+  patch_size: 16
+  in_chans: 3
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: "UCF101"
+  root: "/data/UCF101"
+  clip_len: 8
+  frame_sample_strategy: "uniform"
+  num_workers: 8
+  val_ratio: 0.2
+
+train:
+  epochs: 50
+  batch_size: 8
+  lr: 3e-4
+  weight_decay: 0.05
+  warmup_epochs: 5
+  device: "cuda:0"
+  seed: 42
+
+loss:
+  lambda_sparse: 1e-3
+  lambda_hw: 1e-3
+  alpha_t: 1.0
+  alpha_m: 0.1
+  alpha_e: 0.01
+  latency_norm: 10.0
+  mem_norm: 1000.0
+  energy_norm: 10.0
+  use_entropy_loss: true
+  target_keep_start: 1.0
+  target_keep_end: 0.4
+
+proxy:
+  gpu_yaml: "configs/gpu_data.yaml"
+  device_name: "3090"
+  weight_dir: "./proxy_weights"
+  use_hw_loss: true
+  device: "cuda:0"
+
+log:
+  out_dir: "logs/vc_p3_A1_grid"
+  print_freq: 10
+  save_ckpt: true
+
+mapping:
+  chiplet_combo:
+    - {name: "3090",   count: 2, mem_capacity: 24000.0, compute_capacity: 1.0,  link_bw: 100.0}
+    - {name: "2080ti", count: 2, mem_capacity: 11000.0, compute_capacity: 0.7,  link_bw: 80.0}
+    - {name: "4090",   count: 2, mem_capacity: 24000.0, compute_capacity: 1.3,  link_bw: 120.0}
+  outer_iters: 1
+  inner_epochs: 1
+  layers_per_segment: 2
+  lambda_comm: 1.0
+
+layout:
+  export_layout_input: true
+  export_dir: "outputs/P3/A1"
+  wafer_radius_mm: 150.0
+  margin_mm: 1.0
+  chip_max_width_mm: 20.0
+  chip_max_height_mm: 20.0
+  sigma_mm: 20.0
+  scalar_weights:
+    w_comm: 0.7
+    w_therm: 0.3
+    w_penalty: 1000.0
+  power_per_chip: 1.0
+  seed: 1
+  seed_mode: "grid"
+  micro_place_enabled: false
