@@ -17,6 +17,7 @@ def run_alt_opt(
     mapping_solver: MappingSolver,
     segments: List[Segment],
     eff_specs: Dict,
+    traffic_sym: np.ndarray,
     sites_xy: np.ndarray,
     assign_init: np.ndarray,
     evaluator: LayoutEvaluator,
@@ -24,28 +25,35 @@ def run_alt_opt(
     pareto: ParetoSet,
     cfg: Dict,
     trace_path,
+    chip_tdp: np.ndarray | None = None,
 ):
     assign = assign_init.copy()
-    mapping = list(range(len(segments)))
+    mapping = list(range(assign.shape[0]))
     for r in range(rounds):
-        # Step1: remap limited segments (placeholder greedy)
-        mapping = mapping_solver.solve_mapping(segments, eff_specs, cfg.get("hw_proxy"), layout_positions=None)["mapping"]
+        # Step1: optional remap (skip if segments missing)
+        if segments and eff_specs:
+            mapping = mapping_solver.solve_mapping(segments, eff_specs, cfg.get("hw_proxy"), layout_positions=None)["mapping"]
         layout_state.assign = assign
-        # Step2: refine layout starting from top pareto points
-        result = run_detailed_place(
-            sites_xy=sites_xy,
-            assign_seed=assign,
-            evaluator=evaluator,
-            layout_state=layout_state,
-            traffic_sym=np.zeros((layout_state.S, layout_state.S)),
-            site_to_region=np.zeros((sites_xy.shape[0],), dtype=int),
-            regions=[],
-            clusters=[],
-            cluster_to_region=[],
-            pareto=pareto,
-            cfg=cfg.get("refine_each_round", {}),
-            trace_path=trace_path.parent / f"alt_opt_round_{r}.csv",
-            seed_id=r,
-        )
-        assign = result.assign
+        # Step2: refine layout starting from Pareto seeds
+        seeds = pareto.points[: max(1, min(5, len(pareto.points)))]
+        seeds_assign = [assign] if not seeds else [p.payload.get("assign", assign) for p in seeds]
+        for idx, seed_assign in enumerate(seeds_assign):
+            layout_state.assign = seed_assign
+            result = run_detailed_place(
+                sites_xy=sites_xy,
+                assign_seed=seed_assign,
+                evaluator=evaluator,
+                layout_state=layout_state,
+                traffic_sym=traffic_sym,
+                site_to_region=np.zeros((sites_xy.shape[0],), dtype=int),
+                regions=[],
+                clusters=[],
+                cluster_to_region=[],
+                pareto=pareto,
+                cfg=cfg.get("refine_each_round", {}),
+                trace_path=trace_path.parent / f"alt_opt_round_{r}_{idx}.csv",
+                seed_id=r,
+                chip_tdp=chip_tdp,
+            )
+            assign = result.assign
     return assign, mapping

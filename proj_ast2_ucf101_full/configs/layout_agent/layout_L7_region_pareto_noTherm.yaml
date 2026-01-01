@@ -1,0 +1,13 @@
+_base_: ./base_layout.yaml
+
+objective:
+  enable_therm: false
+  scalar_weights:
+    w_comm: 1.0
+    w_therm: 0.0
+    w_penalty: 1000.0
+detailed_place:
+  planner:
+    type: heuristic
+alt_opt:
+  enabled: false
