@@ -604,7 +604,7 @@ class LLMProvider(ABC):
 **A2**：traffic_aware seed（无 micro_place）
 **A3**：traffic_aware + micro_place（v4.3.2 默认）
 
-命令（示例；cfg 名按你仓库实际落地）：
+命令（示例；cfg 名按你仓库实际落地；`--export_layout_input` 可单独写或显式传 `true/false`）：
 
 ```bash
 python -m scripts.run_version_c --cfg configs/vc_p3_A0_nolayout.yaml  --export_layout_input --export_dir outputs/P3/A0
