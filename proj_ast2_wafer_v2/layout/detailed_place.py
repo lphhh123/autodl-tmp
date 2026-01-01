@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from typing import Dict, List, Tuple
@@ -19,6 +20,10 @@ def _sample_action(S: int, action_probs: Dict[str, float], rng: np.random.Genera
     return str(rng.choice(ops, p=probs))
 
 
+def _assign_hash(assign: np.ndarray) -> str:
+    return hashlib.sha1(np.asarray(assign, dtype=np.int64).tobytes()).hexdigest()[:16]
+
+
 def run_detailed_place(
     assign: np.ndarray,
     evaluator: LayoutEvaluator,
@@ -33,6 +38,7 @@ def run_detailed_place(
     hot_pairs: List[Tuple[int, int]],
     rng: np.random.Generator | None = None,
     trace: List[Dict] | None = None,
+    pareto_points: List[Dict] | None = None,
     seed_id: int = 0,
 ) -> Tuple[np.ndarray, Dict]:
     """SA loop with swap/relocate moves and Pareto updates."""
@@ -104,8 +110,26 @@ def run_detailed_place(
             comm_norm=cand_eval["comm_norm"],
             therm_norm=cand_eval["therm_norm"],
             total_scalar=cand_eval["total_scalar"],
-            meta={"stage": "detailed", "iter": step, "seed_id": seed_id},
+            meta={
+                "stage": "detailed",
+                "iter": step,
+                "seed_id": seed_id,
+                "assign_hash": _assign_hash(cand),
+            },
         )
+        if added and pareto_points is not None:
+            pareto_points.append(
+                {
+                    "solution_id": len(pareto_points),
+                    "comm_norm": cand_eval["comm_norm"],
+                    "therm_norm": cand_eval["therm_norm"],
+                    "total_scalar": cand_eval["total_scalar"],
+                    "stage": "detailed",
+                    "iter": step,
+                    "seed_id": seed_id,
+                    "assign_hash": _assign_hash(cand),
+                }
+            )
         trace.append(
             {
                 "iter": step,

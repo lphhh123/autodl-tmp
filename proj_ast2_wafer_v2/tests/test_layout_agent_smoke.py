@@ -34,6 +34,8 @@ def test_layout_agent_smoke(tmp_path):
     out_dir = tmp_path / "out"
     stage_pipeline({}, layout_input, str(out_dir))
     assert (out_dir / "layout_best.json").exists()
+    assert (out_dir / "trace.csv").exists()
+    assert (out_dir / "pareto_points.csv").exists()
     with open(out_dir / "layout_best.json", "r", encoding="utf-8") as f:
         data = json.load(f)
     assert "best" in data
