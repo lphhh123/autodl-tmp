@@ -1,0 +1,46 @@
+layout_agent:
+  version: v4.3.2
+  seed_list: [0, 1, 2]
+  export_trace: true
+
+regions:
+  enabled: false
+
+global_place_region:
+  lambda_graph: 1.0
+  lambda_ring: 1.0
+  lambda_cap: 10000.0
+
+coarsen:
+  target_num_clusters: 8
+  min_merge_traffic: 1.0e6
+
+expand:
+  intra_refine_steps: 100
+
+legalize:
+  enabled: true
+
+pareto:
+  enabled: false
+
+detailed_place:
+  enabled: true
+  steps: 4000
+  sa_T0: 1.0
+  sa_alpha: 0.999
+  action_probs:
+    swap: 0.6
+    relocate: 0.4
+  relocate:
+    same_region_prob: 0.8
+    neighbor_k: 20
+  hot_sampling:
+    top_pairs_k: 20
+    top_slots_k: 20
+
+planner:
+  type: heuristic
+
+alt_opt:
+  enabled: false

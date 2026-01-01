@@ -70,11 +70,37 @@ def build_inter_seg_bytes(segments, layer_metas) -> Dict[Tuple[int, int], float]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type=str, default="configs/ast2_single_gpu.yaml",
+        "--config",
+        type=str,
+        default="configs/ast2_single_gpu.yaml",
         help="Base config (model/data/loss/proxy). Mapping/layout use extra fields.",
     )
+    parser.add_argument(
+        "--cfg",
+        dest="config_alias",
+        type=str,
+        help="Alias of --config for compatibility with experiment command docs.",
+    )
+    parser.add_argument(
+        "--export_layout_input",
+        action="store_true",
+        help="Force exporting layout_input.json regardless of config value.",
+    )
+    parser.add_argument(
+        "--export_dir",
+        type=str,
+        help="Override export directory for layout_input.json.",
+    )
+
     args = parser.parse_args()
-    cfg = load_config(args.config)
+    config_path = args.config_alias or args.config
+    cfg = load_config(config_path)
+
+    # CLI overrides (kept minimal to avoid surprising config drift)
+    if args.export_layout_input:
+        cfg.layout.export_layout_input = True
+    if args.export_dir:
+        cfg.layout.export_dir = args.export_dir
 
     device = torch.device(cfg.train.device)
     model = build_model(cfg).to(device)
