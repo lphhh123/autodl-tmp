@@ -12,19 +12,25 @@ import requests
 
 class LLMProvider(ABC):
     @abstractmethod
-    def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+    def propose_actions(self, state_summary: Dict, k: int) -> tuple[List[Dict], Dict | None]:
+        """Return a tuple of (actions, usage_dict).
+
+        The usage_dict is optional and is used to log token/byte level usage
+        for traceability (required by the v4.3.2 spec). Heuristic providers can
+        return ``None``.
+        """
         ...
 
 
 class HeuristicProvider(LLMProvider):
-    def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+    def propose_actions(self, state_summary: Dict, k: int) -> tuple[List[Dict], Dict | None]:
         actions = []
         hot_pairs = state_summary.get("top_hot_pairs", [])
         for pair in hot_pairs[:k]:
             actions.append({"op": "swap", "i": pair.get("i"), "j": pair.get("j")})
         while len(actions) < k:
             actions.append({"op": "relocate", "i": 0, "site_id": None})
-        return actions
+        return actions, None
 
 
 class VolcArkProvider(LLMProvider):
@@ -35,7 +41,7 @@ class VolcArkProvider(LLMProvider):
         self.timeout = timeout_sec
         self.max_retry = max_retry
 
-    def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+    def propose_actions(self, state_summary: Dict, k: int) -> tuple[List[Dict], Dict | None]:
         if not self.api_key or not self.endpoint or not self.model:
             return HeuristicProvider().propose_actions(state_summary, k)
 
@@ -49,6 +55,7 @@ class VolcArkProvider(LLMProvider):
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": json.dumps({"state": state_summary, "k": k})},
             ],
+            "response_format": {"type": "json_object"},
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         last_err = None
@@ -65,7 +72,12 @@ class VolcArkProvider(LLMProvider):
                 content = data["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
                 actions = parsed.get("actions", [])
-                return actions[:k]
+                usage = data.get("usage", {})
+                usage.update({
+                    "model": self.model,
+                    "call_id": data.get("id", ""),
+                })
+                return actions[:k], usage
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 continue
