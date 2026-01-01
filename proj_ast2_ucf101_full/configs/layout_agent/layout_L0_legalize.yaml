@@ -1,0 +1,14 @@
+_base_: ./base_layout.yaml
+
+regions:
+  enabled: false
+coarsen:
+  target_num_clusters: 1
+  min_merge_traffic: 1.0e9
+pareto:
+  enabled: false
+detailed_place:
+  enabled: false
+  steps: 0
+alt_opt:
+  enabled: false
