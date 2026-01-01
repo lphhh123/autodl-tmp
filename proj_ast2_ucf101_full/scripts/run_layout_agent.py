@@ -150,10 +150,13 @@ def main():
         cfg=detailed_cfg,
         trace_path=out_dir / "trace.csv",
         seed_id=0,
+        chip_tdp=chip_tdp,
+        llm_usage_path=out_dir / "llm_usage.jsonl",
     )
     assign_final = result.assign
 
     # Stage6: alt-opt (optional)
+    mapping_final = layout_input["mapping"].get("mapping") if "mapping" in layout_input else None
     if hasattr(cfg, "alt_opt") and cfg.alt_opt.get("enabled", False):
         mapping_solver = MappingSolver(strategy="greedy_local", mem_limit_factor=1.0)
         assign_final, mapping_final = run_alt_opt(
@@ -161,6 +164,7 @@ def main():
             mapping_solver=mapping_solver,
             segments=[],
             eff_specs={},
+            traffic_sym=traffic_sym,
             sites_xy=sites_xy,
             assign_init=assign_final,
             evaluator=evaluator,
@@ -168,6 +172,7 @@ def main():
             pareto=pareto,
             cfg=cfg.alt_opt,
             trace_path=out_dir,
+            chip_tdp=chip_tdp,
         )
 
     # Outputs
