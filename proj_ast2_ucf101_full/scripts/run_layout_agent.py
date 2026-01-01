@@ -17,7 +17,7 @@ from layout.legalize import legalize_assign
 from layout.pareto import ParetoSet
 from layout.regions import build_regions
 from layout.sites import build_sites
-from mapping.mapping_solver import MappingSolver
+from mapping.segments import Segment
 from utils.config import load_config
 
 
@@ -33,7 +33,33 @@ def _write_pareto_points(pareto: ParetoSet, path: Path):
         for idx, p in enumerate(pareto.points):
             assign_hash = hash(tuple(p.payload.get("assign", [])))
             total = p.payload.get("total_scalar", p.comm_norm + p.therm_norm)
-            f.write(f"{idx},{p.comm_norm},{p.therm_norm},{total},detailed,0,0,{assign_hash}\n")
+            stage = p.payload.get("stage", "detailed")
+            iter_id = p.payload.get("iter", 0)
+            seed_id = p.payload.get("seed", 0)
+            f.write(f"{idx},{p.comm_norm},{p.therm_norm},{total},{stage},{iter_id},{seed_id},{assign_hash}\n")
+
+
+def _parse_segments(raw_segments) -> list[Segment]:
+    segments: list[Segment] = []
+    if not raw_segments:
+        return segments
+    for idx, seg in enumerate(raw_segments):
+        segments.append(
+            Segment(
+                id=seg.get("id", idx),
+                layer_ids=seg.get("layer_ids", []),
+                flops=seg.get("flops", 0.0),
+                bytes=seg.get("bytes", 0.0),
+                seq_len=seg.get("seq_len", 0),
+                embed_dim=seg.get("embed_dim", 0),
+                num_heads=seg.get("num_heads", 0),
+                mlp_ratio=seg.get("mlp_ratio", 0.0),
+                precision=seg.get("precision", 1),
+                traffic_in_bytes=seg.get("traffic_in_bytes", 0.0),
+                traffic_out_bytes=seg.get("traffic_out_bytes", 0.0),
+            )
+        )
+    return segments
 
 
 def main():
@@ -55,6 +81,8 @@ def main():
     chip_tdp = np.array(layout_input["slots"]["tdp"], dtype=float)
     traffic = np.array(layout_input["mapping"]["traffic_matrix"], dtype=float)
     traffic_sym = traffic + traffic.T
+    mapping_current = layout_input.get("mapping", {}).get("mapping", list(range(assign_seed.shape[0])))
+    segments = _parse_segments(layout_input.get("mapping", {}).get("segments", []))
     S = assign_grid.shape[0]
     evaluator = LayoutEvaluator(
         sigma_mm=float(cfg.objective.sigma_mm),
@@ -87,10 +115,18 @@ def main():
     # Stage0: baseline evaluations
     layout_state.assign = assign_grid
     base_eval = evaluator.evaluate(layout_state)
-    pareto.add(base_eval["comm_norm"], base_eval["therm_norm"], {"assign": assign_grid.copy(), "total_scalar": base_eval["total_scalar"]})
+    pareto.add(
+        base_eval["comm_norm"],
+        base_eval["therm_norm"],
+        {"assign": assign_grid.copy(), "total_scalar": base_eval["total_scalar"], "stage": "baseline", "iter": 0, "seed": -1},
+    )
     layout_state.assign = assign_seed
     seed_eval = evaluator.evaluate(layout_state)
-    pareto.add(seed_eval["comm_norm"], seed_eval["therm_norm"], {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"]})
+    pareto.add(
+        seed_eval["comm_norm"],
+        seed_eval["therm_norm"],
+        {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
+    )
 
     # Stage1: coarsen
     clusters, W = coarsen_traffic(
@@ -150,40 +186,51 @@ def main():
         cfg=detailed_cfg,
         trace_path=out_dir / "trace.csv",
         seed_id=0,
+        chip_tdp=chip_tdp,
+        llm_usage_path=out_dir / "llm_usage.jsonl",
+        stage_label="detailed",
     )
     assign_final = result.assign
 
     # Stage6: alt-opt (optional)
+    mapping_final = mapping_current
     if hasattr(cfg, "alt_opt") and cfg.alt_opt.get("enabled", False):
-        mapping_solver = MappingSolver(strategy="greedy_local", mem_limit_factor=1.0)
         assign_final, mapping_final = run_alt_opt(
             rounds=int(cfg.alt_opt.get("rounds", 3)),
-            mapping_solver=mapping_solver,
-            segments=[],
-            eff_specs={},
+            segments=segments,
+            traffic_sym=traffic_sym,
             sites_xy=sites_xy,
             assign_init=assign_final,
             evaluator=evaluator,
             layout_state=layout_state,
             pareto=pareto,
             cfg=cfg.alt_opt,
-            trace_path=out_dir,
+            trace_dir=out_dir,
+            chip_tdp=chip_tdp,
         )
 
     # Outputs
     _write_pareto_points(pareto, out_dir / "pareto_points.csv")
     best_comm, best_therm, best_payload = pareto.knee_point()
+    best_assign = best_payload.get("assign", assign_final)
+    layout_state.assign = np.array(best_assign, dtype=int)
+    best_eval = evaluator.evaluate(layout_state)
     layout_best = {
         "best": {
-            "assign": best_payload.get("assign", assign_final).tolist(),
+            "assign": best_assign.tolist(),
+            "pos_xy_mm": sites_xy[best_assign].tolist(),
             "objectives": {"comm_norm": best_comm, "therm_norm": best_therm},
-            "penalty": {},
+            "raw": {"L_comm": best_eval["L_comm"], "L_therm": best_eval["L_therm"]},
+            "penalty": best_eval["penalty"],
             "meta": {"stage": "knee_point"},
         },
         "pareto_front": [
             {"comm_norm": p.comm_norm, "therm_norm": p.therm_norm} for p in pareto.points
         ],
-        "selection": {"method": cfg.pareto.get("selection", "knee_point_v1") if hasattr(cfg, "pareto") else "knee_point_v1", "pareto_size": len(pareto.points)},
+        "selection": {
+            "method": cfg.pareto.get("selection", "knee_point_v1") if hasattr(cfg, "pareto") else "knee_point_v1",
+            "pareto_size": len(pareto.points),
+        },
         "region_plan": {
             "clusters": [c.slots for c in clusters],
             "cluster_to_region": cluster_to_region,
@@ -202,6 +249,7 @@ def main():
         "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
         "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
         "pareto_size": len(pareto.points),
+        "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

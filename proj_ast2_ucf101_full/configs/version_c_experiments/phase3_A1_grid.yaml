@@ -1,0 +1,10 @@
+_base_: ../vc_phase3_full_ucf101.yaml
+
+training:
+  inner_steps_layout: 1
+layout:
+  optimize_layout: true
+layout_seed:
+  method: grid
+  enable_micro_place: false
+  micro_place_steps: 0

@@ -1,0 +1,12 @@
+_base_: ./base_layout.yaml
+
+regions:
+  enabled: false
+pareto:
+  enabled: false
+detailed_place:
+  steps: 4000
+  planner:
+    type: heuristic
+alt_opt:
+  enabled: false
