@@ -607,10 +607,10 @@ class LLMProvider(ABC):
 命令（示例；cfg 名按你仓库实际落地）：
 
 ```bash
-python -m scripts.run_version_c --cfg configs/vc_p3_A0_nolayout.yaml  --export_layout_input true --export_dir outputs/P3/A0
-python -m scripts.run_version_c --cfg configs/vc_p3_A1_grid.yaml      --export_layout_input true --export_dir outputs/P3/A1
-python -m scripts.run_version_c --cfg configs/vc_p3_A2_seed.yaml      --export_layout_input true --export_dir outputs/P3/A2
-python -m scripts.run_version_c --cfg configs/vc_p3_A3_seed_micro.yaml --export_layout_input true --export_dir outputs/P3/A3
+python -m scripts.run_version_c --cfg configs/vc_p3_A0_nolayout.yaml  --export_layout_input --export_dir outputs/P3/A0
+python -m scripts.run_version_c --cfg configs/vc_p3_A1_grid.yaml      --export_layout_input --export_dir outputs/P3/A1
+python -m scripts.run_version_c --cfg configs/vc_p3_A2_seed.yaml      --export_layout_input --export_dir outputs/P3/A2
+python -m scripts.run_version_c --cfg configs/vc_p3_A3_seed_micro.yaml --export_layout_input --export_dir outputs/P3/A3
 ```
 
 输出检查点（每个都必须有）：

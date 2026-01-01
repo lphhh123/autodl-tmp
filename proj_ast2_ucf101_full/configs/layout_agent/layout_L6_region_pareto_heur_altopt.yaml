@@ -1,0 +1,12 @@
+_base_: ./base_layout.yaml
+
+detailed_place:
+  planner:
+    type: heuristic
+alt_opt:
+  enabled: true
+  rounds: 3
+  refine_each_round:
+    steps: 2000
+    sa_T0: 1.0
+    sa_alpha: 0.999
