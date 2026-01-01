@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from .evaluator import LayoutEvaluator, LayoutState
+from .llm_provider import HeuristicProvider, LLMProvider, VolcArkProvider
 from .pareto import ParetoSet
 
 
@@ -36,12 +37,16 @@ def run_detailed_place(
     sa_alpha: float,
     action_probs: Dict[str, float],
     hot_pairs: List[Tuple[int, int]],
+    enable_pareto: bool = True,
+    planner_cfg: Dict | None = None,
+    llm_provider: LLMProvider | None = None,
+    llm_usage: List[Dict] | None = None,
     rng: np.random.Generator | None = None,
     trace: List[Dict] | None = None,
     pareto_points: List[Dict] | None = None,
     seed_id: int = 0,
 ) -> Tuple[np.ndarray, Dict]:
-    """SA loop with swap/relocate moves and Pareto updates."""
+    """SA loop with swap/relocate moves, Pareto updates and optional LLM planner."""
 
     if rng is None:
         rng = np.random.default_rng()
@@ -66,34 +71,118 @@ def run_detailed_place(
             )
         )
 
+    planner_cfg = planner_cfg or {}
+    planner_type = str(planner_cfg.get("type", "heuristic"))
+    mixed_every_n = int(planner_cfg.get("mixed", {}).get("every_n_steps", 50))
+    k_actions = int(planner_cfg.get("mixed", {}).get("k_actions", 4))
+    if planner_type in {"llm", "mixed"} and llm_provider is None:
+        llm_provider = VolcArkProvider(
+            timeout_sec=int(planner_cfg.get("timeout_sec", 30)),
+            max_retry=int(planner_cfg.get("max_retry", 2)),
+        )
+    if llm_provider is None:
+        llm_provider = HeuristicProvider()
+
+    traffic_sym = traffic_bytes + traffic_bytes.T
+
+    def build_state_summary(eval_res: Dict) -> Dict:
+        # build hot pairs with current distances
+        dists = {}
+        pos = sites_xy_mm[cur_assign]
+        for i, j in hot_pairs:
+            dists[(i, j)] = float(np.linalg.norm(pos[i] - pos[j]))
+        top_pairs = [
+            {"i": i, "j": j, "traffic": float(traffic_sym[i, j]), "dist_mm": dists.get((i, j), 0.0)}
+            for i, j in hot_pairs
+        ]
+        top_slots = [
+            {"i": int(i), "tdp": float(t), "region": None}
+            for i, t in sorted(enumerate(chip_tdp_w), key=lambda x: x[1], reverse=True)[: max(1, len(hot_pairs))]
+        ]
+        return {
+            "comm_norm": float(eval_res.get("comm_norm", 0.0)),
+            "therm_norm": float(eval_res.get("therm_norm", 0.0)),
+            "top_hot_pairs": top_pairs,
+            "top_hot_slots": top_slots,
+            "violations": eval_res.get("penalty", {}),
+            "hint": "prefer swap on hot pairs; push high-tdp outward; avoid duplicate sites",
+        }
+
+    def apply_action(base: np.ndarray, action: Dict, rng_local: np.random.Generator) -> np.ndarray:
+        cand = base.copy()
+        op = action.get("op")
+        if op == "swap":
+            i, j = int(action.get("i", -1)), int(action.get("j", -1))
+            if 0 <= i < S and 0 <= j < S:
+                cand[i], cand[j] = cand[j], cand[i]
+        elif op == "relocate":
+            i = int(action.get("i", -1))
+            site_id = action.get("site_id")
+            if 0 <= i < S:
+                occupied = set(int(x) for x in cand.tolist())
+                if site_id is None or site_id in occupied or not (0 <= int(site_id) < Ns):
+                    free = [s for s in range(Ns) if s not in occupied]
+                    if free:
+                        site_id = int(rng_local.choice(free))
+                if site_id is not None and 0 <= int(site_id) < Ns:
+                    cand[i] = int(site_id)
+        elif op == "cluster_move":
+            slots = action.get("slots")
+            if not slots:
+                slots = list(rng_local.choice(S, size=max(1, S // 4), replace=False))
+            target_sites = action.get("site_ids")
+            occupied = set(int(x) for x in cand.tolist())
+            free = [s for s in range(Ns) if s not in occupied]
+            if target_sites:
+                target_sites = [int(s) for s in target_sites if 0 <= int(s) < Ns and int(s) not in occupied]
+            else:
+                target_sites = free[: len(slots)]
+            if len(target_sites) >= len(slots):
+                for sl, site in zip(slots, target_sites):
+                    cand[int(sl)] = int(site)
+        return cand
+
     cur_eval = eval_assign(cur_assign)
     best_assign = cur_assign.copy()
     best_eval = cur_eval
 
     for step in range(steps):
-        op = _sample_action(S, action_probs, rng)
+        use_llm = planner_type in {"llm", "mixed"} and (planner_type == "llm" or step % max(1, mixed_every_n) == 0)
         cand = cur_assign.copy()
-        if op == "swap":
-            if hot_pairs:
-                i, j = hot_pairs[step % len(hot_pairs)][:2]
-            else:
-                i, j = rng.choice(S, size=2, replace=False)
-            cand[i], cand[j] = cand[j], cand[i]
-        elif op == "relocate":
-            i = int(rng.integers(0, S))
-            occupied = set(int(x) for x in cand.tolist())
-            free = [s for s in range(Ns) if s not in occupied]
-            if free:
-                cand[i] = int(rng.choice(free))
-        elif op == "cluster_move":
-            # lightweight proxy: random subset relocate to random free sites
-            size = max(1, S // 4)
-            slots = rng.choice(S, size=size, replace=False)
-            occupied = set(int(x) for x in cand.tolist())
-            free = [s for s in range(Ns) if s not in occupied]
-            if len(free) >= len(slots):
-                for sl, site in zip(slots, free[: len(slots)]):
-                    cand[sl] = int(site)
+        op = "none"
+        if use_llm and llm_provider is not None:
+            state_summary = build_state_summary(cur_eval)
+            actions, usage = llm_provider.propose_actions(state_summary, k_actions)
+            if usage and llm_usage is not None:
+                usage = dict(usage)
+                usage.update({"step": step})
+                llm_usage.append(usage)
+            for act in actions:
+                cand = apply_action(cur_assign, act, rng)
+                op = act.get("op", "llm")
+                break
+        if op == "none":
+            op = _sample_action(S, action_probs, rng)
+            if op == "swap":
+                if hot_pairs:
+                    i, j = hot_pairs[step % len(hot_pairs)][:2]
+                else:
+                    i, j = rng.choice(S, size=2, replace=False)
+                cand[i], cand[j] = cand[j], cand[i]
+            elif op == "relocate":
+                i = int(rng.integers(0, S))
+                occupied = set(int(x) for x in cand.tolist())
+                free = [s for s in range(Ns) if s not in occupied]
+                if free:
+                    cand[i] = int(rng.choice(free))
+            elif op == "cluster_move":
+                size = max(1, S // 4)
+                slots = rng.choice(S, size=size, replace=False)
+                occupied = set(int(x) for x in cand.tolist())
+                free = [s for s in range(Ns) if s not in occupied]
+                if len(free) >= len(slots):
+                    for sl, site in zip(slots, free[: len(slots)]):
+                        cand[sl] = int(site)
 
         cand_eval = eval_assign(cand)
         delta = cand_eval["total_scalar"] - cur_eval["total_scalar"]
@@ -106,34 +195,36 @@ def run_detailed_place(
                 best_assign = cand
                 best_eval = cand_eval
 
-        added = pareto.try_add(
-            comm_norm=cand_eval["comm_norm"],
-            therm_norm=cand_eval["therm_norm"],
-            total_scalar=cand_eval["total_scalar"],
-            meta={
-                "stage": "detailed",
-                "iter": step,
-                "seed_id": seed_id,
-                "assign_hash": _assign_hash(cand),
-            },
-        )
-        if added and pareto_points is not None:
-            pareto_points.append(
-                {
-                    "solution_id": len(pareto_points),
-                    "comm_norm": cand_eval["comm_norm"],
-                    "therm_norm": cand_eval["therm_norm"],
-                    "total_scalar": cand_eval["total_scalar"],
-                    "stage": "detailed",
+        added = False
+        if enable_pareto:
+            added = pareto.try_add(
+                comm_norm=cand_eval["comm_norm"],
+                therm_norm=cand_eval["therm_norm"],
+                total_scalar=cand_eval["total_scalar"],
+                meta={
+                    "stage": planner_cfg.get("stage_label", "detailed"),
                     "iter": step,
                     "seed_id": seed_id,
                     "assign_hash": _assign_hash(cand),
-                }
+                },
             )
+            if added and pareto_points is not None:
+                pareto_points.append(
+                    {
+                        "solution_id": len(pareto_points),
+                        "comm_norm": cand_eval["comm_norm"],
+                        "therm_norm": cand_eval["therm_norm"],
+                        "total_scalar": cand_eval["total_scalar"],
+                        "stage": planner_cfg.get("stage_label", "detailed"),
+                        "iter": step,
+                        "seed_id": seed_id,
+                        "assign_hash": _assign_hash(cand),
+                    }
+                )
         trace.append(
             {
                 "iter": step,
-                "stage": "detailed",
+                "stage": planner_cfg.get("stage_label", "detailed"),
                 "op": op,
                 "op_args_json": json.dumps({}),
                 "accepted": int(accept),
