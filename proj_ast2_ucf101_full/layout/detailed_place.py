@@ -174,7 +174,17 @@ def run_detailed_place(
             "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms\n"
         )
         eval_out = evaluator.evaluate(layout_state)
-        pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy()})
+        pareto.add(
+            eval_out["comm_norm"],
+            eval_out["therm_norm"],
+            {
+                "assign": assign.copy(),
+                "total_scalar": eval_out["total_scalar"],
+                "stage": stage_label,
+                "iter": 0,
+                "seed": seed_id,
+            },
+        )
         for step in range(steps):
             # choose action
             if planner_cfg.get("type") == "mixed" and mixed_every and step % mixed_every == 0:
@@ -218,13 +228,25 @@ def run_detailed_place(
                 assign = new_assign
                 eval_out = eval_new
                 layout_state.assign = assign
-                added = pareto.add(eval_out["comm_norm"], eval_out["therm_norm"], {"assign": assign.copy()})
+                added = pareto.add(
+                    eval_out["comm_norm"],
+                    eval_out["therm_norm"],
+                    {
+                        "assign": assign.copy(),
+                        "total_scalar": eval_out["total_scalar"],
+                        "stage": stage_label,
+                        "iter": step + 1,
+                        "seed": seed_id,
+                    },
+                )
             else:
                 layout_state.assign = assign
                 added = False
             T *= alpha
             f_trace.write(
-                f"{step},detailed,{op},{json.dumps(action)}," f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n"
+                f"{step},{stage_label},{op},{json.dumps(action)},"
+                f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},"
+                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n"
             )
     if usage_fp:
         usage_fp.close()

@@ -8,13 +8,55 @@ import numpy as np
 from layout.detailed_place import run_detailed_place
 from layout.pareto import ParetoSet
 from layout.evaluator import LayoutEvaluator, LayoutState
-from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
+
+
+def _top_segments_by_traffic(segments: List[Segment], ratio: float) -> List[int]:
+    if not segments:
+        return []
+    ratio = max(0.0, min(1.0, ratio))
+    k = max(1, int(len(segments) * ratio))
+    order = sorted(range(len(segments)), key=lambda i: getattr(segments[i], "traffic_out_bytes", 0.0), reverse=True)
+    return order[:k]
+
+
+def _remap_top_segments(mapping: List[int], segments: List[Segment], assign: np.ndarray, sites_xy: np.ndarray, ratio: float) -> List[int]:
+    if not segments or not mapping:
+        return mapping
+    S = assign.shape[0]
+    mapping = [m % S for m in mapping]
+    top_ids = _top_segments_by_traffic(segments, ratio)
+    pos = sites_xy[assign]
+
+    def _edge_cost(idx_a: int, idx_b: int, map_a: int, map_b: int) -> float:
+        if idx_a < 0 or idx_b >= len(mapping):
+            return 0.0
+        traffic = getattr(segments[idx_a], "traffic_out_bytes", 0.0)
+        if map_a == map_b:
+            return 0.0
+        return traffic * float(np.linalg.norm(pos[map_a] - pos[map_b]))
+
+    for i in top_ids:
+        curr_slot = mapping[i]
+        best_slot = curr_slot
+        best_delta = 0.0
+        for s in range(S):
+            if s == curr_slot:
+                continue
+            delta = 0.0
+            delta += _edge_cost(i - 1, i, mapping[i - 1] if i - 1 >= 0 else s, s)
+            delta += _edge_cost(i, i + 1, s, mapping[i + 1] if i + 1 < len(mapping) else s)
+            delta -= _edge_cost(i - 1, i, mapping[i - 1] if i - 1 >= 0 else curr_slot, curr_slot)
+            delta -= _edge_cost(i, i + 1, curr_slot, mapping[i + 1] if i + 1 < len(mapping) else curr_slot)
+            if delta < best_delta:
+                best_delta = delta
+                best_slot = s
+        mapping[i] = best_slot
+    return mapping
 
 
 def run_alt_opt(
     rounds: int,
-    mapping_solver: MappingSolver,
     segments: List[Segment],
     eff_specs: Dict,
     traffic_sym: np.ndarray,
