@@ -96,19 +96,64 @@ class MappingSolver:
                 comm_ms += base_time + dist * distance_scale_ms
         return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
 
-    def build_traffic_matrix(self, segments: List[Segment], mapping: List[int]) -> torch.Tensor:
+    def build_traffic_matrix(
+        self,
+        segments: List[Segment],
+        mapping: List[int],
+        *,
+        S: Optional[int] = None,
+        mode: str = "full",
+    ) -> torch.Tensor:
         """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
 
-        For the common pipeline case, the traffic between segment k and k+1 is
-        attributed to their mapped slots. This method intentionally stays
-        simple to keep the contract explicit for downstream layout stages.
+        Args:
+            segments: partitioned segments.
+            mapping: slot assignment for each segment.
+            S: total number of slots in hardware; required for ``mode="full"``.
+            mode: ``"full"`` returns (S,S) matrix aligned to slot ids 0..S-1.
+                  ``"compact"`` returns (U,U) matrix where U=len(used slots)
+                  ordered by first appearance in ``mapping``.
         """
 
-        if not segments:
-            return torch.zeros((0, 0), dtype=torch.float32)
-        S = max(mapping) + 1 if mapping else 0
+        if not segments or not mapping:
+            total_slots = S or 0
+            traffic = torch.zeros((total_slots, total_slots), dtype=torch.float32)
+            return traffic if mode == "full" else (traffic, list(range(total_slots)))
+
+        if mode not in {"full", "compact"}:
+            raise ValueError(f"Unsupported traffic mode: {mode}")
+
+        limit = min(len(mapping), len(segments))
+
+        if mode == "compact":
+            # Preserve order of first appearance to keep deterministic compact output.
+            used_order = []
+            seen = set()
+            for slot in mapping[:limit]:
+                if slot not in seen:
+                    used_order.append(slot)
+                    seen.add(slot)
+            U = len(used_order)
+            traffic = torch.zeros((U, U), dtype=torch.float32)
+            for k in range(limit - 1):
+                a = mapping[k]
+                b = mapping[k + 1]
+                if a == b:
+                    continue
+                i = used_order.index(a)
+                j = used_order.index(b)
+                traffic[i, j] += float(segments[k].traffic_out_bytes)
+            return traffic, used_order
+
+        # mode == "full"
+        if S is None:
+            raise ValueError("S must be provided for mode='full' traffic export")
+        max_slot = max(mapping)
+        if max_slot >= S or min(mapping) < 0:
+            raise ValueError(f"Mapping contains invalid slot id: max={max_slot}, S={S}")
+
         traffic = torch.zeros((S, S), dtype=torch.float32)
-        for k in range(len(segments) - 1):
+        for k in range(limit - 1):
             a = mapping[k]
             b = mapping[k + 1]
             if a == b:
