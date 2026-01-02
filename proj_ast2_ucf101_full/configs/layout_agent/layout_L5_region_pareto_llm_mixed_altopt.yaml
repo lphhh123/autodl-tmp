@@ -11,6 +11,8 @@ detailed_place:
 alt_opt:
   enabled: true
   rounds: 3
+  mapping_mode: comm_only
+  mapping_strategy: greedy_swap
   refine_each_round:
     steps: 2000
     sa_T0: 1.0
