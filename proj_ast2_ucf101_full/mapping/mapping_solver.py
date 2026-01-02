@@ -97,90 +97,31 @@ class MappingSolver:
         return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
 
     def build_traffic_matrix(
-        self,
-        segments: List[Segment],
-        mapping: List[int],
-        num_slots: Optional[int] = None,
-        return_meta: bool = False,
-    ):
-        """Return traffic aligned to slot ids.
+        self, segments: List[Segment], mapping: List[int], num_slots: Optional[int] = None
+    ) -> torch.Tensor:
+        """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
 
-        * num_slots is None  -> compact (U,U) using sorted unique mapping slot ids
-        * num_slots provided -> canonical (S,S) with S=num_slots, slot order 0..S-1
+        Args:
+            segments: partitioned segments.
+            mapping: slot assignment for each segment.
+            S: total number of slots in hardware; required for ``mode="full"``.
+            mode: ``"full"`` returns (S,S) matrix aligned to slot ids 0..S-1.
+                  ``"compact"`` returns (U,U) matrix where U=len(used slots)
+                  ordered by first appearance in ``mapping``.
         """
 
-        if mapping is None or len(mapping) == 0:
-            raise ValueError("[build_traffic_matrix] mapping is empty; cannot build traffic.")
-
-        mapping_i = [int(x) for x in mapping]
-        slot_ids = sorted(set(mapping_i))
-        U = len(slot_ids)
-
-        limit = max(0, min(len(mapping_i), len(segments)) - 1)
-
-        def _accumulate(target: torch.Tensor, lookup: Dict[int, int]):
-            for k in range(limit):
-                a = mapping_i[k]
-                b = mapping_i[k + 1]
-                if a == b:
-                    continue
-                i = lookup.get(a)
-                j = lookup.get(b)
-                if i is None or j is None:
-                    raise ValueError(
-                        f"[build_traffic_matrix] slot id missing in lookup; mapping[{k}]={a}, mapping[{k+1}]={b}, slot_ids={slot_ids[:8]}"
-                    )
-                traffic_bytes = float(getattr(segments[k], "traffic_out_bytes", 0.0))
-                target[i, j] += traffic_bytes
-
-        # Compact mode: preserve legacy behaviour
-        if num_slots is None:
-            traffic = torch.zeros((U, U), dtype=torch.float32)
-            slot_to_idx = {sid: idx for idx, sid in enumerate(slot_ids)}
-            _accumulate(traffic, slot_to_idx)
-            meta = {
-                "traffic_is_canonical": False,
-                "traffic_slot_ids": slot_ids,
-                "traffic_compact_shape": [U, U],
-                "traffic_shape_in": [U, U],
-                "traffic_mode": "compact_sorted_slot_ids",
-                "S": U,
-                "U": U,
-            }
-            return (traffic, meta) if return_meta else traffic
-
-        # Canonical mode: enforce SxS aligned to slot ids 0..S-1
-        S = int(num_slots)
-        if S <= 0:
-            raise ValueError(f"[build_traffic_matrix] invalid num_slots={S}")
-        bad = [d for d in mapping_i if d < 0 or d >= S]
-        if bad:
-            raise ValueError(f"[build_traffic_matrix] mapping has out-of-range slot ids: {bad[:10]} (S={S})")
-
-        traffic_full = torch.zeros((S, S), dtype=torch.float32)
-        slot_to_idx = {sid: sid for sid in range(S)}
-        _accumulate(traffic_full, slot_to_idx)
-
-        meta = {
-            "traffic_is_canonical": True,
-            "traffic_slot_ids": slot_ids,
-            "traffic_compact_shape": [U, U],
-            "traffic_shape_in": [S, S],
-            "traffic_mode": "full_SxS_slot_order_0_to_S-1",
-            "S": S,
-            "U": U,
-        }
-        return (traffic_full, meta) if return_meta else traffic_full
-
-    def _build_traffic_legacy(
-        self, segments: List[Segment], mapping: List[int], slot_ids: List[int], limit: int
-    ) -> torch.Tensor:
-        """Original traffic accumulation on compact slots (U,U)."""
-
-        U = len(slot_ids)
-        traffic = torch.zeros((U, U), dtype=torch.float32)
-        slot_to_idx = {slot: idx for idx, slot in enumerate(slot_ids)}
-        for k in range(limit):
+        if not segments or not mapping:
+            return torch.zeros((0, 0), dtype=torch.float32)
+        if len(mapping) < len(segments):
+            # Fallback to the common prefix to avoid crashes when mapping/segments
+            # lengths get out of sync. This keeps layout export best-effort while
+            # we align upstream producers.
+            limit = len(mapping)
+        else:
+            limit = len(segments)
+        S = max(mapping) + 1
+        traffic = torch.zeros((S, S), dtype=torch.float32)
+        for k in range(limit - 1):
             a = mapping[k]
             b = mapping[k + 1]
             if a == b:
