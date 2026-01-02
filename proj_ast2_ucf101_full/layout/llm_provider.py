@@ -13,17 +13,23 @@ from requests.exceptions import ReadTimeout
 
 class LLMProvider(ABC):
     @abstractmethod
-    def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
         ...
 
 
 class HeuristicProvider(LLMProvider):
-    def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
-        actions: List[Dict] = []
-        hot_pairs = state_summary.get("top_hot_pairs", [])
-        for pair in hot_pairs[:k]:
-            actions.append({"op": "swap", "i": pair.get("i"), "j": pair.get("j")})
-        return actions
+    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
+        cands = state_summary.get("candidates", [])
+        cands_sorted = sorted(cands, key=lambda x: float(x.get("d_total", 0)))
+        picks: List[int] = []
+        for cand in cands_sorted:
+            cid = int(cand.get("id", -1))
+            if cid in state_summary.get("forbidden_ids", []):
+                continue
+            picks.append(cid)
+            if len(picks) >= k:
+                break
+        return picks
 
 
 class VolcArkProvider(LLMProvider):
@@ -45,45 +51,30 @@ class VolcArkProvider(LLMProvider):
 
     def _build_payload(self, state_summary: Dict, k: int, repair_raw: Optional[str] = None) -> Dict:
         system_prompt = (
-            "STRICT MODE. OUTPUT MUST START IMMEDIATELY.\n\n"
-            "You MUST reply with ONLY the following 3 lines:\n"
+            "STRICT MODE. Output MUST be exactly 3 lines and start with BEGIN_JSON.\n"
+            "Only output picks from candidate_ids; avoid forbidden_ids.\n"
             "LINE1: BEGIN_JSON\n"
-            "LINE2: {\"actions\":[...]}   (a single JSON object, no extra keys)\n"
-            "LINE3: END_JSON\n\n"
-            "HARD RULES:\n"
-            "- The very first characters of your reply MUST be \"BEGIN_JSON\".\n"
-            "- No greetings, no analysis, no explanation, no markdown, no code fences.\n"
-            "- JSON top-level MUST be exactly {\"actions\": [...]}\n"
-            "- Each action MUST be one of:\n"
-            "  {\"op\":\"swap\",\"i\":INT,\"j\":INT}\n"
-            "  {\"op\":\"relocate\",\"i\":INT,\"site_id\":INT}\n"
-            "  {\"op\":\"cluster_move\",\"cluster_id\":INT,\"region_id\":INT}\n"
-            "- Return at most K actions; if none, use {\"actions\":[]}.\n\n"
-            "If you violate any rule, you have FAILED. Output the empty list."
+            "LINE2: {\"pick\":[ID1,ID2,...]}   # only this key, max K unique ids\n"
+            "LINE3: END_JSON\n"
+            "Rules: ids must be valid, include diversity (relocate/cluster_move if present), prefer lower d_total, avoid templates."
         )
-        S = int(state_summary.get("S", 0))
-        Ns = int(state_summary.get("Ns", 0))
-        num_clusters = int(state_summary.get("num_clusters", 0))
-        num_regions = int(state_summary.get("num_regions", 0))
 
         if repair_raw is None:
             state_json = json.dumps(state_summary, separators=(",", ":"))
             user_content = (
-                f"K={int(k)}\n"
-                "VALID RANGES:\n"
-                f"i,j in [0,{S - 1}], site_id in [0,{Ns - 1}], cluster_id in [0,{num_clusters - 1}], region_id in [0,{num_regions - 1}]\n\n"
-                "STATE_JSON:\n"
-                f"{state_json}\n\n"
-                "Return ONLY the 3-line wrapped JSON. Start with BEGIN_JSON."
+                "Selection rubric:\n"
+                "- Rule1: pick ids must be valid.\n"
+                "- Rule2: minimize d_total (sum over picks).\n"
+                "- Rule3: include diversity (at least one relocate/cluster_move if available).\n"
+                "- Rule4: avoid forbidden/repeat.\n"
+                "STATE:\n"
+                f"{state_json}"
             )
         else:
             user_content = (
-                "REPAIR TASK:\n"
-                "Convert the following text into the required 3-line wrapped JSON format.\n"
-                "Do NOT add any extra text.\n\n"
-                "RAW_TEXT:\n<<<\n"
-                f"{repair_raw}\n"
-                ">>>"
+                "REPAIR: Convert RAW text to the 3-line wrapper. Do not change ids.\n"
+                "RAW_TEXT:\nBEGIN_RAW\n"
+                f"{repair_raw}\nEND_RAW"
             )
 
         return {
@@ -92,9 +83,9 @@ class VolcArkProvider(LLMProvider):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            "max_completion_tokens": int(min(self.max_tokens, 96)),
-            "temperature": 0,
-            "top_p": 1,
+            "max_completion_tokens": int(min(self.max_tokens, 128)),
+            "temperature": 0.15,
+            "top_p": 0.9,
             "stop": ["END_JSON"],
         }
 
@@ -130,84 +121,57 @@ class VolcArkProvider(LLMProvider):
 
     @staticmethod
     def _recover_json(raw: str) -> Tuple[Optional[dict], Optional[str]]:
-        obj_match = re.search(r"\{\s*\"actions\"\s*:\s*\[.*?\]\s*\}", raw, re.S)
+        obj_match = re.search(r"\{\s*\"pick\"\s*:\s*\[.*?\]\s*\}", raw, re.S)
         if obj_match:
             try:
                 return json.loads(obj_match.group(0)), None
             except Exception:  # noqa: BLE001
                 pass
-
-        arr_match = re.search(r"\[\s*\{.*?\}\s*(?:,\s*\{.*?\}\s*)*\]", raw, re.S)
+        arr_match = re.search(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]", raw, re.S)
         if arr_match:
             try:
-                return {"actions": json.loads(arr_match.group(0))}, None
+                return {"pick": json.loads(arr_match.group(0))}, None
             except Exception:  # noqa: BLE001
                 pass
         return None, "no_json_found"
 
-    @staticmethod
-    def _validate_actions(
-        actions: Optional[List[Dict]],
-        S: int,
-        Ns: int,
-        num_clusters: int,
-        num_regions: int,
-    ) -> List[Dict]:
-        if not isinstance(actions, list):
+    def _validate_picks(self, picks: Optional[List], candidate_ids: List[int], forbidden_ids: List[int], k: int) -> List[int]:
+        if not isinstance(picks, list):
             return []
-        valid: List[Dict] = []
-        for action in actions:
-            if not isinstance(action, dict):
+        allowed = set(int(x) for x in candidate_ids)
+        forb = set(int(x) for x in forbidden_ids)
+        clean: List[int] = []
+        for p in picks:
+            try:
+                pid = int(p)
+            except Exception:
                 continue
-            op = action.get("op")
-            if op == "swap":
-                try:
-                    i = int(action.get("i", -1))
-                    j = int(action.get("j", -1))
-                except Exception:
-                    continue
-                if 0 <= i < S and 0 <= j < S:
-                    valid.append({"op": "swap", "i": i, "j": j})
-            elif op == "relocate":
-                try:
-                    i = int(action.get("i", -1))
-                    site_id = int(action.get("site_id", -1))
-                except Exception:
-                    continue
-                if 0 <= i < S and 0 <= site_id < Ns:
-                    valid.append({"op": "relocate", "i": i, "site_id": site_id})
-            elif op == "cluster_move":
-                try:
-                    cluster_id = int(action.get("cluster_id", -1))
-                    region_id = int(action.get("region_id", -1))
-                except Exception:
-                    continue
-                if 0 <= cluster_id < num_clusters and 0 <= region_id < num_regions:
-                    valid.append({"op": "cluster_move", "cluster_id": cluster_id, "region_id": region_id})
-        return valid
+            if pid in forb or pid not in allowed or pid in clean:
+                continue
+            clean.append(pid)
+            if len(clean) >= k:
+                break
+        return clean
 
-    def _parse_actions(
+    def _parse_picks(
         self,
         raw: str,
-        S: int,
-        Ns: int,
-        num_clusters: int,
-        num_regions: int,
-    ) -> Tuple[List[Dict], Optional[str]]:
+        candidate_ids: List[int],
+        forbidden_ids: List[int],
+        k: int,
+    ) -> Tuple[List[int], Optional[str]]:
         parsed, parse_error = self.extract_wrapped_json(raw)
         if parsed is None:
             parsed, parse_error = self._recover_json(raw)
-
         if parsed is None:
             return [], parse_error or "no_json_found"
+        picks_raw = parsed.get("pick") if isinstance(parsed, dict) else []
+        valid_picks = self._validate_picks(picks_raw, candidate_ids, forbidden_ids, k)
+        if valid_picks:
+            return valid_picks, None
+        return [], "empty_or_invalid_picks"
 
-        actions_raw = parsed.get("actions") if isinstance(parsed, dict) else []
-        valid_actions = self._validate_actions(actions_raw, S, Ns, num_clusters, num_regions)
-        if valid_actions:
-            return valid_actions, None
-        return [], "empty_or_invalid_actions"
-
-    def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
         url = f"{self.endpoint}/chat/completions"
         if not self.endpoint or not self.api_key or not self.model:
             self.last_usage = {
@@ -227,10 +191,8 @@ class VolcArkProvider(LLMProvider):
         }
         last_error = None
         raw_preview: str = ""
-        S = int(state_summary.get("S", 0))
-        Ns = int(state_summary.get("Ns", 0))
-        num_clusters = int(state_summary.get("num_clusters", 0))
-        num_regions = int(state_summary.get("num_regions", 0))
+        candidate_ids = state_summary.get("candidate_ids", [])
+        forbidden_ids = state_summary.get("forbidden_ids", [])
         attempts = self.max_retry + 1
         repair_attempted = False
         payload = self._build_payload(state_summary, k)
@@ -269,8 +231,8 @@ class VolcArkProvider(LLMProvider):
                     raw = (msg.get("reasoning_content") or "").strip()
                 raw_preview = raw[:200]
 
-                valid_actions, parse_error = self._parse_actions(raw, S, Ns, num_clusters, num_regions)
-                ok = len(valid_actions) > 0 and parse_error is None
+                valid_picks, parse_error = self._parse_picks(raw, candidate_ids, forbidden_ids, k)
+                ok = len(valid_picks) > 0 and parse_error is None
                 self.last_usage = {
                     **base_usage,
                     "prompt_tokens": usage.get("prompt_tokens"),
@@ -279,18 +241,19 @@ class VolcArkProvider(LLMProvider):
                     "response_bytes": len(resp.content),
                     "ok": ok,
                     "raw_preview": raw_preview,
-                    "n_actions": len(valid_actions),
+                    "n_pick": len(valid_picks),
                     "error": parse_error,
+                    "status_code": resp.status_code,
                 }
                 if ok:
-                    return valid_actions
+                    return valid_picks
 
-                if (parse_error in {"missing_wrapper", "no_json_found"}) and not repair_attempted:
+                if (parse_error in {"missing_wrapper", "no_json_found", "bad_json_in_wrapper"}) and not repair_attempted:
                     repair_attempted = True
                     repair_raw = raw[:1000]
                     payload = self._build_payload(state_summary, k, repair_raw=repair_raw)
                     continue
-                last_error = Exception(parse_error or "empty_or_invalid_actions")
+                last_error = Exception(parse_error or "empty_or_invalid_picks")
             except ReadTimeout as exc:
                 last_error = exc
                 self.last_usage = {

@@ -21,6 +21,7 @@ from layout.coarsen import Cluster
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from layout.llm_provider import HeuristicProvider, VolcArkProvider, LLMProvider
+from layout.candidate_pool import Candidate, build_candidate_pool, simulate_action_sequence
 
 
 @dataclass
@@ -68,26 +69,66 @@ def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: List
 
 
 def _state_summary(
-    comm_norm: float,
-    therm_norm: float,
+    step: int,
+    T: float,
+    eval_out: Dict[str, float],
     traffic_sym: np.ndarray,
     assign: np.ndarray,
     site_to_region: np.ndarray,
     chip_tdp: Optional[np.ndarray],
     clusters: List[Cluster],
     regions,
+    candidates: List[Candidate],
+    candidate_ids: List[int],
+    forbidden_ids: List[int],
+    k: int,
 ) -> Dict:
     pairs = _compute_top_pairs(traffic_sym, 5)
     hot_slots = []
     if chip_tdp is not None and len(chip_tdp) == traffic_sym.shape[0]:
         order = np.argsort(chip_tdp)[::-1][:5]
-        hot_slots = [{"i": int(i), "tdp": float(chip_tdp[i]), "region": int(site_to_region[assign[i]])} for i in order]
+        hot_slots = [
+            {"i": int(i), "tdp": float(chip_tdp[i]), "region": int(site_to_region[assign[i]])}
+            for i in order
+        ]
+    cand_payload = []
+    for cand in candidates:
+        desc = ""
+        op = cand.type
+        action = cand.action
+        if op == "swap":
+            desc = f"swap {action.get('i')}-{action.get('j')}"
+        elif op == "relocate":
+            desc = f"reloc slot{action.get('i')}->site{action.get('site_id')}"
+        elif op == "cluster_move":
+            desc = f"cluster {action.get('cluster_id')}->reg{action.get('region_id')}"
+        radial_to = cand.features.get("radial_to") if op != "swap" else None
+        cand_payload.append(
+            {
+                "id": int(cand.id),
+                "type": op,
+                "d_total": float(cand.est.get("d_total", 0.0)),
+                "d_comm": float(cand.est.get("d_comm", 0.0)),
+                "d_therm": float(cand.est.get("d_therm", 0.0)),
+                "touch_hot": 1 if cand.features.get("touches_hot_pair") or cand.features.get("touches_hot_slot") else 0,
+                "radial_to": None if radial_to is None else float(radial_to),
+                "desc": desc[:60],
+            }
+        )
     return {
-        "comm_norm": float(comm_norm),
-        "therm_norm": float(therm_norm),
+        "K": int(k),
+        "step": int(step),
+        "T": float(T),
+        "current": {
+            "total": float(eval_out.get("total_scalar", 0.0)),
+            "comm": float(eval_out.get("comm_norm", 0.0)),
+            "therm": float(eval_out.get("therm_norm", 0.0)),
+        },
         "top_hot_pairs": [{"i": int(i), "j": int(j), "traffic": float(t)} for i, j, t in pairs],
         "top_hot_slots": hot_slots,
-        "hint": "prefer swap on hot pairs; push high-tdp outward; avoid duplicate sites",
+        "candidate_ids": candidate_ids,
+        "forbidden_ids": forbidden_ids,
+        "candidates": cand_payload,
         "S": int(traffic_sym.shape[0]),
         "Ns": int(len(site_to_region)),
         "num_clusters": int(len(clusters)),
@@ -251,36 +292,79 @@ def run_detailed_place(
             },
         )
 
-        for step in range(steps):
-            # ---- choose action ----
-            use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+        action_queue: List[Dict] = []
+        forbidden_history: List[List[int]] = []
+        failed_counts: Dict[int, int] = {}
+        recent_failed_ids: set[int] = set()
+        consecutive_queue_rejects = 0
+        queue_window_steps = int(_cfg_get(planner_cfg, "queue_window_steps", 30))
+        refresh_due_to_rejects = False
 
-            actions: List[Dict] = []
-            if use_llm and llm_provider is not None:
+        for step in range(steps):
+            candidate_pool = build_candidate_pool(
+                assign,
+                eval_out,
+                evaluator,
+                layout_state,
+                traffic_sym,
+                sites_xy,
+                site_to_region,
+                regions,
+                clusters,
+                cluster_to_region,
+                chip_tdp,
+                cfg,
+                rng,
+            )
+            cand_map = {c.id: c for c in candidate_pool}
+            candidate_ids = [c.id for c in candidate_pool]
+            forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
+
+            use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+            need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
+            refresh_due_to_rejects = False
+
+            if need_refresh:
                 ss = _state_summary(
-                    eval_out["comm_norm"],
-                    eval_out["therm_norm"],
+                    step,
+                    T,
+                    eval_out,
                     traffic_sym,
                     assign,
                     site_to_region,
                     chip_tdp,
                     clusters,
                     regions,
+                    candidate_pool,
+                    candidate_ids,
+                    forbidden_ids,
+                    k_actions,
                 )
                 raw_text = ""
+                pick_ids: List[int] = []
                 try:
-                    actions = llm_provider.propose_actions(ss, k_actions) or []
+                    pick_ids = llm_provider.propose_picks(ss, k_actions) or []
+                    pick_types_count: Dict[str, int] = {}
+                    best_d_total = None
+                    for pid in pick_ids:
+                        cand = cand_map.get(pid)
+                        if cand:
+                            pick_types_count[cand.type] = pick_types_count.get(cand.type, 0) + 1
+                            if best_d_total is None or cand.est.get("d_total", 0) < best_d_total:
+                                best_d_total = cand.est.get("d_total", 0)
                     if usage_fp and hasattr(llm_provider, "last_usage"):
                         usage = dict(getattr(llm_provider, "last_usage") or {})
                         raw_text = str(usage.get("raw_preview", ""))
                         usage.setdefault("ok", True)
-                        usage.setdefault("n_actions", len(actions))
+                        usage.setdefault("n_pick", len(pick_ids))
+                        usage["pick_ids"] = pick_ids
+                        usage["pick_types_count"] = pick_types_count
+                        usage["best_d_total_in_pick"] = best_d_total
                         usage["step"] = int(step)
                         json.dump(usage, usage_fp)
-                        usage_fp.write("\n")
+                        usage_fp.write("\\n")
                         usage_fp.flush()
                 except Exception as e:
-                    # fall back to heuristic sampling for this step
                     if usage_fp:
                         json.dump(
                             {
@@ -291,17 +375,33 @@ def run_detailed_place(
                             },
                             usage_fp,
                         )
-                        usage_fp.write("\n")
+                        usage_fp.write("\\n")
                         usage_fp.flush()
-                    actions = []
+                if pick_ids:
+                    forbidden_history.append(pick_ids)
+                    actions = simulate_action_sequence(assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions)
+                    expire_step = step + queue_window_steps
+                    for act in actions:
+                        action_queue.append({"action": act, "expire": expire_step})
 
-            action = actions[0] if actions else _sample_action(
-                cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
-            )
+            action_queue = [a for a in action_queue if a.get("expire", step) >= step]
 
-            new_assign = assign.copy()
+            action_payload = None
+            if action_queue:
+                action_payload = action_queue.pop(0)["action"]
+            else:
+                fallback = next((c for c in candidate_pool if c.id not in forbidden_ids), None)
+                if fallback:
+                    action_payload = {**fallback.action, "candidate_id": fallback.id, "type": fallback.type}
+                else:
+                    action_payload = _sample_action(
+                        cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
+                    )
+
+            action = action_payload or {"op": "none"}
             op = str(action.get("op", "none"))
 
+            new_assign = assign.copy()
             if op == "swap":
                 _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
             elif op == "relocate":
@@ -314,7 +414,6 @@ def run_detailed_place(
                     target_sites = [s for s, r in enumerate(site_to_region) if int(r) == rid][: len(cluster.slots)]
                     _apply_cluster_move(new_assign, cluster, target_sites)
 
-            # ---- evaluate & accept ----
             layout_state.assign = new_assign
             eval_new = evaluator.evaluate(layout_state)
             delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
@@ -335,18 +434,26 @@ def run_detailed_place(
                         "seed": seed_id,
                     },
                 )
+                consecutive_queue_rejects = 0
             else:
                 layout_state.assign = assign
                 added = False
+                if action.get("candidate_id") is not None:
+                    cid = int(action.get("candidate_id"))
+                    failed_counts[cid] = failed_counts.get(cid, 0) + 1
+                    if failed_counts[cid] > 10:
+                        recent_failed_ids.add(cid)
+                consecutive_queue_rejects += 1
+                if consecutive_queue_rejects >= 6:
+                    refresh_due_to_rejects = True
 
             T *= alpha
 
             f_trace.write(
-                f"{step},{stage_label},{op},{json.dumps(action)},"
-                f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},"
-                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n"
+                f"{step},{stage_label},{op},{json.dumps(action)},",
+                f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},",
+                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n",
             )
-
     if usage_fp:
         usage_fp.close()
 
