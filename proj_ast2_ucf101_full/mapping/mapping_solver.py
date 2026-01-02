@@ -101,9 +101,13 @@ class MappingSolver:
     ) -> torch.Tensor:
         """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
 
-        For the common pipeline case, the traffic between segment k and k+1 is
-        attributed to their mapped slots. This method intentionally stays
-        simple to keep the contract explicit for downstream layout stages.
+        Args:
+            segments: partitioned segments.
+            mapping: slot assignment for each segment.
+            S: total number of slots in hardware; required for ``mode="full"``.
+            mode: ``"full"`` returns (S,S) matrix aligned to slot ids 0..S-1.
+                  ``"compact"`` returns (U,U) matrix where U=len(used slots)
+                  ordered by first appearance in ``mapping``.
         """
 
         if not segments or not mapping:

@@ -249,6 +249,8 @@ def _export_layout_input(
             "segments": segments_json,
             "traffic_matrix": traffic.tolist(),
             "mapping": mapping,
+            "used_slots": sorted(set(mapping)),
+            "traffic_mode": "full_SxS_slot_order_0_to_S-1",
         },
         "baseline": baseline,
         "seed": {"assign_seed": assign_seed.tolist(), "micro_place_stats": micro_stats},
