@@ -93,6 +93,7 @@ class VolcArkProvider(LLMProvider):
             "Authorization": f"Bearer {self.api_key}",
         }
         last_error = None
+        raw_preview: str = ""
         for _ in range(self.max_retry + 1):
             try:
                 resp = requests.post(
