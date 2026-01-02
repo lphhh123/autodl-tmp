@@ -259,10 +259,6 @@ def run_detailed_place(
                         usage_fp.flush()
                 except Exception as e:
                     # fall back to heuristic sampling for this step
-                    if usage_fp and hasattr(llm_provider, "last_usage"):
-                        json.dump(getattr(llm_provider, "last_usage"), usage_fp)
-                        usage_fp.write("\n")
-                        usage_fp.flush()
                     if usage_fp:
                         json.dump({"event": "llm_step_failed", "step": int(step), "error": repr(e)}, usage_fp)
                         usage_fp.write("\n")
