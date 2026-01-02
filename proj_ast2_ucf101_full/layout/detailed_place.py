@@ -159,6 +159,7 @@ def run_detailed_place(
 ):
     rng = np.random.default_rng(cfg.get("seed", 0) + seed_id)
     assign = assign_seed.copy()
+    layout_state.assign = assign
     planner_cfg = cfg.get("planner", {"type": "heuristic"})
     planner = _init_provider(planner_cfg)
     mixed_every = int(planner_cfg.get("mixed", {}).get("every_n_steps", 50)) if planner_cfg.get("type") == "mixed" else None
