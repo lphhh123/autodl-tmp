@@ -1,0 +1,6 @@
+_base_: ../vc_phase3_nolayout_ucf101.yaml
+
+layout_seed:
+  method: grid
+  enable_micro_place: false
+  micro_place_steps: 0
