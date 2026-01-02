@@ -174,15 +174,10 @@ def run_detailed_place(
     assert layout_state.assign.shape[0] == layout_state.S
     assert np.all(layout_state.assign >= 0)
     planner_cfg = cfg.get("planner", {"type": "heuristic"})
-    planner_type = str(planner_cfg.get("type", "heuristic")).lower()
-
-    heur_provider = HeuristicProvider()
-    llm_provider, llm_init_error = _init_provider(planner_cfg)
-
-    mixed_cfg = planner_cfg.get("mixed", {}) if planner_type == "mixed" else {}
-    mixed_every = int(mixed_cfg.get("every_n_steps", 50)) if planner_type == "mixed" else 0
-    k_actions = int(mixed_cfg.get("k_actions", planner_cfg.get("k_actions", 4)))
-    stage_label = str(cfg.get("stage_label", f"detailed_{planner_type}"))
+    planner = _init_provider(planner_cfg)
+    mixed_every = int(planner_cfg.get("mixed", {}).get("every_n_steps", 50)) if planner_cfg.get("type") == "mixed" else None
+    k_actions = int(planner_cfg.get("mixed", {}).get("k_actions", 4))
+    stage_label = str(cfg.get("stage_label", f"detailed_{planner_cfg.get('type','heuristic')}"))
 
     steps = int(cfg.get("steps", 0))
     T = float(cfg.get("sa_T0", 1.0))
@@ -235,7 +230,6 @@ def run_detailed_place(
                         "ok": False,
                         "skipped": True,
                         "reason": "llm_provider_not_initialized",
-                        "init_error": llm_init_error,
                     }
                 else:
                     try:
