@@ -47,6 +47,7 @@ def _traffic_aware_seed(sites_xy: np.ndarray, traffic: np.ndarray, S: int, rng: 
     Ns = sites_xy.shape[0]
     assign = np.full(S, -1, dtype=int)
     used_sites: set[int] = set()
+    assigned_slots: set[int] = set()
 
     t_sym = traffic + traffic.T
     hot_pairs: list[tuple[int, int, float]] = []
@@ -65,19 +66,30 @@ def _traffic_aware_seed(sites_xy: np.ndarray, traffic: np.ndarray, S: int, rng: 
     site_pairs.sort(key=lambda x: x[2])
 
     for i, j, _ in hot_pairs:
+        if i in assigned_slots or j in assigned_slots:
+            continue
         for a, b, _ in site_pairs:
             if a in used_sites or b in used_sites:
                 continue
             assign[i] = a
             assign[j] = b
             used_sites.update([a, b])
+            assigned_slots.update([i, j])
             break
 
     # fill remaining slots deterministically
     remaining_sites = [s for s in range(Ns) if s not in used_sites]
     for s_idx in range(S):
-        if assign[s_idx] == -1 and remaining_sites:
+        if assign[s_idx] == -1:
+            if not remaining_sites:
+                break
             assign[s_idx] = remaining_sites.pop(0)
+
+    if np.any(assign < 0):
+        missing = np.nonzero(assign < 0)[0][:8]
+        raise ValueError(
+            f"[traffic_aware_seed] failed to assign all slots; missing {missing.tolist()} (Ns={Ns}, S={S})"
+        )
     return assign
 
 
@@ -211,9 +223,44 @@ def _export_layout_input(
         baseline={"L_comm_baseline": base_res["L_comm"], "L_therm_baseline": base_res["L_therm"]},
         scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
     )
-    assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
+    seed_cfg = getattr(cfg, "layout_seed", None)
+    method = getattr(seed_cfg, "method", "grid") if seed_cfg is not None else "grid"
+    if method == "grid":
+        assign_seed = assign_grid.copy()
+    elif method in {"traffic", "traffic_aware", "seed"}:
+        assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
+    else:
+        raise ValueError(f"[export_layout_input] unsupported layout_seed.method={method!r}")
+
+    bad = assign_seed[(assign_seed < 0) | (assign_seed >= Ns)]
+    if bad.size > 0:
+        raise ValueError(
+            f"[export_layout_input] assign_seed has invalid site ids: {np.unique(bad)[:8]} Ns={Ns}"
+        )
+
+    micro_enabled = bool(getattr(seed_cfg, "enable_micro_place", False)) if seed_cfg is not None else False
+    micro_steps = int(getattr(seed_cfg, "micro_place_steps", 0)) if seed_cfg is not None else 0
+    if micro_enabled and micro_steps > 0:
+        layout_state.assign = assign_seed
+        assign_seed, micro_stats = _micro_place_seed(
+            assign_seed,
+            sites_xy,
+            baseline_eval,
+            layout_state,
+            traffic,
+            steps=micro_steps,
+            T0=float(getattr(seed_cfg, "micro_place_T0", 1.0)),
+            alpha=float(getattr(seed_cfg, "micro_place_alpha", 0.995)),
+            rng=rng,
+        )
+    else:
+        micro_stats = {
+            "skipped": True,
+            "enable_micro_place": micro_enabled,
+            "micro_place_steps": micro_steps,
+        }
+
     layout_state.assign = assign_seed
-    assign_seed, micro_stats = _micro_place_seed(assign_seed, sites_xy, baseline_eval, layout_state, traffic, rng=rng)
 
     baseline = {
         "assign_grid": assign_grid.tolist(),
