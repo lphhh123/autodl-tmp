@@ -176,14 +176,18 @@ def _export_layout_input(
         grid_pitch_mm=None,
         seed=int(seed),
     )
-    S = cfg.hw.num_slots
+    S = int(cfg.hw.num_slots)
     Ns = sites_xy.shape[0]
     assign_grid = np.arange(S, dtype=int) % Ns
 
     eff_specs = chiplet_slots(hard=False)["eff_specs"]
     chip_tdp = eff_specs["tdp_w"].detach().cpu().numpy().astype(float)
 
-    traffic = mapping_solver.build_traffic_matrix(segments, mapping).cpu().numpy().astype(float)
+    traffic = mapping_solver.build_traffic_matrix(segments, mapping, num_slots=S).cpu().numpy().astype(float)
+    if traffic.shape != (S, S):
+        raise ValueError(
+            f"[export_layout_input] traffic must be (S,S)=({S},{S}), got {traffic.shape}"
+        )
     sigma_mm = float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0
     rng = np.random.default_rng(seed)
     baseline_eval = LayoutEvaluator(
