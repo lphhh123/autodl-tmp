@@ -126,7 +126,13 @@ class MappingSolver:
             b = mapping[k + 1]
             if a == b:
                 continue
-            traffic[a, b] += float(segments[k].traffic_out_bytes)
+            i = slot_to_idx.get(a)
+            j = slot_to_idx.get(b)
+            if i is None or j is None:
+                raise ValueError(
+                    f"[build_traffic_matrix] slot id missing in slot_ids; mapping[{k}]={a}, mapping[{k+1}]={b}, slot_ids={slot_ids[:8]}"
+                )
+            traffic[i, j] += float(getattr(segments[k], "traffic_out_bytes", 0.0))
         return traffic
 
     def _violates_mem(self, mapping: List[int], k_idx: int, new_d: int, mem_mb: torch.Tensor, eff_specs: Dict[str, torch.Tensor]) -> bool:
