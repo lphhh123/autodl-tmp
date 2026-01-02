@@ -74,6 +74,8 @@ def _state_summary(
     assign: np.ndarray,
     site_to_region: np.ndarray,
     chip_tdp: Optional[np.ndarray],
+    clusters: List[Cluster],
+    regions,
 ) -> Dict:
     pairs = _compute_top_pairs(traffic_sym, 5)
     hot_slots = []
@@ -86,6 +88,10 @@ def _state_summary(
         "top_hot_pairs": [{"i": int(i), "j": int(j), "traffic": float(t)} for i, j, t in pairs],
         "top_hot_slots": hot_slots,
         "hint": "prefer swap on hot pairs; push high-tdp outward; avoid duplicate sites",
+        "S": int(traffic_sym.shape[0]),
+        "Ns": int(len(site_to_region)),
+        "num_clusters": int(len(clusters)),
+        "num_regions": int(len(regions)),
     }
 
 
@@ -252,7 +258,14 @@ def run_detailed_place(
             actions: List[Dict] = []
             if use_llm and llm_provider is not None:
                 ss = _state_summary(
-                    eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region, chip_tdp
+                    eval_out["comm_norm"],
+                    eval_out["therm_norm"],
+                    traffic_sym,
+                    assign,
+                    site_to_region,
+                    chip_tdp,
+                    clusters,
+                    regions,
                 )
                 raw_text = ""
                 try:
