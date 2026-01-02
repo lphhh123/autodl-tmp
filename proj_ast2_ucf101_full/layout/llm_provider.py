@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import requests
+from requests.exceptions import ReadTimeout
 
 
 class LLMProvider(ABC):
@@ -42,17 +43,35 @@ class VolcArkProvider(LLMProvider):
         self.last_usage = None
 
     def _build_payload(self, state_summary: Dict, k: int) -> Dict:
-        prompt = (
-            "You are a placement planner. Return JSON with actions."
-            " Only output JSON with key actions (list)."
+        system_prompt = (
+            "You are a placement planner. Return ONLY valid JSON without explanations. "
+            "Output either a JSON array of actions or {\"actions\":[...]}. Each action must be one of: "
+            "swap(i,j), relocate(i,site_id), cluster_move(cluster_id,region_id)."
         )
-        content = json.dumps({"hint": prompt, "state": state_summary, "k": k})
+        user_content = json.dumps({"state": state_summary, "k": k})
         return {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
             "max_completion_tokens": int(self.max_tokens),
             "response_format": {"type": "json_object"},
         }
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[str]:
+        if not text:
+            return None
+        start_candidates = [idx for idx in (text.find("[") , text.find("{")) if idx != -1]
+        if not start_candidates:
+            return None
+        start = min(start_candidates)
+        end_bracket = text.rfind("]")
+        end_brace = text.rfind("}")
+        end_candidates = [idx for idx in (end_bracket, end_brace) if idx != -1 and idx > start]
+        if not end_candidates:
+            return None
+        end = max(end_candidates)
+        snippet = text[start : end + 1]
+        return snippet if snippet else None
 
     def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
         url = f"{self.endpoint}/chat/completions"
@@ -111,6 +130,22 @@ class VolcArkProvider(LLMProvider):
                 actions = parsed.get("actions", [])
                 if isinstance(actions, list):
                     return actions
+
+                self.last_usage.update(
+                    {"ok": False, "error": "no_actions_list", "raw_preview": str(parsed)[:200]}
+                )
+                return []
+            except ReadTimeout as exc:
+                last_error = exc
+                self.last_usage = {
+                    "ok": False,
+                    "endpoint": self.endpoint,
+                    "url": url,
+                    "model": self.model,
+                    "key_len": len(self.api_key),
+                    "error": "ReadTimeout",
+                }
+                return []
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 resp_text = resp.text[:200] if "resp" in locals() else None
