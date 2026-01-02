@@ -96,7 +96,9 @@ class MappingSolver:
                 comm_ms += base_time + dist * distance_scale_ms
         return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
 
-    def build_traffic_matrix(self, segments: List[Segment], mapping: List[int]) -> torch.Tensor:
+    def build_traffic_matrix(
+        self, segments: List[Segment], mapping: List[int], num_slots: Optional[int] = None
+    ) -> torch.Tensor:
         """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
 
         For the common pipeline case, the traffic between segment k and k+1 is
@@ -104,11 +106,24 @@ class MappingSolver:
         simple to keep the contract explicit for downstream layout stages.
         """
 
-        if not segments:
-            return torch.zeros((0, 0), dtype=torch.float32)
-        S = max(mapping) + 1 if mapping else 0
+        if not segments or not mapping:
+            S = num_slots or 0
+            return torch.zeros((S, S), dtype=torch.float32)
+        if len(mapping) < len(segments):
+            # Fallback to the common prefix to avoid crashes when mapping/segments
+            # lengths get out of sync. This keeps layout export best-effort while
+            # we align upstream producers.
+            limit = len(mapping)
+        else:
+            limit = len(segments)
+        if num_slots is not None:
+            S = num_slots
+        elif mapping:
+            S = max(mapping) + 1
+        else:
+            S = 0
         traffic = torch.zeros((S, S), dtype=torch.float32)
-        for k in range(len(segments) - 1):
+        for k in range(limit - 1):
             a = mapping[k]
             b = mapping[k + 1]
             if a == b:
