@@ -25,12 +25,20 @@ class HeuristicProvider(LLMProvider):
 
 
 class VolcArkProvider(LLMProvider):
-    def __init__(self, timeout_sec: int = 30, max_retry: int = 2):
-        self.endpoint = os.getenv("VOLC_ARK_ENDPOINT")
-        self.api_key = os.getenv("VOLC_ARK_API_KEY")
-        self.model = os.getenv("VOLC_ARK_MODEL")
+    def __init__(self, timeout_sec: int = 30, max_retry: int = 2, max_tokens: int = 1024):
+        self.endpoint = (os.getenv("VOLC_ARK_ENDPOINT") or "https://ark.cn-beijing.volces.com/api/v3").strip()
+        self.model = (os.getenv("VOLC_ARK_MODEL") or "").strip()
+        self.api_key = (os.getenv("VOLC_ARK_API_KEY") or os.getenv("ARK_API_KEY") or "").strip()
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
+        self.max_tokens = int(max_tokens)
+        # allow users to pass a full /chat/completions url and normalize to base
+        if self.endpoint.rstrip("/").endswith("/chat/completions"):
+            self.endpoint = self.endpoint.rstrip("/")[:-len("/chat/completions")]
+        self.endpoint = self.endpoint.rstrip("/")
+        # handle keys provided as "Bearer xxx"
+        if self.api_key.lower().startswith("bearer "):
+            self.api_key = self.api_key[7:].strip()
         self.last_usage = None
 
     def _build_payload(self, state_summary: Dict, k: int) -> Dict:
@@ -42,42 +50,83 @@ class VolcArkProvider(LLMProvider):
         return {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
+            "max_completion_tokens": int(self.max_tokens),
             "response_format": {"type": "json_object"},
         }
 
     def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+        url = f"{self.endpoint}/chat/completions"
         if not self.endpoint or not self.api_key or not self.model:
-            self.last_usage = {"ok": False, "skipped": True, "reason": "VOLC_ARK credentials missing"}
+            self.last_usage = {
+                "ok": False,
+                "skipped": True,
+                "reason": "VOLC_ARK credentials missing",
+                "endpoint": self.endpoint,
+                "url": url,
+                "model": self.model,
+                "key_len": len(self.api_key),
+            }
             return []
+
         payload = self._build_payload(state_summary, k)
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
         last_error = None
         for _ in range(self.max_retry + 1):
             try:
                 resp = requests.post(
-                    f"{self.endpoint}/chat/completions",
+                    url,
                     json=payload,
+                    headers=headers,
                     timeout=self.timeout_sec,
                 )
-                resp.raise_for_status()
+                self.last_usage = {
+                    "endpoint": self.endpoint,
+                    "url": url,
+                    "model": self.model,
+                    "key_len": len(self.api_key),
+                    "request_bytes": len(json.dumps(payload)),
+                    "status_code": resp.status_code,
+                }
+                if resp.status_code != 200:
+                    self.last_usage.update({"ok": False, "resp": resp.text[:200]})
+                    last_error = Exception(f"HTTP {resp.status_code}")
+                    continue
+
                 data = resp.json()
                 usage = data.get("usage", {})
-                self.last_usage = {
-                    "model": self.model,
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                    "total_tokens": usage.get("total_tokens"),
-                    "request_bytes": len(json.dumps(payload)),
-                    "response_bytes": len(resp.content),
-                }
+                self.last_usage.update(
+                    {
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                        "total_tokens": usage.get("total_tokens"),
+                        "response_bytes": len(resp.content),
+                        "ok": True,
+                    }
+                )
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
                 parsed = json.loads(content)
                 actions = parsed.get("actions", [])
                 if isinstance(actions, list):
-                    self.last_usage["ok"] = True
                     return actions
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                resp_text = resp.text[:200] if "resp" in locals() else None
+                self.last_usage = {
+                    "ok": False,
+                    "endpoint": self.endpoint,
+                    "url": url,
+                    "model": self.model,
+                    "key_len": len(self.api_key),
+                    "error": repr(exc),
+                }
+                if resp_text is not None:
+                    self.last_usage["resp"] = resp_text
                 continue
-        self.last_usage = {"ok": False, "error": str(last_error) if last_error else "unknown"}
+        if self.last_usage is None:
+            self.last_usage = {"ok": False}
+        if last_error:
+            self.last_usage.setdefault("error", repr(last_error))
         return []
