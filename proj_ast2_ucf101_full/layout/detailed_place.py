@@ -247,7 +247,6 @@ def run_detailed_place(
             use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
 
             actions: List[Dict] = []
-            raw_text: str = ""
             if use_llm and llm_provider is not None:
                 ss = _state_summary(
                     eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region, chip_tdp
@@ -260,23 +259,8 @@ def run_detailed_place(
                         usage_fp.flush()
                 except Exception as e:
                     # fall back to heuristic sampling for this step
-                    if usage_fp and hasattr(llm_provider, "last_usage"):
-                        last_usage = getattr(llm_provider, "last_usage")
-                        if isinstance(last_usage, dict):
-                            raw_text = str(last_usage.get("raw_preview", ""))
-                        json.dump(last_usage, usage_fp)
-                        usage_fp.write("\n")
-                        usage_fp.flush()
                     if usage_fp:
-                        json.dump(
-                            {
-                                "event": "llm_step_failed",
-                                "step": int(step),
-                                "error": repr(e),
-                                "raw_preview": raw_text[:200],
-                            },
-                            usage_fp,
-                        )
+                        json.dump({"event": "llm_step_failed", "step": int(step), "error": repr(e)}, usage_fp)
                         usage_fp.write("\n")
                         usage_fp.flush()
                     actions = []

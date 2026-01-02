@@ -26,7 +26,7 @@ class HeuristicProvider(LLMProvider):
 
 
 class VolcArkProvider(LLMProvider):
-    def __init__(self, timeout_sec: int = 30, max_retry: int = 2, max_tokens: int = 256):
+    def __init__(self, timeout_sec: int = 30, max_retry: int = 2, max_tokens: int = 1024):
         self.endpoint = (os.getenv("VOLC_ARK_ENDPOINT") or "https://ark.cn-beijing.volces.com/api/v3").strip()
         self.model = (os.getenv("VOLC_ARK_MODEL") or "").strip()
         self.api_key = (os.getenv("VOLC_ARK_API_KEY") or os.getenv("ARK_API_KEY") or "").strip()
@@ -51,12 +51,9 @@ class VolcArkProvider(LLMProvider):
         user_content = json.dumps({"state": state_summary, "k": k})
         return {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
+            "messages": [{"role": "user", "content": content}],
             "max_completion_tokens": int(self.max_tokens),
-            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
         }
 
     @staticmethod
@@ -103,7 +100,7 @@ class VolcArkProvider(LLMProvider):
                     url,
                     json=payload,
                     headers=headers,
-                    timeout=(5, self.timeout_sec),
+                    timeout=self.timeout_sec,
                 )
                 self.last_usage = {
                     "endpoint": self.endpoint,
@@ -126,39 +123,13 @@ class VolcArkProvider(LLMProvider):
                         "completion_tokens": usage.get("completion_tokens"),
                         "total_tokens": usage.get("total_tokens"),
                         "response_bytes": len(resp.content),
+                        "ok": True,
                     }
                 )
-                message = data.get("choices", [{}])[0].get("message", {})
-                text = (message.get("content") or "").strip()
-                if not text:
-                    text = (message.get("reasoning_content") or "").strip()
-                raw_preview = text
-                extracted = self._extract_json(text)
-                if not extracted:
-                    self.last_usage.update(
-                        {
-                            "ok": False,
-                            "error": "no_json_fragment",
-                            "raw_preview": raw_preview[:200],
-                        }
-                    )
-                    return []
-
-                try:
-                    parsed = json.loads(extracted)
-                except json.JSONDecodeError as exc:  # noqa: BLE001
-                    self.last_usage.update(
-                        {
-                            "ok": False,
-                            "error": f"json_decode:{exc.msg}",
-                            "raw_preview": extracted[:200],
-                        }
-                    )
-                    return []
-
-                actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                parsed = json.loads(content)
+                actions = parsed.get("actions", [])
                 if isinstance(actions, list):
-                    self.last_usage.update({"ok": True})
                     return actions
 
                 self.last_usage.update(
@@ -189,8 +160,6 @@ class VolcArkProvider(LLMProvider):
                 }
                 if resp_text is not None:
                     self.last_usage["resp"] = resp_text
-                if raw_preview:
-                    self.last_usage["raw_preview"] = raw_preview[:200]
                 continue
         if self.last_usage is None:
             self.last_usage = {"ok": False}
