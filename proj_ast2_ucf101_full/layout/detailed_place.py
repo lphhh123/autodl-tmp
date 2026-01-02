@@ -202,11 +202,11 @@ def run_detailed_place(
     planner_cfg = _cfg_get(cfg, "planner", {"type": "heuristic"}) or {"type": "heuristic"}
     planner_type = str(_cfg_get(planner_cfg, "type", "heuristic"))
     mixed_cfg = _cfg_get(planner_cfg, "mixed", {}) or {}
-    mixed_every = int(_cfg_get(mixed_cfg, "every_n_steps", 50)) if planner_type == "mixed" else 0
+    mixed_every = int(_cfg_get(mixed_cfg, "every_n_steps", 200)) if planner_type == "mixed" else 0
     k_actions = int(_cfg_get(mixed_cfg, "k_actions", 4))
 
-    timeout_sec = int(_cfg_get(planner_cfg, "timeout_sec", 30))
-    max_retry = int(_cfg_get(planner_cfg, "max_retry", 2))
+    timeout_sec = int(_cfg_get(planner_cfg, "timeout_sec", 90))
+    max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
     stage_label = str(_cfg_get(cfg, "stage_label", f"detailed_{planner_type}"))
 
     # Providers: always have heuristic; LLM optional
