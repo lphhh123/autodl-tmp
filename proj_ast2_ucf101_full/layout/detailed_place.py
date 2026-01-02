@@ -48,6 +48,28 @@ def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: List
         assign[slot] = site
 
 
+def _init_provider(planner_cfg: Dict) -> Tuple[Optional[LLMProvider], Optional[str]]:
+    """Initialize LLM provider for llm/mixed planners.
+
+    Returns a tuple of (provider or None, init_error or None). Initialization
+    errors are captured instead of raised so callers can log the failure and
+    fall back to heuristic sampling without crashing.
+    """
+
+    planner_type = str(planner_cfg.get("type", "heuristic")).lower()
+    if planner_type not in {"llm", "mixed"}:
+        return None, None
+
+    try:
+        provider = VolcArkProvider(
+            timeout_sec=int(planner_cfg.get("timeout_sec", 30)),
+            max_retry=int(planner_cfg.get("max_retry", 2)),
+        )
+        return provider, None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def _sample_action(
     cfg: Dict,
     traffic_sym: np.ndarray,
@@ -162,6 +184,19 @@ def run_detailed_place(
     alpha = float(cfg.get("sa_alpha", 0.999))
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
+
+    if usage_fp and planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error:
+        json.dump(
+            {
+                "event": "llm_init_failed",
+                "planner_type": planner_type,
+                "error": llm_init_error,
+                "fallback": True,
+            },
+            usage_fp,
+        )
+        usage_fp.write("\n")
+        usage_fp.flush()
     with trace_path.open("w", encoding="utf-8") as f_trace:
         f_trace.write(
             "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms\n"
