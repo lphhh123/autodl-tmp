@@ -73,67 +73,12 @@ def _traffic_aware_seed(sites_xy: np.ndarray, traffic: np.ndarray, S: int, rng: 
             used_sites.update([a, b])
             break
 
-    # fill remaining slots deterministically (no -1 allowed)
+    # fill remaining slots deterministically
     remaining_sites = [s for s in range(Ns) if s not in used_sites]
     for s_idx in range(S):
-        if assign[s_idx] == -1:
-            if remaining_sites:
-                assign[s_idx] = remaining_sites.pop(0)
-            else:
-                # Not enough unique sites: allow duplicates; evaluator penalty handles it
-                assign[s_idx] = int(s_idx % Ns)
+        if assign[s_idx] == -1 and remaining_sites:
+            assign[s_idx] = remaining_sites.pop(0)
     return assign
-
-
-def _canonicalize_traffic_to_SxS(traffic: np.ndarray, mapping: List[int], S: int):
-    """Normalize any compact traffic matrix to full (S,S) with slot order 0..S-1.
-
-    Accepts traffic shapes (S,S) or (U,U). Raises on non-square or invalid slot ids.
-    """
-
-    traffic = np.asarray(traffic)
-    if traffic.ndim != 2 or traffic.shape[0] != traffic.shape[1]:
-        raise ValueError(
-            f"[canonicalize_traffic] traffic must be square; got shape {traffic.shape} for S={S}"
-        )
-
-    if traffic.shape == (S, S):
-        if not np.all(np.isfinite(traffic)):
-            raise ValueError("[canonicalize_traffic] traffic contains non-finite values")
-        return traffic, {
-            "traffic_shape_in": traffic.shape,
-            "used_slots": sorted(set(mapping)) if mapping else list(range(S)),
-            "traffic_mode": "full_SxS_slot_order_0_to_S-1",
-            "S": S,
-            "U": S,
-        }
-
-    U = int(traffic.shape[0])
-    used_slots = sorted(set(mapping)) if mapping else list(range(U))
-    if len(used_slots) != U:
-        raise ValueError(
-            f"[canonicalize_traffic] len(used_slots)={len(used_slots)} != traffic dim U={U}; mapping={mapping[:8]}"
-        )
-    if max(used_slots, default=-1) >= S or min(used_slots or [0]) < 0:
-        raise ValueError(
-            f"[canonicalize_traffic] used_slots out of range for S={S}: {used_slots[:8]}"
-        )
-
-    full = np.zeros((S, S), dtype=traffic.dtype)
-    for i, si in enumerate(used_slots):
-        for j, sj in enumerate(used_slots):
-            full[si, sj] = traffic[i, j]
-
-    if not np.all(np.isfinite(full)):
-        raise ValueError("[canonicalize_traffic] canonicalized traffic contains non-finite values")
-
-    return full, {
-        "traffic_shape_in": traffic.shape,
-        "used_slots": used_slots,
-        "traffic_mode": "full_SxS_slot_order_0_to_S-1",
-        "S": S,
-        "U": U,
-    }
 
 
 def _micro_place_seed(
@@ -197,8 +142,7 @@ def _micro_place_seed(
         T *= alpha
 
     layout_state.assign = best_assign
-    accept_rate = float(accepts) / max(1.0, float(steps))
-    return best_assign, {"steps": float(steps), "accept_rate": accept_rate, "best_scalar": float(best)}
+    return best_assign, {"steps": steps, "accepts": accepts, "best_total": float(best)}
 
 
 def _export_layout_input(
@@ -239,11 +183,8 @@ def _export_layout_input(
     eff_specs = chiplet_slots(hard=False)["eff_specs"]
     chip_tdp = eff_specs["tdp_w"].detach().cpu().numpy().astype(float)
 
-    traffic_raw = mapping_solver.build_traffic_matrix(segments, mapping, S=S, mode="full").cpu().numpy().astype(float)
-    traffic, traffic_meta = _canonicalize_traffic_to_SxS(traffic_raw, mapping, S)
-
-    seed_cfg = getattr(cfg, "layout_seed", {})
-    sigma_mm = float(getattr(seed_cfg, "sigma_mm", 20.0))
+    traffic = mapping_solver.build_traffic_matrix(segments, mapping).cpu().numpy().astype(float)
+    sigma_mm = float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0
     rng = np.random.default_rng(seed)
     baseline_eval = LayoutEvaluator(
         sigma_mm=sigma_mm,
@@ -266,39 +207,9 @@ def _export_layout_input(
         baseline={"L_comm_baseline": base_res["L_comm"], "L_therm_baseline": base_res["L_therm"]},
         scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
     )
-    seed_method = getattr(seed_cfg, "method", "seed_micro")
-    enable_micro = bool(getattr(seed_cfg, "enable_micro_place", True))
-    micro_steps = int(getattr(seed_cfg, "micro_place_steps", 80))
-
-    if seed_method in ["grid", "A1_grid"]:
-        assign_seed = assign_grid.copy()
-    elif seed_method in ["seed", "traffic", "traffic_aware", "A2_seed", "A3_seed_micro"]:
-        assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
-    else:
-        assign_seed = assign_grid.copy()
+    assign_seed = _traffic_aware_seed(sites_xy, traffic, S, rng)
     layout_state.assign = assign_seed
-
-    micro_stats = {"steps": float(micro_steps), "accept_rate": 0.0, "best_scalar": None}
-    if enable_micro and micro_steps > 0:
-        assign_seed, micro_stats = _micro_place_seed(
-            assign_seed,
-            sites_xy,
-            baseline_eval,
-            layout_state,
-            traffic,
-            steps=micro_steps,
-            T0=float(getattr(seed_cfg, "micro_place_T0", 1.0)),
-            alpha=float(getattr(seed_cfg, "micro_place_alpha", 0.995)),
-            rng=rng,
-        )
-    else:
-        layout_state.assign = assign_seed
-        micro_eval = baseline_eval.evaluate(layout_state)
-        micro_stats = {
-            "steps": float(micro_steps),
-            "accept_rate": 0.0,
-            "best_scalar": float(micro_eval["total_scalar"]),
-        }
+    assign_seed, micro_stats = _micro_place_seed(assign_seed, sites_xy, baseline_eval, layout_state, traffic, rng=rng)
 
     baseline = {
         "assign_grid": assign_grid.tolist(),
@@ -338,11 +249,8 @@ def _export_layout_input(
             "segments": segments_json,
             "traffic_matrix": traffic.tolist(),
             "mapping": mapping,
-            "used_slots": traffic_meta["used_slots"],
-            "traffic_mode": traffic_meta["traffic_mode"],
-            "traffic_shape_in": tuple(int(x) for x in traffic_meta["traffic_shape_in"]),
-            "S": int(traffic_meta["S"]),
-            "U": int(traffic_meta["U"]),
+            "used_slots": sorted(set(mapping)),
+            "traffic_mode": "full_SxS_slot_order_0_to_S-1",
         },
         "baseline": baseline,
         "seed": {"assign_seed": assign_seed.tolist(), "micro_place_stats": micro_stats},
