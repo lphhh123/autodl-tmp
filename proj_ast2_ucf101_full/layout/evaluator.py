@@ -46,15 +46,37 @@ class LayoutEvaluator:
         return total
 
     def evaluate(self, st: LayoutState) -> Dict:
-        pos = st.sites_xy_mm[st.assign]
-        penalty_duplicate = 0.0
-        if len(np.unique(st.assign)) < len(st.assign):
-            penalty_duplicate = float(self.scalar_w.get("w_penalty", 1.0))
-        boundary_mask = np.linalg.norm(pos, axis=1) > (st.wafer_radius_mm + 1e-6)
-        penalty_boundary = float(boundary_mask.sum()) * self.scalar_w.get("w_penalty", 1.0)
+        assign = np.asarray(st.assign, dtype=int)
+        if assign.shape[0] != int(st.S):
+            raise ValueError(f"[LayoutEvaluator] len(assign)={assign.shape[0]} != S={st.S}")
 
-        L_comm = self._compute_comm(pos, st.traffic_bytes)
-        L_therm = self._compute_therm(pos, st.chip_tdp_w)
+        bad = assign[(assign < 0) | (assign >= int(st.Ns))]
+        if bad.size > 0:
+            raise ValueError(
+                f"[LayoutEvaluator] assign contains invalid site_id(s): {np.unique(bad)[:8].tolist()} (Ns={st.Ns})"
+            )
+
+        traffic = np.asarray(st.traffic_bytes)
+        if traffic.shape != (int(st.S), int(st.S)):
+            raise ValueError(
+                f"[LayoutEvaluator] traffic_bytes shape {traffic.shape} != (S,S)=({st.S},{st.S}). "
+                f"Fix exporter to inflate compact traffic to SxS before calling evaluate()."
+            )
+
+        chip_tdp = np.asarray(st.chip_tdp_w)
+        if chip_tdp.shape[0] != int(st.S):
+            raise ValueError(f"[LayoutEvaluator] len(chip_tdp_w)={chip_tdp.shape[0]} != S={st.S}")
+
+        pos = st.sites_xy_mm[assign]
+        penalty_duplicate = 0.0
+        dup_count = len(assign) - len(np.unique(assign))
+        if dup_count > 0:
+            penalty_duplicate = float(dup_count) ** 2
+        boundary_overflow = np.linalg.norm(pos, axis=1) - st.wafer_radius_mm
+        penalty_boundary = float(np.sum(np.maximum(boundary_overflow, 0.0) ** 2))
+
+        L_comm = self._compute_comm(pos, traffic)
+        L_therm = self._compute_therm(pos, chip_tdp)
         comm_norm = L_comm / (self.baseline.get("L_comm_baseline", 1e-9) + 1e-9)
         therm_norm = L_therm / (self.baseline.get("L_therm_baseline", 1e-9) + 1e-9)
         total = (

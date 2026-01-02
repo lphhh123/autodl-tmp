@@ -96,24 +96,90 @@ class MappingSolver:
                 comm_ms += base_time + dist * distance_scale_ms
         return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
 
-    def build_traffic_matrix(self, segments: List[Segment], mapping: List[int]) -> torch.Tensor:
-        """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
+    def build_traffic_matrix(
+        self,
+        segments: List[Segment],
+        mapping: List[int],
+        num_slots: Optional[int] = None,
+        return_meta: bool = False,
+    ):
+        """Return canonical (S,S) traffic aligned to slot ids 0..S-1.
 
-        For the common pipeline case, the traffic between segment k and k+1 is
-        attributed to their mapped slots. This method intentionally stays
-        simple to keep the contract explicit for downstream layout stages.
+        If legacy computation yields a compact (U,U), inflate deterministically
+        using slot_ids=sorted(unique(mapping)). No fallback rebuilds are allowed.
         """
 
-        if not segments:
-            return torch.zeros((0, 0), dtype=torch.float32)
-        S = max(mapping) + 1 if mapping else 0
-        traffic = torch.zeros((S, S), dtype=torch.float32)
-        for k in range(len(segments) - 1):
+        if mapping is None or len(mapping) == 0:
+            raise ValueError("[build_traffic_matrix] mapping is empty; cannot build traffic.")
+
+        mapping_i = [int(x) for x in mapping]
+        if num_slots is None:
+            num_slots = max(mapping_i) + 1
+        S = int(num_slots)
+        if S <= 0:
+            raise ValueError(f"[build_traffic_matrix] invalid num_slots={S}")
+
+        bad = [d for d in mapping_i if d < 0 or d >= S]
+        if bad:
+            raise ValueError(f"[build_traffic_matrix] mapping has out-of-range slot ids: {bad[:10]} (S={S})")
+
+        slot_ids = sorted(set(mapping_i))
+        U = len(slot_ids)
+        limit = min(len(mapping_i), len(segments))
+
+        traffic = self._build_traffic_legacy(segments, mapping_i, slot_ids, limit)
+        if not isinstance(traffic, torch.Tensor):
+            traffic = torch.tensor(traffic, dtype=torch.float32)
+        if traffic.dim() != 2 or traffic.shape[0] != traffic.shape[1]:
+            raise ValueError(f"[build_traffic_matrix] legacy traffic must be square, got {tuple(traffic.shape)}")
+
+        if tuple(traffic.shape) == (S, S):
+            traffic_full = traffic
+            compact_shape = (S, S)
+        elif tuple(traffic.shape) == (U, U):
+            traffic_full = traffic.new_zeros((S, S))
+            for a, sa in enumerate(slot_ids):
+                for b, sb in enumerate(slot_ids):
+                    traffic_full[sa, sb] = traffic[a, b]
+            compact_shape = (U, U)
+        else:
+            raise ValueError(
+                f"[build_traffic_matrix] legacy traffic shape {tuple(traffic.shape)} "
+                f"does not match (S,S)=({S},{S}) nor (U,U)=({U},{U}). Refuse to fallback."
+            )
+
+        meta = {
+            "traffic_is_canonical": True,
+            "traffic_slot_ids": slot_ids,
+            "traffic_compact_shape": list(compact_shape),
+            "traffic_shape_in": list(traffic.shape),
+            "traffic_mode": "full_SxS_slot_order_0_to_S-1",
+            "S": S,
+            "U": U,
+        }
+
+        return (traffic_full, meta) if return_meta else traffic_full
+
+    def _build_traffic_legacy(
+        self, segments: List[Segment], mapping: List[int], slot_ids: List[int], limit: int
+    ) -> torch.Tensor:
+        """Original traffic accumulation on compact slots (U,U)."""
+
+        U = len(slot_ids)
+        traffic = torch.zeros((U, U), dtype=torch.float32)
+        slot_to_idx = {slot: idx for idx, slot in enumerate(slot_ids)}
+        for k in range(max(0, limit - 1)):
             a = mapping[k]
             b = mapping[k + 1]
             if a == b:
                 continue
-            traffic[a, b] += float(segments[k].traffic_out_bytes)
+            i = slot_to_idx.get(a)
+            j = slot_to_idx.get(b)
+            if i is None or j is None:
+                raise ValueError(
+                    f"[build_traffic_matrix] slot id missing in slot_ids; mapping[{k}]={a}, mapping[{k+1}]={b}, slot_ids={slot_ids[:8]}"
+                )
+            traffic[i, j] += float(getattr(segments[k], "traffic_out_bytes", 0.0))
         return traffic
 
     def _violates_mem(self, mapping: List[int], k_idx: int, new_d: int, mem_mb: torch.Tensor, eff_specs: Dict[str, torch.Tensor]) -> bool:

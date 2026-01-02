@@ -53,9 +53,26 @@ class ParetoSet:
         if not self.points:
             return (float("inf"), float("inf"), {})
         arr = self.as_array()
-        origin = arr.min(axis=0)
-        diff = arr - origin
-        dist = np.linalg.norm(diff, axis=1)
-        idx = int(dist.argmin())
-        p = self.points[idx]
+        # find anchor points on each axis
+        anchor_comm_idx = int(arr[:, 0].argmin())
+        anchor_therm_idx = int(arr[:, 1].argmin())
+        a = arr[anchor_comm_idx]
+        b = arr[anchor_therm_idx]
+        if np.allclose(a, b):
+            p = self.points[anchor_comm_idx]
+            return p.comm_norm, p.therm_norm, p.payload
+        # line from a to b, compute perpendicular distance for each point
+        ab = b - a
+        ab_norm = np.linalg.norm(ab)
+        max_dist = -1.0
+        best_idx = anchor_comm_idx
+        for idx, pt in enumerate(arr):
+            ap = pt - a
+            proj = np.dot(ap, ab) / (ab_norm + 1e-12)
+            closest = a + (proj / (ab_norm + 1e-12)) * ab
+            dist = np.linalg.norm(pt - closest)
+            if dist > max_dist:
+                max_dist = dist
+                best_idx = idx
+        p = self.points[best_idx]
         return p.comm_norm, p.therm_norm, p.payload
