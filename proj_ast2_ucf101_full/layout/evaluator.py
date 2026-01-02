@@ -69,7 +69,7 @@ class LayoutEvaluator:
 
         pos = st.sites_xy_mm[assign]
         penalty_duplicate = 0.0
-        dup_count = len(assign) - len(np.unique(assign))
+        dup_count = len(st.assign) - len(np.unique(st.assign))
         if dup_count > 0:
             penalty_duplicate = float(dup_count) ** 2
         boundary_overflow = np.linalg.norm(pos, axis=1) - st.wafer_radius_mm
