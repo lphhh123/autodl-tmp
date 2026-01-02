@@ -17,6 +17,7 @@ from layout.legalize import legalize_assign
 from layout.pareto import ParetoSet
 from layout.regions import build_regions
 from layout.sites import build_sites
+from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
 
@@ -106,6 +107,10 @@ def main():
         traffic_bytes=traffic,
         meta={"stage": "seed"},
     )
+    mapping_solver = MappingSolver(
+        strategy=str(getattr(getattr(cfg, "alt_opt", {}), "mapping_strategy", "greedy_local")),
+        mem_limit_factor=float(getattr(getattr(cfg, "alt_opt", {}), "mem_limit_factor", 1.0)),
+    )
     pareto = ParetoSet(
         eps_comm=float(cfg.pareto.get("eps_comm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
         eps_therm=float(cfg.pareto.get("eps_therm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
@@ -172,24 +177,41 @@ def main():
 
     # Stage5: detailed place
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-    result = run_detailed_place(
-        sites_xy=sites_xy,
-        assign_seed=assign_leg,
-        evaluator=evaluator,
-        layout_state=layout_state,
-        traffic_sym=traffic_sym,
-        site_to_region=site_to_region,
-        regions=regions,
-        clusters=clusters,
-        cluster_to_region=cluster_to_region,
-        pareto=pareto,
-        cfg=detailed_cfg,
-        trace_path=out_dir / "trace.csv",
-        seed_id=0,
-        chip_tdp=chip_tdp,
-        llm_usage_path=out_dir / "llm_usage.jsonl",
-    )
-    assign_final = result.assign
+    detailed_steps = int(detailed_cfg.get("steps", 0))
+    if detailed_steps <= 0:
+        layout_state.assign = assign_leg
+        legalize_eval = evaluator.evaluate(layout_state)
+        pareto.add(
+            legalize_eval["comm_norm"],
+            legalize_eval["therm_norm"],
+            {
+                "assign": assign_leg.copy(),
+                "total_scalar": legalize_eval["total_scalar"],
+                "stage": "legalize",
+                "iter": 0,
+                "seed": 0,
+            },
+        )
+        assign_final = assign_leg
+    else:
+        result = run_detailed_place(
+            sites_xy=sites_xy,
+            assign_seed=assign_leg,
+            evaluator=evaluator,
+            layout_state=layout_state,
+            traffic_sym=traffic_sym,
+            site_to_region=site_to_region,
+            regions=regions,
+            clusters=clusters,
+            cluster_to_region=cluster_to_region,
+            pareto=pareto,
+            cfg=detailed_cfg,
+            trace_path=out_dir / "trace.csv",
+            seed_id=0,
+            chip_tdp=chip_tdp,
+            llm_usage_path=out_dir / "llm_usage.jsonl",
+        )
+        assign_final = result.assign
 
     # Stage6: alt-opt (optional)
     mapping_final = layout_input["mapping"].get("mapping") if "mapping" in layout_input else None
@@ -197,8 +219,8 @@ def main():
         assign_final, mapping_final = run_alt_opt(
             rounds=int(cfg.alt_opt.get("rounds", 3)),
             mapping_solver=mapping_solver,
-            segments=[],
-            eff_specs={},
+            segments=segments,
+            mapping_init=mapping_current,
             traffic_sym=traffic_sym,
             sites_xy=sites_xy,
             assign_init=assign_final,
@@ -241,6 +263,10 @@ def main():
             "trace_csv": str((out_dir / "trace.csv").absolute()),
             "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
             "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
+        },
+        "alt_opt": {
+            "enabled": bool(cfg.alt_opt.get("enabled", False)) if hasattr(cfg, "alt_opt") else False,
+            "mapping_final": mapping_final,
         },
     }
     with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:

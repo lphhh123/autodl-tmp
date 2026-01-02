@@ -79,3 +79,14 @@ Artifacts produced per run (SPEC §8):
 - `layout_best.json` with Pareto summary and knee selection
 - `trace.csv`, `pareto_points.csv`, and `report.json`
 - `llm_usage.jsonl` when planner type is `mixed` or `llm`
+
+To quickly assert L4/L5 produced non-empty LLM logs:
+
+```bash
+for L in L4 L5; do
+  f="outputs/P3/A3/$L/llm_usage.jsonl"
+  test -f "$f" || { echo "MISS $f"; exit 1; }
+  test -s "$f" || { echo "EMPTY $f"; exit 1; }
+done
+echo "OK: LLM usage logs exist and non-empty."
+```

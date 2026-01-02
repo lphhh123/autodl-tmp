@@ -32,8 +32,6 @@ class VolcArkProvider(LLMProvider):
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
         self.last_usage = None
-        if not self.endpoint or not self.api_key or not self.model:
-            raise RuntimeError("VOLC Ark credentials missing in environment variables")
 
     def _build_payload(self, state_summary: Dict, k: int) -> Dict:
         prompt = (
@@ -48,6 +46,9 @@ class VolcArkProvider(LLMProvider):
         }
 
     def propose_actions(self, state_summary: Dict, k: int) -> List[Dict]:
+        if not self.endpoint or not self.api_key or not self.model:
+            self.last_usage = {"ok": False, "skipped": True, "reason": "VOLC_ARK credentials missing"}
+            return []
         payload = self._build_payload(state_summary, k)
         headers = {"Authorization": f"Bearer {self.api_key}"}
         last_error = None
@@ -73,8 +74,10 @@ class VolcArkProvider(LLMProvider):
                 parsed = json.loads(content)
                 actions = parsed.get("actions", [])
                 if isinstance(actions, list):
+                    self.last_usage["ok"] = True
                     return actions
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 continue
-        raise RuntimeError(f"Volc Ark call failed after retries: {last_error}")
+        self.last_usage = {"ok": False, "error": str(last_error) if last_error else "unknown"}
+        return []
