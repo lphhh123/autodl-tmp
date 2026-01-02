@@ -26,7 +26,7 @@ class HeuristicProvider(LLMProvider):
 
 
 class VolcArkProvider(LLMProvider):
-    def __init__(self, timeout_sec: int = 30, max_retry: int = 2, max_tokens: int = 1024):
+    def __init__(self, timeout_sec: int = 30, max_retry: int = 2, max_tokens: int = 256):
         self.endpoint = (os.getenv("VOLC_ARK_ENDPOINT") or "https://ark.cn-beijing.volces.com/api/v3").strip()
         self.model = (os.getenv("VOLC_ARK_MODEL") or "").strip()
         self.api_key = (os.getenv("VOLC_ARK_API_KEY") or os.getenv("ARK_API_KEY") or "").strip()
@@ -44,15 +44,18 @@ class VolcArkProvider(LLMProvider):
 
     def _build_payload(self, state_summary: Dict, k: int) -> Dict:
         system_prompt = (
-            "You are a placement planner. Return ONLY valid JSON without explanations. "
+            "You are a placement planner. Return ONLY valid JSON. No explanation. "
             "Output either a JSON array of actions or {\"actions\":[...]}. Each action must be one of: "
             "swap(i,j), relocate(i,site_id), cluster_move(cluster_id,region_id)."
         )
         user_content = json.dumps({"state": state_summary, "k": k})
         return {
             "model": self.model,
-            "messages": [{"role": "user", "content": content}],
-            "max_completion_tokens": int(self.max_tokens),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "max_completion_tokens": int(min(self.max_tokens, 256)),
             "response_format": {"type": "json_object"},
         }
 
@@ -94,47 +97,76 @@ class VolcArkProvider(LLMProvider):
         }
         last_error = None
         raw_preview: str = ""
+        request_bytes = len(json.dumps(payload))
         for _ in range(self.max_retry + 1):
             try:
+                resp = None
                 resp = requests.post(
                     url,
                     json=payload,
                     headers=headers,
                     timeout=self.timeout_sec,
                 )
-                self.last_usage = {
+                base_usage = {
                     "endpoint": self.endpoint,
                     "url": url,
                     "model": self.model,
                     "key_len": len(self.api_key),
-                    "request_bytes": len(json.dumps(payload)),
+                    "request_bytes": request_bytes,
                     "status_code": resp.status_code,
                 }
                 if resp.status_code != 200:
-                    self.last_usage.update({"ok": False, "resp": resp.text[:200]})
+                    self.last_usage = {**base_usage, "ok": False, "resp": resp.text[:200]}
                     last_error = Exception(f"HTTP {resp.status_code}")
                     continue
 
                 data = resp.json()
                 usage = data.get("usage", {})
-                self.last_usage.update(
-                    {
+                msg = (data.get("choices") or [{}])[0].get("message", {})
+                text = (msg.get("content") or "").strip()
+                if not text:
+                    text = (msg.get("reasoning_content") or "").strip()
+                raw_preview = text[:200]
+                json_snippet = self._extract_json(text)
+                if not json_snippet:
+                    last_error = Exception("no_json_found")
+                    self.last_usage = {
+                        **base_usage,
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                        "total_tokens": usage.get("total_tokens"),
+                        "response_bytes": len(resp.content),
+                        "ok": False,
+                        "error": "no_json_found",
+                        "raw_preview": raw_preview,
+                    }
+                    continue
+
+                parsed = json.loads(json_snippet)
+                actions = parsed.get("actions", parsed if isinstance(parsed, list) else [])
+                if isinstance(actions, list):
+                    self.last_usage = {
+                        **base_usage,
                         "prompt_tokens": usage.get("prompt_tokens"),
                         "completion_tokens": usage.get("completion_tokens"),
                         "total_tokens": usage.get("total_tokens"),
                         "response_bytes": len(resp.content),
                         "ok": True,
+                        "raw_preview": raw_preview,
+                        "n_actions": len(actions),
                     }
-                )
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-                parsed = json.loads(content)
-                actions = parsed.get("actions", [])
-                if isinstance(actions, list):
                     return actions
 
-                self.last_usage.update(
-                    {"ok": False, "error": "no_actions_list", "raw_preview": str(parsed)[:200]}
-                )
+                self.last_usage = {
+                    **base_usage,
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "total_tokens": usage.get("total_tokens"),
+                    "response_bytes": len(resp.content),
+                    "ok": False,
+                    "error": "no_actions_list",
+                    "raw_preview": raw_preview,
+                }
                 return []
             except ReadTimeout as exc:
                 last_error = exc
@@ -149,7 +181,7 @@ class VolcArkProvider(LLMProvider):
                 return []
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                resp_text = resp.text[:200] if "resp" in locals() else None
+                resp_text = resp.text[:200] if resp is not None else None
                 self.last_usage = {
                     "ok": False,
                     "endpoint": self.endpoint,
