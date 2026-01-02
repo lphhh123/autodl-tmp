@@ -183,6 +183,11 @@ def run_detailed_place(
     rng = np.random.default_rng(base_seed)
     random.seed(base_seed)
 
+    # ---- llm logging safety ----
+    raw_text: str = ""
+    llm_provider: Optional[LLMProvider] = None
+    llm_init_error: Optional[str] = None
+
     # ---- init assign ----
     assign = np.array(assign_seed, dtype=int).copy()
     layout_state.assign = assign
@@ -200,8 +205,6 @@ def run_detailed_place(
 
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
-    llm_provider: Optional[LLMProvider] = None
-    llm_init_error: Optional[str] = None
     if planner_type in ("llm", "mixed"):
         try:
             llm_provider = VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
@@ -251,16 +254,30 @@ def run_detailed_place(
                 ss = _state_summary(
                     eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region, chip_tdp
                 )
+                raw_text = ""
                 try:
                     actions = llm_provider.propose_actions(ss, k_actions) or []
                     if usage_fp and hasattr(llm_provider, "last_usage"):
-                        json.dump(getattr(llm_provider, "last_usage"), usage_fp)
+                        usage = dict(getattr(llm_provider, "last_usage") or {})
+                        raw_text = str(usage.get("raw_preview", ""))
+                        usage.setdefault("ok", True)
+                        usage.setdefault("n_actions", len(actions))
+                        usage["step"] = int(step)
+                        json.dump(usage, usage_fp)
                         usage_fp.write("\n")
                         usage_fp.flush()
                 except Exception as e:
                     # fall back to heuristic sampling for this step
                     if usage_fp:
-                        json.dump({"event": "llm_step_failed", "step": int(step), "error": repr(e)}, usage_fp)
+                        json.dump(
+                            {
+                                "event": "llm_step_failed",
+                                "step": int(step),
+                                "error": repr(e),
+                                "raw_preview": raw_text[:200],
+                            },
+                            usage_fp,
+                        )
                         usage_fp.write("\n")
                         usage_fp.flush()
                     actions = []
