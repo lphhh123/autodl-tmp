@@ -157,13 +157,18 @@ def run_detailed_place(
     chip_tdp: Optional[np.ndarray] = None,
     llm_usage_path: Optional[Path] = None,
 ):
-    rng = np.random.default_rng(cfg.get("seed", 0) + seed_id)
+    base_seed = int(cfg.get("seed", 0)) + int(seed_id)
+    rng = np.random.default_rng(base_seed)
+    random.seed(base_seed)
     assign = assign_seed.copy()
     layout_state.assign = assign
+    assert layout_state.assign.shape[0] == layout_state.S
+    assert np.all(layout_state.assign >= 0)
     planner_cfg = cfg.get("planner", {"type": "heuristic"})
     planner = _init_provider(planner_cfg)
     mixed_every = int(planner_cfg.get("mixed", {}).get("every_n_steps", 50)) if planner_cfg.get("type") == "mixed" else None
     k_actions = int(planner_cfg.get("mixed", {}).get("k_actions", 4))
+    stage_label = str(cfg.get("stage_label", f"detailed_{planner_cfg.get('type','heuristic')}"))
 
     steps = int(cfg.get("steps", 0))
     T = float(cfg.get("sa_T0", 1.0))
