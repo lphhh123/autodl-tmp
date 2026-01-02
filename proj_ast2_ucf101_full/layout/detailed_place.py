@@ -104,19 +104,6 @@ def _sample_action(
     return {"op": "none"}
 
 
-def _init_provider(planner_cfg: Dict) -> LLMProvider:
-    planner_type = planner_cfg.get("type", "heuristic")
-    if planner_type == "llm":
-        return VolcArkProvider(
-            timeout_sec=int(planner_cfg.get("timeout_sec", 30)),
-            max_retry=int(planner_cfg.get("max_retry", 2)),
-        )
-    if planner_type == "mixed":
-        # mixed handled in caller by alternating heuristic/llm
-        return HeuristicProvider()
-    return HeuristicProvider()
-
-
 def _state_summary(
     comm_norm: float,
     therm_norm: float,
@@ -157,13 +144,28 @@ def run_detailed_place(
     chip_tdp: Optional[np.ndarray] = None,
     llm_usage_path: Optional[Path] = None,
 ):
-    rng = np.random.default_rng(cfg.get("seed", 0) + seed_id)
+    base_seed = int(cfg.get("seed", 0)) + int(seed_id)
+    rng = np.random.default_rng(base_seed)
+    random.seed(base_seed)
     assign = assign_seed.copy()
     layout_state.assign = assign
+    assert layout_state.assign.shape[0] == layout_state.S
+    assert np.all(layout_state.assign >= 0)
     planner_cfg = cfg.get("planner", {"type": "heuristic"})
-    planner = _init_provider(planner_cfg)
-    mixed_every = int(planner_cfg.get("mixed", {}).get("every_n_steps", 50)) if planner_cfg.get("type") == "mixed" else None
-    k_actions = int(planner_cfg.get("mixed", {}).get("k_actions", 4))
+    planner_type = str(planner_cfg.get("type", "heuristic")).lower()
+
+    heur_provider = HeuristicProvider()
+    llm_provider: Optional[LLMProvider] = None
+    if planner_type in ("llm", "mixed"):
+        llm_provider = VolcArkProvider(
+            timeout_sec=int(planner_cfg.get("timeout_sec", 30)),
+            max_retry=int(planner_cfg.get("max_retry", 2)),
+        )
+
+    mixed_cfg = planner_cfg.get("mixed", {}) if planner_type == "mixed" else {}
+    mixed_every = int(mixed_cfg.get("every_n_steps", 50)) if planner_type == "mixed" else 0
+    k_actions = int(mixed_cfg.get("k_actions", planner_cfg.get("k_actions", 4)))
+    stage_label = str(cfg.get("stage_label", f"detailed_{planner_type}"))
 
     steps = int(cfg.get("steps", 0))
     T = float(cfg.get("sa_T0", 1.0))
@@ -188,24 +190,54 @@ def run_detailed_place(
         )
         for step in range(steps):
             # choose action
-            if planner_cfg.get("type") == "mixed" and mixed_every and step % mixed_every == 0:
+            actions: List[Dict] = []
+            usage_entry: Optional[Dict] = None
+            attempt_llm = planner_type == "llm" or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+            ss: Optional[Dict] = None
+            if attempt_llm:
                 ss = _state_summary(
                     eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region, chip_tdp
                 )
-                try:
-                    actions = planner.propose_actions(ss, k_actions)
-                    if usage_fp and hasattr(planner, "last_usage"):
-                        json.dump(planner.last_usage, usage_fp)
-                        usage_fp.write("\n")
-                except Exception:
-                    actions = []
+                if llm_provider is None:
+                    usage_entry = {
+                        "step": step,
+                        "mode": planner_type,
+                        "ok": False,
+                        "skipped": True,
+                        "reason": "llm_provider_not_initialized",
+                    }
+                else:
+                    try:
+                        actions = llm_provider.propose_actions(ss, k_actions)
+                        usage_entry = {"step": step, "mode": planner_type}
+                        usage_info = getattr(llm_provider, "last_usage", None) or {}
+                        usage_entry.update(usage_info)
+                        usage_entry.setdefault("ok", bool(actions))
+                    except Exception as exc:  # noqa: BLE001
+                        usage_entry = {
+                            "step": step,
+                            "mode": planner_type,
+                            "ok": False,
+                            "error": str(exc),
+                        }
+                        if hasattr(llm_provider, "last_usage") and llm_provider.last_usage:
+                            usage_entry["usage"] = llm_provider.last_usage
+                if usage_fp:
+                    json.dump(usage_entry, usage_fp)
+                    usage_fp.write("\n")
+
+            if not actions:
+                if planner_type in ("heuristic", "mixed"):
+                    if ss is None:
+                        ss = _state_summary(
+                            eval_out["comm_norm"], eval_out["therm_norm"], traffic_sym, assign, site_to_region, chip_tdp
+                        )
+                    actions = heur_provider.propose_actions(ss, k_actions)
                 action = actions[0] if actions else _sample_action(
                     cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
                 )
             else:
-                action = _sample_action(
-                    cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
-                )
+                action = actions[0]
 
             new_assign = assign.copy()
             op = action.get("op", "none")
