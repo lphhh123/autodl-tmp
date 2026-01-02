@@ -1,8 +1,12 @@
 import json
+import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 
 def _write_layout_input(tmp: Path):
@@ -20,28 +24,72 @@ def _write_layout_input(tmp: Path):
 
 
 def _write_cfg(tmp: Path):
-    cfg = {
-        "layout_agent": {"version": "v4.3.2", "seed_list": [0], "export_trace": True},
-        "objective": {"sigma_mm": 20.0, "scalar_weights": {"w_comm": 0.7, "w_therm": 0.3, "w_penalty": 1000.0}},
-        "coarsen": {"target_num_clusters": 2, "min_merge_traffic": 0.0},
-        "regions": {"enabled": True, "ring_edges_ratio": [0.0, 1.0], "sectors_per_ring": [4], "ring_score": [1.0], "capacity_ratio": 1.0},
-        "global_place_region": {"lambda_graph": 1.0, "lambda_ring": 1.0, "lambda_cap": 1.0, "refine": {"enabled": False}},
-        "expand": {"intra_refine_steps": 2},
-        "pareto": {"enabled": True, "eps_comm": 0.0, "eps_therm": 0.0, "max_points": 50, "selection": "knee_point_v1"},
-        "detailed_place": {"enabled": True, "steps": 5, "sa_T0": 1.0, "sa_alpha": 0.99, "action_probs": {"swap": 0.6, "relocate": 0.3, "cluster_move": 0.1}},
-    }
-    import yaml
-
-    (tmp / "cfg.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    yaml_text = """
+layout_agent:
+  version: v4.3.2
+  seed_list: [0]
+  export_trace: true
+objective:
+  sigma_mm: 20.0
+  scalar_weights:
+    w_comm: 0.7
+    w_therm: 0.3
+    w_penalty: 1000.0
+coarsen:
+  target_num_clusters: 2
+  min_merge_traffic: 0.0
+regions:
+  enabled: true
+  ring_edges_ratio: [0.0, 1.0]
+  sectors_per_ring: [4]
+  ring_score: [1.0]
+  capacity_ratio: 1.0
+global_place_region:
+  lambda_graph: 1.0
+  lambda_ring: 1.0
+  lambda_cap: 1.0
+  refine:
+    enabled: false
+expand:
+  intra_refine_steps: 2
+pareto:
+  enabled: true
+  eps_comm: 0.0
+  eps_therm: 0.0
+  max_points: 50
+  selection: knee_point_v1
+detailed_place:
+  enabled: true
+  steps: 5
+  sa_T0: 1.0
+  sa_alpha: 0.99
+  action_probs:
+    swap: 0.6
+    relocate: 0.3
+    cluster_move: 0.1
+"""
+    (tmp / "cfg.yaml").write_text(yaml_text.strip() + "\n", encoding="utf-8")
 
 
 def test_smoke_run_layout_agent():
+    if importlib.util.find_spec("numpy") is None:
+        pytest.skip("numpy not installed in test environment")
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         _write_layout_input(tmp)
         _write_cfg(tmp)
         out_dir = tmp / "out"
-        cmd = [sys.executable, "-m", "scripts.run_layout_agent", "--layout_input", str(tmp / "layout_input.json"), "--cfg", str(tmp / "cfg.yaml"), "--out_dir", str(out_dir)]
+        cmd = [
+            sys.executable,
+            "-m",
+            "proj_ast2_ucf101_full.scripts.run_layout_agent",
+            "--layout_input",
+            str(tmp / "layout_input.json"),
+            "--cfg",
+            str(tmp / "cfg.yaml"),
+            "--out_dir",
+            str(out_dir),
+        ]
         subprocess.check_call(cmd)
         assert (out_dir / "layout_best.json").exists()
         assert (out_dir / "trace.csv").exists()

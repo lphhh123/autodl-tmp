@@ -1,0 +1,7 @@
+_base_: ./base_layout.yaml
+
+detailed_place:
+  planner:
+    type: heuristic
+alt_opt:
+  enabled: false
