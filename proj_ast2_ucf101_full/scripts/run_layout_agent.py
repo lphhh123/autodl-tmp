@@ -17,6 +17,7 @@ from layout.legalize import legalize_assign
 from layout.pareto import ParetoSet
 from layout.regions import build_regions
 from layout.sites import build_sites
+from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
 
@@ -105,6 +106,10 @@ def main():
         chip_tdp_w=chip_tdp,
         traffic_bytes=traffic,
         meta={"stage": "seed"},
+    )
+    mapping_solver = MappingSolver(
+        strategy=str(getattr(getattr(cfg, "alt_opt", {}), "mapping_strategy", "greedy_local")),
+        mem_limit_factor=float(getattr(getattr(cfg, "alt_opt", {}), "mem_limit_factor", 1.0)),
     )
     pareto = ParetoSet(
         eps_comm=float(cfg.pareto.get("eps_comm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
@@ -214,8 +219,8 @@ def main():
         assign_final, mapping_final = run_alt_opt(
             rounds=int(cfg.alt_opt.get("rounds", 3)),
             mapping_solver=mapping_solver,
-            segments=[],
-            eff_specs={},
+            segments=segments,
+            mapping_init=mapping_current,
             traffic_sym=traffic_sym,
             sites_xy=sites_xy,
             assign_init=assign_final,
@@ -258,6 +263,10 @@ def main():
             "trace_csv": str((out_dir / "trace.csv").absolute()),
             "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
             "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
+        },
+        "alt_opt": {
+            "enabled": bool(cfg.alt_opt.get("enabled", False)) if hasattr(cfg, "alt_opt") else False,
+            "mapping_final": mapping_final,
         },
     }
     with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
