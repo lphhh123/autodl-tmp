@@ -480,13 +480,30 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
 
     if export_layout_input:
         export_dir_path = Path(export_dir or "outputs/P3")
+        slot_out = chiplet_slots(hard=False)
+        eff_specs = slot_out["eff_specs"]
+        part_res = partitioner.plan(
+            model,
+            eff_specs,
+            use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+        )
+        canonical_segments = part_res["segments"]
+        mapping_result = mapping_solver.solve_mapping(
+            canonical_segments,
+            eff_specs,
+            hw_proxy,
+            layout_positions=wafer_layout.current_pos,
+            strategy=getattr(cfg.hw, "mapping_strategy", "greedy_local"),
+            distance_scale_ms=getattr(cfg.hw, "distance_scale_ms", 0.0),
+        )
+        mapping_canonical = mapping_result["mapping"]
         _export_layout_input(
             cfg=cfg,
             export_dir=export_dir_path,
             chiplet_slots=chiplet_slots,
             mapping_solver=mapping_solver,
-            segments=last_segments,
-            mapping=last_mapping,
+            segments=canonical_segments,
+            mapping=mapping_canonical,
             wafer_layout=wafer_layout,
             seed=int(getattr(cfg.train, "seed", 0)),
         )
