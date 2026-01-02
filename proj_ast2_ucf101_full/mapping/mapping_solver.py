@@ -107,8 +107,7 @@ class MappingSolver:
         """
 
         if not segments or not mapping:
-            S = num_slots or 0
-            return torch.zeros((S, S), dtype=torch.float32)
+            return torch.zeros((0, 0), dtype=torch.float32)
         if len(mapping) < len(segments):
             # Fallback to the common prefix to avoid crashes when mapping/segments
             # lengths get out of sync. This keeps layout export best-effort while
@@ -116,12 +115,7 @@ class MappingSolver:
             limit = len(mapping)
         else:
             limit = len(segments)
-        if num_slots is not None:
-            S = num_slots
-        elif mapping:
-            S = max(mapping) + 1
-        else:
-            S = 0
+        S = max(mapping) + 1
         traffic = torch.zeros((S, S), dtype=torch.float32)
         for k in range(limit - 1):
             a = mapping[k]

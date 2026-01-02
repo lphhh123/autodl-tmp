@@ -4,24 +4,24 @@ This file lists ready-to-run commands for Phase3 (training/export) and Phase-L (
 
 ## Phase3 (training + layout export)
 
-Each command exports `layout_input.json` to the specified directory after training. Adjust `--export_dir` to your preferred output location. The `--export_layout_input` flag also accepts an explicit `true/false` value if you prefer to pass one.
+Each command exports `layout_input.json` to the specified directory after training. Adjust `--export_dir` to your preferred output location.
 
 ```bash
 # A0: no layout loss, grid seed only
-    python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A0_nolayout.yaml \
-      --export_layout_input --export_dir outputs/P3/A0
+python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A0_nolayout.yaml \
+  --export_layout_input true --export_dir outputs/P3/A0
 
 # A1: grid seed baseline (layout step on, no micro-place)
-    python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A1_grid.yaml \
-      --export_layout_input --export_dir outputs/P3/A1
+python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A1_grid.yaml \
+  --export_layout_input true --export_dir outputs/P3/A1
 
 # A2: traffic-aware seed (no micro-place)
-    python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A2_seed.yaml \
-      --export_layout_input --export_dir outputs/P3/A2
+python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A2_seed.yaml \
+  --export_layout_input true --export_dir outputs/P3/A2
 
 # A3: traffic-aware seed + micro-place (default)
-    python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A3_seed_micro.yaml \
-      --export_layout_input --export_dir outputs/P3/A3
+python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A3_seed_micro.yaml \
+  --export_layout_input true --export_dir outputs/P3/A3
 ```
 
 Outputs for each run (per SPEC §12.1):
