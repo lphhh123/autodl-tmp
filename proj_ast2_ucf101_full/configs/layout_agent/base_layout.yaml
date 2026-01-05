@@ -61,6 +61,13 @@ detailed_place:
   hot_sampling:
     top_pairs_k: 20
     top_slots_k: 20
+  anti_oscillation:
+    tabu_tenure: 8
+    inverse_tenure: 6
+    per_slot_cooldown: 6
+    aspiration_delta: 0.0001
+    max_relocate_per_slot_in_final: 2
+    backtrack_window: 10
   planner:
     type: heuristic
 
