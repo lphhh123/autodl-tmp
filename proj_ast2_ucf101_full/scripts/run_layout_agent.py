@@ -68,12 +68,15 @@ def main():
     parser.add_argument("--layout_input", type=str, required=True)
     parser.add_argument("--cfg", type=str, required=True)
     parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     layout_input = load_layout_input(Path(args.layout_input))
     cfg = load_config(args.cfg)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    np.random.seed(args.seed)
 
     wafer_radius = float(layout_input["wafer"]["radius_mm"])
     sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
@@ -207,7 +210,7 @@ def main():
             pareto=pareto,
             cfg=detailed_cfg,
             trace_path=out_dir / "trace.csv",
-            seed_id=0,
+            seed_id=int(args.seed),
             chip_tdp=chip_tdp,
             llm_usage_path=out_dir / "llm_usage.jsonl",
         )

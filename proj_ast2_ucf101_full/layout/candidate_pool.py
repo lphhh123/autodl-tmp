@@ -1,6 +1,7 @@
 """Candidate pool construction for detailed placement LLM planner."""
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +20,7 @@ class Candidate:
     features: Dict[str, Any]
     est: Dict[str, float]
     score: float
+    signature: str
 
 
 def _cfg_get(cfg: Any, key: str, default=None):
@@ -58,17 +60,38 @@ def _apply_action(assign: np.ndarray, action: Dict[str, Any], clusters: List[Clu
                 assign[int(slot)] = int(site)
 
 
-def _op_signature(action: Dict[str, Any]) -> str:
+def _signature_for_action(action: Dict[str, Any], assign: Optional[np.ndarray] = None) -> str:
     op = action.get("op")
     if op == "swap":
         i = int(action.get("i", 0))
         j = int(action.get("j", 0))
         ii, jj = sorted([i, j])
-        return f"swap:{ii}-{jj}"
+        return f"swap:{ii}<->{jj}"
     if op == "relocate":
-        return f"reloc:{int(action.get('i', -1))}->{int(action.get('site_id', -1))}"
+        slot = int(action.get("i", -1))
+        from_site = action.get("from_site", None)
+        if from_site is None and assign is not None and 0 <= slot < len(assign):
+            from_site = int(assign[slot])
+        to_site = int(action.get("site_id", -1))
+        return f"rel:{slot}:{int(from_site) if from_site is not None else -1}->{to_site}"
     if op == "cluster_move":
-        return f"cluster:{int(action.get('cluster_id', -1))}->{int(action.get('region_id', -1))}"
+        return f"cl:{int(action.get('cluster_id', -1))}->{int(action.get('region_id', -1))}"
+    return "none"
+
+
+def inverse_signature(action: Dict[str, Any], assign: Optional[np.ndarray] = None) -> str:
+    op = action.get("op")
+    if op == "swap":
+        return _signature_for_action(action, assign)
+    if op == "relocate":
+        slot = int(action.get("i", -1))
+        from_site = action.get("from_site", None)
+        if from_site is None and assign is not None and 0 <= slot < len(assign):
+            from_site = int(assign[slot])
+        to_site = int(action.get("site_id", -1))
+        return f"rel:{slot}:{to_site}->{int(from_site) if from_site is not None else -1}"
+    if op == "cluster_move":
+        return _signature_for_action(action, assign)
     return "none"
 
 
@@ -124,6 +147,9 @@ def build_candidate_pool(
     raw_candidates: List[Candidate] = []
     candidate_id = 0
 
+    anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
+    max_relocate_final = int(_cfg_get(anti_cfg, "max_relocate_per_slot_in_final", 2))
+
     S = assign.shape[0]
     Ns = site_to_region.shape[0]
     max_r = float(np.max(np.linalg.norm(sites_xy, axis=1))) if len(sites_xy) else 1.0
@@ -163,7 +189,9 @@ def build_candidate_pool(
         d_comm_z = float(np.clip(d_comm / denom_comm, -1, 1))
         d_therm_z = float(np.clip(d_therm / denom_therm, -1, 1))
 
-        action_sig = _op_signature(action)
+        if action.get("op") == "relocate":
+            action["from_site"] = int(assign[int(action.get("i", -1))])
+        action_sig = _signature_for_action(action, assign)
         traffic_hint = _traffic_gain_hint(traffic_sym, sites_xy, assign, int(action.get("i", 0)), action.get("j"), action.get("site_id"))
 
         features = {
@@ -206,6 +234,7 @@ def build_candidate_pool(
             features=features,
             est=est_full,
             score=float(score),
+            signature=action_sig,
         )
         raw_candidates.append(cand)
         candidate_id += 1
@@ -306,6 +335,19 @@ def build_candidate_pool(
     topN = min(80, len(raw_candidates))
     candidates = raw_candidates[:topN]
 
+    relocate_by_slot: Dict[int, List[Candidate]] = {}
+    filtered_candidates: List[Candidate] = []
+    for c in candidates:
+        if c.type != "relocate":
+            filtered_candidates.append(c)
+            continue
+        slot = int(c.action.get("i", -1))
+        relocate_by_slot.setdefault(slot, []).append(c)
+    for slot, cands in relocate_by_slot.items():
+        cands_sorted = sorted(cands, key=lambda cc: cc.score)
+        filtered_candidates.extend(cands_sorted[:max_relocate_final])
+    candidates = filtered_candidates
+
     # diversity packing
     final: List[Candidate] = []
     sig_seen = set()
@@ -319,7 +361,7 @@ def build_candidate_pool(
         if c.type == "relocate":
             slot = int(c.action.get("i", -1))
             per_slot_relocate[slot] = per_slot_relocate.get(slot, 0) + 1
-            if per_slot_relocate[slot] > 6:
+            if per_slot_relocate[slot] > max_relocate_final:
                 return False
         final.append(c)
         sig_seen.add(c.features.get("op_signature"))
@@ -357,7 +399,9 @@ def simulate_action_sequence(assign: np.ndarray, picks: List[int], cand_map: Dic
         cand = cand_map.get(pid)
         if cand is None:
             continue
-        action = cand.action
+        action = copy.deepcopy(cand.action)
+        if "signature" not in action:
+            action["signature"] = cand.signature if hasattr(cand, "signature") else _signature_for_action(action, assign)
         op = action.get("op")
         if op == "relocate":
             target = int(action.get("site_id", -1))
@@ -368,7 +412,7 @@ def simulate_action_sequence(assign: np.ndarray, picks: List[int], cand_map: Dic
         _apply_action(temp_assign, action, clusters, site_to_region)
         if len(set(temp_assign.tolist())) != len(temp_assign):
             continue
-        actions.append({**action, "candidate_id": pid, "type": cand.type})
+        actions.append({**action, "candidate_id": pid, "type": cand.type, "signature": action.get("signature", cand.signature)})
         if len(actions) >= max_k:
             break
     return actions

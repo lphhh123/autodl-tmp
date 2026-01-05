@@ -8,9 +8,11 @@ Key guarantees:
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import random
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -21,7 +23,7 @@ from layout.coarsen import Cluster
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from layout.llm_provider import HeuristicProvider, VolcArkProvider, LLMProvider
-from layout.candidate_pool import Candidate, build_candidate_pool, simulate_action_sequence
+from layout.candidate_pool import Candidate, build_candidate_pool, inverse_signature, simulate_action_sequence, _signature_for_action
 
 
 @dataclass
@@ -239,6 +241,13 @@ def run_detailed_place(
     assign = np.array(assign_seed, dtype=int).copy()
     layout_state.assign = assign
 
+    # ---- anti-oscillation params ----
+    anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
+    tabu_tenure = int(_cfg_get(anti_cfg, "tabu_tenure", 8))
+    inverse_tenure = int(_cfg_get(anti_cfg, "inverse_tenure", 6))
+    per_slot_cooldown = int(_cfg_get(anti_cfg, "per_slot_cooldown", 6))
+    aspiration_delta = float(_cfg_get(anti_cfg, "aspiration_delta", 1e-4))
+
     # ---- planner config ----
     planner_cfg = _cfg_get(cfg, "planner", {"type": "heuristic"}) or {"type": "heuristic"}
     planner_type = str(_cfg_get(planner_cfg, "type", "heuristic"))
@@ -275,7 +284,7 @@ def run_detailed_place(
 
     with trace_path.open("w", encoding="utf-8") as f_trace:
         f_trace.write(
-            "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms\n"
+            "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms,signature,tabu_hit,inverse_hit,cooldown_hit\n"
         )
 
         # initial eval
@@ -291,6 +300,24 @@ def run_detailed_place(
                 "seed": seed_id,
             },
         )
+
+        best_total_seen = float(eval_out.get("total_scalar", 0.0))
+        tabu_signatures: deque[str] = deque(maxlen=tabu_tenure)
+        inverse_signatures: deque[str] = deque(maxlen=inverse_tenure)
+        last_site_per_slot: Dict[int, int] = {int(i): int(assign[int(i)]) for i in range(len(assign))}
+        last_move_step_per_slot: Dict[int, int] = {int(i): -10**6 for i in range(len(assign))}
+
+        def _touched_slots(act: Dict[str, Any]) -> List[int]:
+            op_local = act.get("op")
+            if op_local == "swap":
+                return [int(act.get("i", -1)), int(act.get("j", -1))]
+            if op_local == "relocate":
+                return [int(act.get("i", -1))]
+            if op_local == "cluster_move":
+                cid = int(act.get("cluster_id", -1))
+                if 0 <= cid < len(clusters):
+                    return [int(s) for s in clusters[cid].slots]
+            return []
 
         action_queue: List[Dict] = []
         forbidden_history: List[List[int]] = []
@@ -382,23 +409,64 @@ def run_detailed_place(
                     actions = simulate_action_sequence(assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions)
                     expire_step = step + queue_window_steps
                     for act in actions:
-                        action_queue.append({"action": act, "expire": expire_step})
+                        action_copy = copy.deepcopy(act)
+                        if "signature" not in action_copy:
+                            action_copy["signature"] = _signature_for_action(action_copy, assign)
+                        action_queue.append({"action": action_copy, "expire": expire_step})
 
             action_queue = [a for a in action_queue if a.get("expire", step) >= step]
+            fallback_candidates = [c for c in candidate_pool if c.id not in forbidden_ids]
+            fallback_idx = 0
 
-            action_payload = None
-            if action_queue:
-                action_payload = action_queue.pop(0)["action"]
-            else:
-                fallback = next((c for c in candidate_pool if c.id not in forbidden_ids), None)
-                if fallback:
-                    action_payload = {**fallback.action, "candidate_id": fallback.id, "type": fallback.type}
+            action = {"op": "none"}
+            tabu_hit = inverse_hit = cooldown_hit = 0
+            est_total_new = None
+            signature = "none"
+            inverse_sig = "none"
+            max_attempts = max(5, len(action_queue) + len(fallback_candidates) + 3)
+
+            for _ in range(max_attempts):
+                action_payload = None
+                if action_queue:
+                    action_payload = action_queue.pop(0).get("action")
+                elif fallback_idx < len(fallback_candidates):
+                    fb = fallback_candidates[fallback_idx]
+                    fallback_idx += 1
+                    action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
                 else:
                     action_payload = _sample_action(
                         cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
                     )
 
-            action = action_payload or {"op": "none"}
+                action = copy.deepcopy(action_payload) if action_payload else {"op": "none"}
+                op = str(action.get("op", "none"))
+                if op == "relocate" and "from_site" not in action:
+                    action["from_site"] = int(assign[int(action.get("i", -1))])
+                if "signature" not in action:
+                    action["signature"] = _signature_for_action(action, assign)
+                signature = str(action.get("signature", "none"))
+                inverse_sig = inverse_signature(action, assign)
+                est_total_new = None
+                cand_ref = None
+                cid = action.get("candidate_id")
+                cid_int = int(cid) if cid is not None else None
+                if cid_int is not None and cid_int in cand_map:
+                    cand_ref = cand_map[int(cid_int)]
+                    est_total_new = cand_ref.est.get("total_new")
+                    action.setdefault("type", cand_ref.type)
+                    action.setdefault("signature", cand_ref.signature)
+
+                aspiration = est_total_new is not None and est_total_new < best_total_seen - aspiration_delta
+                tabu_hit = 1 if signature in tabu_signatures else 0
+                inverse_hit = 1 if signature in inverse_signatures else 0
+                cooldown_hit = 0
+                for slot in _touched_slots(action):
+                    if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
+                        cooldown_hit = 1
+                        break
+
+                if aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
+                    break
             op = str(action.get("op", "none"))
 
             new_assign = assign.copy()
@@ -434,6 +502,13 @@ def run_detailed_place(
                         "seed": seed_id,
                     },
                 )
+                tabu_signatures.append(signature)
+                inverse_signatures.append(inverse_sig)
+                for slot in _touched_slots(action):
+                    last_move_step_per_slot[int(slot)] = step
+                    if 0 <= int(slot) < len(assign):
+                        last_site_per_slot[int(slot)] = int(assign[int(slot)])
+                best_total_seen = min(best_total_seen, float(eval_out.get("total_scalar", best_total_seen)))
                 consecutive_queue_rejects = 0
             else:
                 layout_state.assign = assign
@@ -452,7 +527,8 @@ def run_detailed_place(
             f_trace.write(
                 f"{step},{stage_label},{op},{json.dumps(action)},",
                 f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},",
-                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0\n",
+                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0,",
+                f"{signature},{tabu_hit},{inverse_hit},{cooldown_hit}\n",
             )
     if usage_fp:
         usage_fp.close()
