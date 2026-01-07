@@ -291,6 +291,7 @@ class VideoAudioAST(nn.Module):
             "L_AST": L_ast_val,
             "token_feat": tokens.view(b, t, self.num_tokens, -1),
             "modality_slices": modality_slices,
+            "modal_stats": sparsity.get("modal") if sparsity else None,
             "gates": {
                 "token_mask": ast_out.token_mask if ast_out is not None else torch.ones(b, t, self.num_tokens, device=x_video.device),
                 "head_weights": head_w,

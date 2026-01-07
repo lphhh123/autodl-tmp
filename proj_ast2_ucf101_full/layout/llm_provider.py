@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Tuple
 
@@ -13,12 +12,15 @@ from requests.exceptions import ReadTimeout
 
 class LLMProvider(ABC):
     @abstractmethod
-    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
+    def propose_pick(self, state_summary: Dict, k: int) -> List[int]:
         ...
+
+    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
+        return self.propose_pick(state_summary, k)
 
 
 class HeuristicProvider(LLMProvider):
-    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
+    def propose_pick(self, state_summary: Dict, k: int) -> List[int]:
         cands = state_summary.get("candidates", [])
         cands_sorted = sorted(cands, key=lambda x: float(x.get("d_total", 0)))
         picks: List[int] = []
@@ -59,24 +61,38 @@ class VolcArkProvider(LLMProvider):
 
     def _build_payload(self, state_summary: Dict, k: int, repair_raw: Optional[str] = None) -> Dict:
         system_prompt = (
-            "STRICT MODE. Output MUST be exactly 3 lines and start with BEGIN_JSON.\n"
-            "Only output picks from candidate_ids; avoid forbidden_ids.\n"
+            "STRICT PICK MODE.\n"
+            "You MUST output EXACTLY 3 lines and NOTHING ELSE.\n"
             "LINE1: BEGIN_JSON\n"
-            "LINE2: {\"pick\":[ID1,ID2,...]}   # only this key, max K unique ids\n"
-            "LINE3: END_JSON\n"
-            "Rules: ids must be valid, include diversity (relocate/cluster_move if present), prefer lower d_total, avoid templates."
+            "LINE2: {\"pick\":[ID1,ID2,...]}\n"
+            "LINE3: END_JSON\n\n"
+            "HARD RULES:\n"
+            "- The FIRST characters MUST be \"BEGIN_JSON\".\n"
+            "- Output JSON must have ONLY key \"pick\".\n"
+            "- Each ID must be an integer.\n"
+            "- IDs MUST be chosen ONLY from candidate_ids.\n"
+            "- IDs MUST NOT appear in forbidden_ids.\n"
+            "- IDs must be UNIQUE. Max K IDs.\n"
+            "- If you cannot comply, output {\"pick\":[]}.\n\n"
+            "OPTIMIZATION GOAL:\n"
+            "- Prefer IDs with more negative d_total (best improvement).\n"
+            "- Secondary: improve d_comm and d_therm (more negative is better).\n"
+            "- DIVERSITY: If candidates include relocate/cluster_move, ensure at least ONE picked ID is NOT swap.\n\n"
+            "ANTI-TEMPLATE:\n"
+            "- Do NOT always pick the smallest IDs.\n"
+            "- Do NOT always pick the same pattern (e.g., 0-1,1-2,2-3 swaps).\n"
+            "- Use the provided candidate list only.\n"
         )
 
         if repair_raw is None:
             state_json = json.dumps(state_summary, separators=(",", ":"))
             user_content = (
-                "Selection rubric:\n"
-                "- Rule1: pick ids must be valid.\n"
-                "- Rule2: minimize d_total (sum over picks).\n"
-                "- Rule3: include diversity (at least one relocate/cluster_move if available).\n"
-                "- Rule4: avoid forbidden/repeat.\n"
-                "STATE:\n"
-                f"{state_json}"
+                f"K={int(k)}\n"
+                f"STATE_JSON={state_json}\n"
+                "REMINDER:\n"
+                "- Output ONLY 3 lines wrapper.\n"
+                "- Use ONLY candidate_ids and avoid forbidden_ids.\n"
+                "- Pick up to K IDs, unique.\n"
             )
         else:
             user_content = (
@@ -127,22 +143,6 @@ class VolcArkProvider(LLMProvider):
             return None, f"bad_json_in_wrapper:{ex!r}"
         return obj, None
 
-    @staticmethod
-    def _recover_json(raw: str) -> Tuple[Optional[dict], Optional[str]]:
-        obj_match = re.search(r"\{\s*\"pick\"\s*:\s*\[.*?\]\s*\}", raw, re.S)
-        if obj_match:
-            try:
-                return json.loads(obj_match.group(0)), None
-            except Exception:  # noqa: BLE001
-                pass
-        arr_match = re.search(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]", raw, re.S)
-        if arr_match:
-            try:
-                return {"pick": json.loads(arr_match.group(0))}, None
-            except Exception:  # noqa: BLE001
-                pass
-        return None, "no_json_found"
-
     def _validate_picks(self, picks: Optional[List], candidate_ids: List[int], forbidden_ids: List[int], k: int) -> List[int]:
         if not isinstance(picks, list):
             return []
@@ -170,16 +170,14 @@ class VolcArkProvider(LLMProvider):
     ) -> Tuple[List[int], Optional[str]]:
         parsed, parse_error = self.extract_wrapped_json(raw)
         if parsed is None:
-            parsed, parse_error = self._recover_json(raw)
-        if parsed is None:
-            return [], parse_error or "no_json_found"
+            return [], parse_error or "missing_wrapper"
         picks_raw = parsed.get("pick") if isinstance(parsed, dict) else []
         valid_picks = self._validate_picks(picks_raw, candidate_ids, forbidden_ids, k)
         if valid_picks:
             return valid_picks, None
         return [], "empty_or_invalid_picks"
 
-    def propose_picks(self, state_summary: Dict, k: int) -> List[int]:
+    def propose_pick(self, state_summary: Dict, k: int) -> List[int]:
         url = f"{self.endpoint}/chat/completions"
         if not self.endpoint or not self.api_key or not self.model:
             self.last_usage = {
