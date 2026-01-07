@@ -22,13 +22,21 @@ class HeuristicProvider(LLMProvider):
         cands = state_summary.get("candidates", [])
         cands_sorted = sorted(cands, key=lambda x: float(x.get("d_total", 0)))
         picks: List[int] = []
+        non_swap_ids: List[int] = []
         for cand in cands_sorted:
             cid = int(cand.get("id", -1))
             if cid in state_summary.get("forbidden_ids", []):
                 continue
+            if cand.get("type") not in ("swap", None):
+                non_swap_ids.append(cid)
             picks.append(cid)
             if len(picks) >= k:
                 break
+        if picks and non_swap_ids and all(
+            (next((c for c in cands if int(c.get("id", -1)) == pid), {}).get("type") == "swap")
+            for pid in picks
+        ):
+            picks[-1] = non_swap_ids[0]
         return picks
 
 

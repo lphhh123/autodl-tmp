@@ -425,6 +425,7 @@ def main():
         "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
         "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
         "pareto_size": len(pareto.points),
+        "pareto_front_size": len(pareto.points),
         "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,

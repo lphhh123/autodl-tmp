@@ -13,6 +13,7 @@ import csv
 import json
 import math
 import random
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -255,6 +256,8 @@ def run_detailed_place(
     mixed_cfg = _cfg_get(planner_cfg, "mixed", {}) or {}
     mixed_every = int(_cfg_get(mixed_cfg, "every_n_steps", 200)) if planner_type == "mixed" else 0
     k_actions = int(_cfg_get(mixed_cfg, "k_actions", 4))
+    queue_enabled = bool(_cfg_get(planner_cfg, "queue_enabled", True))
+    feasibility_check = bool(_cfg_get(planner_cfg, "feasibility_check", True))
 
     timeout_sec = int(_cfg_get(planner_cfg, "timeout_sec", 90))
     max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
@@ -275,7 +278,9 @@ def run_detailed_place(
     alpha = float(_cfg_get(cfg, "sa_alpha", 0.999))
 
     trace_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = trace_path.parent
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
+    start_time = time.time()
 
     # If LLM is requested but init failed, log once and continue with heuristic
     if usage_fp and planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error:
@@ -325,6 +330,8 @@ def run_detailed_place(
         )
 
         best_total_seen = float(eval_out.get("total_scalar", 0.0))
+        best_assign = assign.copy()
+        best_eval = dict(eval_out)
         tabu_signatures: deque[str] = deque(maxlen=tabu_tenure)
         inverse_signatures: deque[str] = deque(maxlen=inverse_tenure)
         last_site_per_slot: Dict[int, int] = {int(i): int(assign[int(i)]) for i in range(len(assign))}
@@ -349,6 +356,9 @@ def run_detailed_place(
         consecutive_queue_rejects = 0
         queue_window_steps = int(_cfg_get(planner_cfg, "queue_window_steps", 30))
         refresh_due_to_rejects = False
+        progress_every = int(_cfg_get(cfg, "progress_every", 10))
+        save_every = int(_cfg_get(cfg, "save_every", 50))
+        accepted_steps = 0
 
         for step in range(steps):
             candidate_pool = build_candidate_pool(
@@ -402,18 +412,6 @@ def run_detailed_place(
                             pick_types_count[cand.type] = pick_types_count.get(cand.type, 0) + 1
                             if best_d_total is None or cand.est.get("d_total", 0) < best_d_total:
                                 best_d_total = cand.est.get("d_total", 0)
-                    if usage_fp and hasattr(llm_provider, "last_usage"):
-                        usage = dict(getattr(llm_provider, "last_usage") or {})
-                        raw_text = str(usage.get("raw_preview", ""))
-                        usage.setdefault("ok", True)
-                        usage.setdefault("n_pick", len(pick_ids))
-                        usage["pick_ids"] = pick_ids
-                        usage["pick_types_count"] = pick_types_count
-                        usage["best_d_total_in_pick"] = best_d_total
-                        usage["step"] = int(step)
-                        json.dump(usage, usage_fp)
-                        usage_fp.write("\\n")
-                        usage_fp.flush()
                 except Exception as e:
                     if usage_fp:
                         json.dump(
@@ -429,13 +427,53 @@ def run_detailed_place(
                         usage_fp.flush()
                 if pick_ids:
                     forbidden_history.append(pick_ids)
-                    actions = simulate_action_sequence(assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions)
+                    if feasibility_check:
+                        actions = simulate_action_sequence(
+                            assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions
+                        )
+                    else:
+                        actions = []
+                        for pid in pick_ids[:k_actions]:
+                            cand = cand_map.get(pid)
+                            if cand is None:
+                                continue
+                            action_copy = copy.deepcopy(cand.action)
+                            action_copy.setdefault("signature", cand.signature)
+                            actions.append(
+                                {
+                                    **action_copy,
+                                    "candidate_id": pid,
+                                    "type": cand.type,
+                                    "signature": action_copy.get("signature", cand.signature),
+                                }
+                            )
+                    if usage_fp and hasattr(llm_provider, "last_usage"):
+                        usage = dict(getattr(llm_provider, "last_usage") or {})
+                        raw_text = str(usage.get("raw_preview", ""))
+                        usage.setdefault("ok", True)
+                        usage.setdefault("n_pick", len(pick_ids))
+                        usage["pick_ids"] = pick_ids
+                        usage["picked_types"] = pick_types_count
+                        usage["best_d_total"] = best_d_total
+                        usage["n_queue_push"] = len(actions)
+                        usage["step"] = int(step)
+                        json.dump(usage, usage_fp)
+                        usage_fp.write("\\n")
+                        usage_fp.flush()
                     expire_step = step + queue_window_steps
-                    for act in actions:
-                        action_copy = copy.deepcopy(act)
-                        if "signature" not in action_copy:
-                            action_copy["signature"] = _signature_for_action(action_copy, assign)
-                        action_queue.append({"action": action_copy, "expire": expire_step})
+                    if queue_enabled:
+                        for act in actions:
+                            action_copy = copy.deepcopy(act)
+                            if "signature" not in action_copy:
+                                action_copy["signature"] = _signature_for_action(action_copy, assign)
+                            action_queue.append({"action": action_copy, "expire": expire_step})
+                    elif actions:
+                        action_queue = [
+                            {
+                                "action": copy.deepcopy(actions[0]),
+                                "expire": step,
+                            }
+                        ]
 
             action_queue = [a for a in action_queue if a.get("expire", step) >= step]
             fallback_candidates = [c for c in candidate_pool if c.id not in forbidden_ids]
@@ -522,6 +560,7 @@ def run_detailed_place(
                 assign = new_assign
                 eval_out = eval_new
                 layout_state.assign = assign
+                accepted_steps += 1
                 added = pareto.add(
                     eval_out["comm_norm"],
                     eval_out["therm_norm"],
@@ -539,7 +578,10 @@ def run_detailed_place(
                     last_move_step_per_slot[int(slot)] = step
                     if 0 <= int(slot) < len(assign):
                         last_site_per_slot[int(slot)] = int(assign[int(slot)])
-                best_total_seen = min(best_total_seen, float(eval_out.get("total_scalar", best_total_seen)))
+                if float(eval_out.get("total_scalar", best_total_seen)) < best_total_seen:
+                    best_total_seen = float(eval_out.get("total_scalar", best_total_seen))
+                    best_assign = assign.copy()
+                    best_eval = dict(eval_out)
                 consecutive_queue_rejects = 0
             else:
                 layout_state.assign = assign
@@ -581,6 +623,31 @@ def run_detailed_place(
             )
             if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
                 f_trace.flush()
+            if progress_every > 0 and step % progress_every == 0:
+                heartbeat = {
+                    "step": int(step),
+                    "elapsed_s": float(time.time() - start_time),
+                    "cur_total": float(eval_out.get("total_scalar", 0.0)),
+                    "best_total": float(best_total_seen),
+                    "accept_rate": float(accepted_steps / max(1, step + 1)),
+                    "queue_len": int(len(action_queue)),
+                    "last_op": op,
+                    "temperature": float(T),
+                }
+                with (out_dir / "heartbeat.json").open("w", encoding="utf-8") as hb_fp:
+                    json.dump(heartbeat, hb_fp, indent=2)
+            if save_every > 0 and step % save_every == 0:
+                checkpoint = {
+                    "step": int(step),
+                    "assign": assign.tolist(),
+                    "best_assign": best_assign.tolist(),
+                    "best_eval": best_eval,
+                    "cur_eval": eval_out,
+                    "temperature": float(T),
+                    "recent_signatures": list(tabu_signatures),
+                }
+                with (out_dir / "checkpoint_state.json").open("w", encoding="utf-8") as ck_fp:
+                    json.dump(checkpoint, ck_fp, indent=2)
     if usage_fp:
         usage_fp.close()
 

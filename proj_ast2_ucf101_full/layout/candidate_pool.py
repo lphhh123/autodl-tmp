@@ -145,6 +145,9 @@ def build_candidate_pool(
 
     anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
     max_relocate_final = int(_cfg_get(anti_cfg, "max_relocate_per_slot_in_final", 2))
+    pool_cfg = _cfg_get(cfg, "candidate_pool", {}) or {}
+    diversity_enabled = bool(_cfg_get(pool_cfg, "diversity_enabled", True))
+    final_size = int(_cfg_get(pool_cfg, "final_size", 60))
 
     S = assign.shape[0]
     Ns = site_to_region.shape[0]
@@ -331,6 +334,9 @@ def build_candidate_pool(
     topN = min(80, len(raw_candidates))
     candidates = raw_candidates[:topN]
 
+    if not diversity_enabled:
+        return candidates[:final_size]
+
     relocate_by_slot: Dict[int, List[Candidate]] = {}
     filtered_candidates: List[Candidate] = []
     for c in candidates:
@@ -380,7 +386,7 @@ def build_candidate_pool(
                 explore_added += 1
 
     for c in candidates:
-        if len(final) >= 60:
+        if len(final) >= final_size:
             break
         try_add(c)
 
