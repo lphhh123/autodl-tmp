@@ -203,16 +203,6 @@ def build_candidate_pool(
     used_sites = set(int(x) for x in assign.tolist())
     empty_sites = [s for s in range(Ns) if s not in used_sites]
 
-    def _select_cluster_targets(cluster: Cluster, region_id: int) -> List[int]:
-        region_sites = [s for s, r in enumerate(site_to_region) if int(r) == int(region_id)]
-        empties = [sid for sid in region_sites if sid not in used_sites]
-        if len(empties) < len(cluster.slots):
-            return []
-        cluster_pos = np.array([sites_xy[int(assign[int(slot)])] for slot in cluster.slots], dtype=np.float32)
-        centroid = cluster_pos.mean(axis=0) if cluster_pos.size else np.zeros(2, dtype=np.float32)
-        empties_sorted = sorted(empties, key=lambda s: float(np.linalg.norm(sites_xy[int(s)] - centroid)))
-        return [int(s) for s in empties_sorted[: len(cluster.slots)]]
-
     def add_candidate(
         action: Dict[str, Any],
         ctype: str,
@@ -324,6 +314,9 @@ def build_candidate_pool(
 
     # 3) THERM-HOTSPOT-RELOCATE-OUT
     if chip_tdp is not None and len(chip_tdp) == S and empty_sites:
+        region_tdp = {int(r): 0.0 for r in np.unique(site_to_region)}
+        for slot in range(S):
+            region_tdp[int(site_to_region[int(assign[slot])])] += float(chip_tdp[slot])
         cool_regions = sorted(region_tdp.items(), key=lambda x: x[1])[:3]
         cool_region_ids = {int(r) for r, _ in cool_regions}
         hot_slots_by_tdp = list(np.argsort(chip_tdp)[::-1][: min(20, S)])
@@ -402,17 +395,11 @@ def build_candidate_pool(
         for region_id, _ in sorted(region_tdp.items(), key=lambda x: x[1])[:4] if chip_tdp is not None else []:
             if int(region_id) == cur_region:
                 continue
-            target_sites = _select_cluster_targets(cluster, int(region_id))
-            if not target_sites:
+            target_sites = [s for s in empty_sites if int(site_to_region[s]) == int(region_id)]
+            if len(target_sites) < len(cluster.slots):
                 continue
             add_candidate(
-                {
-                    "op": "cluster_move",
-                    "cluster_id": cid,
-                    "region_id": int(region_id),
-                    "target_sites": target_sites,
-                    "from_region": cur_region,
-                },
+                {"op": "cluster_move", "cluster_id": cid, "region_id": int(region_id)},
                 "cluster_move",
                 "cluster_move_therm",
                 region_from=cur_region,
@@ -420,7 +407,7 @@ def build_candidate_pool(
             )
 
     # 8) RANDOM-DIVERSITY
-    for _ in range(30):
+    for _ in range(12):
         if rng.random() < 0.5 and len(empty_sites) > 0:
             slot = int(rng.integers(0, S))
             site_id = int(rng.choice(empty_sites))
@@ -430,24 +417,6 @@ def build_candidate_pool(
             j = int(rng.integers(0, S))
             if i != j:
                 add_candidate({"op": "swap", "i": i, "j": j}, "swap", "random_diversity")
-
-    # 9) RAW target fill
-    attempts = 0
-    while len(raw_candidates) < raw_target_size and attempts < raw_target_size * 10:
-        attempts += 1
-        if rng.random() < 0.5 and len(empty_sites) > 0:
-            slot = int(rng.integers(0, S))
-            site_id = int(rng.choice(empty_sites))
-            add_candidate({"op": "relocate", "i": slot, "site_id": site_id}, "relocate", "random_fill")
-        else:
-            i = int(rng.integers(0, S))
-            j = int(rng.integers(0, S))
-            if i != j:
-                add_candidate({"op": "swap", "i": i, "j": j}, "swap", "random_fill")
-
-    if len(raw_candidates) > raw_target_max:
-        raw_candidates.sort(key=lambda c: c.score)
-        raw_candidates = raw_candidates[:raw_target_max]
 
     def _coverage_counts(items: List[Candidate]) -> Dict[str, int]:
         hot = sum(1 for c in items if c.features.get("touches_hot_slot") or c.features.get("touches_hot_pair"))
@@ -593,11 +562,8 @@ def build_candidate_pool(
     if debug_out_path:
         strategy_names = sorted({c.strategy for c in raw_candidates})
         debug = {
-            "raw_total": raw_total,
-            "filtered_total": filtered_total,
+            "raw_total": len(raw_candidates),
             "final_total": len(final),
-            "raw_target_size": raw_target_size,
-            "raw_target_max": raw_target_max,
             "coverage": _coverage_counts(raw_candidates),
             "counts_by_strategy": {k: len([c for c in raw_candidates if c.strategy == k]) for k in strategy_names},
             "counts_by_type": {k: len([c for c in raw_candidates if c.type == k]) for k in sorted(type_quota)},
