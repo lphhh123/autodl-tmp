@@ -403,7 +403,7 @@ def run_detailed_place(
                 raw_text = ""
                 pick_ids: List[int] = []
                 try:
-                    pick_ids = llm_provider.propose_picks(ss, k_actions) or []
+                    pick_ids = llm_provider.propose_pick(ss, k_actions) or []
                     pick_types_count: Dict[str, int] = {}
                     best_d_total = None
                     for pid in pick_ids:
