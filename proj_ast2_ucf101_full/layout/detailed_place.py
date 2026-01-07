@@ -375,6 +375,7 @@ def run_detailed_place(
                 chip_tdp,
                 cfg,
                 rng,
+                debug_out_path=(out_dir / "candidate_pool_debug.json") if step == 0 else None,
             )
             cand_map = {c.id: c for c in candidate_pool}
             candidate_ids = [c.id for c in candidate_pool]
@@ -403,7 +404,7 @@ def run_detailed_place(
                 raw_text = ""
                 pick_ids: List[int] = []
                 try:
-                    pick_ids = llm_provider.propose_picks(ss, k_actions) or []
+                    pick_ids = llm_provider.propose_pick(ss, k_actions) or []
                     pick_types_count: Dict[str, int] = {}
                     best_d_total = None
                     for pid in pick_ids:
@@ -501,9 +502,9 @@ def run_detailed_place(
 
                 action = copy.deepcopy(action_payload) if action_payload else {"op": "none"}
                 op = str(action.get("op", "none"))
-                if op == "relocate" and "from_site" not in action:
+                if op == "relocate":
                     action["from_site"] = int(assign[int(action.get("i", -1))])
-                if op == "cluster_move" and "from_region" not in action:
+                if op == "cluster_move":
                     cid = int(action.get("cluster_id", -1))
                     if 0 <= cid < len(clusters) and clusters[cid].slots:
                         slot_id = int(clusters[cid].slots[0])
