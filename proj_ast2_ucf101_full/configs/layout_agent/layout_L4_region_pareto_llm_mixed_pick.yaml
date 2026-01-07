@@ -1,0 +1,16 @@
+_base_: ./base_layout.yaml
+
+detailed_place:
+  planner:
+    type: mixed
+    mixed:
+      every_n_steps: 200
+      k_actions: 4
+    timeout_sec: 5
+    max_retry: 0
+    queue_enabled: true
+    feasibility_check: true
+  candidate_pool:
+    diversity_enabled: true
+alt_opt:
+  enabled: false
