@@ -27,8 +27,14 @@ run_vc () {
 run_layout () {
   local cfg="$1"
   local out="$2"
+  local layout_input="${LAYOUT_INPUT:-outputs/EXP-A4/seed${SEED}/layout_input.json}"
+  if [[ ! -f "$layout_input" ]]; then
+    echo "[ERROR] Missing layout_input.json at $layout_input"
+    echo "        Run EXP-A4 first or set LAYOUT_INPUT to a valid layout_input.json."
+    exit 1
+  fi
   python -m scripts.run_layout_agent \
-    --layout_input outputs/P3/A3/layout_input.json \
+    --layout_input "$layout_input" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 

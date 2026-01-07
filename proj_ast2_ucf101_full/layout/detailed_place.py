@@ -65,11 +65,29 @@ def _apply_relocate(assign: np.ndarray, i: int, site_id: int):
     assign[i] = site_id
 
 
-def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: List[int]):
-    if len(target_sites) < len(cluster.slots):
+def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: Optional[List[int]]):
+    if not target_sites or len(target_sites) < len(cluster.slots):
         return
     for slot, site in zip(cluster.slots, target_sites):
         assign[int(slot)] = int(site)
+
+
+def _select_cluster_target_sites(
+    assign: np.ndarray,
+    cluster: Cluster,
+    region_id: int,
+    site_to_region: np.ndarray,
+    sites_xy: np.ndarray,
+) -> List[int]:
+    used_sites = set(int(x) for x in assign.tolist())
+    region_sites = [s for s, r in enumerate(site_to_region) if int(r) == int(region_id)]
+    empties = [sid for sid in region_sites if sid not in used_sites]
+    if len(empties) < len(cluster.slots):
+        return []
+    cluster_pos = np.array([sites_xy[int(assign[int(slot)])] for slot in cluster.slots], dtype=np.float32)
+    centroid = cluster_pos.mean(axis=0) if cluster_pos.size else np.zeros(2, dtype=np.float32)
+    empties_sorted = sorted(empties, key=lambda s: float(np.linalg.norm(sites_xy[int(s)] - centroid)))
+    return [int(s) for s in empties_sorted[: len(cluster.slots)]]
 
 
 def _state_summary(
@@ -510,6 +528,10 @@ def run_detailed_place(
                         slot_id = int(clusters[cid].slots[0])
                         if 0 <= slot_id < len(assign):
                             action["from_region"] = int(site_to_region[int(assign[slot_id])])
+                        if "target_sites" not in action:
+                            action["target_sites"] = _select_cluster_target_sites(
+                                assign, clusters[cid], int(action.get("region_id", -1)), site_to_region, sites_xy
+                            )
                 if "signature" not in action:
                     action["signature"] = _signature_for_action(action, assign)
                 signature = str(action.get("signature", "none"))
@@ -547,7 +569,10 @@ def run_detailed_place(
                 rid = int(action.get("region_id", 0))
                 if 0 <= cid < len(clusters):
                     cluster = clusters[cid]
-                    target_sites = [s for s, r in enumerate(site_to_region) if int(r) == rid][: len(cluster.slots)]
+                    target_sites = action.get("target_sites")
+                    if not target_sites:
+                        target_sites = _select_cluster_target_sites(assign, cluster, rid, site_to_region, sites_xy)
+                        action["target_sites"] = target_sites
                     _apply_cluster_move(new_assign, cluster, target_sites)
 
             layout_state.assign = new_assign

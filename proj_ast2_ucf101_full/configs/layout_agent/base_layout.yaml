@@ -70,6 +70,12 @@ detailed_place:
     backtrack_window: 10
   planner:
     type: heuristic
+  candidate_pool:
+    raw_target_size: 180
+    raw_target_max: 220
+    final_size: 60
+    diversity_enabled: true
+    coverage_min_per_bucket: 6
 
 alt_opt:
   enabled: false

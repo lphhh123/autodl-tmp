@@ -58,7 +58,9 @@ def _apply_action(assign: np.ndarray, action: Dict[str, Any], clusters: List[Clu
         rid = int(action.get("region_id", -1))
         if 0 <= cid < len(clusters):
             cluster = clusters[cid]
-            target_sites = [s for s, r in enumerate(site_to_region) if int(r) == rid][: len(cluster.slots)]
+            target_sites = action.get("target_sites")
+            if not target_sites:
+                target_sites = [s for s, r in enumerate(site_to_region) if int(r) == rid][: len(cluster.slots)]
             for slot, site in zip(cluster.slots, target_sites):
                 assign[int(slot)] = int(site)
 
@@ -90,6 +92,10 @@ def inverse_signature(action: Dict[str, Any], assign: Optional[np.ndarray] = Non
             from_site = int(assign[slot])
         return f"rel:{slot}->{int(from_site) if from_site is not None else -1}"
     if op == "cluster_move":
+        cid = int(action.get("cluster_id", -1))
+        from_region = action.get("from_region", None)
+        if from_region is not None:
+            return f"cl:{cid}->{int(from_region)}"
         return _signature_for_action(action, assign)
     return "none"
 
@@ -152,6 +158,8 @@ def build_candidate_pool(
     pool_cfg = _cfg_get(cfg, "candidate_pool", {}) or {}
     diversity_enabled = bool(_cfg_get(pool_cfg, "diversity_enabled", True))
     final_size = int(_cfg_get(pool_cfg, "final_size", 60))
+    raw_target_size = int(_cfg_get(pool_cfg, "raw_target_size", 180))
+    raw_target_max = int(_cfg_get(pool_cfg, "raw_target_max", 220))
 
     S = assign.shape[0]
     Ns = site_to_region.shape[0]
@@ -470,10 +478,14 @@ def build_candidate_pool(
                     break
 
     # scoring and filtering
-    raw_candidates = [c for c in raw_candidates if c.est.get("pen_dup", 0) <= 0 and c.est.get("pen_bnd", 0) <= 0]
-    raw_candidates.sort(key=lambda c: c.score)
-    topN = min(80, len(raw_candidates))
-    candidates = raw_candidates[:topN]
+    raw_total = len(raw_candidates)
+    filtered_candidates = [c for c in raw_candidates if c.est.get("pen_dup", 0) <= 0 and c.est.get("pen_bnd", 0) <= 0]
+    filtered_total = len(filtered_candidates)
+    filtered_candidates.sort(key=lambda c: c.score)
+    if len(filtered_candidates) > raw_target_max:
+        filtered_candidates = filtered_candidates[:raw_target_max]
+    topN = min(max(80, final_size), len(filtered_candidates))
+    candidates = filtered_candidates[:topN]
 
     if not diversity_enabled:
         return candidates[:final_size]
