@@ -9,6 +9,7 @@ Key guarantees:
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import math
 import random
@@ -282,9 +283,31 @@ def run_detailed_place(
         usage_fp.write("\n")
         usage_fp.flush()
 
-    with trace_path.open("w", encoding="utf-8") as f_trace:
-        f_trace.write(
-            "iter,stage,op,op_args_json,accepted,total_scalar,comm_norm,therm_norm,pareto_added,duplicate_penalty,boundary_penalty,seed_id,time_ms,signature,tabu_hit,inverse_hit,cooldown_hit\n"
+    with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
+        writer = csv.writer(f_trace)
+        writer.writerow(
+            [
+                "iter",
+                "stage",
+                "op",
+                "op_args_json",
+                "accepted",
+                "total_scalar",
+                "comm_norm",
+                "therm_norm",
+                "pareto_added",
+                "duplicate_penalty",
+                "boundary_penalty",
+                "seed_id",
+                "time_ms",
+                "signature",
+                "d_total",
+                "d_comm",
+                "d_therm",
+                "tabu_hit",
+                "inverse_hit",
+                "cooldown_hit",
+            ]
         )
 
         # initial eval
@@ -442,6 +465,12 @@ def run_detailed_place(
                 op = str(action.get("op", "none"))
                 if op == "relocate" and "from_site" not in action:
                     action["from_site"] = int(assign[int(action.get("i", -1))])
+                if op == "cluster_move" and "from_region" not in action:
+                    cid = int(action.get("cluster_id", -1))
+                    if 0 <= cid < len(clusters) and clusters[cid].slots:
+                        slot_id = int(clusters[cid].slots[0])
+                        if 0 <= slot_id < len(assign):
+                            action["from_region"] = int(site_to_region[int(assign[slot_id])])
                 if "signature" not in action:
                     action["signature"] = _signature_for_action(action, assign)
                 signature = str(action.get("signature", "none"))
@@ -485,6 +514,8 @@ def run_detailed_place(
             layout_state.assign = new_assign
             eval_new = evaluator.evaluate(layout_state)
             delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
+            delta_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
+            delta_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
             accept = (delta < 0) or (math.exp(-delta / max(T, 1e-6)) > float(rng.random()))
 
             if accept:
@@ -524,12 +555,32 @@ def run_detailed_place(
 
             T *= alpha
 
-            f_trace.write(
-                f"{step},{stage_label},{op},{json.dumps(action)},",
-                f"{int(accept)},{eval_out['total_scalar']},{eval_out['comm_norm']},{eval_out['therm_norm']},{int(added)},",
-                f"{eval_out['penalty']['duplicate']},{eval_out['penalty']['boundary']},{seed_id},0,",
-                f"{signature},{tabu_hit},{inverse_hit},{cooldown_hit}\n",
+            writer.writerow(
+                [
+                    step,
+                    stage_label,
+                    op,
+                    json.dumps(action),
+                    int(accept),
+                    eval_out["total_scalar"],
+                    eval_out["comm_norm"],
+                    eval_out["therm_norm"],
+                    int(added),
+                    eval_out["penalty"]["duplicate"],
+                    eval_out["penalty"]["boundary"],
+                    seed_id,
+                    0,
+                    signature,
+                    delta,
+                    delta_comm,
+                    delta_therm,
+                    tabu_hit,
+                    inverse_hit,
+                    cooldown_hit,
+                ]
             )
+            if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
+                f_trace.flush()
     if usage_fp:
         usage_fp.close()
 
