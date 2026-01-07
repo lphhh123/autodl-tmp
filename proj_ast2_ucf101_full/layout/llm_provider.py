@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Tuple
 
@@ -144,22 +143,6 @@ class VolcArkProvider(LLMProvider):
             return None, f"bad_json_in_wrapper:{ex!r}"
         return obj, None
 
-    @staticmethod
-    def _recover_json(raw: str) -> Tuple[Optional[dict], Optional[str]]:
-        obj_match = re.search(r"\{\s*\"pick\"\s*:\s*\[.*?\]\s*\}", raw, re.S)
-        if obj_match:
-            try:
-                return json.loads(obj_match.group(0)), None
-            except Exception:  # noqa: BLE001
-                pass
-        arr_match = re.search(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]", raw, re.S)
-        if arr_match:
-            try:
-                return {"pick": json.loads(arr_match.group(0))}, None
-            except Exception:  # noqa: BLE001
-                pass
-        return None, "no_json_found"
-
     def _validate_picks(self, picks: Optional[List], candidate_ids: List[int], forbidden_ids: List[int], k: int) -> List[int]:
         if not isinstance(picks, list):
             return []
@@ -187,9 +170,7 @@ class VolcArkProvider(LLMProvider):
     ) -> Tuple[List[int], Optional[str]]:
         parsed, parse_error = self.extract_wrapped_json(raw)
         if parsed is None:
-            parsed, parse_error = self._recover_json(raw)
-        if parsed is None:
-            return [], parse_error or "no_json_found"
+            return [], parse_error or "missing_wrapper"
         picks_raw = parsed.get("pick") if isinstance(parsed, dict) else []
         valid_picks = self._validate_picks(picks_raw, candidate_ids, forbidden_ids, k)
         if valid_picks:
