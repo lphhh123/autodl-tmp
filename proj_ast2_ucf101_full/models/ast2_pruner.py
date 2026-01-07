@@ -22,6 +22,14 @@ def _entropy_from_prob(p: torch.Tensor, dim: int, eps: float) -> torch.Tensor:
     return -(p * (p + eps).log()).sum(dim=dim)
 
 
+def minmax_norm_per_batch(x: torch.Tensor) -> torch.Tensor:
+    B = x.shape[0]
+    x_flat = x.view(B, -1)
+    mn = x_flat.min(dim=1).values.view(B, *([1] * (x.dim() - 1)))
+    mx = x_flat.max(dim=1).values.view(B, *([1] * (x.dim() - 1)))
+    return (x - mn) / (mx - mn + 1e-6)
+
+
 def build_voronoi_regions(num_patches: int, grid_hw: Tuple[int, int], num_regions: int) -> Tuple[torch.Tensor, int]:
     H_p, W_p = grid_hw
     coords = []
@@ -183,18 +191,28 @@ class ASTPruner(nn.Module):
         self.g_block = nn.Parameter(torch.zeros(depth))
 
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-        B = H.shape[0]
-        H_flat = H.reshape(B, -1)
-        H_min = H_flat.min(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
-        H_max = H_flat.max(dim=-1, keepdim=True)[0].reshape(B, 1, 1)
-        return (H - H_min) / (H_max - H_min + eps)
+        return minmax_norm_per_batch(H)
 
-    def _fuse_levels(self, levels: Dict[int, torch.Tensor]) -> torch.Tensor:
+    def _fuse_levels(
+        self,
+        levels: Dict[int, torch.Tensor],
+        expected_shape: Optional[Tuple[int, ...]] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
         fused = []
         for H in levels.values():
+            if expected_shape is not None:
+                assert tuple(H.shape) == tuple(expected_shape), (
+                    f"Expected level shape {expected_shape}, got {tuple(H.shape)}"
+                )
             fused.append(self._normalize(H))
         if not fused:
-            return torch.tensor(0.0, device=self.region_ids.device)
+            if expected_shape is None:
+                raise ValueError("Expected shape must be provided when no levels are available.")
+            device = device or self.region_ids.device
+            dtype = dtype or torch.float32
+            return torch.zeros(*expected_shape, device=device, dtype=dtype)
         return torch.stack(fused, dim=0).mean(dim=0)
 
     def _expand_time_token(self, Ht: torch.Tensor, T: int, N: int) -> torch.Tensor:
@@ -220,16 +238,19 @@ class ASTPruner(nn.Module):
 
     def token_gating_single_modal(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
+        B, T, N, _ = x.shape
         Ht = compute_multi_level_time_entropy(
             x, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
         )
         Hs = compute_multi_level_space_entropy(
             x, self.H_p, self.W_p, self.space_window_levels, self.entropy_tau, self.entropy_eps
         )
-        Ht_fused = self._fuse_levels(Ht["H_time_level"])
-        Hs_fused = self._fuse_levels(Hs["H_space_level"])
-
-        B, T, N, _ = x.shape
+        Ht_fused = self._fuse_levels(
+            Ht["H_time_level"], expected_shape=(B, N), device=x.device, dtype=x.dtype
+        )
+        Hs_fused = self._fuse_levels(
+            Hs["H_space_level"], expected_shape=(B, T), device=x.device, dtype=x.dtype
+        )
         Ht_norm = self._normalize(Ht_fused).to(x.dtype)
         Hs_norm = self._normalize(Hs_fused).to(x.dtype)
         H_time_token = self._expand_time_token(Ht_norm, T, N)
@@ -273,8 +294,12 @@ class ASTPruner(nn.Module):
                 Hs = compute_multi_level_space_entropy(
                     tokens, self.H_p, self.W_p, self.space_window_levels, self.entropy_tau, self.entropy_eps
                 )
-                Ht_fused = self._fuse_levels(Ht["H_time_level"]).to(x.dtype)
-                Hs_fused = self._fuse_levels(Hs["H_space_level"]).to(x.dtype)
+                Ht_fused = self._fuse_levels(
+                    Ht["H_time_level"], expected_shape=(x.shape[0], e - s), device=x.device, dtype=x.dtype
+                ).to(x.dtype)
+                Hs_fused = self._fuse_levels(
+                    Hs["H_space_level"], expected_shape=(x.shape[0], x.shape[1]), device=x.device, dtype=x.dtype
+                ).to(x.dtype)
                 H_time_token[:, :, s:e] = self._expand_time_token(Ht_fused, x.shape[1], e - s)
                 H_space_token[:, :, s:e] = self._expand_space_token(Hs_fused, x.shape[1], e - s)
                 modal_stats[name] = {"H_time_mean": Ht_fused.mean()}
@@ -282,7 +307,9 @@ class ASTPruner(nn.Module):
                 Ht = compute_multi_level_time_entropy(
                     tokens, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
                 )
-                Ht_fused = self._fuse_levels(Ht["H_time_level"]).to(x.dtype)
+                Ht_fused = self._fuse_levels(
+                    Ht["H_time_level"], expected_shape=(x.shape[0], e - s), device=x.device, dtype=x.dtype
+                ).to(x.dtype)
                 H_time_token[:, :, s:e] = self._expand_time_token(Ht_fused, x.shape[1], e - s)
                 H_space_token[:, :, s:e] = self._expand_time_token(Ht_fused, x.shape[1], e - s)
                 modal_stats[name] = {"H_time_mean": Ht_fused.mean()}

@@ -31,7 +31,7 @@ class UCF101Dataset(Dataset):
         super().__init__()
         self.cfg = cfg
         data_cfg = cfg.data
-        project_root = Path(__file__).resolve().parents[1]
+        project_root = Path(__file__).resolve().parents[2]
         frames_root = getattr(data_cfg, "frames_root", None)
         splits_root = getattr(data_cfg, "splits_root", None)
         audio_root = getattr(data_cfg, "audio_root", None)
@@ -248,7 +248,7 @@ class UCF101Dataset(Dataset):
         window_indices = list(range(item.t_start, t_end))
         if len(window_indices) >= self.num_frames:
             select = np.linspace(0, len(window_indices) - 1, self.num_frames)
-            select = np.round(select).astype(int).tolist()
+            select = np.floor(select).astype(int).tolist()
             frame_indices = [window_indices[i] for i in select]
         else:
             frame_indices = window_indices.copy()

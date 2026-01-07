@@ -5,6 +5,7 @@ import argparse
 import importlib
 import importlib.util
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -14,6 +15,11 @@ if importlib.util.find_spec("librosa") is not None:
     librosa = importlib.import_module("librosa")
 else:
     librosa = None
+
+if importlib.util.find_spec("cv2") is not None:
+    cv2 = importlib.import_module("cv2")
+else:
+    cv2 = None
 
 
 def _load_waveform(video_path: Path, sample_rate: int) -> np.ndarray:
@@ -25,15 +31,15 @@ def _load_waveform(video_path: Path, sample_rate: int) -> np.ndarray:
     return waveform
 
 
-def _extract_mel(waveform: np.ndarray, sample_rate: int, n_mels: int, hop_length: int, win_length: int) -> np.ndarray:
+def _extract_mel(waveform: np.ndarray, sample_rate: int, n_mels: int, n_fft: int, hop_length: int) -> np.ndarray:
     if librosa is None or waveform.size == 0:
         return np.zeros((n_mels, 1), dtype=np.float32)
     mel = librosa.feature.melspectrogram(
         y=waveform,
         sr=sample_rate,
         n_mels=n_mels,
+        n_fft=n_fft,
         hop_length=hop_length,
-        win_length=win_length,
         power=2.0,
     )
     mel_db = librosa.power_to_db(mel, ref=np.max)
@@ -47,13 +53,25 @@ def _pool_mel_to_frames(mel: np.ndarray, num_frames: int) -> np.ndarray:
     edges = np.linspace(0, t_spec, num_frames + 1)
     pooled = np.zeros((num_frames, n_mels), dtype=np.float32)
     for idx in range(num_frames):
-        start = int(round(edges[idx]))
-        end = int(round(edges[idx + 1]))
+        start = int(edges[idx])
+        end = int(edges[idx + 1])
         if end <= start:
-            pooled[idx] = mel[:, min(start, t_spec - 1)]
-        else:
-            pooled[idx] = mel[:, start:end].mean(axis=1)
+            end = start + 1
+        end = min(end, t_spec)
+        start = min(start, max(t_spec - 1, 0))
+        pooled[idx] = mel[:, start:end].mean(axis=1)
     return pooled
+
+
+def _get_video_frame_count(video_path: Optional[Path]) -> Optional[int]:
+    if video_path is None or not video_path.is_file() or cv2 is None:
+        return None
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return count if count > 0 else None
 
 
 def main():
@@ -65,9 +83,9 @@ def main():
     parser.add_argument("--video-root", type=str, default="")
     parser.add_argument("--audio-root", type=str, default="")
     parser.add_argument("--sample-rate", type=int, default=16000)
-    parser.add_argument("--n-mels", type=int, default=128)
-    parser.add_argument("--hop-length", type=int, default=160)
-    parser.add_argument("--win-length", type=int, default=400)
+    parser.add_argument("--n-mels", type=int, default=64)
+    parser.add_argument("--n-fft", type=int, default=2048)
+    parser.add_argument("--hop-length", type=int, default=512)
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -128,11 +146,15 @@ def main():
                         video_path = cand
                         break
             waveform = _load_waveform(video_path, args.sample_rate) if video_path else np.array([])
-            mel = _extract_mel(waveform, args.sample_rate, args.n_mels, args.hop_length, args.win_length)
-            features = _pool_mel_to_frames(mel, num_frames)
+            mel = _extract_mel(waveform, args.sample_rate, args.n_mels, args.n_fft, args.hop_length)
+            frame_count = _get_video_frame_count(video_path) if video_path else None
+            target_frames = frame_count if frame_count is not None else mel.shape[1]
+            if target_frames <= 0:
+                target_frames = num_frames
+            features = _pool_mel_to_frames(mel, target_frames)
             if waveform.size == 0:
                 print(f"[WARN] audio unavailable for {video_dir.name}, saving zero features.")
-                features = np.zeros((num_frames, args.n_mels), dtype=np.float32)
+                features = np.zeros((target_frames, args.n_mels), dtype=np.float32)
             np.save(out_path, features.astype(np.float32))
             print(f"[audio] saved {out_path}")
 
