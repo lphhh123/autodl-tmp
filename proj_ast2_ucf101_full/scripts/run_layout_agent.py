@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -79,6 +80,8 @@ def _compute_trace_metrics(trace_path: Path, window: int, eps_flat: float) -> di
         return {}
 
     totals = [float(r.get("total_scalar", 0.0)) for r in rows]
+    comm_vals = [float(r.get("comm_norm", 0.0)) for r in rows]
+    therm_vals = [float(r.get("therm_norm", 0.0)) for r in rows]
     signatures = [r.get("signature", "") or "" for r in rows]
     accepted = [int(r.get("accepted", 0)) for r in rows]
     d_total = [float(r.get("d_total", 0.0)) for r in rows]
@@ -177,7 +180,11 @@ def _compute_trace_metrics(trace_path: Path, window: int, eps_flat: float) -> di
         "improve_step_ratio": improve_step_ratio,
         "flat_step_ratio": flat_step_ratio,
         "last_total": float(totals[-1]) if totals else 0.0,
+        "last_comm": float(comm_vals[-1]) if comm_vals else 0.0,
+        "last_therm": float(therm_vals[-1]) if therm_vals else 0.0,
         "best_total": float(np.min(obj_arr)) if obj_arr.size else 0.0,
+        "best_comm": float(np.min(comm_vals)) if comm_vals else 0.0,
+        "best_therm": float(np.min(therm_vals)) if therm_vals else 0.0,
     }
 
 
@@ -217,6 +224,7 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    start_time = time.time()
     np.random.seed(args.seed)
 
     wafer_radius = float(layout_input["wafer"]["radius_mm"])
@@ -382,6 +390,7 @@ def main():
     best_assign = best_payload.get("assign", assign_final)
     layout_state.assign = np.array(best_assign, dtype=int)
     best_eval = evaluator.evaluate(layout_state)
+    runtime_s = time.time() - start_time
     layout_best = {
         "best": {
             "assign": best_assign.tolist(),
@@ -424,11 +433,16 @@ def main():
     report = {
         "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
         "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
+        "best_total": float(best_eval.get("total_scalar", 0.0)),
+        "best_comm": float(best_eval.get("comm_norm", best_comm)),
+        "best_therm": float(best_eval.get("therm_norm", best_therm)),
         "pareto_size": len(pareto.points),
         "pareto_front_size": len(pareto.points),
         "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
+        "runtime_s": float(runtime_s),
+        "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
         **trace_metrics,
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
