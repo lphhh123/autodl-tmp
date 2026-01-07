@@ -66,14 +66,11 @@ def _signature_for_action(action: Dict[str, Any], assign: Optional[np.ndarray] =
         i = int(action.get("i", 0))
         j = int(action.get("j", 0))
         ii, jj = sorted([i, j])
-        return f"swap:{ii}<->{jj}"
+        return f"swap:{ii}-{jj}"
     if op == "relocate":
         slot = int(action.get("i", -1))
-        from_site = action.get("from_site", None)
-        if from_site is None and assign is not None and 0 <= slot < len(assign):
-            from_site = int(assign[slot])
         to_site = int(action.get("site_id", -1))
-        return f"rel:{slot}:{int(from_site) if from_site is not None else -1}->{to_site}"
+        return f"rel:{slot}->{to_site}"
     if op == "cluster_move":
         return f"cl:{int(action.get('cluster_id', -1))}->{int(action.get('region_id', -1))}"
     return "none"
@@ -88,8 +85,7 @@ def inverse_signature(action: Dict[str, Any], assign: Optional[np.ndarray] = Non
         from_site = action.get("from_site", None)
         if from_site is None and assign is not None and 0 <= slot < len(assign):
             from_site = int(assign[slot])
-        to_site = int(action.get("site_id", -1))
-        return f"rel:{slot}:{to_site}->{int(from_site) if from_site is not None else -1}"
+        return f"rel:{slot}->{int(from_site) if from_site is not None else -1}"
     if op == "cluster_move":
         return _signature_for_action(action, assign)
     return "none"
