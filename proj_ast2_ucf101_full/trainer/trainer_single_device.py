@@ -1,8 +1,11 @@
 """Single-device AST2.0-lite trainer (SPEC §12.1)."""
 from __future__ import annotations
 
-import torch
+import random
 from functools import partial
+
+import numpy as np
+import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -22,12 +25,37 @@ def _as_float(val, name: str) -> float:
         raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
 
 
+def _seed_worker(worker_id: int, base_seed: int) -> None:
+    seed = base_seed + worker_id
+    random.seed(seed)
+    np.random.seed(seed)
+
+
 def build_dataloaders(cfg):
     train_ds = UCF101Dataset(cfg, split="train")
     val_ds = UCF101Dataset(cfg, split="val")
     print(f"[DEBUG] len(train_ds)={len(train_ds)}, len(val_ds)={len(val_ds)}")
-    train_loader = DataLoader(train_ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
-    val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size, shuffle=False, num_workers=cfg.data.num_workers)
+    batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
+    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    generator = torch.Generator()
+    generator.manual_seed(base_seed)
+    worker_init = partial(_seed_worker, base_seed=base_seed)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=cfg.data.num_workers,
+        worker_init_fn=worker_init,
+        generator=generator,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=cfg.data.num_workers,
+        worker_init_fn=worker_init,
+        generator=generator,
+    )
     return train_loader, val_loader
 
 

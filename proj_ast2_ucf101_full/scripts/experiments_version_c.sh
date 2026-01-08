@@ -27,35 +27,55 @@ run_vc () {
 run_layout () {
   local cfg="$1"
   local out="$2"
-  local layout_input="${LAYOUT_INPUT:-outputs/EXP-A4/seed${SEED}/layout_input.json}"
-  if [[ ! -f "$layout_input" ]]; then
-    echo "[ERROR] Missing layout_input.json at $layout_input"
-    echo "        Run EXP-A4 first or set LAYOUT_INPUT to a valid layout_input.json."
-    exit 1
-  fi
   python -m scripts.run_layout_agent \
-    --layout_input "$layout_input" \
+    --layout_input outputs/P3/A3/layout_input.json \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
 case "$EXP_ID" in
-  # --- Innovation A ---
-  EXP-A1) run_ast configs/ast2_ucf101_dense.yaml        "outputs/EXP-A1/seed${SEED}" ;;
-  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml     "outputs/EXP-A2/seed${SEED}" ;;
-  EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml       "outputs/EXP-A3/seed${SEED}" ;;
-  EXP-A4) run_vc  configs/vc_phase3_full_ucf101.yaml    "outputs/EXP-A4/seed${SEED}" ;;
-  EXP-A5) run_vc  configs/vc_phase3_full_ucf101.yaml    "outputs/EXP-A5_twostage/seed${SEED}" ;;
-  EXP-A6) run_vc  configs/vc_phase3_full_ucf101.yaml    "outputs/EXP-A6_mappingonly/seed${SEED}" ;;
-  EXP-A7) run_vc  configs/vc_phase3_full_ucf101.yaml    "outputs/EXP-A7_layoutonly/seed${SEED}" ;;
+  # -------------------------
+  # Innovation A (Main/Core)
+  # -------------------------
+  EXP-A1) run_ast configs/ast2_ucf101_dense.yaml           "outputs/EXP-A1/seed${SEED}" ;;
+  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml        "outputs/EXP-A2/seed${SEED}" ;;
+  EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml          "outputs/EXP-A3/seed${SEED}" ;;
+  EXP-A4) run_vc  configs/vc_phase3_full_ucf101.yaml       "outputs/EXP-A4/seed${SEED}" ;;
+  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101.yaml   "outputs/EXP-A5_twostage/seed${SEED}" ;;
+  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml "outputs/EXP-A6_mappingonly/seed${SEED}" ;;
+  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml  "outputs/EXP-A7_layoutonly/seed${SEED}" ;;
 
-  # --- Innovation B ---
+  # A-G2 fairness (same rho_target)
+  EXP-A-G2-uniform) run_ast configs/ablations/ast_uniform_keep.yaml "outputs/EXP-A-G2-uniform/seed${SEED}" ;;
+  EXP-A-G2-random)  run_ast configs/ablations/ast_random_keep.yaml  "outputs/EXP-A-G2-random/seed${SEED}" ;;
+  EXP-A-G2-ours)    run_vc  configs/vc_phase3_full_ucf101.yaml      "outputs/EXP-A-G2-ours/seed${SEED}" ;;
+
+  # A-G3 ablations
+  EXP-Abl-time)     run_ast configs/ablations/ast_no_time.yaml      "outputs/EXP-Abl-time/seed${SEED}" ;;
+  EXP-Abl-space)    run_ast configs/ablations/ast_no_space.yaml     "outputs/EXP-Abl-space/seed${SEED}" ;;
+  EXP-Abl-vor)      run_ast configs/ablations/ast_no_voronoi.yaml   "outputs/EXP-Abl-vor/seed${SEED}" ;;
+  EXP-Abl-1lvl)     run_ast configs/ablations/ast_level1.yaml       "outputs/EXP-Abl-1lvl/seed${SEED}" ;;
+  EXP-Abl-nomodal)  run_ast configs/ablations/ast_no_modal.yaml     "outputs/EXP-Abl-nomodal/seed${SEED}" ;;
+  EXP-Abl-uniform)  run_ast configs/ablations/ast_uniform_keep.yaml "outputs/EXP-Abl-uniform/seed${SEED}" ;;
+  EXP-Abl-random)   run_ast configs/ablations/ast_random_keep.yaml  "outputs/EXP-Abl-random/seed${SEED}" ;;
+
+  # -------------------------
+  # Innovation B (Layout)
+  # -------------------------
   EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic.yaml "outputs/EXP-B1/seed${SEED}" ;;
   EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick.yaml "outputs/EXP-B2/seed${SEED}" ;;
-  EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto.yaml "outputs/EXP-B3/seed${SEED}" ;;
-
+  EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa.yaml "outputs/EXP-B3/seed${SEED}" ;;
   EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;
   EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas.yaml    "outputs/EXP-B2-ab-nofeas/seed${SEED}" ;;
   EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse.yaml "outputs/EXP-B2-ab-nodiverse/seed${SEED}" ;;
+
+  # -------------------------
+  # Appendix / Optional (kept but not required for main table)
+  # -------------------------
+  EXP-APP-A-DENSE-NOSCALE) run_ast configs/ast2_ucf101_dense_noscale.yaml "outputs/EXP-APP-A-DENSE-NOSCALE/seed${SEED}" ;;
+  EXP-APP-AV-DENSE)        run_ast configs/ast2_ucf101_av_dense.yaml      "outputs/EXP-APP-AV-DENSE/seed${SEED}" ;;
+  EXP-APP-AV-AST-HW)       run_ast configs/ast2_ucf101_av_ast_hw.yaml     "outputs/EXP-APP-AV-AST-HW/seed${SEED}" ;;
+  EXP-APP-AV-AST-ONLY)     run_ast configs/ast2_ucf101_av_ast_only.yaml   "outputs/EXP-APP-AV-AST-ONLY/seed${SEED}" ;;
+  EXP-APP-VC-PHASE2-FIXED4) run_vc configs/vc_phase2_fixed4_big.yaml      "outputs/EXP-APP-VC-PHASE2-FIXED4/seed${SEED}" ;;
 
   *) echo "Unknown EXP_ID=$EXP_ID"; exit 2 ;;
 esac

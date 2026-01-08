@@ -1,0 +1,6 @@
+_base_: ./vc_phase3_full_ucf101.yaml
+training:
+  layout_only: true
+  inner_steps_alpha: 0
+hw:
+  optimize_layout: true

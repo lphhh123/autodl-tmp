@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,6 +34,16 @@ def _cfg_get(cfg: Any, key: str, default=None):
         return cfg.get(key, default)
     except Exception:
         return getattr(cfg, key, default)
+
+
+def _compute_top_pairs(traffic_sym: np.ndarray, k: int) -> List[Tuple[int, int, float]]:
+    pairs: List[Tuple[int, int, float]] = []
+    S = int(traffic_sym.shape[0])
+    for i in range(S):
+        for j in range(i + 1, S):
+            pairs.append((i, j, float(traffic_sym[i, j])))
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    return pairs[:k]
 
 
 def _radial_norm(point: np.ndarray, max_r: float) -> float:
@@ -155,11 +164,13 @@ def build_candidate_pool(
 
     anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
     max_relocate_final = int(_cfg_get(anti_cfg, "max_relocate_per_slot_in_final", 2))
+    max_relocate_raw = int(_cfg_get(anti_cfg, "max_relocate_per_slot_in_raw", 6))
     pool_cfg = _cfg_get(cfg, "candidate_pool", {}) or {}
     diversity_enabled = bool(_cfg_get(pool_cfg, "diversity_enabled", True))
     final_size = int(_cfg_get(pool_cfg, "final_size", 60))
     raw_target_size = int(_cfg_get(pool_cfg, "raw_target_size", 180))
     raw_target_max = int(_cfg_get(pool_cfg, "raw_target_max", 220))
+    eps_flat = float(_cfg_get(cfg, "eps_flat", 1e-4))
 
     S = assign.shape[0]
     Ns = site_to_region.shape[0]
@@ -168,6 +179,7 @@ def build_candidate_pool(
     base_total = float(eval_out.get("total_scalar", 0.0))
     base_comm = float(eval_out.get("comm_norm", 0.0))
     base_therm = float(eval_out.get("therm_norm", 0.0))
+    per_slot_relocate_raw: Dict[int, int] = {}
 
     top_pairs: List[Tuple[int, int, float]] = []
     for i in range(S):
@@ -217,6 +229,10 @@ def build_candidate_pool(
         coverage_boundary: bool = False,
     ):
         nonlocal candidate_id
+        if ctype == "relocate":
+            slot_id = int(action.get("i", -1))
+            if per_slot_relocate_raw.get(slot_id, 0) >= max_relocate_raw:
+                return
         _, est = _evaluate_action(assign, action, evaluator, layout_state, clusters, site_to_region)
         if est.get("pen_dup", 0) > 0 or est.get("pen_bnd", 0) > 0:
             return
@@ -224,6 +240,8 @@ def build_candidate_pool(
         d_total = est["total_new"] - base_total
         d_comm = est["comm_new"] - base_comm
         d_therm = est["therm_new"] - base_therm
+        if abs(d_total) < eps_flat and abs(d_comm) < eps_flat and abs(d_therm) < eps_flat:
+            return
         denom_total = max(abs(base_total), 1e-6)
         denom_comm = max(abs(base_comm), 1e-6)
         denom_therm = max(abs(base_therm), 1e-6)
@@ -282,6 +300,8 @@ def build_candidate_pool(
             score=float(score),
             signature=action_sig,
         )
+        if ctype == "relocate":
+            per_slot_relocate_raw[slot_id] = per_slot_relocate_raw.get(slot_id, 0) + 1
         raw_candidates.append(cand)
         candidate_id += 1
 
@@ -418,6 +438,18 @@ def build_candidate_pool(
             if i != j:
                 add_candidate({"op": "swap", "i": i, "j": j}, "swap", "random_diversity")
 
+    # 9) EXPLORE-RANDOM
+    for _ in range(10):
+        if rng.random() < 0.5 and len(empty_sites) > 0:
+            slot = int(rng.integers(0, S))
+            site_id = int(rng.choice(empty_sites))
+            add_candidate({"op": "relocate", "i": slot, "site_id": site_id}, "explore", "explore_random")
+        else:
+            i = int(rng.integers(0, S))
+            j = int(rng.integers(0, S))
+            if i != j:
+                add_candidate({"op": "swap", "i": i, "j": j}, "explore", "explore_random")
+
     def _coverage_counts(items: List[Candidate]) -> Dict[str, int]:
         hot = sum(1 for c in items if c.features.get("touches_hot_slot") or c.features.get("touches_hot_pair"))
         long_edge = sum(1 for c in items if c.features.get("coverage_long_edge"))
@@ -487,28 +519,56 @@ def build_candidate_pool(
     topN = min(max(80, final_size), len(filtered_candidates))
     candidates = filtered_candidates[:topN]
 
+    final = pack_diverse_candidates(
+        candidates=candidates,
+        cfg=cfg,
+        rng=rng,
+        final_size=final_size,
+        max_relocate_final=max_relocate_final,
+        diversity_enabled=diversity_enabled,
+    )
+
+    if debug_out_path:
+        strategy_names = sorted({c.strategy for c in raw_candidates})
+        type_names = sorted({c.type for c in raw_candidates})
+        debug = {
+            "raw_total": len(raw_candidates),
+            "final_total": len(final),
+            "coverage": _coverage_counts(raw_candidates),
+            "counts_by_strategy": {k: len([c for c in raw_candidates if c.strategy == k]) for k in strategy_names},
+            "counts_by_type": {k: len([c for c in raw_candidates if c.type == k]) for k in type_names},
+            "final_counts_by_strategy": {k: len([c for c in final if c.strategy == k]) for k in strategy_names},
+            "final_counts_by_type": {k: len([c for c in final if c.type == k]) for k in type_names},
+        }
+        debug_out_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_out_path.open("w", encoding="utf-8") as f_debug:
+            json.dump(debug, f_debug, indent=2)
+
+    return final
+
+
+def pack_diverse_candidates(
+    candidates: List[Candidate],
+    cfg: Any,
+    rng: np.random.Generator,
+    final_size: int,
+    max_relocate_final: int,
+    diversity_enabled: bool,
+) -> List[Candidate]:
     if not diversity_enabled:
         return candidates[:final_size]
 
-    relocate_by_slot: Dict[int, List[Candidate]] = {}
-    filtered_candidates: List[Candidate] = []
-    for c in candidates:
-        if c.type != "relocate":
-            filtered_candidates.append(c)
-            continue
-        slot = int(c.action.get("i", -1))
-        relocate_by_slot.setdefault(slot, []).append(c)
-    for slot, cands in relocate_by_slot.items():
-        cands_sorted = sorted(cands, key=lambda cc: cc.score)
-        filtered_candidates.extend(cands_sorted[:max_relocate_final])
-    candidates = filtered_candidates
-
-    # diversity packing
-    final: List[Candidate] = []
-    sig_seen = set()
-    type_quota = {"relocate": 18, "cluster_move": 8, "swap": 18}
-    exploration_quota = 6
-    strategy_quota = {
+    pool_cfg = _cfg_get(cfg, "candidate_pool", {}) or {}
+    type_quota = dict(_cfg_get(pool_cfg, "type_quota", {}) or {})
+    for key, fallback in {
+        "relocate": 18,
+        "cluster_move": 8,
+        "swap": 18,
+        "explore": 8,
+    }.items():
+        if type_quota.get(key, 0) <= 0:
+            type_quota[key] = fallback
+    strategy_quota = _cfg_get(pool_cfg, "strategy_quota", None) or {
         "comm_longedge_swap": 6,
         "comm_longedge_relocate": 6,
         "therm_hotspot_relocate_out": 6,
@@ -517,10 +577,28 @@ def build_candidate_pool(
         "cluster_move_therm": 9,
         "density_overlap_repair": 6,
         "random_diversity": 12,
+        "explore_random": 8,
     }
-    per_slot_relocate = {}
+    exploration_quota = int(_cfg_get(pool_cfg, "exploration_quota", 6))
 
-    def try_add(c: Candidate):
+    relocate_by_slot: Dict[int, List[Candidate]] = {}
+    filtered: List[Candidate] = []
+    for c in candidates:
+        if c.type != "relocate":
+            filtered.append(c)
+            continue
+        slot = int(c.action.get("i", -1))
+        relocate_by_slot.setdefault(slot, []).append(c)
+    for slot, cands in relocate_by_slot.items():
+        cands_sorted = sorted(cands, key=lambda cc: cc.score)
+        filtered.extend(cands_sorted[:max_relocate_final])
+    candidates = filtered
+
+    final: List[Candidate] = []
+    sig_seen = set()
+    per_slot_relocate: Dict[int, int] = {}
+
+    def try_add(c: Candidate) -> bool:
         if c.features.get("op_signature") in sig_seen:
             return False
         if c.type == "relocate":
@@ -532,25 +610,22 @@ def build_candidate_pool(
         sig_seen.add(c.features.get("op_signature"))
         return True
 
-    # enforce strategy quotas
     for strategy, needed in strategy_quota.items():
         for c in candidates:
             if c.strategy == strategy and len([x for x in final if x.strategy == strategy]) < needed:
                 try_add(c)
 
-    # enforce type quotas
-    for t in ["relocate", "cluster_move", "swap"]:
+    for t in ["relocate", "cluster_move", "swap", "explore"]:
         needed = type_quota.get(t, 0)
         for c in candidates:
             if c.type == t and len([x for x in final if x.type == t]) < needed:
                 try_add(c)
 
-    # exploration/random fill
     explore_added = 0
     for c in candidates:
         if explore_added >= exploration_quota:
             break
-        if c.type in {"swap", "relocate"} and rng.random() < 0.3:
+        if c.type in {"swap", "relocate", "explore"} and rng.random() < 0.3:
             if try_add(c):
                 explore_added += 1
 
@@ -559,25 +634,85 @@ def build_candidate_pool(
             break
         try_add(c)
 
-    if debug_out_path:
-        strategy_names = sorted({c.strategy for c in raw_candidates})
-        debug = {
-            "raw_total": len(raw_candidates),
-            "final_total": len(final),
-            "coverage": _coverage_counts(raw_candidates),
-            "counts_by_strategy": {k: len([c for c in raw_candidates if c.strategy == k]) for k in strategy_names},
-            "counts_by_type": {k: len([c for c in raw_candidates if c.type == k]) for k in sorted(type_quota)},
-            "final_counts_by_strategy": {k: len([c for c in final if c.strategy == k]) for k in strategy_names},
-            "final_counts_by_type": {k: len([c for c in final if c.type == k]) for k in sorted(type_quota)},
-        }
-        debug_out_path.parent.mkdir(parents=True, exist_ok=True)
-        with debug_out_path.open("w", encoding="utf-8") as f_debug:
-            json.dump(debug, f_debug, indent=2)
-
-    return final
+    return final[:final_size]
 
 
-def simulate_action_sequence(assign: np.ndarray, picks: List[int], cand_map: Dict[int, Candidate], clusters: List[Cluster], site_to_region: np.ndarray, max_k: int = 4) -> List[Dict[str, Any]]:
+def build_state_summary(
+    step: int,
+    T: float,
+    eval_out: Dict[str, float],
+    traffic_sym: np.ndarray,
+    assign: np.ndarray,
+    site_to_region: np.ndarray,
+    chip_tdp: Optional[np.ndarray],
+    clusters: List[Cluster],
+    regions,
+    candidates: List[Candidate],
+    candidate_ids: List[int],
+    forbidden_ids: List[int],
+    k: int,
+) -> Dict:
+    pairs = _compute_top_pairs(traffic_sym, 5)
+    hot_slots = []
+    if chip_tdp is not None and len(chip_tdp) == traffic_sym.shape[0]:
+        order = np.argsort(chip_tdp)[::-1][:5]
+        hot_slots = [
+            {"i": int(i), "tdp": float(chip_tdp[i]), "region": int(site_to_region[assign[i]])}
+            for i in order
+        ]
+    cand_payload = []
+    for cand in candidates:
+        desc = ""
+        op = cand.type
+        action = cand.action
+        if action.get("op") == "swap":
+            desc = f"swap {action.get('i')}-{action.get('j')}"
+        elif action.get("op") == "relocate":
+            desc = f"reloc slot{action.get('i')}->site{action.get('site_id')}"
+        elif action.get("op") == "cluster_move":
+            desc = f"cluster {action.get('cluster_id')}->reg{action.get('region_id')}"
+        radial_to = cand.features.get("radial_to") if action.get("op") != "swap" else None
+        cand_payload.append(
+            {
+                "id": int(cand.id),
+                "type": op,
+                "d_total": float(cand.est.get("d_total", 0.0)),
+                "d_comm": float(cand.est.get("d_comm", 0.0)),
+                "d_therm": float(cand.est.get("d_therm", 0.0)),
+                "touch_hot": 1 if cand.features.get("touches_hot_pair") or cand.features.get("touches_hot_slot") else 0,
+                "radial_to": None if radial_to is None else float(radial_to),
+                "desc": desc[:60],
+            }
+        )
+    return {
+        "K": int(k),
+        "step": int(step),
+        "T": float(T),
+        "current": {
+            "total": float(eval_out.get("total_scalar", 0.0)),
+            "comm": float(eval_out.get("comm_norm", 0.0)),
+            "therm": float(eval_out.get("therm_norm", 0.0)),
+        },
+        "top_hot_pairs": [{"i": int(i), "j": int(j), "traffic": float(t)} for i, j, t in pairs],
+        "top_hot_slots": hot_slots,
+        "candidate_ids": candidate_ids,
+        "forbidden_ids": forbidden_ids,
+        "candidates": cand_payload,
+        "S": int(traffic_sym.shape[0]),
+        "Ns": int(len(site_to_region)),
+        "num_clusters": int(len(clusters)),
+        "num_regions": int(len(regions)),
+    }
+
+
+def pick_ids_to_actions_sequential(
+    assign: np.ndarray,
+    picks: List[int],
+    cand_map: Dict[int, Candidate],
+    clusters: List[Cluster],
+    site_to_region: np.ndarray,
+    max_k: int = 4,
+) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     temp_assign = assign.copy()
     used_sites = set(int(x) for x in temp_assign.tolist())
@@ -602,3 +737,14 @@ def simulate_action_sequence(assign: np.ndarray, picks: List[int], cand_map: Dic
         if len(actions) >= max_k:
             break
     return actions
+
+
+def simulate_action_sequence(
+    assign: np.ndarray,
+    picks: List[int],
+    cand_map: Dict[int, Candidate],
+    clusters: List[Cluster],
+    site_to_region: np.ndarray,
+    max_k: int = 4,
+) -> List[Dict[str, Any]]:
+    return pick_ids_to_actions_sequential(assign, picks, cand_map, clusters, site_to_region, max_k=max_k)

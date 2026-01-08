@@ -25,7 +25,14 @@ from layout.coarsen import Cluster
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from layout.llm_provider import HeuristicProvider, VolcArkProvider, LLMProvider
-from layout.candidate_pool import Candidate, build_candidate_pool, inverse_signature, simulate_action_sequence, _signature_for_action
+from layout.candidate_pool import (
+    Candidate,
+    build_candidate_pool,
+    build_state_summary,
+    inverse_signature,
+    pick_ids_to_actions_sequential,
+    _signature_for_action,
+)
 
 
 @dataclass
@@ -88,74 +95,6 @@ def _select_cluster_target_sites(
     centroid = cluster_pos.mean(axis=0) if cluster_pos.size else np.zeros(2, dtype=np.float32)
     empties_sorted = sorted(empties, key=lambda s: float(np.linalg.norm(sites_xy[int(s)] - centroid)))
     return [int(s) for s in empties_sorted[: len(cluster.slots)]]
-
-
-def _state_summary(
-    step: int,
-    T: float,
-    eval_out: Dict[str, float],
-    traffic_sym: np.ndarray,
-    assign: np.ndarray,
-    site_to_region: np.ndarray,
-    chip_tdp: Optional[np.ndarray],
-    clusters: List[Cluster],
-    regions,
-    candidates: List[Candidate],
-    candidate_ids: List[int],
-    forbidden_ids: List[int],
-    k: int,
-) -> Dict:
-    pairs = _compute_top_pairs(traffic_sym, 5)
-    hot_slots = []
-    if chip_tdp is not None and len(chip_tdp) == traffic_sym.shape[0]:
-        order = np.argsort(chip_tdp)[::-1][:5]
-        hot_slots = [
-            {"i": int(i), "tdp": float(chip_tdp[i]), "region": int(site_to_region[assign[i]])}
-            for i in order
-        ]
-    cand_payload = []
-    for cand in candidates:
-        desc = ""
-        op = cand.type
-        action = cand.action
-        if op == "swap":
-            desc = f"swap {action.get('i')}-{action.get('j')}"
-        elif op == "relocate":
-            desc = f"reloc slot{action.get('i')}->site{action.get('site_id')}"
-        elif op == "cluster_move":
-            desc = f"cluster {action.get('cluster_id')}->reg{action.get('region_id')}"
-        radial_to = cand.features.get("radial_to") if op != "swap" else None
-        cand_payload.append(
-            {
-                "id": int(cand.id),
-                "type": op,
-                "d_total": float(cand.est.get("d_total", 0.0)),
-                "d_comm": float(cand.est.get("d_comm", 0.0)),
-                "d_therm": float(cand.est.get("d_therm", 0.0)),
-                "touch_hot": 1 if cand.features.get("touches_hot_pair") or cand.features.get("touches_hot_slot") else 0,
-                "radial_to": None if radial_to is None else float(radial_to),
-                "desc": desc[:60],
-            }
-        )
-    return {
-        "K": int(k),
-        "step": int(step),
-        "T": float(T),
-        "current": {
-            "total": float(eval_out.get("total_scalar", 0.0)),
-            "comm": float(eval_out.get("comm_norm", 0.0)),
-            "therm": float(eval_out.get("therm_norm", 0.0)),
-        },
-        "top_hot_pairs": [{"i": int(i), "j": int(j), "traffic": float(t)} for i, j, t in pairs],
-        "top_hot_slots": hot_slots,
-        "candidate_ids": candidate_ids,
-        "forbidden_ids": forbidden_ids,
-        "candidates": cand_payload,
-        "S": int(traffic_sym.shape[0]),
-        "Ns": int(len(site_to_region)),
-        "num_clusters": int(len(clusters)),
-        "num_regions": int(len(regions)),
-    }
 
 
 def _sample_action(
@@ -404,7 +343,7 @@ def run_detailed_place(
             refresh_due_to_rejects = False
 
             if need_refresh:
-                ss = _state_summary(
+                ss = build_state_summary(
                     step,
                     T,
                     eval_out,
@@ -421,10 +360,10 @@ def run_detailed_place(
                 )
                 raw_text = ""
                 pick_ids: List[int] = []
+                pick_types_count: Dict[str, int] = {}
+                best_d_total = None
                 try:
                     pick_ids = llm_provider.propose_pick(ss, k_actions) or []
-                    pick_types_count: Dict[str, int] = {}
-                    best_d_total = None
                     for pid in pick_ids:
                         cand = cand_map.get(pid)
                         if cand:
@@ -444,14 +383,14 @@ def run_detailed_place(
                         )
                         usage_fp.write("\\n")
                         usage_fp.flush()
+                actions: List[Dict[str, Any]] = []
                 if pick_ids:
                     forbidden_history.append(pick_ids)
                     if feasibility_check:
-                        actions = simulate_action_sequence(
+                        actions = pick_ids_to_actions_sequential(
                             assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions
                         )
                     else:
-                        actions = []
                         for pid in pick_ids[:k_actions]:
                             cand = cand_map.get(pid)
                             if cand is None:
@@ -466,19 +405,19 @@ def run_detailed_place(
                                     "signature": action_copy.get("signature", cand.signature),
                                 }
                             )
-                    if usage_fp and hasattr(llm_provider, "last_usage"):
-                        usage = dict(getattr(llm_provider, "last_usage") or {})
-                        raw_text = str(usage.get("raw_preview", ""))
-                        usage.setdefault("ok", True)
-                        usage.setdefault("n_pick", len(pick_ids))
-                        usage["pick_ids"] = pick_ids
-                        usage["picked_types"] = pick_types_count
-                        usage["best_d_total"] = best_d_total
-                        usage["n_queue_push"] = len(actions)
-                        usage["step"] = int(step)
-                        json.dump(usage, usage_fp)
-                        usage_fp.write("\\n")
-                        usage_fp.flush()
+                if usage_fp and hasattr(llm_provider, "last_usage"):
+                    usage = dict(getattr(llm_provider, "last_usage") or {})
+                    raw_text = str(usage.get("raw_preview", ""))
+                    usage.setdefault("ok", bool(pick_ids))
+                    usage.setdefault("n_pick", len(pick_ids))
+                    usage["pick_ids"] = pick_ids
+                    usage["picked_types"] = pick_types_count
+                    usage["best_d_total"] = best_d_total
+                    usage["n_queue_push"] = len(actions)
+                    usage["step"] = int(step)
+                    json.dump(usage, usage_fp)
+                    usage_fp.write("\\n")
+                    usage_fp.flush()
                     expire_step = step + queue_window_steps
                     if queue_enabled:
                         for act in actions:

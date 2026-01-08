@@ -14,21 +14,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, default="./configs/ast2_ucf101.yaml")
     parser.add_argument("--out_dir", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     cfg = load_config(args.cfg)
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)
+    if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
     if args.out_dir:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        cfg.train.out_dir = str(out_dir)
+        if hasattr(cfg, "train"):
+            cfg.train.out_dir = str(out_dir)
     train_single_device(cfg)
 
 
