@@ -4,10 +4,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import random
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -18,7 +16,7 @@ import numpy as np
 from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
-from scripts.run_layout_agent import _compute_trace_metrics, _write_pareto_points, compute_oscillation_metrics
+from scripts.run_layout_agent import _write_pareto_points, compute_oscillation_metrics
 from utils.config import load_config
 
 
@@ -132,12 +130,18 @@ def _write_test_data(work_dir: Path, layout_input: dict, cfg: Any, seed: int) ->
     return case_name, target
 
 
-def _prepare_work_dir(out_dir: Path, heuragenix_root: Path, layout_input: dict, cfg: Any, seed: int) -> Tuple[Path, str]:
+def _prepare_work_dir(
+    out_dir: Path,
+    heuragenix_root: Path,
+    layout_input: dict,
+    cfg: Any,
+    seed: int,
+) -> Tuple[Path, str, Path]:
     work_dir = out_dir / "_heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
     _ensure_prompt_files(work_dir, heuragenix_root)
-    case_name, _ = _write_test_data(work_dir, layout_input, cfg, seed)
-    return work_dir, case_name
+    case_name, case_path = _write_test_data(work_dir, layout_input, cfg, seed)
+    return work_dir, case_name, case_path
 
 
 def _compute_iterations_scale(layout_input: dict, max_steps: int) -> float:
@@ -148,63 +152,24 @@ def _compute_iterations_scale(layout_input: dict, max_steps: int) -> float:
     return max(1.0, float(max_steps) / max(1, S))
 
 
-def _run_heuragenix(
-    work_dir: Path,
-    heuragenix_root: Path,
-    project_root: Path,
-    cfg: dict,
-    case_name: str,
-    engine: str,
-    iterations_scale: float,
-    seed: int,
-) -> Tuple[bool, Path, str]:
-    baseline_cfg = cfg.get("baseline", {})
-    heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
-    llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
-    cmd = [
-        sys.executable,
-        str(heuragenix_root / "launch_hyper_heuristic.py"),
-        "-p",
-        str(baseline_cfg.get("problem", "wafer_layout")),
-        "-e",
-        engine,
-        "-d",
-        heuristic_dir,
-        "-t",
-        case_name,
-        "-n",
-        f"{iterations_scale:.6f}",
-        "-m",
-        str(int(baseline_cfg.get("selection_frequency", 5))),
-        "-c",
-        str(int(baseline_cfg.get("num_candidate_heuristics", 4))),
-        "-b",
-        str(int(baseline_cfg.get("rollout_budget", 0))),
-        "-r",
-        "result",
-        "--seed",
-        str(seed),
-    ]
-    if engine == "llm_hh" and llm_config is not None:
-        cmd.extend(["-l", str(llm_config)])
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(project_root), str(heuragenix_root), str(heuragenix_root / "src"), env.get("PYTHONPATH", "")]
-    )
-    log_path = work_dir / f"heuragenix_{engine}.log"
-    with log_path.open("w", encoding="utf-8") as log_fp:
-        result = subprocess.run(
-            cmd,
-            cwd=str(work_dir),
-            env=env,
-            stdout=log_fp,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    output_dir = work_dir / "output" / "wafer_layout" / case_name / "result" / engine
-    expected_files = [output_dir / "best_solution.json", output_dir / "recordings.jsonl"]
-    ok = result.returncode == 0 and all(path.exists() for path in expected_files)
-    return ok, output_dir, log_path.read_text(encoding="utf-8")
+def _ensure_heuragenix_paths(heuragenix_root: Path) -> None:
+    if str(heuragenix_root) not in sys.path:
+        sys.path.insert(0, str(heuragenix_root))
+    src_path = heuragenix_root / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+
+
+def _resolve_heuristic_files(heuragenix_root: Path, problem: str, heuristic_dir: str) -> List[str]:
+    candidate = Path(heuristic_dir)
+    if not candidate.is_absolute():
+        candidate = heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir
+    if not candidate.exists():
+        raise FileNotFoundError(f"Heuristic directory not found: {candidate}")
+    files = [str(path) for path in sorted(candidate.glob("*.py")) if not path.name.startswith("__")]
+    if not files:
+        raise RuntimeError(f"No heuristics found in {candidate}")
+    return files
 
 
 def _derive_initial_assign(layout_input: dict) -> np.ndarray:
@@ -467,85 +432,85 @@ def main() -> None:
     if not heuragenix_root.exists():
         raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
 
-    work_dir, case_name = _prepare_work_dir(out_dir, heuragenix_root, layout_input, cfg, seed)
+    _ensure_heuragenix_paths(heuragenix_root)
+    from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomHyperHeuristic
+    from problems.wafer_layout.components import NoOp
+    from problems.wafer_layout.env import Env as WaferLayoutEnv
+    from util.llm_client.get_llm_client import get_llm_client
+
+    work_dir, case_name, case_path = _prepare_work_dir(out_dir, heuragenix_root, layout_input, cfg, seed)
 
     max_steps = int(baseline_cfg.get("max_steps", 1000))
-    iterations_scale = _compute_iterations_scale(layout_input, max_steps)
-
     method = str(baseline_cfg.get("method", "llm_hh"))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
     llm_usage_path = out_dir / "llm_usage.jsonl"
     llm_usage_path.touch(exist_ok=True)
 
-    ok, output_dir, log_text = _run_heuragenix(
-        work_dir,
-        heuragenix_root,
-        project_root,
-        cfg.__dict__ if hasattr(cfg, "__dict__") else cfg,
-        case_name,
-        method,
-        iterations_scale,
-        seed,
-    )
+    problem = str(baseline_cfg.get("problem", "wafer_layout"))
+    heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
+    heuristic_files = _resolve_heuristic_files(heuragenix_root, problem, heuristic_dir)
+    selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
+    num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
+    rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
+
+    env = WaferLayoutEnv(str(case_path), rng=random.Random(seed))
+    iterations_scale = _compute_iterations_scale(layout_input, max_steps)
+    total_steps = max(1, int(iterations_scale * max(1, env.problem_size)))
+
+    output_root = work_dir / "output" / problem / case_name / "result"
+    output_dir = output_root / method
+    env.reset(str(output_dir))
+
     fallback_used = False
-    if not ok and method == "llm_hh":
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "reason": "llm_hh_failed", "fallback": fallback_method, "log": log_text[-500:]},
-        )
-        fallback_used = True
-        method = fallback_method
-        ok, output_dir, log_text = _run_heuragenix(
-            work_dir,
-            heuragenix_root,
-            project_root,
-            cfg.__dict__ if hasattr(cfg, "__dict__") else cfg,
-            case_name,
-            method,
-            iterations_scale,
-            seed,
-        )
-
-    if not ok:
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "reason": "heuragenix_failed", "fallback": method, "log": log_text[-500:]},
-        )
-        output_dir = work_dir / "output" / "wafer_layout" / case_name / "result" / method
-        output_dir.mkdir(parents=True, exist_ok=True)
-        fallback_assign = _derive_initial_assign(layout_input).tolist()
-        best_solution_path = output_dir / "best_solution.json"
-        best_solution_path.write_text(
-            json.dumps({"best_assign": fallback_assign, "best_metrics": {}, "meta": {}}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        recordings_path = output_dir / "recordings.jsonl"
-        with recordings_path.open("w", encoding="utf-8") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "step": 0,
-                        "heuristic": "noop",
-                        "op": "noop",
-                        "op_args": {},
-                        "signature": "noop",
-                        "assign": fallback_assign,
-                        "key_value": 0.0,
-                        "comm_norm": 0.0,
-                        "therm_norm": 0.0,
-                        "duplicate_penalty": 0.0,
-                        "boundary_penalty": 0.0,
-                        "accepted": True,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+    log_text = ""
+    if method == "llm_hh":
+        llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
+        try:
+            if llm_config is None:
+                raise RuntimeError("llm_config is required for llm_hh")
+            prompt_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "prompt"
+            llm_client = get_llm_client(str(llm_config), prompt_dir=str(prompt_dir), output_dir=str(out_dir))
+            if llm_client is None:
+                raise RuntimeError("Failed to load LLM client config")
+            hh = LLMSelectionHyperHeuristic(
+                llm_client=llm_client,
+                heuristic_pool=heuristic_files,
+                problem=problem,
+                iterations_scale_factor=iterations_scale,
+                selection_frequency=selection_frequency,
+                num_candidate_heuristics=num_candidate_heuristics,
+                rollout_budget=rollout_budget,
+                rng=env.rng,
+                usage_path=str(llm_usage_path),
             )
+            hh.run(env)
+        except Exception as exc:  # noqa: BLE001
+            log_text = repr(exc)
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "llm_hh_failed", "fallback": fallback_method, "error": log_text},
+            )
+            fallback_used = True
+            method = fallback_method
 
-    usage_src = output_dir / "llm_usage.jsonl"
-    if usage_src.exists():
-        shutil.copyfile(usage_src, llm_usage_path)
+    if method == "random_hh":
+        remaining_steps = max(0, total_steps - len(env.recordings))
+        if remaining_steps > 0:
+            hh = RandomHyperHeuristic(
+                heuristic_pool=heuristic_files,
+                problem=problem,
+                iterations_scale_factor=float(remaining_steps) / max(1, env.problem_size),
+                selection_frequency=selection_frequency,
+                rng=env.rng,
+            )
+            hh.run(env)
+
+    if not env.recordings:
+        env.run_operator(NoOp(), True, meta={"heuristic_name": "noop"}, stage="heuragenix", time_ms=0)
+
+    output_dir = output_root / method
+    env.dump_result({"engine": method, "steps": total_steps}, str(output_dir))
     if fallback_used:
         _append_llm_usage(
             llm_usage_path,
@@ -563,8 +528,7 @@ def main() -> None:
     detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
     eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-    trace_metrics = _compute_trace_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
-    oscillation_metrics = compute_oscillation_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
+    trace_metrics = compute_oscillation_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
 
     best_eval = trace_info.get("best_eval") or {}
     report = {
@@ -582,8 +546,7 @@ def main() -> None:
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
         "iterations_scale_factor": float(iterations_scale),
-        "trace_metrics": trace_metrics,
-        "oscillation_metrics": oscillation_metrics,
+        **trace_metrics,
         "raw_dir": str(output_dir),
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:

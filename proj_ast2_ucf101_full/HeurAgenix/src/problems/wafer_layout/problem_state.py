@@ -11,7 +11,7 @@ def _top_k_pairs(values: List[Tuple[int, int, float]], k: int) -> List[Tuple[int
     return values[:k]
 
 
-def get_instance_problem_state(instance_data: dict, **kwargs) -> dict:
+def get_instance_problem_state(instance_data: dict) -> dict:
     sites_xy = np.asarray(instance_data["sites"]["sites_xy"], dtype=float)
     radii = np.linalg.norm(sites_xy, axis=1)
     traffic = np.asarray(instance_data["mapping"]["traffic_matrix"], dtype=float)
@@ -36,30 +36,25 @@ def get_instance_problem_state(instance_data: dict, **kwargs) -> dict:
     }
 
 
-def get_solution_problem_state(problem_state: dict, current_solution=None, **kwargs) -> dict:
-    solution = problem_state.get("solution", {})
-    eval_out = problem_state.get("eval", {})
-    assign = solution.get("assign", [])
-    if current_solution is not None and hasattr(current_solution, "assign"):
-        assign = current_solution.assign
+def get_solution_problem_state(instance_data: dict, current_solution) -> dict:
+    assign = list(getattr(current_solution, "assign", []) or [])
     assign_arr = np.asarray(assign, dtype=int)
-    sites_xy = np.asarray(problem_state.get("sites_xy", []), dtype=float)
+    sites_xy = np.asarray(instance_data.get("sites", {}).get("sites_xy", []), dtype=float)
+    Ns = int(instance_data.get("sites", {}).get("Ns", len(sites_xy)))
     radius_mean = 0.0
     if sites_xy.size and assign_arr.size:
         valid = assign_arr[(assign_arr >= 0) & (assign_arr < len(sites_xy))]
         if valid.size:
             radius_mean = float(np.linalg.norm(sites_xy[valid], axis=1).mean())
     return {
-        "total_scalar": eval_out.get("total_scalar", 0.0),
-        "comm_norm": eval_out.get("comm_norm", 0.0),
-        "therm_norm": eval_out.get("therm_norm", 0.0),
-        "free_sites_count": int(problem_state.get("Ns", 0) - len(set(assign))),
+        "assign": assign,
+        "free_sites_count": int(Ns - len(set(assign))),
         "duplicate_count": int(len(assign) - len(set(assign))),
         "assign_radius_mean": radius_mean,
     }
 
 
-def get_observation_problem_state(problem_state: dict, **kwargs) -> dict:
+def get_observation_problem_state(problem_state: dict) -> dict:
     return {
         "instance": problem_state.get("instance", {}),
         "solution": problem_state.get("solution", {}),

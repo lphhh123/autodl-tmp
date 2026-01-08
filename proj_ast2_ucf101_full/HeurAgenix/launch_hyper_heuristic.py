@@ -4,11 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Dict
 
+ROOT = Path(__file__).resolve().parent
+for path in (str(ROOT), str(ROOT / "src")):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
 from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
-from util.get_heuristic import get_heuristic
 from util.llm_client.get_llm_client import get_llm_client
 
 
@@ -42,6 +47,20 @@ def _load_env(problem: str, data_path: str, rng_seed: int) -> object:
     return env_cls(data_path, rng=rng)
 
 
+def _resolve_heuristic_files(heuristic_dir: str, problem: str) -> list[str]:
+    candidate = Path(heuristic_dir)
+    if candidate.exists():
+        root = candidate
+    else:
+        root = Path(__file__).resolve().parent / "src" / "problems" / problem / "heuristics" / heuristic_dir
+    if not root.exists():
+        raise FileNotFoundError(f"Heuristic directory not found: {root}")
+    files = [str(path) for path in sorted(root.glob("*.py")) if not path.name.startswith("__")]
+    if not files:
+        raise RuntimeError(f"No heuristics found in {root}")
+    return files
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--problem", required=True)
@@ -61,7 +80,7 @@ def main() -> None:
     test_path = _resolve_test_data(problem, args.test_data)
     env = _load_env(problem, str(test_path), args.seed)
 
-    heuristics = list(get_heuristic(args.heuristic_dir, problem).values())
+    heuristic_files = _resolve_heuristic_files(args.heuristic_dir, problem)
     steps = max(1, int(float(args.iterations_scale_factor) * getattr(env, "problem_size", 1)))
 
     output_root = Path.cwd() / "output" / problem / test_path.name / args.result / args.engine
@@ -75,23 +94,26 @@ def main() -> None:
         if llm_client is None:
             raise RuntimeError("Failed to load LLM client config")
         hh = LLMSelectionHyperHeuristic(
-            env,
-            heuristics,
-            rng=env.rng,
+            llm_client=llm_client,
+            heuristic_pool=heuristic_files,
+            problem=problem,
+            iterations_scale_factor=args.iterations_scale_factor,
             selection_frequency=args.selection_frequency,
             num_candidate_heuristics=args.num_candidate_heuristics,
-            llm_client=llm_client,
+            rollout_budget=args.rollout_budget,
+            rng=env.rng,
             usage_path=str(usage_path),
         )
     else:
         hh = RandomSelectionHyperHeuristic(
-            env,
-            heuristics,
-            rng=env.rng,
+            heuristic_pool=heuristic_files,
+            problem=problem,
+            iterations_scale_factor=args.iterations_scale_factor,
             selection_frequency=args.selection_frequency,
+            rng=env.rng,
         )
 
-    hh.run(steps)
+    hh.run(env)
 
     if getattr(hh, "usage_records", None) and args.engine != "llm_hh":
         with usage_path.open("w", encoding="utf-8") as f:
