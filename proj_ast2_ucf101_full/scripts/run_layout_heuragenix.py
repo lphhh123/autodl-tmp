@@ -59,6 +59,9 @@ def _seed_everything(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    def _eval_assign(assign: np.ndarray) -> Dict[str, Any]:
+        base_state.assign = np.asarray(assign, dtype=int)
+        return evaluator.evaluate(base_state)
 
 def _signature_for_assign(assign: Iterable[int]) -> str:
     return "assign:" + ",".join(str(int(x)) for x in assign)
@@ -95,22 +98,6 @@ def _import_heuristics(module_prefix: str, heuristic_dir: Path) -> List[Callable
     if not heuristics:
         raise RuntimeError(f"No heuristics found under {heuristic_dir}")
     return heuristics
-
-
-def _load_llm_config(llm_config_path: Path) -> None:
-    if not llm_config_path.exists():
-        return
-    with llm_config_path.open("r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    endpoint = str(cfg.get("endpoint", "")).strip()
-    model = str(cfg.get("model", "")).strip()
-    api_key = str(cfg.get("api_key", "")).strip()
-    if endpoint:
-        os.environ.setdefault("VOLC_ARK_ENDPOINT", endpoint)
-    if model:
-        os.environ.setdefault("VOLC_ARK_MODEL", model)
-    if api_key and "REPLACE_WITH_API_KEY" not in api_key:
-        os.environ.setdefault("VOLC_ARK_API_KEY", api_key)
 
 
 def _build_evaluator(layout_input: dict, cfg: dict) -> LayoutEvaluator:
@@ -209,7 +196,7 @@ def _record_trace(
             writer.writerow(
                 [
                     idx,
-                    rec.get("stage", "heuragenix"),
+                    "heuragenix",
                     op_name,
                     json.dumps(op_args_payload),
                     accepted,
@@ -266,36 +253,21 @@ def main() -> None:
     sys.path.insert(0, str(heuragenix_root / "src"))
     sys.path.insert(0, str(project_root))
 
-    try:
-        from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
-        from problems.wafer_layout.env import Env
-        from util.get_heuristic import get_heuristic
-    except Exception as exc:  # noqa: BLE001
-        _append_llm_usage(
-            llm_usage_path,
-            {
-                "ok": False,
-                "reason": "import_error",
-                "error": str(exc),
-            },
-        )
-        raise
+    from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
+    from problems.wafer_layout.env import Env
 
     evaluator = _build_evaluator(layout_input, cfg)
     eval_assign = _build_eval_assign(layout_input, evaluator)
 
     env = Env(str(heuragenix_data_path), rng=rng, algorithm_data={"eval_assign": eval_assign})
 
-    heuristic_dir_name = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
-    heuristic_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "heuristics" / heuristic_dir_name
-    try:
-        heuristics_map = get_heuristic(heuristic_dir_name, "wafer_layout")
-        heuristics = list(heuristics_map.values())
-    except Exception:  # noqa: BLE001
-        heuristics = _import_heuristics(
-            "problems.wafer_layout.heuristics." + heuristic_dir_name,
-            heuristic_dir,
-        )
+    heuristic_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "heuristics" / str(
+        baseline_cfg.get("heuristic_dir", "basic_heuristics")
+    )
+    heuristics = _import_heuristics(
+        "problems.wafer_layout.heuristics." + str(baseline_cfg.get("heuristic_dir", "basic_heuristics")),
+        heuristic_dir,
+    )
 
     S = int(layout_input["slots"].get("S", len(layout_input["slots"]["tdp"])))
     max_steps = int(baseline_cfg.get("max_steps", 0))
@@ -311,11 +283,6 @@ def main() -> None:
     sa_alpha = float(baseline_cfg.get("sa_alpha", 0.995))
 
     method = str(baseline_cfg.get("method", "random_hh"))
-    fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
-    llm_config_file = baseline_cfg.get("llm_config_file")
-    if llm_config_file:
-        llm_cfg_path = (heuragenix_root / str(llm_config_file)).resolve()
-        _load_llm_config(llm_cfg_path)
     start_time = time.time()
     fallback_used = False
 
@@ -332,7 +299,6 @@ def main() -> None:
             sa_alpha=sa_alpha,
             timeout_sec=llm_timeout,
             max_retry=llm_max_retry,
-            stage_name="heuragenix_llm_hh",
         )
         try:
             llm_hh.run(max_steps)
@@ -359,7 +325,6 @@ def main() -> None:
             selection_frequency=selection_frequency,
             sa_T0=sa_T0,
             sa_alpha=sa_alpha,
-            stage_name="heuragenix_random_hh",
         )
         remaining_steps = max_steps
         if env.recordings:
@@ -400,9 +365,6 @@ def main() -> None:
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
         "iterations_scale_factor": float(iterations_scale_factor),
-        "selection_frequency": selection_frequency,
-        "num_candidate_heuristics": num_candidate_heuristics,
-        "rollout_budget": int(baseline_cfg.get("rollout_budget", 0)),
         **trace_metrics,
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
