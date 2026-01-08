@@ -22,6 +22,7 @@ class LLMSelectionHyperHeuristic:
         timeout_sec: int = 90,
         max_retry: int = 1,
         stage_name: str = "heuragenix_llm_hh",
+        llm_client: Any | None = None,
     ) -> None:
         self.env = env
         self.heuristics = heuristics
@@ -31,12 +32,14 @@ class LLMSelectionHyperHeuristic:
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
         self.stage_name = stage_name
-        self.llm = VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
+        self.llm = llm_client or VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
 
     def _llm_ready(self) -> bool:
-        return bool(self.llm.endpoint and self.llm.api_key and self.llm.model)
+        if hasattr(self.llm, "is_ready"):
+            return bool(self.llm.is_ready())
+        return bool(getattr(self.llm, "endpoint", None) and getattr(self.llm, "api_key", None) and getattr(self.llm, "model", None))
 
     def _score_candidates(self, solution) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
