@@ -1,0 +1,3 @@
+problem_state fields:
+- instance: fixed layout instance info (S, Ns, wafer radius, objective config, top traffic pairs).
+- solution: current solution metrics (total_scalar, comm_norm, therm_norm) and assignment stats.
