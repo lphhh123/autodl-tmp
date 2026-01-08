@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-from problems.base.components import BaseOperator, BaseSolution
+from core import BaseOperator, BaseSolution
 
 
 @dataclass

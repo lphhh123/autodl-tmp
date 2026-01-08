@@ -34,16 +34,23 @@ def get_instance_problem_state(instance_data: dict) -> dict:
     }
 
 
-def get_solution_problem_state(instance_data: dict, solution) -> dict:
-    assign = getattr(solution, "assign", [])
+def get_solution_problem_state(problem_state: dict) -> dict:
+    solution = problem_state.get("solution", {})
+    eval_out = problem_state.get("eval", {})
+    assign = solution.get("assign", [])
     assign_arr = np.asarray(assign, dtype=int)
     return {
-        "assign": list(assign),
-        "assign_radius_mean": float(assign_arr.mean()) if assign_arr.size else 0.0,
+        "total_scalar": eval_out.get("total_scalar", 0.0),
+        "comm_norm": eval_out.get("comm_norm", 0.0),
+        "therm_norm": eval_out.get("therm_norm", 0.0),
+        "free_sites_count": int(problem_state.get("Ns", 0) - len(set(assign))),
         "duplicate_count": int(len(assign) - len(set(assign))),
-        "free_sites_count": int(int(instance_data["sites"]["Ns"]) - len(set(assign))),
+        "assign_radius_mean": float(assign_arr.mean()) if assign_arr.size else 0.0,
     }
 
 
-def get_observation_problem_state(solution_problem_state: dict) -> dict:
-    return solution_problem_state
+def get_observation_problem_state(problem_state: dict) -> dict:
+    return {
+        "instance": problem_state.get("instance", {}),
+        "solution": problem_state.get("solution", {}),
+    }

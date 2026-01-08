@@ -8,13 +8,12 @@ from typing import Any, Dict
 
 import numpy as np
 
+from core import BaseEnv
 from layout.evaluator import LayoutEvaluator, LayoutState
-from problems.base.env import BaseEnv
 from problems.wafer_layout.components import WaferLayoutSolution
-from problems.wafer_layout import problem_state as ps
 
 
-class Env(BaseEnv):
+class WaferLayoutEnv(BaseEnv):
     def __init__(self, data_path: str, rng: random.Random | None = None):
         self.rng = rng or random.Random(0)
         super().__init__(data_path)
@@ -75,15 +74,3 @@ class Env(BaseEnv):
     def evaluate(self, solution: WaferLayoutSolution) -> Dict[str, Any]:
         st = self._build_state(np.asarray(solution.assign, dtype=int))
         return self._evaluator.evaluate(st)
-
-    def get_problem_state(self) -> Dict[str, Any]:
-        instance_state = ps.get_instance_problem_state(self.instance_data)
-        solution_state = ps.get_solution_problem_state(self.instance_data, self.current_solution)
-        return {
-            "instance": instance_state,
-            "current_solution": self.current_solution,
-            "solution_state": solution_state,
-        }
-
-    def dump_result(self, content: Dict[str, Any], output_folder: str) -> None:
-        return None

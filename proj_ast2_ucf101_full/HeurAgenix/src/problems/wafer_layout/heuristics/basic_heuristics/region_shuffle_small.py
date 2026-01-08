@@ -8,7 +8,7 @@ from problems.wafer_layout.components import RandomKick, SwapSlots
 
 def region_shuffle_small(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[RandomKick, Dict]:
     rng: random.Random = algorithm_data["rng"]
-    solution = problem_state["current_solution"]
+    solution = problem_state["solution"]
     slots = list(range(solution.S))
     rng.shuffle(slots)
     ops = []

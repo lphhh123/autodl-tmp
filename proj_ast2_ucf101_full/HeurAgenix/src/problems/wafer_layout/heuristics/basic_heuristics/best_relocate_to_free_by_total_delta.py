@@ -9,7 +9,7 @@ from problems.wafer_layout.components import RelocateSlot
 def best_relocate_to_free_by_total_delta(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[RelocateSlot, Dict]:
     env = algorithm_data["env"]
     rng: random.Random = algorithm_data["rng"]
-    solution = problem_state["current_solution"]
+    solution = problem_state["solution"]
     used = set(solution.assign)
     free_sites = [s for s in range(solution.Ns) if s not in used]
     if not free_sites:

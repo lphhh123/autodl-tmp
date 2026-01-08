@@ -5,7 +5,7 @@ import random
 import time
 from typing import Any, Callable, Dict, List, Tuple
 
-from problems.base.env import BaseEnv
+from core import BaseEnv
 from layout.llm_provider import VolcArkProvider
 
 
