@@ -6,7 +6,6 @@ import time
 from typing import Any, Callable, Dict, List, Tuple
 
 from core import BaseEnv
-from layout.llm_provider import VolcArkProvider
 
 
 class LLMSelectionHyperHeuristic:
@@ -32,14 +31,16 @@ class LLMSelectionHyperHeuristic:
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
         self.stage_name = stage_name
-        self.llm = llm_client or VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
+        self.llm = llm_client
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
 
     def _llm_ready(self) -> bool:
+        if self.llm is None:
+            return False
         if hasattr(self.llm, "is_ready"):
             return bool(self.llm.is_ready())
-        return bool(getattr(self.llm, "endpoint", None) and getattr(self.llm, "api_key", None) and getattr(self.llm, "model", None))
+        return bool(getattr(self.llm, "base_url", None) and getattr(self.llm, "model", None))
 
     def _score_candidates(self, solution) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []

@@ -17,14 +17,16 @@ def get_instance_problem_state(instance_data: dict, **kwargs) -> dict:
     traffic = np.asarray(instance_data["mapping"]["traffic_matrix"], dtype=float)
     pairs = []
     S = int(instance_data["slots"]["S"])
+    Ns = int(instance_data["sites"].get("Ns", len(sites_xy)))
     for i in range(S):
         for j in range(i + 1, S):
             pairs.append((i, j, float(traffic[i, j])))
     return {
         "S": int(instance_data["slots"]["S"]),
-        "Ns": int(instance_data["sites"]["Ns"]),
+        "Ns": Ns,
         "wafer_radius_mm": float(instance_data["wafer"]["radius_mm"]),
         "objective_cfg": instance_data.get("objective_cfg", {}),
+        "sites_xy": sites_xy.tolist(),
         "sites_radius_stats": {
             "min": float(radii.min()) if radii.size else 0.0,
             "max": float(radii.max()) if radii.size else 0.0,
@@ -41,13 +43,19 @@ def get_solution_problem_state(problem_state: dict, current_solution=None, **kwa
     if current_solution is not None and hasattr(current_solution, "assign"):
         assign = current_solution.assign
     assign_arr = np.asarray(assign, dtype=int)
+    sites_xy = np.asarray(problem_state.get("sites_xy", []), dtype=float)
+    radius_mean = 0.0
+    if sites_xy.size and assign_arr.size:
+        valid = assign_arr[(assign_arr >= 0) & (assign_arr < len(sites_xy))]
+        if valid.size:
+            radius_mean = float(np.linalg.norm(sites_xy[valid], axis=1).mean())
     return {
         "total_scalar": eval_out.get("total_scalar", 0.0),
         "comm_norm": eval_out.get("comm_norm", 0.0),
         "therm_norm": eval_out.get("therm_norm", 0.0),
         "free_sites_count": int(problem_state.get("Ns", 0) - len(set(assign))),
         "duplicate_count": int(len(assign) - len(set(assign))),
-        "assign_radius_mean": float(assign_arr.mean()) if assign_arr.size else 0.0,
+        "assign_radius_mean": radius_mean,
     }
 
 

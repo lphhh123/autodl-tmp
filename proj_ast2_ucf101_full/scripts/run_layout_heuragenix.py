@@ -5,13 +5,12 @@ import argparse
 import csv
 import importlib
 import json
-import os
 import random
 import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -68,14 +67,18 @@ def _seed_everything(seed: int) -> None:
 def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
     if cfg_root:
         candidate = Path(cfg_root).expanduser()
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
         if candidate.exists():
             return candidate
     fallback = project_root / "HeurAgenix"
-    return fallback
+    if fallback.exists():
+        return fallback
+    sibling = project_root.parent / "HeurAgenix"
+    return sibling
 
 
-def _copy_layout_input(layout_input_path: Path, heuragenix_root: Path) -> Path:
-    case_name = layout_input_path.stem
+def _copy_layout_input(layout_input_path: Path, heuragenix_root: Path, case_name: str) -> Path:
     target_dir = heuragenix_root / "data" / "wafer_layout" / "data" / "test_data"
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{case_name}.json"
@@ -98,7 +101,9 @@ def _import_heuristics(module_prefix: str, heuristic_dir: Path) -> List[Callable
     return heuristics
 
 
-def _parse_layout_input(layout_input: dict, cfg: dict) -> tuple[LayoutState, LayoutEvaluator, np.ndarray, Callable[[np.ndarray], Dict[str, Any]]]:
+def _parse_layout_input(
+    layout_input: dict, cfg: dict
+) -> tuple[LayoutState, LayoutEvaluator, np.ndarray, Callable[[np.ndarray], Dict[str, Any]]]:
     wafer = layout_input.get("wafer", {})
     slots = layout_input.get("slots", {})
     sites = layout_input.get("sites", {})
@@ -108,7 +113,7 @@ def _parse_layout_input(layout_input: dict, cfg: dict) -> tuple[LayoutState, Lay
     sites_xy = np.asarray(sites.get("sites_xy", []), dtype=np.float32)
     tdp = np.asarray(slots.get("tdp", []), dtype=float)
     S = int(slots.get("S", len(tdp)))
-    Ns = int(sites.get("Ns", len(sites_xy)))
+    Ns = int(len(sites_xy))
     traffic = np.asarray(layout_input.get("mapping", {}).get("traffic_matrix", []), dtype=float)
     if traffic.size == 0:
         traffic = np.zeros((S, S), dtype=float)
@@ -204,9 +209,87 @@ def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
 def _iter_selection_records(records: List[Dict[str, Any]], fallback_used: bool) -> Iterable[Dict[str, Any]]:
     for rec in records:
         payload = dict(rec)
+        if "selection_id" in payload and "selection_idx" not in payload:
+            payload["selection_idx"] = payload.pop("selection_id")
+        if "selection_idx" not in payload and "selection_id" in payload:
+            payload["selection_idx"] = payload["selection_id"]
+        if "chosen_heuristic" not in payload:
+            if "heuristic_name" in payload:
+                payload["chosen_heuristic"] = payload["heuristic_name"]
         payload.setdefault("ok", True)
         payload.setdefault("fallback_used", fallback_used)
         yield payload
+
+
+def _resolve_llm_config_path(llm_config_file: Optional[str], heuragenix_root: Path, project_root: Path) -> Optional[Path]:
+    if not llm_config_file:
+        return None
+    candidate = Path(llm_config_file).expanduser()
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    candidates = [heuragenix_root / candidate, project_root / candidate]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+class _FallbackOperator:
+    def __init__(self, name: str, **kwargs: Any) -> None:
+        self.name = name
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+def _run_simple_fallback(
+    max_steps: int,
+    eval_assign: Callable[[np.ndarray], Dict[str, Any]],
+    init_assign: np.ndarray,
+    Ns: int,
+    rng: random.Random,
+    sa_T0: float,
+    sa_alpha: float,
+    stage_name: str = "heuragenix_fallback",
+) -> List[Dict[str, Any]]:
+    recordings: List[Dict[str, Any]] = []
+    current_assign = np.asarray(init_assign, dtype=int).copy()
+    current_eval = eval_assign(current_assign)
+    temperature = float(sa_T0)
+    S = int(current_assign.shape[0])
+    Ns = int(max(Ns, 1))
+    for step in range(max_steps):
+        step_start = time.perf_counter()
+        if S > 1 and rng.random() < 0.5:
+            i, j = rng.sample(range(S), 2)
+            new_assign = current_assign.copy()
+            new_assign[i], new_assign[j] = new_assign[j], new_assign[i]
+            operator = _FallbackOperator("swap", i=i, j=j)
+        else:
+            i = rng.randrange(S) if S > 0 else 0
+            site_id = rng.randrange(Ns)
+            new_assign = current_assign.copy()
+            new_assign[i] = site_id
+            operator = _FallbackOperator("relocate", i=i, site_id=site_id)
+        new_eval = eval_assign(new_assign)
+        delta = float(new_eval["total_scalar"] - current_eval["total_scalar"])
+        accept = (delta < 0) or (rng.random() < np.exp(-delta / max(temperature, 1e-6)))
+        if accept:
+            current_assign = new_assign
+            current_eval = new_eval
+        recordings.append(
+            {
+                "step": step,
+                "stage": stage_name,
+                "operator": operator,
+                "meta": {},
+                "accepted": accept,
+                "score": float(current_eval.get("total_scalar", 0.0)),
+                "time_ms": int((time.perf_counter() - step_start) * 1000),
+                "assign": list(current_assign),
+            }
+        )
+        temperature *= sa_alpha
+    return recordings
 
 
 def _record_trace(
@@ -323,27 +406,42 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else {}
     heuragenix_root = _resolve_heuragenix_root(baseline_cfg.get("heuragenix_root"), project_root)
-    heuragenix_data_path = _copy_layout_input(layout_input_path, heuragenix_root)
+    heuragenix_available = heuragenix_root.exists()
+    case_name = f"{out_dir.name}_seed{seed}"
+    heuragenix_data_path = None
+    if heuragenix_available:
+        heuragenix_data_path = _copy_layout_input(layout_input_path, heuragenix_root, case_name)
 
-    sys.path.insert(0, str(heuragenix_root))
-    sys.path.insert(0, str(heuragenix_root / "src"))
+    if heuragenix_available:
+        sys.path.insert(0, str(heuragenix_root))
+        sys.path.insert(0, str(heuragenix_root / "src"))
     sys.path.insert(0, str(project_root))
 
-    from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
-    from problems.wafer_layout.env import Env
-    from util.llm_client.get_llm_client import get_llm_client
+    LLMSelectionHyperHeuristic = None
+    RandomSelectionHyperHeuristic = None
+    Env = None
+    get_llm_client = None
+    if heuragenix_available:
+        try:
+            from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
+            from problems.wafer_layout.env import Env
+            from util.llm_client.get_llm_client import get_llm_client
+        except Exception:  # noqa: BLE001
+            heuragenix_available = False
 
     base_state, evaluator, init_assign, eval_assign = _parse_layout_input(layout_input, cfg)
 
-    env = Env(str(heuragenix_data_path), rng=rng, algorithm_data={"eval_assign": eval_assign})
-
-    heuristic_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "heuristics" / str(
-        baseline_cfg.get("heuristic_dir", "basic_heuristics")
-    )
-    heuristics = _import_heuristics(
-        "problems.wafer_layout.heuristics." + str(baseline_cfg.get("heuristic_dir", "basic_heuristics")),
-        heuristic_dir,
-    )
+    env = None
+    heuristics: List[Callable[..., Any]] = []
+    if heuragenix_available and heuragenix_data_path is not None:
+        env = Env(str(heuragenix_data_path), rng=rng, algorithm_data={"eval_assign": eval_assign})
+        heuristic_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "heuristics" / str(
+            baseline_cfg.get("heuristic_dir", "basic_heuristics")
+        )
+        heuristics = _import_heuristics(
+            "problems.wafer_layout.heuristics." + str(baseline_cfg.get("heuristic_dir", "basic_heuristics")),
+            heuristic_dir,
+        )
 
     S = int(layout_input["slots"].get("S", len(layout_input["slots"]["tdp"])))
     max_steps = int(baseline_cfg.get("max_steps", 0))
@@ -364,64 +462,127 @@ def main() -> None:
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     llm_client = None
     llm_config_file = baseline_cfg.get("llm_config_file")
-    if llm_config_file:
-        llm_client = get_llm_client(
-            str(Path(llm_config_file).expanduser()),
-            timeout_sec=int(baseline_cfg.get("llm_timeout_s", 30)),
-            max_retry=int(baseline_cfg.get("max_llm_failures", 1)),
-        )
+    resolved_llm_config = None
+    if heuragenix_available and get_llm_client is not None:
+        resolved_llm_config = _resolve_llm_config_path(llm_config_file, heuragenix_root, project_root)
+        if resolved_llm_config is not None:
+            llm_client = get_llm_client(
+                str(resolved_llm_config),
+                timeout_sec=int(baseline_cfg.get("llm_timeout_s", 30)),
+                max_retry=int(baseline_cfg.get("max_llm_failures", 1)),
+            )
 
+    recordings: List[Dict[str, Any]] = []
     if method == "llm_hh":
         llm_timeout = int(baseline_cfg.get("llm_timeout_s", 30))
         llm_max_retry = int(baseline_cfg.get("max_llm_failures", 1))
-        llm_hh = LLMSelectionHyperHeuristic(
-            env,
-            heuristics,
-            rng,
-            selection_frequency=selection_frequency,
-            num_candidate_heuristics=num_candidate_heuristics,
-            sa_T0=sa_T0,
-            sa_alpha=sa_alpha,
-            timeout_sec=llm_timeout,
-            max_retry=llm_max_retry,
-            llm_client=llm_client,
-        )
-        try:
-            llm_hh.run(max_steps)
-            for rec in _iter_selection_records(llm_hh.selection_records, False):
-                _append_llm_usage(llm_usage_path, rec)
-        except Exception as exc:  # noqa: BLE001
+        if not heuragenix_available or env is None or not heuristics:
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "heuragenix_missing", "fallback_used": True, "method": method},
+            )
+            fallback_used = True
+        elif llm_client is None or not getattr(llm_client, "is_ready", lambda: False)():
             _append_llm_usage(
                 llm_usage_path,
                 {
                     "ok": False,
-                    "reason": "llm_failure",
-                    "error": str(exc),
+                    "reason": "llm_not_ready",
                     "fallback_used": True,
                     "method": method,
+                    "llm_config_file": str(resolved_llm_config) if resolved_llm_config else None,
                 },
             )
             fallback_used = True
+        else:
+            llm_hh = LLMSelectionHyperHeuristic(
+                env,
+                heuristics,
+                rng,
+                selection_frequency=selection_frequency,
+                num_candidate_heuristics=num_candidate_heuristics,
+                sa_T0=sa_T0,
+                sa_alpha=sa_alpha,
+                timeout_sec=llm_timeout,
+                max_retry=llm_max_retry,
+                llm_client=llm_client,
+            )
+            try:
+                llm_hh.run(max_steps)
+                recordings = env.recordings
+                for rec in _iter_selection_records(llm_hh.selection_records, False):
+                    _append_llm_usage(llm_usage_path, rec)
+            except Exception as exc:  # noqa: BLE001
+                _append_llm_usage(
+                    llm_usage_path,
+                    {
+                        "ok": False,
+                        "reason": "llm_failure",
+                        "error": str(exc),
+                        "fallback_used": True,
+                        "method": method,
+                    },
+                )
+                fallback_used = True
 
     if method != "llm_hh" or fallback_used:
-        random_hh = RandomSelectionHyperHeuristic(
-            env,
-            heuristics,
-            rng,
-            selection_frequency=selection_frequency,
-            sa_T0=sa_T0,
-            sa_alpha=sa_alpha,
-        )
-        remaining_steps = max_steps
-        if env.recordings:
-            remaining_steps = max(0, max_steps - len(env.recordings))
-        random_hh.run(remaining_steps)
-        for rec in _iter_selection_records(random_hh.usage_records, fallback_used):
-            _append_llm_usage(llm_usage_path, rec)
-        if method != "llm_hh":
-            _append_llm_usage(llm_usage_path, {"ok": False, "mode": "random_hh"})
+        if heuragenix_available and env is not None and heuristics and RandomSelectionHyperHeuristic is not None:
+            random_hh = RandomSelectionHyperHeuristic(
+                env,
+                heuristics,
+                rng,
+                selection_frequency=selection_frequency,
+                sa_T0=sa_T0,
+                sa_alpha=sa_alpha,
+            )
+            remaining_steps = max_steps
+            if env.recordings:
+                remaining_steps = max(0, max_steps - len(env.recordings))
+            try:
+                random_hh.run(remaining_steps)
+                recordings = env.recordings
+                for rec in _iter_selection_records(random_hh.usage_records, fallback_used):
+                    _append_llm_usage(llm_usage_path, rec)
+            except Exception as exc:  # noqa: BLE001
+                _append_llm_usage(
+                    llm_usage_path,
+                    {
+                        "ok": False,
+                        "reason": "random_hh_failure",
+                        "error": str(exc),
+                        "fallback_used": True,
+                        "method": "random_hh",
+                    },
+                )
+                recordings = _run_simple_fallback(
+                    max_steps,
+                    eval_assign,
+                    init_assign,
+                    base_state.Ns,
+                    rng,
+                    sa_T0,
+                    sa_alpha,
+                )
+                fallback_used = True
+        else:
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "heuragenix_missing", "fallback_used": True, "method": "random_hh"},
+            )
+            recordings = _run_simple_fallback(
+                max_steps,
+                eval_assign,
+                init_assign,
+                base_state.Ns,
+                rng,
+                sa_T0,
+                sa_alpha,
+            )
+            fallback_used = True
 
-    trace_info = _record_trace(out_dir, seed, env.recordings, eval_assign, init_assign)
+    if not recordings and env is not None:
+        recordings = env.recordings
+    trace_info = _record_trace(out_dir, seed, recordings, eval_assign, init_assign)
 
     detailed_cfg = cfg.get("detailed_place", {})
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
@@ -429,7 +590,7 @@ def main() -> None:
     trace_metrics = compute_oscillation_metrics(trace_info["trace_path"], metrics_window, eps_flat)
 
     best_eval = trace_info["best_eval"] or {}
-    best_assign = trace_info["best_assign"] or env.solution.assign
+    best_assign = trace_info["best_assign"] or (env.solution.assign if env is not None else list(init_assign))
 
     layout_best = {
         "assign": list(best_assign),
@@ -444,7 +605,7 @@ def main() -> None:
         "ok": bool(method == "llm_hh" and not fallback_used),
         "provider": getattr(llm_client, "provider", None) if llm_client else None,
         "model": getattr(llm_client, "model", None) if llm_client else None,
-        "llm_config_file": str(llm_config_file) if llm_config_file else None,
+        "llm_config_file": str(resolved_llm_config) if resolved_llm_config else None,
         "total_calls": len(getattr(llm_client, "calls", [])) if llm_client else None,
         "fallback": fallback_method if fallback_used else None,
     }

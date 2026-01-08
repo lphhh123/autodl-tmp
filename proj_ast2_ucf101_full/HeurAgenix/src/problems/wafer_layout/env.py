@@ -35,6 +35,9 @@ class WaferLayoutEnv(BaseEnv):
             baseline = self.instance_data.get("baseline", {})
             objective_cfg = self.instance_data.get("objective_cfg", {})
             scalar = objective_cfg.get("scalar_weights", {})
+            sites_xy = np.asarray(self.instance_data["sites"]["sites_xy"], dtype=np.float32)
+            slots = int(self.instance_data["slots"].get("S", len(self.instance_data["slots"].get("tdp", []))))
+            Ns = int(self.instance_data["sites"].get("Ns", len(sites_xy)))
             evaluator = LayoutEvaluator(
                 sigma_mm=float(objective_cfg.get("sigma_mm", 20.0)),
                 baseline={
@@ -48,11 +51,11 @@ class WaferLayoutEnv(BaseEnv):
                 },
             )
             base_state = LayoutState(
-                S=int(self.instance_data["slots"]["S"]),
-                Ns=int(self.instance_data["sites"]["Ns"]),
+                S=slots,
+                Ns=Ns,
                 wafer_radius_mm=float(self.instance_data["wafer"]["radius_mm"]),
-                sites_xy_mm=np.asarray(self.instance_data["sites"]["sites_xy"], dtype=np.float32),
-                assign=np.zeros(int(self.instance_data["slots"]["S"]), dtype=int),
+                sites_xy_mm=sites_xy,
+                assign=np.zeros(slots, dtype=int),
                 chip_tdp_w=np.asarray(self.instance_data["slots"]["tdp"], dtype=float),
                 traffic_bytes=np.asarray(self.instance_data["mapping"]["traffic_matrix"], dtype=float),
                 meta={},
@@ -68,16 +71,25 @@ class WaferLayoutEnv(BaseEnv):
     def init_solution(self) -> WaferLayoutSolution:
         seed = self.instance_data.get("seed", {})
         baseline = self.instance_data.get("baseline", {})
-        slots = int(self.instance_data["slots"]["S"])
-        Ns = int(self.instance_data["sites"]["Ns"])
+        slots = int(self.instance_data["slots"].get("S", len(self.instance_data["slots"].get("tdp", []))))
+        sites_xy = np.asarray(self.instance_data["sites"]["sites_xy"], dtype=np.float32)
+        Ns = int(self.instance_data["sites"].get("Ns", len(sites_xy)))
         if "assign_seed" in seed:
             assign = list(seed["assign_seed"])
+        elif "seed_assign" in seed:
+            assign = list(seed["seed_assign"])
         elif "assign_grid" in baseline:
             assign = list(baseline["assign_grid"])
         else:
-            sites = list(range(Ns))
-            self.rng.shuffle(sites)
-            assign = sites[:slots]
+            if Ns <= 0:
+                assign = [0 for _ in range(slots)]
+            else:
+                sites = list(range(Ns))
+                self.rng.shuffle(sites)
+                if slots <= Ns:
+                    assign = sites[:slots]
+                else:
+                    assign = [sites[i % Ns] for i in range(slots)]
         return WaferLayoutSolution(assign=assign, S=slots, Ns=Ns)
 
     def get_key_value(self, solution: WaferLayoutSolution) -> float:
