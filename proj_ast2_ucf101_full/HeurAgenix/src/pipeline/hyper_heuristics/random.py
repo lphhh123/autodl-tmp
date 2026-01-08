@@ -24,15 +24,30 @@ class RandomHyperHeuristic:
         self.selection_frequency = max(1, int(selection_frequency))
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
+        self.usage_records: List[Dict[str, Any]] = []
 
     def run(self, max_steps: int) -> None:
         temperature = self.sa_T0
         current_solution = self.env.solution
         current_score = self.env.get_key_value(current_solution)
+        selection_id = 0
+        selected = None
         for step in range(max_steps):
             step_start = time.perf_counter()
-            heuristic = self.rng.choice(self.heuristics)
-            operator, meta = heuristic({"solution": current_solution}, {"env": self.env, "rng": self.rng})
+            if step % self.selection_frequency == 0 or selected is None:
+                selected = self.rng.choice(self.heuristics)
+                self.usage_records.append(
+                    {
+                        "ok": True,
+                        "reason": "random_pick",
+                        "chosen_heuristic": getattr(selected, "__name__", "unknown"),
+                        "candidates": [getattr(h, "__name__", "unknown") for h in self.heuristics],
+                        "selection_id": selection_id,
+                        "step": int(step),
+                    }
+                )
+                selection_id += 1
+            operator, meta = selected({"solution": current_solution}, {"env": self.env, "rng": self.rng})
             new_solution = operator.run(current_solution)
             new_score = self.env.get_key_value(new_solution)
             delta = new_score - current_score
@@ -49,6 +64,7 @@ class RandomHyperHeuristic:
                     "accepted": accept,
                     "score": current_score,
                     "time_ms": int((time.perf_counter() - step_start) * 1000),
+                    "assign": list(current_solution.assign),
                 }
             )
             temperature *= self.sa_alpha

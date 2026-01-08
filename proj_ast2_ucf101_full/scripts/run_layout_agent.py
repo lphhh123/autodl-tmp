@@ -188,6 +188,10 @@ def _compute_trace_metrics(trace_path: Path, window: int, eps_flat: float) -> di
     }
 
 
+def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
+    return _compute_trace_metrics(trace_path, window, eps_flat)
+
+
 def _parse_segments(raw_segments) -> list[Segment]:
     segments: list[Segment] = []
     if not raw_segments:
