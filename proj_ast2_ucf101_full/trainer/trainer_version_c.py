@@ -6,8 +6,10 @@ from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import numpy as np
 import math
+import random
+
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -36,9 +38,27 @@ def _as_float(val, name: str) -> float:
         raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
 
 
+def _seed_worker(worker_id: int, base_seed: int) -> None:
+    seed = base_seed + worker_id
+    random.seed(seed)
+    np.random.seed(seed)
+
+
 def build_dataloader(cfg):
     ds = UCF101Dataset(cfg, split="train")
-    return DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=True, num_workers=cfg.data.num_workers)
+    batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
+    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    generator = torch.Generator()
+    generator.manual_seed(base_seed)
+    worker_init = partial(_seed_worker, base_seed=base_seed)
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=cfg.data.num_workers,
+        worker_init_fn=worker_init,
+        generator=generator,
+    )
 
 
 def _traffic_aware_seed(sites_xy: np.ndarray, traffic: np.ndarray, S: int, rng: np.random.Generator) -> np.ndarray:
@@ -318,7 +338,15 @@ def _export_layout_input(
     return out_path
 
 
-def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, mapping_solver: MappingSolver, wafer_layout: WaferLayout, partitioner: PartitionPlanner, hw_cfg: Dict):
+def compute_hw_loss(
+    model,
+    chiplet_slots: ChipletSlots,
+    hw_proxy: LayerHwProxy,
+    mapping_solver: MappingSolver,
+    wafer_layout: WaferLayout,
+    partitioner: PartitionPlanner,
+    hw_cfg: Dict,
+):
     slot_out = chiplet_slots(hard=False)
     alpha = slot_out["alpha"]
     eff_specs = slot_out["eff_specs"]
@@ -359,18 +387,39 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
     total_area_mm2 = (eff_specs["area_mm2"] * chip_used_prob).sum()
     L_area = hw_cfg.lambda_area * torch.relu(total_area_mm2 - hw_cfg.area_limit_mm2) ** 2
 
-    L_layout, layout_stats = wafer_layout(
-        mapping,
-        segments,
-        eff_specs,
-        lambda_boundary=hw_cfg.lambda_boundary,
-        lambda_overlap=hw_cfg.lambda_overlap,
-        lambda_comm=hw_cfg.lambda_comm_extra,
-        lambda_thermal=hw_cfg.lambda_thermal,
-        distance_scale=1e-9,
-    )
+    optimize_layout = bool(getattr(hw_cfg, "optimize_layout", True))
+    if optimize_layout:
+        L_layout, layout_stats = wafer_layout(
+            mapping,
+            segments,
+            eff_specs,
+            lambda_boundary=hw_cfg.lambda_boundary,
+            lambda_overlap=hw_cfg.lambda_overlap,
+            lambda_comm=hw_cfg.lambda_comm_extra,
+            lambda_thermal=hw_cfg.lambda_thermal,
+            distance_scale=1e-9,
+        )
+    else:
+        L_layout = alpha.new_tensor(0.0)
+        layout_stats = {
+            "boundary": alpha.new_tensor(0.0),
+            "overlap": alpha.new_tensor(0.0),
+            "comm": alpha.new_tensor(0.0),
+            "thermal": alpha.new_tensor(0.0),
+        }
 
-    L_hw = hw_cfg.lambda_T * total_latency_ms + hw_cfg.lambda_E * total_energy_j + hw_cfg.lambda_mem * peak_mem_mb + L_area + L_chip_count + L_layout
+    layout_only = bool(getattr(hw_cfg, "layout_only", False))
+    if layout_only:
+        L_hw = L_layout
+    else:
+        L_hw = (
+            hw_cfg.lambda_T * total_latency_ms
+            + hw_cfg.lambda_E * total_energy_j
+            + hw_cfg.lambda_mem * peak_mem_mb
+            + L_area
+            + L_chip_count
+            + L_layout
+        )
     hw_stats = {
         "total_latency_ms": total_latency_ms.detach(),
         "total_energy_j": total_energy_j.detach(),
@@ -378,6 +427,7 @@ def compute_hw_loss(model, chiplet_slots: ChipletSlots, hw_proxy: LayerHwProxy, 
         "total_area_mm2": total_area_mm2.detach(),
         "chip_count": chip_used_prob.sum().detach(),
         "layout": {k: v.detach() for k, v in layout_stats.items()},
+        "L_layout": L_layout.detach(),
         "comm_ms": comm_ms.detach(),
     }
     return L_hw, hw_stats, mapping, partition_result.get("rewrite_plan")
@@ -392,6 +442,18 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
 
     loader = build_dataloader(cfg)
     data_iter = iter(loader)
+
+    mapping_only = bool(getattr(cfg.training, "mapping_only", False))
+    layout_only = bool(getattr(cfg.training, "layout_only", False))
+    twostage = bool(getattr(cfg.training, "twostage", False))
+    if mapping_only:
+        setattr(cfg.hw, "optimize_layout", False)
+        setattr(cfg.hw, "mapping_only", True)
+    if layout_only:
+        setattr(cfg.hw, "layout_only", True)
+
+    update_alpha = not layout_only
+    update_layout = bool(getattr(cfg.hw, "optimize_layout", True))
 
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -472,11 +534,14 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
-                loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + cfg.loss.lambda_hw * L_hw
+                hw_term = cfg.loss.lambda_hw * L_hw if not twostage else L_hw.new_tensor(0.0)
+                loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
-            scaler.step(optimizer_alpha)
-            scaler.step(optimizer_layout)
+            if not twostage and update_alpha:
+                scaler.step(optimizer_alpha)
+            if not twostage and update_layout:
+                scaler.step(optimizer_layout)
             scaler.update()
             part_res = partitioner.plan(
                 model,
@@ -502,32 +567,42 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             global_step += 1
 
         # Step B: alpha refinement
-        for _ in range(cfg.training.inner_steps_alpha):
-            L_hw, hw_stats, mapping, _ = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
-            optimizer_alpha.zero_grad()
-            L_hw.backward()
-            optimizer_alpha.step()
+        if update_alpha:
+            for _ in range(cfg.training.inner_steps_alpha):
+                L_hw, hw_stats, mapping, _ = compute_hw_loss(
+                    model,
+                    chiplet_slots,
+                    hw_proxy,
+                    mapping_solver,
+                    wafer_layout,
+                    partitioner,
+                    cfg.hw,
+                )
+                optimizer_alpha.zero_grad()
+                L_hw.backward()
+                optimizer_alpha.step()
 
         # Step D: layout refinement
-        for _ in range(cfg.training.inner_steps_layout):
-            slot_out = chiplet_slots(hard=False)
-            eff_specs = slot_out["eff_specs"]
-            part_res = partitioner.plan(model, eff_specs, use_fine_split=getattr(cfg.hw, "use_fine_split", True))
-            segments = part_res["segments"]
-            mapping = part_res["mapping"]
-            L_layout, layout_stats = wafer_layout(
-                mapping,
-                segments,
-                eff_specs,
-                lambda_boundary=cfg.hw.lambda_boundary,
-                lambda_overlap=cfg.hw.lambda_overlap,
-                lambda_comm=cfg.hw.lambda_comm_extra,
-                lambda_thermal=cfg.hw.lambda_thermal,
-                distance_scale=1e-9,
-            )
-            optimizer_layout.zero_grad()
-            L_layout.backward()
-            optimizer_layout.step()
+        if update_layout:
+            for _ in range(cfg.training.inner_steps_layout):
+                slot_out = chiplet_slots(hard=False)
+                eff_specs = slot_out["eff_specs"]
+                part_res = partitioner.plan(model, eff_specs, use_fine_split=getattr(cfg.hw, "use_fine_split", True))
+                segments = part_res["segments"]
+                mapping = part_res["mapping"]
+                L_layout, layout_stats = wafer_layout(
+                    mapping,
+                    segments,
+                    eff_specs,
+                    lambda_boundary=cfg.hw.lambda_boundary,
+                    lambda_overlap=cfg.hw.lambda_overlap,
+                    lambda_comm=cfg.hw.lambda_comm_extra,
+                    lambda_thermal=cfg.hw.lambda_thermal,
+                    distance_scale=1e-9,
+                )
+                optimizer_layout.zero_grad()
+                L_layout.backward()
+                optimizer_layout.step()
 
     if export_layout_input:
         export_dir_path = Path(export_dir or "outputs/P3")

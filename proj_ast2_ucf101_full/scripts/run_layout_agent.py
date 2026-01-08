@@ -223,6 +223,7 @@ def main():
     cfg = load_config(args.cfg)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "llm_usage.jsonl").touch(exist_ok=True)
 
     start_time = time.time()
     np.random.seed(args.seed)

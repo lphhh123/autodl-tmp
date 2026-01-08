@@ -33,7 +33,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, default="./configs/version_c_ucf101.yaml")
     parser.add_argument("--out_dir", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--export_layout_input",
         type=_str2bool,
@@ -45,22 +45,27 @@ def main():
     parser.add_argument("--export_dir", type=str, default=None, help="Directory to write layout artifacts")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)
+    if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
-    export_layout_input = args.export_layout_input or args.out_dir is not None
-    export_dir = args.export_dir
+    cfg_export_layout = bool(getattr(cfg, "export_layout_input", False))
+    export_layout_input = args.export_layout_input or args.out_dir is not None or cfg_export_layout
+    export_dir = args.export_dir or getattr(cfg, "export_dir", None)
     if args.out_dir:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        cfg.train.out_dir = str(out_dir)
+        if hasattr(cfg, "train"):
+            cfg.train.out_dir = str(out_dir)
         if export_dir is None:
             export_dir = str(out_dir)
+    if export_layout_input and export_dir is None:
+        export_dir = "outputs/P3/A3"
     train_version_c(cfg, export_layout_input=export_layout_input, export_dir=export_dir)
 
 
