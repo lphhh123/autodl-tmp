@@ -1,0 +1,5 @@
+{
+  "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+  "model": "gpt-4o",
+  "api_key": "REPLACE_WITH_API_KEY"
+}

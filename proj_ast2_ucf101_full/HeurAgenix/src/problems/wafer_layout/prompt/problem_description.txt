@@ -1,0 +1,3 @@
+Wafer layout optimization.
+Goal: minimize total_scalar = w_comm*comm_norm + w_therm*therm_norm + w_penalty*penalty.
+Heuristics should favor reductions in total_scalar, comm_norm, and therm_norm.

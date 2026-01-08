@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import json
+import math
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional
-
-import math
+from typing import Any, Dict, List, Optional, Tuple
 import random
 
 import numpy as np
@@ -346,6 +345,8 @@ def compute_hw_loss(
     wafer_layout: WaferLayout,
     partitioner: PartitionPlanner,
     hw_cfg: Dict,
+    stable_hw_cfg: Dict | None = None,
+    stable_hw_state: Dict | None = None,
 ):
     slot_out = chiplet_slots(hard=False)
     alpha = slot_out["alpha"]
@@ -409,17 +410,44 @@ def compute_hw_loss(
         }
 
     layout_only = bool(getattr(hw_cfg, "layout_only", False))
+    L_hw_norm = hw_cfg.lambda_T * total_latency_ms + hw_cfg.lambda_E * total_energy_j + hw_cfg.lambda_mem * peak_mem_mb
+    norm_terms = {
+        "t_hinge": total_latency_ms.detach(),
+        "e_hinge": total_energy_j.detach(),
+        "m_hinge": peak_mem_mb.detach(),
+    }
+    ref_terms = {"T_ref": total_latency_ms.detach(), "E_ref": total_energy_j.detach(), "M_ref": peak_mem_mb.detach()}
+    if stable_hw_cfg and getattr(stable_hw_cfg, "normalize", None):
+        norm_cfg = stable_hw_cfg.normalize
+        eps = float(getattr(norm_cfg, "eps", 1e-6))
+        target_ratio_T = float(getattr(norm_cfg, "target_ratio_T", 0.9))
+        target_ratio_E = float(getattr(norm_cfg, "target_ratio_E", 0.9))
+        mem_hinge_only = bool(getattr(norm_cfg, "mem_hinge_only", True))
+        clip_term_max = float(getattr(norm_cfg, "clip_term_max", 10.0))
+        ref_T = total_latency_ms.detach()
+        ref_E = total_energy_j.detach()
+        ref_M = peak_mem_mb.detach()
+        if stable_hw_state:
+            ref_T = stable_hw_state.get("ref_T", ref_T)
+            ref_E = stable_hw_state.get("ref_E", ref_E)
+            ref_M = stable_hw_state.get("ref_M", ref_M)
+        t = torch.log((total_latency_ms + eps) / (ref_T + eps))
+        e = torch.log((total_energy_j + eps) / (ref_E + eps))
+        m = torch.log((peak_mem_mb + eps) / (ref_M + eps))
+        t_hinge = F.softplus(t - math.log(target_ratio_T))
+        e_hinge = F.softplus(e - math.log(target_ratio_E))
+        m_hinge = F.softplus(m) if mem_hinge_only else torch.abs(m)
+        t_hinge = torch.clamp(t_hinge, max=clip_term_max)
+        e_hinge = torch.clamp(e_hinge, max=clip_term_max)
+        m_hinge = torch.clamp(m_hinge, max=clip_term_max)
+        L_hw_norm = hw_cfg.lambda_T * t_hinge + hw_cfg.lambda_E * e_hinge + hw_cfg.lambda_mem * m_hinge
+        norm_terms = {"t_hinge": t_hinge.detach(), "e_hinge": e_hinge.detach(), "m_hinge": m_hinge.detach()}
+        ref_terms = {"T_ref": ref_T.detach(), "E_ref": ref_E.detach(), "M_ref": ref_M.detach()}
+
     if layout_only:
         L_hw = L_layout
     else:
-        L_hw = (
-            hw_cfg.lambda_T * total_latency_ms
-            + hw_cfg.lambda_E * total_energy_j
-            + hw_cfg.lambda_mem * peak_mem_mb
-            + L_area
-            + L_chip_count
-            + L_layout
-        )
+        L_hw = L_hw_norm + L_area + L_chip_count + L_layout
     hw_stats = {
         "total_latency_ms": total_latency_ms.detach(),
         "total_energy_j": total_energy_j.detach(),
@@ -428,9 +456,67 @@ def compute_hw_loss(
         "chip_count": chip_used_prob.sum().detach(),
         "layout": {k: v.detach() for k, v in layout_stats.items()},
         "L_layout": L_layout.detach(),
+        "L_hw_norm": L_hw_norm.detach(),
+        "norm_terms": {k: v.detach() for k, v in norm_terms.items()},
+        "ref_terms": {k: v.detach() for k, v in ref_terms.items()},
         "comm_ms": comm_ms.detach(),
     }
     return L_hw, hw_stats, mapping, partition_result.get("rewrite_plan")
+
+
+def _stable_hw_schedule(epoch: int, stable_hw_cfg: Dict, state: Dict) -> Tuple[float, str]:
+    sched = stable_hw_cfg.lambda_hw_schedule
+    if not bool(getattr(sched, "enabled", True)):
+        state["lambda_hw"] = 0.0
+        return 0.0, "disabled"
+    warmup = int(getattr(sched, "warmup_epochs", 0))
+    ramp = int(getattr(sched, "ramp_epochs", 0))
+    lambda_hw_max = float(getattr(sched, "lambda_hw_max", 0.0))
+    clamp_min = float(getattr(sched, "clamp_min", 0.0))
+    clamp_max = float(getattr(sched, "clamp_max", 1.0))
+    if epoch < warmup:
+        value = 0.0
+        phase = "warmup"
+    elif epoch < warmup + ramp:
+        progress = (epoch - warmup + 1) / max(1, ramp)
+        value = lambda_hw_max * progress
+        phase = "ramp"
+    else:
+        value = lambda_hw_max
+        phase = "stabilize"
+    value = max(clamp_min, min(clamp_max, value))
+    state["lambda_hw"] = float(value)
+    state["schedule_phase"] = phase
+    return state["lambda_hw"], phase
+
+
+def _apply_accuracy_guard(acc1: float, stable_hw_cfg: Dict, state: Dict) -> None:
+    guard = stable_hw_cfg.accuracy_guard
+    if not bool(getattr(guard, "enabled", True)):
+        return
+    baseline = state.get("acc_baseline")
+    if baseline is None:
+        state["acc_baseline"] = float(acc1)
+        baseline = state["acc_baseline"]
+    if bool(getattr(guard, "use_ema", True)):
+        beta = float(getattr(guard, "ema_beta", 0.8))
+        prev = state.get("acc_ema", float(acc1))
+        state["acc_ema"] = float(beta * prev + (1 - beta) * acc1)
+        current = state["acc_ema"]
+    else:
+        current = float(acc1)
+    drop = float(baseline - current)
+    state["acc_drop"] = drop
+    epsilon = float(getattr(guard, "epsilon_drop", 0.01))
+    if drop > epsilon:
+        scale = float(getattr(getattr(guard, "on_violate", {}), "scale_lambda_hw", 0.5))
+        state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
+        state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
+        max_consecutive = int(getattr(getattr(guard, "on_violate", {}), "max_consecutive", 3))
+        if state["violate_streak"] >= max_consecutive:
+            state["lambda_hw"] = 0.0
+    else:
+        state["violate_streak"] = 0
 
 
 def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional[str] = None):
@@ -513,9 +599,15 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
     last_segments: List = []
     last_mapping: List[int] = []
 
+    stable_hw_cfg = getattr(cfg, "stable_hw", None)
+    stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.loss, "lambda_hw", 0.0))}
+
     for outer in range(cfg.training.outer_epochs):
+        if stable_hw_cfg:
+            _stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
         tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
         chiplet_slots.set_tau(tau)
+        last_hw_stats = None
         for step in range(cfg.training.inner_steps_ast):
             try:
                 batch = next(data_iter)
@@ -533,8 +625,20 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 else:
                     logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
-                L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(model, chiplet_slots, hw_proxy, mapping_solver, wafer_layout, partitioner, cfg.hw)
-                hw_term = cfg.loss.lambda_hw * L_hw if not twostage else L_hw.new_tensor(0.0)
+                L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(
+                    model,
+                    chiplet_slots,
+                    hw_proxy,
+                    mapping_solver,
+                    wafer_layout,
+                    partitioner,
+                    cfg.hw,
+                    stable_hw_cfg=stable_hw_cfg,
+                    stable_hw_state=stable_hw_state,
+                )
+                last_hw_stats = hw_stats
+                lambda_hw = float(stable_hw_state.get("lambda_hw", getattr(cfg.loss, "lambda_hw", 0.0)))
+                hw_term = lambda_hw * L_hw if not twostage else L_hw.new_tensor(0.0)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
@@ -552,6 +656,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             last_mapping = part_res.get("mapping", [])
             if step % 10 == 0:
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
+                if stable_hw_cfg:
+                    _apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_hw_state)
                 log_stats(logger, {"outer": outer, "step": step, "loss": loss.item(), "acc1": acc1.item(), "lat_ms": hw_stats["total_latency_ms"].item()})
                 with log_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({
@@ -563,8 +669,17 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                         "mem_mb": float(hw_stats["peak_mem_mb"].item()),
                         "area": float(hw_stats["total_area_mm2"].item()),
                         "chip_count": float(hw_stats["chip_count"].item()),
+                        "lambda_hw": float(stable_hw_state.get("lambda_hw", 0.0)),
+                        "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
+                        "schedule_phase": stable_hw_state.get("schedule_phase"),
                     }) + "\n")
             global_step += 1
+
+        if stable_hw_cfg and last_hw_stats:
+            beta = float(getattr(stable_hw_cfg.normalize, "ema_beta", 0.95)) if hasattr(stable_hw_cfg, "normalize") else 0.95
+            stable_hw_state["ref_T"] = beta * stable_hw_state.get("ref_T", last_hw_stats["total_latency_ms"].detach()) + (1 - beta) * last_hw_stats["total_latency_ms"].detach()
+            stable_hw_state["ref_E"] = beta * stable_hw_state.get("ref_E", last_hw_stats["total_energy_j"].detach()) + (1 - beta) * last_hw_stats["total_energy_j"].detach()
+            stable_hw_state["ref_M"] = beta * stable_hw_state.get("ref_M", last_hw_stats["peak_mem_mb"].detach()) + (1 - beta) * last_hw_stats["peak_mem_mb"].detach()
 
         # Step B: alpha refinement
         if update_alpha:
@@ -577,6 +692,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     wafer_layout,
                     partitioner,
                     cfg.hw,
+                    stable_hw_cfg=stable_hw_cfg,
+                    stable_hw_state=stable_hw_state,
                 )
                 optimizer_alpha.zero_grad()
                 L_hw.backward()

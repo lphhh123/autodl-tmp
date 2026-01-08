@@ -1,0 +1,3 @@
+Choose heuristics that reduce total_scalar.
+Avoid no-op if any heuristic can reduce comm_norm or therm_norm.
+If no improvement is obvious, prefer small relocations or swaps to escape local minima.

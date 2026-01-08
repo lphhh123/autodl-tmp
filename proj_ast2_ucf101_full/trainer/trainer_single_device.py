@@ -1,11 +1,14 @@
 """Single-device AST2.0-lite trainer (SPEC §12.1)."""
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 from functools import partial
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -59,10 +62,17 @@ def build_dataloaders(cfg):
     return train_loader, val_loader
 
 
-def train_single_device(cfg):
+def train_single_device(cfg, out_dir: str | Path | None = None):
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
+    metrics_path = None
+    if out_dir is None and hasattr(cfg, "train") and getattr(cfg.train, "out_dir", None):
+        out_dir = Path(cfg.train.out_dir)
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = out_dir / "metrics.json"
     train_loader, val_loader = build_dataloaders(cfg)
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -108,6 +118,8 @@ def train_single_device(cfg):
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
 
+    best_acc = 0.0
+    last_acc = 0.0
     for epoch in range(cfg.train.epochs):
         model.train()
         for step, batch in enumerate(train_loader):
@@ -129,10 +141,22 @@ def train_single_device(cfg):
             if step % 10 == 0:
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
                 log_stats(logger, {"epoch": epoch, "step": step, "loss": loss.item(), "acc1": acc1.item(), "acc5": acc5.item(), "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()})
-        validate(model, val_loader, device, logger, epoch, cfg)
+        last_acc = validate(model, val_loader, device, logger, epoch, cfg)
+        best_acc = max(best_acc, last_acc)
+        if metrics_path:
+            metrics = {
+                "epoch": int(epoch),
+                "acc1": float(last_acc),
+                "best_acc1": float(best_acc),
+                "loss": float(loss.item()),
+                "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
+                "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
+            }
+            with metrics_path.open("w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2)
 
 
-def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg):
+def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:
     model.eval()
     total = 0
     correct = 0
@@ -149,3 +173,4 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger,
             correct += (pred == y).sum().item()
     acc = correct / max(1, total)
     logger.info(f"[val] epoch {epoch} acc={acc:.4f}")
+    return float(acc)

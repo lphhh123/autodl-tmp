@@ -110,7 +110,6 @@ class VolcArkProvider(LLMProvider):
             "max_completion_tokens": int(min(self.max_tokens, 128)),
             "temperature": 0.15,
             "top_p": 0.9,
-            "stop": ["END_JSON"],
         }
 
     @staticmethod
@@ -170,7 +169,15 @@ class VolcArkProvider(LLMProvider):
     ) -> Tuple[List[int], Optional[str]]:
         parsed, parse_error = self.extract_wrapped_json(raw)
         if parsed is None:
-            return [], parse_error or "missing_wrapper"
+            snippet = self._extract_json(raw)
+            if snippet:
+                try:
+                    parsed = json.loads(snippet)
+                    parse_error = None
+                except Exception:  # noqa: BLE001
+                    return [], parse_error or "missing_wrapper"
+            else:
+                return [], parse_error or "missing_wrapper"
         picks_raw = parsed.get("pick") if isinstance(parsed, dict) else []
         valid_picks = self._validate_picks(picks_raw, candidate_ids, forbidden_ids, k)
         if valid_picks:
