@@ -17,6 +17,7 @@ class RandomHyperHeuristic:
         selection_frequency: int = 1,
         sa_T0: float = 1.0,
         sa_alpha: float = 0.995,
+        stage_name: str = "heuragenix_random_hh",
     ) -> None:
         self.env = env
         self.heuristics = heuristics
@@ -59,6 +60,7 @@ class RandomHyperHeuristic:
             self.env.recordings.append(
                 {
                     "step": step,
+                    "stage": self.stage_name,
                     "operator": operator,
                     "meta": meta,
                     "accepted": accept,

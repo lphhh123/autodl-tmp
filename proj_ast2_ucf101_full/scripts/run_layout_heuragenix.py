@@ -5,6 +5,7 @@ import argparse
 import csv
 import importlib
 import json
+import os
 import random
 import shutil
 import sys
@@ -58,6 +59,9 @@ def _seed_everything(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    def _eval_assign(assign: np.ndarray) -> Dict[str, Any]:
+        base_state.assign = np.asarray(assign, dtype=int)
+        return evaluator.evaluate(base_state)
 
 def _signature_for_assign(assign: Iterable[int]) -> str:
     return "assign:" + ",".join(str(int(x)) for x in assign)
@@ -355,6 +359,8 @@ def main() -> None:
         "steps_total": int(max_steps),
         "accepts_total": int(trace_info["accepts"]),
         "method": method,
+        "fallback_used": fallback_used,
+        "fallback_method": fallback_method,
         "runtime_s": float(time.time() - start_time),
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,

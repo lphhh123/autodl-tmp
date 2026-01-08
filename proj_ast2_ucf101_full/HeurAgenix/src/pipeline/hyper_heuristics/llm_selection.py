@@ -21,6 +21,7 @@ class LLMSelectionHyperHeuristic:
         sa_alpha: float = 0.995,
         timeout_sec: int = 90,
         max_retry: int = 1,
+        stage_name: str = "heuragenix_llm_hh",
     ) -> None:
         self.env = env
         self.heuristics = heuristics
@@ -29,6 +30,7 @@ class LLMSelectionHyperHeuristic:
         self.num_candidate_heuristics = max(1, int(num_candidate_heuristics))
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
+        self.stage_name = stage_name
         self.llm = VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
@@ -118,6 +120,7 @@ class LLMSelectionHyperHeuristic:
             self.env.recordings.append(
                 {
                     "step": step,
+                    "stage": self.stage_name,
                     "operator": selected_operator,
                     "meta": selected_meta,
                     "accepted": accept,
