@@ -318,6 +318,7 @@ def run_detailed_place(
         accepted_steps = 0
 
         for step in range(steps):
+            step_start = time.perf_counter()
             candidate_pool = build_candidate_pool(
                 assign,
                 eval_out,
@@ -562,6 +563,7 @@ def run_detailed_place(
 
             T *= alpha
 
+            time_ms = int((time.perf_counter() - step_start) * 1000)
             writer.writerow(
                 [
                     step,
@@ -576,7 +578,7 @@ def run_detailed_place(
                     eval_out["penalty"]["duplicate"],
                     eval_out["penalty"]["boundary"],
                     seed_id,
-                    0,
+                    time_ms,
                     signature,
                     delta,
                     delta_comm,
