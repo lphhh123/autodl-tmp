@@ -3,20 +3,22 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib
 import json
+import os
 import random
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from layout.candidate_pool import _signature_for_action, inverse_signature
+from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
-from scripts.run_layout_agent import compute_oscillation_metrics
+from layout.pareto import ParetoSet
+from scripts.run_layout_agent import _compute_trace_metrics, _write_pareto_points, compute_oscillation_metrics
 from utils.config import load_config
 
 
@@ -35,7 +37,6 @@ TRACE_FIELDS = [
     "seed_id",
     "time_ms",
     "signature",
-    "inverse_signature",
     "d_total",
     "d_comm",
     "d_therm",
@@ -78,37 +79,165 @@ def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
     return sibling
 
 
-def _copy_layout_input(layout_input_path: Path, heuragenix_root: Path, case_name: str) -> Path:
-    target_dir = heuragenix_root / "data" / "wafer_layout" / "data" / "test_data"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{case_name}.json"
-    shutil.copyfile(layout_input_path, target_path)
-    return target_path
+def _resolve_llm_config_path(llm_config_file: str | None, heuragenix_root: Path, project_root: Path) -> Path | None:
+    if not llm_config_file:
+        return None
+    candidate = Path(llm_config_file).expanduser()
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    for base in (heuragenix_root, project_root):
+        path = base / candidate
+        if path.exists():
+            return path
+    return None
 
 
-def _import_heuristics(module_prefix: str, heuristic_dir: Path) -> List[Callable[..., Any]]:
-    heuristics: List[Callable[..., Any]] = []
-    for py_file in sorted(heuristic_dir.glob("*.py")):
-        if py_file.name.startswith("__"):
-            continue
-        name = py_file.stem
-        module = importlib.import_module(f"{module_prefix}.{name}")
-        if not hasattr(module, name):
-            raise AttributeError(f"Heuristic {name} missing in {module_prefix}.{name}")
-        heuristics.append(getattr(module, name))
-    if not heuristics:
-        raise RuntimeError(f"No heuristics found under {heuristic_dir}")
-    return heuristics
+def _ensure_prompt_files(work_dir: Path, heuragenix_root: Path) -> None:
+    prompt_dir = work_dir / "data" / "wafer_layout" / "prompt"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    candidates = [
+        heuragenix_root / "data" / "wafer_layout" / "prompt",
+        heuragenix_root / "src" / "problems" / "wafer_layout" / "prompt",
+    ]
+    source = next((c for c in candidates if c.exists()), None)
+    if source is None:
+        return
+    for file in source.glob("*.txt"):
+        target = prompt_dir / file.name
+        if not target.exists():
+            shutil.copyfile(file, target)
 
 
-def _parse_layout_input(
-    layout_input: dict, cfg: dict
-) -> tuple[LayoutState, LayoutEvaluator, np.ndarray, Callable[[np.ndarray], Dict[str, Any]]]:
+def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
+    objective = cfg.objective if hasattr(cfg, "objective") else {}
+    scalar = objective.get("scalar_weights", {}) if isinstance(objective, dict) else objective.scalar_weights
+    return {
+        "sigma_mm": float(objective.get("sigma_mm", 20.0)) if isinstance(objective, dict) else float(objective.sigma_mm),
+        "scalar_weights": {
+            "w_comm": float(scalar.get("w_comm", 0.7)) if isinstance(scalar, dict) else float(scalar.w_comm),
+            "w_therm": float(scalar.get("w_therm", 0.3)) if isinstance(scalar, dict) else float(scalar.w_therm),
+            "w_penalty": float(scalar.get("w_penalty", 1000.0)) if isinstance(scalar, dict) else float(scalar.w_penalty),
+        },
+    }
+
+
+def _write_test_data(work_dir: Path, layout_input: dict, cfg: Any, seed: int) -> Tuple[str, Path]:
+    data_dir = work_dir / "data" / "wafer_layout" / "data" / "test_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    case_name = f"layout_seed{seed}.json"
+    payload = dict(layout_input)
+    payload["objective_cfg"] = _build_objective_cfg(cfg)
+    target = data_dir / case_name
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return case_name, target
+
+
+def _prepare_work_dir(out_dir: Path, heuragenix_root: Path, layout_input: dict, cfg: Any, seed: int) -> Tuple[Path, str]:
+    work_dir = out_dir / "_heuragenix_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_prompt_files(work_dir, heuragenix_root)
+    case_name, _ = _write_test_data(work_dir, layout_input, cfg, seed)
+    return work_dir, case_name
+
+
+def _compute_iterations_scale(layout_input: dict, max_steps: int) -> float:
+    slots = layout_input.get("slots", {})
+    S = int(slots.get("S", len(slots.get("tdp", []))))
+    if max_steps <= 0:
+        return 1.0
+    return max(1.0, float(max_steps) / max(1, S))
+
+
+def _run_heuragenix(
+    work_dir: Path,
+    heuragenix_root: Path,
+    project_root: Path,
+    cfg: dict,
+    case_name: str,
+    engine: str,
+    iterations_scale: float,
+    seed: int,
+) -> Tuple[bool, Path, str]:
+    baseline_cfg = cfg.get("baseline", {})
+    heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
+    llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
+    cmd = [
+        sys.executable,
+        str(heuragenix_root / "launch_hyper_heuristic.py"),
+        "-p",
+        str(baseline_cfg.get("problem", "wafer_layout")),
+        "-e",
+        engine,
+        "-d",
+        heuristic_dir,
+        "-t",
+        case_name,
+        "-n",
+        f"{iterations_scale:.6f}",
+        "-m",
+        str(int(baseline_cfg.get("selection_frequency", 5))),
+        "-c",
+        str(int(baseline_cfg.get("num_candidate_heuristics", 4))),
+        "-b",
+        str(int(baseline_cfg.get("rollout_budget", 0))),
+        "-r",
+        "result",
+        "--seed",
+        str(seed),
+    ]
+    if engine == "llm_hh" and llm_config is not None:
+        cmd.extend(["-l", str(llm_config)])
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(project_root), str(heuragenix_root), str(heuragenix_root / "src"), env.get("PYTHONPATH", "")]
+    )
+    log_path = work_dir / f"heuragenix_{engine}.log"
+    with log_path.open("w", encoding="utf-8") as log_fp:
+        result = subprocess.run(
+            cmd,
+            cwd=str(work_dir),
+            env=env,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    output_dir = work_dir / "output" / "wafer_layout" / case_name / "result" / engine
+    expected_files = [output_dir / "best_solution.json", output_dir / "recordings.jsonl"]
+    ok = result.returncode == 0 and all(path.exists() for path in expected_files)
+    return ok, output_dir, log_path.read_text(encoding="utf-8")
+
+
+def _derive_initial_assign(layout_input: dict) -> np.ndarray:
+    baseline = layout_input.get("baseline", {})
+    seed = layout_input.get("seed", {})
+    slots = layout_input.get("slots", {})
+    tdp = np.asarray(slots.get("tdp", []), dtype=int)
+    S = int(slots.get("S", len(tdp)))
+    sites_xy = np.asarray(layout_input.get("sites", {}).get("sites_xy", []), dtype=float)
+    Ns = int(layout_input.get("sites", {}).get("Ns", len(sites_xy)))
+
+    init_assign = None
+    if seed.get("assign_seed") is not None:
+        init_assign = np.asarray(seed.get("assign_seed"), dtype=int)
+    elif seed.get("seed_assign") is not None:
+        init_assign = np.asarray(seed.get("seed_assign"), dtype=int)
+    elif baseline.get("assign_grid") is not None:
+        init_assign = np.asarray(baseline.get("assign_grid"), dtype=int)
+    elif layout_input.get("baseline_assign_grid") is not None:
+        init_assign = np.asarray(layout_input.get("baseline_assign_grid"), dtype=int)
+    if init_assign is None:
+        if Ns <= 0:
+            init_assign = np.zeros(S, dtype=int)
+        else:
+            init_assign = np.arange(S, dtype=int) % max(1, Ns)
+    return init_assign
+
+
+def _build_evaluator(layout_input: dict, cfg: Any) -> Tuple[LayoutState, LayoutEvaluator]:
     wafer = layout_input.get("wafer", {})
     slots = layout_input.get("slots", {})
     sites = layout_input.get("sites", {})
     baseline = layout_input.get("baseline", {})
-    seed = layout_input.get("seed", {})
 
     sites_xy = np.asarray(sites.get("sites_xy", []), dtype=np.float32)
     tdp = np.asarray(slots.get("tdp", []), dtype=float)
@@ -118,31 +247,21 @@ def _parse_layout_input(
     if traffic.size == 0:
         traffic = np.zeros((S, S), dtype=float)
 
-    init_assign = None
-    if seed.get("assign_seed") is not None:
-        init_assign = np.asarray(seed.get("assign_seed"), dtype=int)
-    if init_assign is None and seed.get("seed_assign") is not None:
-        init_assign = np.asarray(seed.get("seed_assign"), dtype=int)
-    if init_assign is None and baseline.get("assign_grid") is not None:
-        init_assign = np.asarray(baseline.get("assign_grid"), dtype=int)
-    if init_assign is None and layout_input.get("baseline_assign_grid") is not None:
-        init_assign = np.asarray(layout_input.get("baseline_assign_grid"), dtype=int)
-    if init_assign is None:
-        init_assign = np.arange(S, dtype=int) % max(1, Ns)
-
+    objective_cfg = _build_objective_cfg(cfg)
     evaluator = LayoutEvaluator(
-        sigma_mm=float(cfg.objective.sigma_mm),
+        sigma_mm=float(objective_cfg["sigma_mm"]),
         baseline={
             "L_comm_baseline": float(baseline.get("L_comm", 1.0)),
             "L_therm_baseline": float(baseline.get("L_therm", 1.0)),
         },
         scalar_w={
-            "w_comm": float(cfg.objective.scalar_weights.w_comm),
-            "w_therm": float(cfg.objective.scalar_weights.w_therm),
-            "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
+            "w_comm": float(objective_cfg["scalar_weights"]["w_comm"]),
+            "w_therm": float(objective_cfg["scalar_weights"]["w_therm"]),
+            "w_penalty": float(objective_cfg["scalar_weights"]["w_penalty"]),
         },
     )
 
+    init_assign = _derive_initial_assign(layout_input)
     base_state = LayoutState(
         S=S,
         Ns=Ns,
@@ -153,168 +272,66 @@ def _parse_layout_input(
         traffic_bytes=traffic,
         meta={"margin_mm": float(wafer.get("margin_mm", 0.0))},
     )
-
-    def _eval_assign(assign: np.ndarray) -> Dict[str, Any]:
-        base_state.assign = np.asarray(assign, dtype=int)
-        out = evaluator.evaluate(base_state)
-        penalty = out.get("penalty", {})
-        out["penalty_norm"] = float(penalty.get("duplicate", 0.0) + penalty.get("boundary", 0.0))
-        return out
-
-    return base_state, evaluator, np.asarray(init_assign, dtype=int), _eval_assign
+    return base_state, evaluator
 
 
-def _operator_to_action(operator: Any, meta: Dict[str, Any], pre_assign: np.ndarray) -> Dict[str, Any]:
-    if operator is None:
-        return {"op": "do_nothing", "type": "do_nothing"}
-    op_name = getattr(operator, "name", operator.__class__.__name__)
-    action: Dict[str, Any] = {"op": op_name, "type": op_name}
-    if op_name == "swap" and hasattr(operator, "i") and hasattr(operator, "j"):
-        action.update({"i": int(operator.i), "j": int(operator.j), "type": "swap"})
-    elif op_name == "relocate" and hasattr(operator, "i") and hasattr(operator, "site_id"):
-        slot = int(operator.i)
-        from_site = int(pre_assign[slot]) if 0 <= slot < len(pre_assign) else None
-        action.update(
-            {
-                "i": slot,
-                "site_id": int(operator.site_id),
-                "from_site": from_site,
-                "type": "relocate",
-            }
-        )
-    elif op_name == "cluster_move":
-        action.update(
-            {
-                "cluster_id": int(meta.get("cluster_id", -1)),
-                "region_id": int(meta.get("region_id", -1)),
-                "target_sites": getattr(operator, "target_sites", None),
-                "slots": getattr(operator, "slots", None),
-                "type": "cluster_move",
-            }
-        )
-    elif op_name == "random_kick":
-        ops = getattr(operator, "ops", []) or []
-        action.update({"k": len(ops), "type": "random_kick"})
-    elif op_name in {"noop", "do_nothing"}:
-        action.update({"op": "do_nothing", "type": "do_nothing"})
-    action.update(meta or {})
+def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
+    with recordings_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict[str, Any]:
+    op = record.get("op", "noop")
+    op_args = record.get("op_args", {}) or {}
+    action = {"op": op, "type": op}
+    if op == "swap":
+        action.update({"i": int(op_args.get("i", -1)), "j": int(op_args.get("j", -1))})
+    elif op == "relocate":
+        slot = int(op_args.get("i", -1))
+        from_site = op_args.get("from_site")
+        if from_site is None and 0 <= slot < len(prev_assign):
+            from_site = int(prev_assign[slot])
+        action.update({"i": slot, "site_id": int(op_args.get("site_id", -1)), "from_site": from_site})
+    elif op == "cluster_move":
+        action.update({"slots": op_args.get("slots"), "target_sites": op_args.get("target_sites")})
+    elif op == "random_kick":
+        action.update({"k": op_args.get("k")})
     return action
 
 
-def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload) + "\n")
-
-
-def _iter_selection_records(records: List[Dict[str, Any]], fallback_used: bool) -> Iterable[Dict[str, Any]]:
-    for rec in records:
-        payload = dict(rec)
-        if "selection_id" in payload and "selection_idx" not in payload:
-            payload["selection_idx"] = payload.pop("selection_id")
-        if "selection_idx" not in payload and "selection_id" in payload:
-            payload["selection_idx"] = payload["selection_id"]
-        if "chosen_heuristic" not in payload:
-            if "heuristic_name" in payload:
-                payload["chosen_heuristic"] = payload["heuristic_name"]
-        payload.setdefault("ok", True)
-        payload.setdefault("fallback_used", fallback_used)
-        yield payload
-
-
-def _resolve_llm_config_path(llm_config_file: Optional[str], heuragenix_root: Path, project_root: Path) -> Optional[Path]:
-    if not llm_config_file:
-        return None
-    candidate = Path(llm_config_file).expanduser()
-    if candidate.is_absolute() and candidate.exists():
-        return candidate
-    candidates = [heuragenix_root / candidate, project_root / candidate]
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
-
-
-class _FallbackOperator:
-    def __init__(self, name: str, **kwargs: Any) -> None:
-        self.name = name
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-
-def _run_simple_fallback(
-    max_steps: int,
-    eval_assign: Callable[[np.ndarray], Dict[str, Any]],
-    init_assign: np.ndarray,
-    Ns: int,
-    rng: random.Random,
-    sa_T0: float,
-    sa_alpha: float,
-    stage_name: str = "heuragenix_fallback",
-) -> List[Dict[str, Any]]:
-    recordings: List[Dict[str, Any]] = []
-    current_assign = np.asarray(init_assign, dtype=int).copy()
-    current_eval = eval_assign(current_assign)
-    temperature = float(sa_T0)
-    S = int(current_assign.shape[0])
-    Ns = int(max(Ns, 1))
-    for step in range(max_steps):
-        step_start = time.perf_counter()
-        if S > 1 and rng.random() < 0.5:
-            i, j = rng.sample(range(S), 2)
-            new_assign = current_assign.copy()
-            new_assign[i], new_assign[j] = new_assign[j], new_assign[i]
-            operator = _FallbackOperator("swap", i=i, j=j)
-        else:
-            i = rng.randrange(S) if S > 0 else 0
-            site_id = rng.randrange(Ns)
-            new_assign = current_assign.copy()
-            new_assign[i] = site_id
-            operator = _FallbackOperator("relocate", i=i, site_id=site_id)
-        new_eval = eval_assign(new_assign)
-        delta = float(new_eval["total_scalar"] - current_eval["total_scalar"])
-        accept = (delta < 0) or (rng.random() < np.exp(-delta / max(temperature, 1e-6)))
-        if accept:
-            current_assign = new_assign
-            current_eval = new_eval
-        recordings.append(
-            {
-                "step": step,
-                "stage": stage_name,
-                "operator": operator,
-                "meta": {},
-                "accepted": accept,
-                "score": float(current_eval.get("total_scalar", 0.0)),
-                "time_ms": int((time.perf_counter() - step_start) * 1000),
-                "assign": list(current_assign),
-            }
-        )
-        temperature *= sa_alpha
-    return recordings
-
-
-def _record_trace(
+def _write_trace_and_pareto(
     out_dir: Path,
     seed: int,
-    recordings: List[Dict[str, Any]],
-    eval_assign: Callable[[np.ndarray], Dict[str, Any]],
-    init_assign: np.ndarray,
-) -> Dict[str, Any]:
+    recordings_path: Path,
+    layout_input: dict,
+    cfg: Any,
+) -> Tuple[Dict[str, Any], ParetoSet]:
+    base_state, evaluator = _build_evaluator(layout_input, cfg)
+    pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
+    pareto = ParetoSet(
+        eps_comm=float(pareto_cfg.get("eps_comm", 0.0)),
+        eps_therm=float(pareto_cfg.get("eps_therm", 0.0)),
+        max_points=int(pareto_cfg.get("max_points", 2000)),
+    )
     trace_path = out_dir / "trace.csv"
+    prev_eval: Dict[str, Any] | None = None
+    prev_assign = _derive_initial_assign(layout_input)
     best_eval: Dict[str, Any] | None = None
     best_assign: List[int] | None = None
-    prev_eval: Dict[str, Any] | None = None
     accepts = 0
     best_step = -1
-    prev_assign = np.asarray(init_assign, dtype=int).copy()
 
-    with trace_path.open("w", encoding="utf-8", newline="") as trace_fp:
-        writer = csv.writer(trace_fp)
+    with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
+        writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
-        for idx, rec in enumerate(recordings):
-            assign = rec.get("assign")
-            if assign is None:
-                continue
-            eval_out = eval_assign(np.asarray(assign, dtype=int))
+        for idx, rec in enumerate(_iter_recordings(recordings_path)):
+            assign = np.asarray(rec.get("assign", prev_assign), dtype=int)
+            base_state.assign = assign
+            eval_out = evaluator.evaluate(base_state)
             if prev_eval is None:
                 prev_eval = eval_out
             d_total = float(eval_out["total_scalar"] - prev_eval["total_scalar"])
@@ -322,37 +339,43 @@ def _record_trace(
             d_therm = float(eval_out["therm_norm"] - prev_eval["therm_norm"])
             prev_eval = eval_out
 
-            accepted = int(bool(rec.get("accepted")))
+            accepted = int(bool(rec.get("accepted", True)))
             if accepted:
                 accepts += 1
-            if best_eval is None or eval_out["total_scalar"] < best_eval["total_scalar"]:
+            if best_eval is None or eval_out["total_scalar"] < best_eval.get("total_scalar", float("inf")):
                 best_eval = dict(eval_out)
                 best_assign = list(assign)
                 best_step = idx
 
-            operator = rec.get("operator")
-            meta = rec.get("meta") or {}
-            action = _operator_to_action(operator, meta, prev_assign)
-            op_name = action.get("op", "none")
+            action = _action_from_record(rec, prev_assign)
             signature = _signature_for_action(action, prev_assign)
-            inv_signature = inverse_signature(action, prev_assign)
+            pareto_added = pareto.add(
+                eval_out["comm_norm"],
+                eval_out["therm_norm"],
+                {
+                    "assign": assign.copy(),
+                    "total_scalar": eval_out["total_scalar"],
+                    "stage": "heuragenix",
+                    "iter": idx,
+                    "seed": seed,
+                },
+            )
             writer.writerow(
                 [
                     idx,
-                    rec.get("stage", "heuragenix"),
-                    op_name,
+                    "heuragenix",
+                    action.get("op", "noop"),
                     json.dumps(action, ensure_ascii=False, sort_keys=True),
                     accepted,
                     float(eval_out["total_scalar"]),
                     float(eval_out["comm_norm"]),
                     float(eval_out["therm_norm"]),
-                    0,
+                    int(pareto_added),
                     float(eval_out["penalty"]["duplicate"]),
                     float(eval_out["penalty"]["boundary"]),
                     seed,
                     int(rec.get("time_ms", 0)),
                     signature,
-                    inv_signature,
                     d_total,
                     d_comm,
                     d_therm,
@@ -361,26 +384,64 @@ def _record_trace(
                     0,
                 ]
             )
-            prev_assign = np.asarray(assign, dtype=int).copy()
-        trace_fp.flush()
-
+            prev_assign = assign.copy()
     return {
         "trace_path": trace_path,
         "best_eval": best_eval,
         "best_assign": best_assign,
         "accepts": accepts,
         "best_step": best_step,
+        "steps_total": idx + 1 if "idx" in locals() else 0,
+    }, pareto
+
+
+def _write_layout_best(
+    out_dir: Path,
+    layout_input: dict,
+    cfg: Any,
+    pareto: ParetoSet,
+    best_assign: List[int],
+) -> Dict[str, Any]:
+    base_state, evaluator = _build_evaluator(layout_input, cfg)
+    base_state.assign = np.asarray(best_assign, dtype=int)
+    eval_out = evaluator.evaluate(base_state)
+    sites_xy = np.asarray(layout_input.get("sites", {}).get("sites_xy", []), dtype=float)
+    pos_xy = sites_xy[best_assign].tolist() if len(best_assign) and len(sites_xy) else []
+    best_comm, best_therm, _ = pareto.knee_point()
+    layout_best = {
+        "best": {
+            "assign": list(best_assign),
+            "pos_xy_mm": pos_xy,
+            "objectives": {"comm_norm": float(eval_out.get("comm_norm", 0.0)), "therm_norm": float(eval_out.get("therm_norm", 0.0))},
+            "raw": {"L_comm": eval_out.get("L_comm", 0.0), "L_therm": eval_out.get("L_therm", 0.0)},
+            "penalty": eval_out.get("penalty", {}),
+            "meta": {"stage": "heuragenix_best"},
+        },
+        "pareto_front": [{"comm_norm": p.comm_norm, "therm_norm": p.therm_norm} for p in pareto.points],
+        "selection": {"method": "knee_point_v1", "pareto_size": len(pareto.points)},
+        "knee_point": {"comm_norm": best_comm, "therm_norm": best_therm},
+        "artifacts": {
+            "trace_csv": str((out_dir / "trace.csv").absolute()),
+            "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
+            "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
+        },
     }
+    with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
+        json.dump(layout_best, f, indent=2)
+    return layout_best
 
 
-def _cfg_to_dict(cfg: Any) -> Dict[str, Any]:
-    if isinstance(cfg, dict):
-        return {k: _cfg_to_dict(v) for k, v in cfg.items()}
-    if isinstance(cfg, list):
-        return [_cfg_to_dict(v) for v in cfg]
-    if hasattr(cfg, "__dict__") and not isinstance(cfg, (str, int, float, bool)):
-        return {k: _cfg_to_dict(v) for k, v in cfg.__dict__.items()}
-    return cfg
+def _read_best_assign(best_solution_path: Path, fallback_assign: List[int]) -> List[int]:
+    if not best_solution_path.exists():
+        return fallback_assign
+    payload = json.loads(best_solution_path.read_text(encoding="utf-8"))
+    return payload.get("best_assign") or payload.get("best", {}).get("assign") or fallback_assign
+
+
+def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def main() -> None:
@@ -396,237 +457,134 @@ def main() -> None:
     layout_input = _load_layout_input(layout_input_path)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    llm_usage_path = out_dir / "llm_usage.jsonl"
-    llm_usage_path.touch(exist_ok=True)
 
     seed = int(args.seed)
     _seed_everything(seed)
-    rng = random.Random(seed)
 
     project_root = Path(__file__).resolve().parents[1]
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else {}
     heuragenix_root = _resolve_heuragenix_root(baseline_cfg.get("heuragenix_root"), project_root)
-    heuragenix_available = heuragenix_root.exists()
-    case_name = f"{out_dir.name}_seed{seed}"
-    heuragenix_data_path = None
-    if heuragenix_available:
-        heuragenix_data_path = _copy_layout_input(layout_input_path, heuragenix_root, case_name)
+    if not heuragenix_root.exists():
+        raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
 
-    if heuragenix_available:
-        sys.path.insert(0, str(heuragenix_root))
-        sys.path.insert(0, str(heuragenix_root / "src"))
-    sys.path.insert(0, str(project_root))
+    work_dir, case_name = _prepare_work_dir(out_dir, heuragenix_root, layout_input, cfg, seed)
 
-    LLMSelectionHyperHeuristic = None
-    RandomSelectionHyperHeuristic = None
-    Env = None
-    get_llm_client = None
-    if heuragenix_available:
-        try:
-            from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
-            from problems.wafer_layout.env import Env
-            from util.llm_client.get_llm_client import get_llm_client
-        except Exception:  # noqa: BLE001
-            heuragenix_available = False
+    max_steps = int(baseline_cfg.get("max_steps", 1000))
+    iterations_scale = _compute_iterations_scale(layout_input, max_steps)
 
-    base_state, evaluator, init_assign, eval_assign = _parse_layout_input(layout_input, cfg)
-
-    env = None
-    heuristics: List[Callable[..., Any]] = []
-    if heuragenix_available and heuragenix_data_path is not None:
-        env = Env(str(heuragenix_data_path), rng=rng, algorithm_data={"eval_assign": eval_assign})
-        heuristic_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "heuristics" / str(
-            baseline_cfg.get("heuristic_dir", "basic_heuristics")
-        )
-        heuristics = _import_heuristics(
-            "problems.wafer_layout.heuristics." + str(baseline_cfg.get("heuristic_dir", "basic_heuristics")),
-            heuristic_dir,
-        )
-
-    S = int(layout_input["slots"].get("S", len(layout_input["slots"]["tdp"])))
-    max_steps = int(baseline_cfg.get("max_steps", 0))
-    iterations_scale_factor = float(baseline_cfg.get("iterations_scale_factor", 1.0))
-    if max_steps > 0:
-        iterations_scale_factor = max_steps / max(1, S)
-    else:
-        max_steps = max(1, int(iterations_scale_factor * max(1, S)))
-
-    selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
-    num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
-    sa_T0 = float(baseline_cfg.get("sa_T0", 1.0))
-    sa_alpha = float(baseline_cfg.get("sa_alpha", 0.995))
-
-    method = str(baseline_cfg.get("method", "random_hh"))
-    start_time = time.time()
-    fallback_used = False
+    method = str(baseline_cfg.get("method", "llm_hh"))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
-    llm_client = None
-    llm_config_file = baseline_cfg.get("llm_config_file")
-    resolved_llm_config = None
-    if heuragenix_available and get_llm_client is not None:
-        resolved_llm_config = _resolve_llm_config_path(llm_config_file, heuragenix_root, project_root)
-        if resolved_llm_config is not None:
-            llm_client = get_llm_client(
-                str(resolved_llm_config),
-                timeout_sec=int(baseline_cfg.get("llm_timeout_s", 30)),
-                max_retry=int(baseline_cfg.get("max_llm_failures", 1)),
-            )
+    start_time = time.time()
+    llm_usage_path = out_dir / "llm_usage.jsonl"
+    llm_usage_path.touch(exist_ok=True)
 
-    recordings: List[Dict[str, Any]] = []
-    if method == "llm_hh":
-        llm_timeout = int(baseline_cfg.get("llm_timeout_s", 30))
-        llm_max_retry = int(baseline_cfg.get("max_llm_failures", 1))
-        if not heuragenix_available or env is None or not heuristics:
-            _append_llm_usage(
-                llm_usage_path,
-                {"ok": False, "reason": "heuragenix_missing", "fallback_used": True, "method": method},
-            )
-            fallback_used = True
-        elif llm_client is None or not getattr(llm_client, "is_ready", lambda: False)():
-            _append_llm_usage(
-                llm_usage_path,
-                {
-                    "ok": False,
-                    "reason": "llm_not_ready",
-                    "fallback_used": True,
-                    "method": method,
-                    "llm_config_file": str(resolved_llm_config) if resolved_llm_config else None,
-                },
-            )
-            fallback_used = True
-        else:
-            llm_hh = LLMSelectionHyperHeuristic(
-                env,
-                heuristics,
-                rng,
-                selection_frequency=selection_frequency,
-                num_candidate_heuristics=num_candidate_heuristics,
-                sa_T0=sa_T0,
-                sa_alpha=sa_alpha,
-                timeout_sec=llm_timeout,
-                max_retry=llm_max_retry,
-                llm_client=llm_client,
-            )
-            try:
-                llm_hh.run(max_steps)
-                recordings = env.recordings
-                for rec in _iter_selection_records(llm_hh.selection_records, False):
-                    _append_llm_usage(llm_usage_path, rec)
-            except Exception as exc:  # noqa: BLE001
-                _append_llm_usage(
-                    llm_usage_path,
+    ok, output_dir, log_text = _run_heuragenix(
+        work_dir,
+        heuragenix_root,
+        project_root,
+        cfg.__dict__ if hasattr(cfg, "__dict__") else cfg,
+        case_name,
+        method,
+        iterations_scale,
+        seed,
+    )
+    fallback_used = False
+    if not ok and method == "llm_hh":
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "reason": "llm_hh_failed", "fallback": fallback_method, "log": log_text[-500:]},
+        )
+        fallback_used = True
+        method = fallback_method
+        ok, output_dir, log_text = _run_heuragenix(
+            work_dir,
+            heuragenix_root,
+            project_root,
+            cfg.__dict__ if hasattr(cfg, "__dict__") else cfg,
+            case_name,
+            method,
+            iterations_scale,
+            seed,
+        )
+
+    if not ok:
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "reason": "heuragenix_failed", "fallback": method, "log": log_text[-500:]},
+        )
+        output_dir = work_dir / "output" / "wafer_layout" / case_name / "result" / method
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fallback_assign = _derive_initial_assign(layout_input).tolist()
+        best_solution_path = output_dir / "best_solution.json"
+        best_solution_path.write_text(
+            json.dumps({"best_assign": fallback_assign, "best_metrics": {}, "meta": {}}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        recordings_path = output_dir / "recordings.jsonl"
+        with recordings_path.open("w", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
                     {
-                        "ok": False,
-                        "reason": "llm_failure",
-                        "error": str(exc),
-                        "fallback_used": True,
-                        "method": method,
+                        "step": 0,
+                        "heuristic": "noop",
+                        "op": "noop",
+                        "op_args": {},
+                        "signature": "noop",
+                        "assign": fallback_assign,
+                        "key_value": 0.0,
+                        "comm_norm": 0.0,
+                        "therm_norm": 0.0,
+                        "duplicate_penalty": 0.0,
+                        "boundary_penalty": 0.0,
+                        "accepted": True,
                     },
+                    ensure_ascii=False,
                 )
-                fallback_used = True
-
-    if method != "llm_hh" or fallback_used:
-        if heuragenix_available and env is not None and heuristics and RandomSelectionHyperHeuristic is not None:
-            random_hh = RandomSelectionHyperHeuristic(
-                env,
-                heuristics,
-                rng,
-                selection_frequency=selection_frequency,
-                sa_T0=sa_T0,
-                sa_alpha=sa_alpha,
+                + "\n"
             )
-            remaining_steps = max_steps
-            if env.recordings:
-                remaining_steps = max(0, max_steps - len(env.recordings))
-            try:
-                random_hh.run(remaining_steps)
-                recordings = env.recordings
-                for rec in _iter_selection_records(random_hh.usage_records, fallback_used):
-                    _append_llm_usage(llm_usage_path, rec)
-            except Exception as exc:  # noqa: BLE001
-                _append_llm_usage(
-                    llm_usage_path,
-                    {
-                        "ok": False,
-                        "reason": "random_hh_failure",
-                        "error": str(exc),
-                        "fallback_used": True,
-                        "method": "random_hh",
-                    },
-                )
-                recordings = _run_simple_fallback(
-                    max_steps,
-                    eval_assign,
-                    init_assign,
-                    base_state.Ns,
-                    rng,
-                    sa_T0,
-                    sa_alpha,
-                )
-                fallback_used = True
-        else:
-            _append_llm_usage(
-                llm_usage_path,
-                {"ok": False, "reason": "heuragenix_missing", "fallback_used": True, "method": "random_hh"},
-            )
-            recordings = _run_simple_fallback(
-                max_steps,
-                eval_assign,
-                init_assign,
-                base_state.Ns,
-                rng,
-                sa_T0,
-                sa_alpha,
-            )
-            fallback_used = True
 
-    if not recordings and env is not None:
-        recordings = env.recordings
-    trace_info = _record_trace(out_dir, seed, recordings, eval_assign, init_assign)
+    usage_src = output_dir / "llm_usage.jsonl"
+    if usage_src.exists():
+        shutil.copyfile(usage_src, llm_usage_path)
+    if fallback_used:
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "reason": "fallback_used", "fallback": method, "fallback_used": True},
+        )
 
-    detailed_cfg = cfg.get("detailed_place", {})
+    recordings_path = output_dir / "recordings.jsonl"
+    trace_info, pareto = _write_trace_and_pareto(out_dir, seed, recordings_path, layout_input, cfg)
+    _write_pareto_points(pareto, out_dir / "pareto_points.csv")
+
+    best_solution_path = output_dir / "best_solution.json"
+    best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
+    _write_layout_best(out_dir, layout_input, cfg, pareto, best_assign)
+
+    detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
     eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-    trace_metrics = compute_oscillation_metrics(trace_info["trace_path"], metrics_window, eps_flat)
+    trace_metrics = _compute_trace_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
+    oscillation_metrics = compute_oscillation_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
 
-    best_eval = trace_info["best_eval"] or {}
-    best_assign = trace_info["best_assign"] or (env.solution.assign if env is not None else list(init_assign))
-
-    layout_best = {
-        "assign": list(best_assign),
-        "best_total": float(best_eval.get("total_scalar", 0.0)),
-        "best_comm": float(best_eval.get("comm_norm", 0.0)),
-        "best_therm": float(best_eval.get("therm_norm", 0.0)),
-    }
-    with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
-        json.dump(layout_best, f, indent=2)
-
-    llm_report = {
-        "ok": bool(method == "llm_hh" and not fallback_used),
-        "provider": getattr(llm_client, "provider", None) if llm_client else None,
-        "model": getattr(llm_client, "model", None) if llm_client else None,
-        "llm_config_file": str(resolved_llm_config) if resolved_llm_config else None,
-        "total_calls": len(getattr(llm_client, "calls", [])) if llm_client else None,
-        "fallback": fallback_method if fallback_used else None,
-    }
+    best_eval = trace_info.get("best_eval") or {}
     report = {
         "cfg_path": str(args.cfg),
-        "cfg_dump": _cfg_to_dict(cfg),
         "best_total": float(best_eval.get("total_scalar", 0.0)),
-        "best_comm": float(best_eval.get("comm_norm", 0.0)),
-        "best_therm": float(best_eval.get("therm_norm", 0.0)),
-        "steps_total": int(max_steps),
+        "best_comm_norm": float(best_eval.get("comm_norm", 0.0)),
+        "best_therm_norm": float(best_eval.get("therm_norm", 0.0)),
+        "steps_total": int(trace_info.get("steps_total", 0)),
+        "accepts_total": int(trace_info.get("accepts", 0)),
         "best_step": int(trace_info.get("best_step", -1)),
-        "accepts_total": int(trace_info["accepts"]),
         "method": method,
         "fallback_used": fallback_used,
-        "fallback_method": fallback_method,
+        "fallback_method": fallback_method if fallback_used else None,
         "runtime_s": float(time.time() - start_time),
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
-        "iterations_scale_factor": float(iterations_scale_factor),
-        "llm": llm_report,
-        "oscillation_metrics": trace_metrics,
+        "iterations_scale_factor": float(iterations_scale),
+        "trace_metrics": trace_metrics,
+        "oscillation_metrics": oscillation_metrics,
+        "raw_dir": str(output_dir),
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

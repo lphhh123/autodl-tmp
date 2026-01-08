@@ -17,6 +17,9 @@ class WaferLayoutSolution(BaseSolution):
 class WaferLayoutOperator(BaseOperator):
     name = "base"
 
+    def signature(self) -> str:
+        return self.name
+
 
 class SwapSlots(WaferLayoutOperator):
     name = "swap"
@@ -29,6 +32,9 @@ class SwapSlots(WaferLayoutOperator):
         assign = list(solution.assign)
         assign[self.i], assign[self.j] = assign[self.j], assign[self.i]
         return WaferLayoutSolution(assign=assign, S=solution.S, Ns=solution.Ns)
+
+    def signature(self) -> str:
+        return f"swap:{self.i}<->{self.j}"
 
 
 class RelocateSlot(WaferLayoutOperator):
@@ -46,6 +52,9 @@ class RelocateSlot(WaferLayoutOperator):
         else:
             assign[self.i] = self.site_id
         return WaferLayoutSolution(assign=assign, S=solution.S, Ns=solution.Ns)
+
+    def signature(self) -> str:
+        return f"relocate:{self.i}->{self.site_id}"
 
 
 class ClusterMove(WaferLayoutOperator):
@@ -65,6 +74,9 @@ class ClusterMove(WaferLayoutOperator):
                 assign[slot] = site
         return WaferLayoutSolution(assign=assign, S=solution.S, Ns=solution.Ns)
 
+    def signature(self) -> str:
+        return f"cluster_move:{len(self.slots)}"
+
 
 class RandomKick(WaferLayoutOperator):
     name = "random_kick"
@@ -78,9 +90,15 @@ class RandomKick(WaferLayoutOperator):
             out = op.run(out)
         return out
 
+    def signature(self) -> str:
+        return f"kick:k={len(self.ops)}"
+
 
 class NoOp(WaferLayoutOperator):
     name = "noop"
 
     def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
         return WaferLayoutSolution(assign=list(solution.assign), S=solution.S, Ns=solution.Ns)
+
+    def signature(self) -> str:
+        return "noop"

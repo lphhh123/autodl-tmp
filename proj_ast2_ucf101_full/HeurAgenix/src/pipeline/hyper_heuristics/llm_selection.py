@@ -1,8 +1,10 @@
 """LLM-selection hyper-heuristic baseline."""
 from __future__ import annotations
 
+import json
 import random
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
 from core import BaseEnv
@@ -22,6 +24,7 @@ class LLMSelectionHyperHeuristic:
         max_retry: int = 1,
         stage_name: str = "heuragenix_llm_hh",
         llm_client: Any | None = None,
+        usage_path: str | None = None,
     ) -> None:
         self.env = env
         self.heuristics = heuristics
@@ -34,6 +37,14 @@ class LLMSelectionHyperHeuristic:
         self.llm = llm_client
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
+        self.usage_path = Path(usage_path) if usage_path else None
+
+    def _append_usage(self, payload: Dict[str, Any]) -> None:
+        if not self.usage_path:
+            return
+        self.usage_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.usage_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _llm_ready(self) -> bool:
         if self.llm is None:
@@ -90,19 +101,11 @@ class LLMSelectionHyperHeuristic:
                 usage["step"] = int(step)
                 usage["n_pick"] = len(picks)
                 self.usage_records.append(usage)
-                if picks:
-                    picked = next((c for c in candidates if c["id"] == picks[0]), candidates[0])
-                    reason = "llm_pick"
-                else:
-                    picked = min(candidates, key=lambda x: x["d_total"])
-                    reason = "llm_empty_pick_fallback"
-                selected_operator = picked["operator"]
-                selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
-                self.selection_records.append(
-                    {
-                        "ok": True,
-                        "reason": reason,
-                        "chosen_heuristic": picked["name"],
+                if not picks or not usage.get("ok", True):
+                    failure = {
+                        "ok": False,
+                        "reason": usage.get("error") or "llm_empty_pick",
+                        "chosen_heuristic": None,
                         "candidates": [
                             {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
                         ],
@@ -110,7 +113,24 @@ class LLMSelectionHyperHeuristic:
                         "step": int(step),
                         **usage,
                     }
-                )
+                    self.selection_records.append(failure)
+                    self._append_usage(failure)
+                    raise RuntimeError(usage.get("error") or "LLM selection failed")
+                picked = next((c for c in candidates if c["id"] == picks[0]), candidates[0])
+                reason = "llm_pick"
+                selected_operator = picked["operator"]
+                selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
+                selection_payload = {
+                    "ok": True,
+                    "reason": reason,
+                    "chosen_heuristic": picked["name"],
+                    "candidates": [{"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates],
+                    "selection_id": selection_id,
+                    "step": int(step),
+                    **usage,
+                }
+                self.selection_records.append(selection_payload)
+                self._append_usage(selection_payload)
                 selection_id += 1
 
             new_solution = selected_operator.run(current_solution)
