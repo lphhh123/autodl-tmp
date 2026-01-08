@@ -26,12 +26,15 @@ def main():
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
+    out_dir = None
     if args.out_dir:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         if hasattr(cfg, "train"):
             cfg.train.out_dir = str(out_dir)
-    train_single_device(cfg)
+        with (out_dir / "config_used.yaml").open("w", encoding="utf-8") as f:
+            f.write(Path(args.cfg).read_text(encoding="utf-8"))
+    train_single_device(cfg, out_dir=out_dir)
 
 
 if __name__ == "__main__":
