@@ -25,6 +25,7 @@ class RandomHyperHeuristic:
         self.selection_frequency = max(1, int(selection_frequency))
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
+        self.stage_name = stage_name
         self.usage_records: List[Dict[str, Any]] = []
 
     def run(self, max_steps: int) -> None:

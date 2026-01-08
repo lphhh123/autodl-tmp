@@ -11,10 +11,11 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 
+from layout.candidate_pool import _signature_for_action, inverse_signature
 from layout.evaluator import LayoutEvaluator, LayoutState
 from scripts.run_layout_agent import compute_oscillation_metrics
 from utils.config import load_config
@@ -35,9 +36,13 @@ TRACE_FIELDS = [
     "seed_id",
     "time_ms",
     "signature",
+    "inverse_signature",
     "d_total",
     "d_comm",
     "d_therm",
+    "tabu_hit",
+    "inverse_hit",
+    "cooldown_hit",
 ]
 
 
@@ -58,13 +63,6 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-    def _eval_assign(assign: np.ndarray) -> Dict[str, Any]:
-        base_state.assign = np.asarray(assign, dtype=int)
-        return evaluator.evaluate(base_state)
-
-def _signature_for_assign(assign: Iterable[int]) -> str:
-    return "assign:" + ",".join(str(int(x)) for x in assign)
 
 
 def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
@@ -100,12 +98,38 @@ def _import_heuristics(module_prefix: str, heuristic_dir: Path) -> List[Callable
     return heuristics
 
 
-def _build_evaluator(layout_input: dict, cfg: dict) -> LayoutEvaluator:
-    return LayoutEvaluator(
+def _parse_layout_input(layout_input: dict, cfg: dict) -> tuple[LayoutState, LayoutEvaluator, np.ndarray, Callable[[np.ndarray], Dict[str, Any]]]:
+    wafer = layout_input.get("wafer", {})
+    slots = layout_input.get("slots", {})
+    sites = layout_input.get("sites", {})
+    baseline = layout_input.get("baseline", {})
+    seed = layout_input.get("seed", {})
+
+    sites_xy = np.asarray(sites.get("sites_xy", []), dtype=np.float32)
+    tdp = np.asarray(slots.get("tdp", []), dtype=float)
+    S = int(slots.get("S", len(tdp)))
+    Ns = int(sites.get("Ns", len(sites_xy)))
+    traffic = np.asarray(layout_input.get("mapping", {}).get("traffic_matrix", []), dtype=float)
+    if traffic.size == 0:
+        traffic = np.zeros((S, S), dtype=float)
+
+    init_assign = None
+    if seed.get("assign_seed") is not None:
+        init_assign = np.asarray(seed.get("assign_seed"), dtype=int)
+    if init_assign is None and seed.get("seed_assign") is not None:
+        init_assign = np.asarray(seed.get("seed_assign"), dtype=int)
+    if init_assign is None and baseline.get("assign_grid") is not None:
+        init_assign = np.asarray(baseline.get("assign_grid"), dtype=int)
+    if init_assign is None and layout_input.get("baseline_assign_grid") is not None:
+        init_assign = np.asarray(layout_input.get("baseline_assign_grid"), dtype=int)
+    if init_assign is None:
+        init_assign = np.arange(S, dtype=int) % max(1, Ns)
+
+    evaluator = LayoutEvaluator(
         sigma_mm=float(cfg.objective.sigma_mm),
         baseline={
-            "L_comm_baseline": float(layout_input.get("baseline", {}).get("L_comm", 1.0)),
-            "L_therm_baseline": float(layout_input.get("baseline", {}).get("L_therm", 1.0)),
+            "L_comm_baseline": float(baseline.get("L_comm", 1.0)),
+            "L_therm_baseline": float(baseline.get("L_therm", 1.0)),
         },
         scalar_w={
             "w_comm": float(cfg.objective.scalar_weights.w_comm),
@@ -114,24 +138,62 @@ def _build_evaluator(layout_input: dict, cfg: dict) -> LayoutEvaluator:
         },
     )
 
-
-def _build_eval_assign(layout_input: dict, evaluator: LayoutEvaluator) -> Callable[[np.ndarray], Dict[str, Any]]:
     base_state = LayoutState(
-        S=int(layout_input["slots"].get("S", len(layout_input["slots"]["tdp"]))),
-        Ns=int(layout_input["sites"].get("Ns", len(layout_input["sites"]["sites_xy"]))),
-        wafer_radius_mm=float(layout_input["wafer"]["radius_mm"]),
-        sites_xy_mm=np.asarray(layout_input["sites"]["sites_xy"], dtype=np.float32),
-        assign=np.zeros(int(layout_input["slots"].get("S", len(layout_input["slots"]["tdp"]))), dtype=int),
-        chip_tdp_w=np.asarray(layout_input["slots"]["tdp"], dtype=float),
-        traffic_bytes=np.asarray(layout_input["mapping"]["traffic_matrix"], dtype=float),
-        meta={},
+        S=S,
+        Ns=Ns,
+        wafer_radius_mm=float(wafer.get("radius_mm", 0.0)),
+        sites_xy_mm=sites_xy,
+        assign=np.asarray(init_assign, dtype=int).copy(),
+        chip_tdp_w=tdp,
+        traffic_bytes=traffic,
+        meta={"margin_mm": float(wafer.get("margin_mm", 0.0))},
     )
 
     def _eval_assign(assign: np.ndarray) -> Dict[str, Any]:
         base_state.assign = np.asarray(assign, dtype=int)
-        return evaluator.evaluate(base_state)
+        out = evaluator.evaluate(base_state)
+        penalty = out.get("penalty", {})
+        out["penalty_norm"] = float(penalty.get("duplicate", 0.0) + penalty.get("boundary", 0.0))
+        return out
 
-    return _eval_assign
+    return base_state, evaluator, np.asarray(init_assign, dtype=int), _eval_assign
+
+
+def _operator_to_action(operator: Any, meta: Dict[str, Any], pre_assign: np.ndarray) -> Dict[str, Any]:
+    if operator is None:
+        return {"op": "do_nothing", "type": "do_nothing"}
+    op_name = getattr(operator, "name", operator.__class__.__name__)
+    action: Dict[str, Any] = {"op": op_name, "type": op_name}
+    if op_name == "swap" and hasattr(operator, "i") and hasattr(operator, "j"):
+        action.update({"i": int(operator.i), "j": int(operator.j), "type": "swap"})
+    elif op_name == "relocate" and hasattr(operator, "i") and hasattr(operator, "site_id"):
+        slot = int(operator.i)
+        from_site = int(pre_assign[slot]) if 0 <= slot < len(pre_assign) else None
+        action.update(
+            {
+                "i": slot,
+                "site_id": int(operator.site_id),
+                "from_site": from_site,
+                "type": "relocate",
+            }
+        )
+    elif op_name == "cluster_move":
+        action.update(
+            {
+                "cluster_id": int(meta.get("cluster_id", -1)),
+                "region_id": int(meta.get("region_id", -1)),
+                "target_sites": getattr(operator, "target_sites", None),
+                "slots": getattr(operator, "slots", None),
+                "type": "cluster_move",
+            }
+        )
+    elif op_name == "random_kick":
+        ops = getattr(operator, "ops", []) or []
+        action.update({"k": len(ops), "type": "random_kick"})
+    elif op_name in {"noop", "do_nothing"}:
+        action.update({"op": "do_nothing", "type": "do_nothing"})
+    action.update(meta or {})
+    return action
 
 
 def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
@@ -152,12 +214,15 @@ def _record_trace(
     seed: int,
     recordings: List[Dict[str, Any]],
     eval_assign: Callable[[np.ndarray], Dict[str, Any]],
+    init_assign: np.ndarray,
 ) -> Dict[str, Any]:
     trace_path = out_dir / "trace.csv"
     best_eval: Dict[str, Any] | None = None
     best_assign: List[int] | None = None
     prev_eval: Dict[str, Any] | None = None
     accepts = 0
+    best_step = -1
+    prev_assign = np.asarray(init_assign, dtype=int).copy()
 
     with trace_path.open("w", encoding="utf-8", newline="") as trace_fp:
         writer = csv.writer(trace_fp)
@@ -180,25 +245,20 @@ def _record_trace(
             if best_eval is None or eval_out["total_scalar"] < best_eval["total_scalar"]:
                 best_eval = dict(eval_out)
                 best_assign = list(assign)
+                best_step = idx
 
             operator = rec.get("operator")
-            op_name = getattr(operator, "name", operator.__class__.__name__ if operator else "none")
-            op_args = {}
-            if operator is not None and hasattr(operator, "__dict__"):
-                op_args = {k: v for k, v in operator.__dict__.items()}
-            op_args_payload = {
-                "op": op_name,
-                **op_args,
-                **(rec.get("meta") or {}),
-            }
-            signature = _signature_for_assign(assign)
-            op_args_payload["signature"] = signature
+            meta = rec.get("meta") or {}
+            action = _operator_to_action(operator, meta, prev_assign)
+            op_name = action.get("op", "none")
+            signature = _signature_for_action(action, prev_assign)
+            inv_signature = inverse_signature(action, prev_assign)
             writer.writerow(
                 [
                     idx,
-                    "heuragenix",
+                    rec.get("stage", "heuragenix"),
                     op_name,
-                    json.dumps(op_args_payload),
+                    json.dumps(action, ensure_ascii=False, sort_keys=True),
                     accepted,
                     float(eval_out["total_scalar"]),
                     float(eval_out["comm_norm"]),
@@ -209,11 +269,16 @@ def _record_trace(
                     seed,
                     int(rec.get("time_ms", 0)),
                     signature,
+                    inv_signature,
                     d_total,
                     d_comm,
                     d_therm,
+                    0,
+                    0,
+                    0,
                 ]
             )
+            prev_assign = np.asarray(assign, dtype=int).copy()
         trace_fp.flush()
 
     return {
@@ -221,7 +286,18 @@ def _record_trace(
         "best_eval": best_eval,
         "best_assign": best_assign,
         "accepts": accepts,
+        "best_step": best_step,
     }
+
+
+def _cfg_to_dict(cfg: Any) -> Dict[str, Any]:
+    if isinstance(cfg, dict):
+        return {k: _cfg_to_dict(v) for k, v in cfg.items()}
+    if isinstance(cfg, list):
+        return [_cfg_to_dict(v) for v in cfg]
+    if hasattr(cfg, "__dict__") and not isinstance(cfg, (str, int, float, bool)):
+        return {k: _cfg_to_dict(v) for k, v in cfg.__dict__.items()}
+    return cfg
 
 
 def main() -> None:
@@ -255,9 +331,9 @@ def main() -> None:
 
     from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
     from problems.wafer_layout.env import Env
+    from util.llm_client.get_llm_client import get_llm_client
 
-    evaluator = _build_evaluator(layout_input, cfg)
-    eval_assign = _build_eval_assign(layout_input, evaluator)
+    base_state, evaluator, init_assign, eval_assign = _parse_layout_input(layout_input, cfg)
 
     env = Env(str(heuragenix_data_path), rng=rng, algorithm_data={"eval_assign": eval_assign})
 
@@ -285,6 +361,15 @@ def main() -> None:
     method = str(baseline_cfg.get("method", "random_hh"))
     start_time = time.time()
     fallback_used = False
+    fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
+    llm_client = None
+    llm_config_file = baseline_cfg.get("llm_config_file")
+    if llm_config_file:
+        llm_client = get_llm_client(
+            str(Path(llm_config_file).expanduser()),
+            timeout_sec=int(baseline_cfg.get("llm_timeout_s", 30)),
+            max_retry=int(baseline_cfg.get("max_llm_failures", 1)),
+        )
 
     if method == "llm_hh":
         llm_timeout = int(baseline_cfg.get("llm_timeout_s", 30))
@@ -299,6 +384,7 @@ def main() -> None:
             sa_alpha=sa_alpha,
             timeout_sec=llm_timeout,
             max_retry=llm_max_retry,
+            llm_client=llm_client,
         )
         try:
             llm_hh.run(max_steps)
@@ -332,8 +418,10 @@ def main() -> None:
         random_hh.run(remaining_steps)
         for rec in _iter_selection_records(random_hh.usage_records, fallback_used):
             _append_llm_usage(llm_usage_path, rec)
+        if method != "llm_hh":
+            _append_llm_usage(llm_usage_path, {"ok": False, "mode": "random_hh"})
 
-    trace_info = _record_trace(out_dir, seed, env.recordings, eval_assign)
+    trace_info = _record_trace(out_dir, seed, env.recordings, eval_assign, init_assign)
 
     detailed_cfg = cfg.get("detailed_place", {})
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
@@ -352,11 +440,22 @@ def main() -> None:
     with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
         json.dump(layout_best, f, indent=2)
 
+    llm_report = {
+        "ok": bool(method == "llm_hh" and not fallback_used),
+        "provider": getattr(llm_client, "provider", None) if llm_client else None,
+        "model": getattr(llm_client, "model", None) if llm_client else None,
+        "llm_config_file": str(llm_config_file) if llm_config_file else None,
+        "total_calls": len(getattr(llm_client, "calls", [])) if llm_client else None,
+        "fallback": fallback_method if fallback_used else None,
+    }
     report = {
+        "cfg_path": str(args.cfg),
+        "cfg_dump": _cfg_to_dict(cfg),
         "best_total": float(best_eval.get("total_scalar", 0.0)),
         "best_comm": float(best_eval.get("comm_norm", 0.0)),
         "best_therm": float(best_eval.get("therm_norm", 0.0)),
         "steps_total": int(max_steps),
+        "best_step": int(trace_info.get("best_step", -1)),
         "accepts_total": int(trace_info["accepts"]),
         "method": method,
         "fallback_used": fallback_used,
@@ -365,7 +464,8 @@ def main() -> None:
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
         "iterations_scale_factor": float(iterations_scale_factor),
-        **trace_metrics,
+        "llm": llm_report,
+        "oscillation_metrics": trace_metrics,
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
