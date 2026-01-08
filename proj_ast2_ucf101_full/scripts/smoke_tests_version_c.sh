@@ -30,4 +30,11 @@ python -m scripts.run_layout_agent \
   --out_dir outputs/SMOKE/layout_L4_pick \
   --seed 0
 
+echo "[SMOKE] HeurAgenix baseline llm_hh (auto-fallback if no key)"
+python -m scripts.run_layout_heuragenix \
+  --layout_input outputs/P3/A3/layout_input.json \
+  --cfg configs/layout_agent/layout_B0_heuragenix_llm_hh.yaml \
+  --out_dir outputs/SMOKE/layout_B0_heuragenix_llm_hh \
+  --seed 0
+
 echo "[SMOKE DONE]"
