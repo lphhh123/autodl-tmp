@@ -213,7 +213,14 @@ class OpenAICompatibleClient:
         return []
 
 
-def get_llm_client(config_path: str, timeout_sec: int = 90, max_retry: int = 1) -> Optional[OpenAICompatibleClient]:
+def get_llm_client(
+    config_path: str,
+    timeout_sec: int = 90,
+    max_retry: int = 1,
+    prompt_dir: str | None = None,
+    output_dir: str | None = None,
+) -> Optional[OpenAICompatibleClient]:
+    _ = prompt_dir, output_dir
     path = Path(config_path)
     if not path.exists():
         return None

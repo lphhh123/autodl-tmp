@@ -1,17 +1,20 @@
 """Base environment for HeurAgenix problems."""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 class BaseEnv:
-    def __init__(self, data_path: str):
+    def __init__(self, data_path: str, problem: Optional[str] = None):
         self.data_path = data_path
+        self.problem = problem or ""
         self.instance_data = self.load_data(data_path)
         self.current_solution = self.init_solution()
         self.solution = self.current_solution
         self.recordings: List[Dict[str, Any]] = []
         self.step = 0
+        self.algorithm_data: Dict[str, Any] = {}
+        self.output_dir: Optional[str] = None
 
     def load_data(self, path: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -25,9 +28,26 @@ class BaseEnv:
     def get_problem_state(self) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def run_operator(self, operator, accepted: bool, meta: Dict[str, Any] | None = None) -> None:
-        self.current_solution = operator.run(self.current_solution)
+    def reset(self, output_dir: Optional[str] = None) -> None:
+        self.current_solution = self.init_solution()
         self.solution = self.current_solution
+        self.recordings = []
+        self.step = 0
+        self.algorithm_data = {}
+        self.output_dir = output_dir
+
+    def run_operator(
+        self,
+        operator,
+        accepted: bool,
+        meta: Dict[str, Any] | None = None,
+        new_solution: Any | None = None,
+    ) -> None:
+        if accepted:
+            if new_solution is None:
+                new_solution = operator.run(self.current_solution)
+            self.current_solution = new_solution
+            self.solution = self.current_solution
         self.recordings.append(
             {
                 "step": int(self.step),

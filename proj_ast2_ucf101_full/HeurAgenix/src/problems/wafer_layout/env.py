@@ -8,24 +8,25 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from core import BaseEnv
-from problems.wafer_layout.components import NoOp, WaferLayoutOperator, WaferLayoutSolution
-from problems.wafer_layout.problem_state import (
+from src.problems.base.env import BaseEnv
+from src.problems.wafer_layout.components import NoOp, WaferLayoutOperator, WaferLayoutSolution
+from src.problems.wafer_layout.problem_state import (
     get_instance_problem_state,
     get_observation_problem_state,
     get_solution_problem_state,
 )
 
 
-class WaferLayoutEnv(BaseEnv):
+class Env(BaseEnv):
     def __init__(
         self,
-        data_path: str,
+        data_name: str,
         rng: random.Random | None = None,
+        seed: int | None = None,
         algorithm_data: Optional[Dict[str, Any]] = None,
-    ):
-        self.rng = rng or random.Random(0)
-        self.algorithm_data: Dict[str, Any] = algorithm_data or {}
+    ) -> None:
+        self.rng = rng or random.Random(0 if seed is None else seed)
+        self._extra_algorithm_data: Dict[str, Any] = algorithm_data or {}
         self._evaluator = None
         self._layout_state = None
         self.last_eval: Dict[str, Any] = {}
@@ -33,15 +34,16 @@ class WaferLayoutEnv(BaseEnv):
         self.construction_steps = 1
         self.key_item = "total_scalar"
         self.compare = min
-        super().__init__(data_path)
+        super().__init__(data_name, "wafer_layout")
         slots = int(self.instance_data["slots"].get("S", len(self.instance_data["slots"].get("tdp", []))))
         self.problem_size = max(1, slots)
+        self.reset()
 
     def load_data(self, path: str) -> Dict[str, Any]:
         with Path(path).open("r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _ensure_evaluator(self):
+    def _ensure_evaluator(self) -> None:
         if self._evaluator is not None:
             return
         from layout.evaluator import LayoutEvaluator, LayoutState
@@ -81,6 +83,7 @@ class WaferLayoutEnv(BaseEnv):
         slots = int(self.instance_data["slots"].get("S", len(self.instance_data["slots"].get("tdp", []))))
         sites_xy = np.asarray(self.instance_data["sites"]["sites_xy"], dtype=np.float32)
         Ns = int(self.instance_data["sites"].get("Ns", len(sites_xy)))
+        assign = None
         if seed.get("assign_seed") is not None:
             assign = list(seed["assign_seed"])
         elif seed.get("seed_assign") is not None:
@@ -114,22 +117,64 @@ class WaferLayoutEnv(BaseEnv):
         eval_out = self.evaluate(solution)
         return float(eval_out.get("total_scalar", 0.0))
 
+    def validation_solution(self, new_solution: WaferLayoutSolution) -> bool:
+        current_score = self.get_key_value(self.solution)
+        return self.get_key_value(new_solution) <= current_score
+
+    def is_complete_solution(self, solution: WaferLayoutSolution) -> bool:
+        return False
+
     def get_problem_state(self) -> Dict[str, Any]:
         instance = get_instance_problem_state(self.instance_data)
+        solution_state = get_solution_problem_state(self.instance_data, self.solution)
         eval_out = self.evaluate(self.solution)
-        solution_state = {
+        solution_state.update(
+            {
+                "total_scalar": eval_out.get("total_scalar", 0.0),
+                "comm_norm": eval_out.get("comm_norm", 0.0),
+                "therm_norm": eval_out.get("therm_norm", 0.0),
+                "eval": eval_out,
+            }
+        )
+        state = {"instance": instance, "solution": solution_state}
+        return get_observation_problem_state(state)
+
+    def reset(self, output_dir: Optional[str] = None) -> None:
+        super().reset(output_dir)
+        self.algorithm_data.update(self._extra_algorithm_data)
+        self.algorithm_data["env"] = self
+        self.algorithm_data["rng"] = self.rng
+        self.initial_assign = list(getattr(self.solution, "assign", []) or [])
+
+    def run_operator(
+        self,
+        operator: WaferLayoutOperator | None,
+        accepted: bool,
+        meta: Dict[str, Any] | None = None,
+        stage: str | None = None,
+        time_ms: int | None = None,
+        new_solution: WaferLayoutSolution | None = None,
+    ) -> None:
+        if operator is None:
+            operator = NoOp()
+        if accepted:
+            if new_solution is None:
+                new_solution = operator.run(self.current_solution)
+            self.current_solution = new_solution
+            self.solution = self.current_solution
+        record: Dict[str, Any] = {
+            "step": int(self.step),
+            "operator": operator,
+            "meta": meta or {},
+            "accepted": accepted,
             "assign": list(self.solution.assign),
-            "eval": eval_out,
         }
-        state = {
-            "instance": instance,
-            "solution": solution_state,
-            "eval": eval_out,
-            "sites_xy": instance.get("sites_xy", []),
-            "Ns": instance.get("Ns", 0),
-        }
-        state["solution"] = get_solution_problem_state(state, current_solution=self.solution)
-        return get_observation_problem_state({"instance": instance, "solution": state["solution"]})
+        if stage is not None:
+            record["stage"] = stage
+        if time_ms is not None:
+            record["time_ms"] = int(time_ms)
+        self.recordings.append(record)
+        self.step += 1
 
     @staticmethod
     def _operator_to_dict(operator: WaferLayoutOperator | None, pre_assign: list[int]) -> Dict[str, Any]:
@@ -161,7 +206,7 @@ class WaferLayoutEnv(BaseEnv):
 
         best_eval: Dict[str, Any] | None = None
         best_assign: list[int] | None = None
-        prev_assign: list[int] = list(self.current_solution.assign)
+        prev_assign: list[int] = list(getattr(self, "initial_assign", self.current_solution.assign))
 
         with recordings_path.open("w", encoding="utf-8") as f:
             for rec in self.recordings:
@@ -187,6 +232,7 @@ class WaferLayoutEnv(BaseEnv):
                     "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
                     "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
                     "accepted": bool(rec.get("accepted", True)),
+                    "time_ms": int(rec.get("time_ms", 0)),
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 prev_assign = list(assign)
@@ -197,6 +243,3 @@ class WaferLayoutEnv(BaseEnv):
             "meta": content or {},
         }
         best_path.write_text(json.dumps(best_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-Env = WaferLayoutEnv
