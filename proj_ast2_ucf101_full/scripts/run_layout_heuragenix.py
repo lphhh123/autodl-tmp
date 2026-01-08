@@ -5,13 +5,13 @@ import argparse
 import csv
 import json
 import random
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
+from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
 from scripts.run_layout_agent import _compute_trace_metrics
 from utils.config import load_config
@@ -22,72 +22,20 @@ def _load_layout_input(path: Path) -> dict:
         return json.load(f)
 
 
-def _seed_everything(seed: int) -> random.Random:
-    rng = random.Random(seed)
+def _seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
-    return rng
 
 
-def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
-    if cfg_root:
-        root = Path(cfg_root).expanduser()
-        if root.exists():
-            return root
-    fallback = project_root / "HeurAgenix"
-    return fallback
-
-
-def _write_instance(layout_input: dict, heuragenix_root: Path, out_dir: Path) -> Path:
-    data_dir = heuragenix_root / "data" / "wafer_layout" / "data" / "test_data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    instance_path = data_dir / f"instance_{out_dir.name}.json"
-    with instance_path.open("w", encoding="utf-8") as f:
-        json.dump(layout_input, f, indent=2)
-    return instance_path
-
-
-def _build_evaluator(cfg, layout_input: dict) -> LayoutEvaluator:
-    return LayoutEvaluator(
-        sigma_mm=float(cfg.objective.sigma_mm),
-        baseline={
-            "L_comm_baseline": float(layout_input["baseline"].get("L_comm", 1.0)),
-            "L_therm_baseline": float(layout_input["baseline"].get("L_therm", 1.0)),
-        },
-        scalar_w={
-            "w_comm": float(cfg.objective.scalar_weights.w_comm),
-            "w_therm": float(cfg.objective.scalar_weights.w_therm),
-            "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
-        },
-    )
-
-
-def _build_state(layout_input: dict, assign: np.ndarray) -> LayoutState:
-    return LayoutState(
-        S=int(layout_input["slots"]["S"]),
-        Ns=int(layout_input["sites"]["Ns"]),
-        wafer_radius_mm=float(layout_input["wafer"]["radius_mm"]),
-        sites_xy_mm=np.asarray(layout_input["sites"]["sites_xy"], dtype=np.float32),
-        assign=assign,
-        chip_tdp_w=np.asarray(layout_input["slots"]["tdp"], dtype=float),
-        traffic_bytes=np.asarray(layout_input["mapping"]["traffic_matrix"], dtype=float),
-        meta={},
-    )
-
-
-def _action_from_operator(operator) -> Dict[str, Any]:
-    name = getattr(operator, "name", operator.__class__.__name__).lower()
-    if name == "swap":
-        return {"op": "swap", "i": int(operator.i), "j": int(operator.j)}
-    if name == "relocate":
-        return {"op": "relocate", "i": int(operator.i), "site_id": int(operator.site_id)}
-    if name == "cluster_move":
-        return {"op": "cluster_move", "slots": list(operator.slots), "target_sites": list(operator.target_sites)}
-    if name == "random_kick":
-        return {"op": "random_kick", "ops": [getattr(op, "name", op.__class__.__name__) for op in operator.ops]}
-    if name == "noop":
-        return {"op": "none"}
-    return {"op": name}
+def _init_assign(layout_input: dict, Ns: int, S: int, rng: random.Random) -> np.ndarray:
+    if "seed" in layout_input and "assign_seed" in layout_input["seed"]:
+        return np.asarray(layout_input["seed"]["assign_seed"], dtype=int)
+    if "baseline" in layout_input and "assign_grid" in layout_input["baseline"]:
+        return np.asarray(layout_input["baseline"]["assign_grid"], dtype=int)
+    slots = int(S)
+    sites = np.arange(int(Ns), dtype=int)
+    rng.shuffle(sites)
+    return sites[:slots]
 
 
 def _apply_action(assign: np.ndarray, action: Dict[str, Any]) -> np.ndarray:
@@ -108,48 +56,89 @@ def _apply_action(assign: np.ndarray, action: Dict[str, Any]) -> np.ndarray:
     return new_assign
 
 
-def _assign_signature(assign: np.ndarray) -> str:
-    return "assign:" + ",".join(str(int(a)) for a in assign.tolist())
+def _random_swap(assign: np.ndarray, rng: random.Random) -> Dict[str, Any]:
+    i, j = rng.sample(range(len(assign)), 2)
+    return {"op": "swap", "i": int(i), "j": int(j)}
 
 
-def _greedy_heuristic_loop(env, heuristics, rng: random.Random, max_steps: int, sa_T0: float, sa_alpha: float) -> None:
-    temperature = sa_T0
-    current_solution = env.solution
-    current_score = env.get_key_value(current_solution)
-    for step in range(max_steps):
-        step_start = time.perf_counter()
-        best = None
-        for heuristic in heuristics:
-            operator, meta = heuristic({"solution": current_solution}, {"env": env, "rng": rng})
-            new_solution = operator.run(current_solution)
-            score = env.get_key_value(new_solution)
-            delta = score - current_score
-            if best is None or delta < best["delta"]:
-                best = {
-                    "operator": operator,
-                    "meta": meta,
-                    "new_solution": new_solution,
-                    "delta": delta,
-                    "score": score,
-                }
-        if best is None:
-            break
-        accept = (best["delta"] < 0) or (rng.random() < pow(2.718281828, -best["delta"] / max(temperature, 1e-6)))
-        if accept:
-            current_solution = best["new_solution"]
-            current_score = best["score"]
-            env.solution = current_solution
-        env.recordings.append(
-            {
-                "step": step,
-                "operator": best["operator"],
-                "meta": best["meta"],
-                "accepted": accept,
-                "score": current_score,
-                "time_ms": int((time.perf_counter() - step_start) * 1000),
-            }
-        )
-        temperature *= sa_alpha
+def _random_relocate(assign: np.ndarray, Ns: int, rng: random.Random) -> Dict[str, Any]:
+    i = rng.randrange(len(assign))
+    site_id = rng.randrange(Ns)
+    occupied = {int(s): idx for idx, s in enumerate(assign)}
+    if site_id in occupied:
+        j = int(occupied[site_id])
+        return {"op": "swap", "i": int(i), "j": int(j)}
+    return {"op": "relocate", "i": int(i), "site_id": int(site_id), "from_site": int(assign[i])}
+
+
+def _cluster_move(assign: np.ndarray, Ns: int, rng: random.Random) -> Dict[str, Any]:
+    slots = rng.sample(range(len(assign)), min(3, len(assign)))
+    target_sites = rng.sample(range(Ns), len(slots))
+    return {"op": "cluster_move", "cluster_id": 0, "region_id": 0, "slots": slots, "target_sites": target_sites}
+
+
+def _evaluate_action(
+    evaluator: LayoutEvaluator,
+    state: LayoutState,
+    assign: np.ndarray,
+    action: Dict[str, Any],
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    new_assign = _apply_action(assign, action)
+    state.assign = new_assign
+    eval_new = evaluator.evaluate(state)
+    state.assign = assign
+    return new_assign, {
+        "total": float(eval_new["total_scalar"]),
+        "comm": float(eval_new["comm_norm"]),
+        "therm": float(eval_new["therm_norm"]),
+        "dup_pen": float(eval_new["penalty"]["duplicate"]),
+        "bnd_pen": float(eval_new["penalty"]["boundary"]),
+    }
+
+
+def _best_of_candidates(
+    evaluator: LayoutEvaluator,
+    state: LayoutState,
+    assign: np.ndarray,
+    candidates: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, float], np.ndarray]:
+    best_action = candidates[0]
+    best_eval = None
+    best_assign = assign
+    best_total = float("inf")
+    for cand in candidates:
+        cand_assign, cand_eval = _evaluate_action(evaluator, state, assign, cand)
+        if cand_eval["total"] < best_total:
+            best_total = cand_eval["total"]
+            best_action = cand
+            best_eval = cand_eval
+            best_assign = cand_assign
+    return best_action, best_eval, best_assign
+
+
+def _select_action(
+    method: str,
+    evaluator: LayoutEvaluator,
+    state: LayoutState,
+    assign: np.ndarray,
+    Ns: int,
+    rng: random.Random,
+) -> Tuple[Dict[str, Any], Dict[str, float], np.ndarray]:
+    if method == "heuristic_only":
+        candidates = [_random_swap(assign, rng), _random_relocate(assign, Ns, rng), _cluster_move(assign, Ns, rng)]
+        return _best_of_candidates(evaluator, state, assign, candidates)
+    if method == "random_hh":
+        action = rng.choice([_random_swap(assign, rng), _random_relocate(assign, Ns, rng), _cluster_move(assign, Ns, rng)])
+        new_assign, new_eval = _evaluate_action(evaluator, state, assign, action)
+        return action, new_eval, new_assign
+    action = rng.choice([_random_swap(assign, rng), _random_relocate(assign, Ns, rng), _cluster_move(assign, Ns, rng)])
+    new_assign, new_eval = _evaluate_action(evaluator, state, assign, action)
+    return action, new_eval, new_assign
+
+
+def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload) + "\n")
 
 
 def main() -> None:
@@ -167,106 +156,64 @@ def main() -> None:
     llm_usage_path = out_dir / "llm_usage.jsonl"
     llm_usage_path.touch(exist_ok=True)
 
-    rng = _seed_everything(int(args.seed))
-    project_root = Path(__file__).resolve().parents[1]
+    seed = int(args.seed)
+    _seed_everything(seed)
+    rng = random.Random(seed)
+
+    wafer_radius = float(layout_input["wafer"]["radius_mm"])
+    sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
+    chip_tdp = np.array(layout_input["slots"]["tdp"], dtype=float)
+    traffic = np.array(layout_input["mapping"]["traffic_matrix"], dtype=float)
+    S = int(layout_input["slots"].get("S", len(chip_tdp)))
+    Ns = int(layout_input["sites"].get("Ns", len(sites_xy)))
+    assign = _init_assign(layout_input, Ns, S, rng)
+
+    evaluator = LayoutEvaluator(
+        sigma_mm=float(cfg.objective.sigma_mm),
+        baseline={
+            "L_comm_baseline": float(layout_input["baseline"].get("L_comm", 1.0)),
+            "L_therm_baseline": float(layout_input["baseline"].get("L_therm", 1.0)),
+        },
+        scalar_w={
+            "w_comm": float(cfg.objective.scalar_weights.w_comm),
+            "w_therm": float(cfg.objective.scalar_weights.w_therm),
+            "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
+        },
+    )
+    layout_state = LayoutState(
+        S=S,
+        Ns=Ns,
+        wafer_radius_mm=wafer_radius,
+        sites_xy_mm=sites_xy,
+        assign=assign.copy(),
+        chip_tdp_w=chip_tdp,
+        traffic_bytes=traffic,
+        meta={"stage": "seed"},
+    )
+
+    eval_out = evaluator.evaluate(layout_state)
+    best_eval = dict(eval_out)
+    best_assign = assign.copy()
+
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else {}
-    heuragenix_root = _resolve_heuragenix_root(baseline_cfg.get("heuragenix_root"), project_root)
-
-    instance_path = _write_instance(layout_input, heuragenix_root, out_dir)
-
-    sys.path.insert(0, str(project_root))
-    sys.path.insert(0, str(heuragenix_root))
-    sys.path.insert(0, str(heuragenix_root / "src"))
-
-    from problems.wafer_layout.env import WaferLayoutEnv
-    from problems.wafer_layout.heuristics.basic_heuristics.best_swap_by_total_delta import (
-        best_swap_by_total_delta,
-    )
-    from problems.wafer_layout.heuristics.basic_heuristics.best_relocate_to_free_by_total_delta import (
-        best_relocate_to_free_by_total_delta,
-    )
-    from problems.wafer_layout.heuristics.basic_heuristics.comm_driven_swap import comm_driven_swap
-    from problems.wafer_layout.heuristics.basic_heuristics.therm_driven_push_apart import therm_driven_push_apart
-    from problems.wafer_layout.heuristics.basic_heuristics.region_shuffle_small import region_shuffle_small
-    from problems.wafer_layout.heuristics.basic_heuristics.random_swap import random_swap
-    from problems.wafer_layout.heuristics.basic_heuristics.random_relocate import random_relocate
-    from problems.wafer_layout.heuristics.basic_heuristics.do_nothing import do_nothing
-    from pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
-    from pipeline.hyper_heuristics.random import RandomHyperHeuristic
-
-    heuristics = [
-        best_swap_by_total_delta,
-        best_relocate_to_free_by_total_delta,
-        comm_driven_swap,
-        therm_driven_push_apart,
-        region_shuffle_small,
-        random_swap,
-        random_relocate,
-        do_nothing,
-    ]
-
-    env = WaferLayoutEnv(str(instance_path), rng=rng)
-    initial_assign = np.asarray(env.solution.assign, dtype=int)
-
     method = str(baseline_cfg.get("method", "heuristic_only"))
     fallback = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     max_steps = int(baseline_cfg.get("max_steps", 0))
     scale_factor = float(baseline_cfg.get("iterations_scale_factor", 1.0))
     if max_steps <= 0:
-        max_steps = max(1, int(scale_factor * env.solution.S))
-
-    sa_T0 = float(baseline_cfg.get("sa_T0", 1.0))
-    sa_alpha = float(baseline_cfg.get("sa_alpha", 0.995))
-    selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
-    num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
-    timeout_sec = int(baseline_cfg.get("llm_timeout_s", 30))
-    max_retry = int(baseline_cfg.get("max_llm_failures", 1))
-
-    start_time = time.time()
-    llm_failed = False
+        max_steps = max(1, int(scale_factor * layout_state.S))
 
     if method == "llm_hh":
-        try:
-            hh = LLMSelectionHyperHeuristic(
-                env=env,
-                heuristics=heuristics,
-                rng=rng,
-                selection_frequency=selection_frequency,
-                num_candidate_heuristics=num_candidate_heuristics,
-                sa_T0=sa_T0,
-                sa_alpha=sa_alpha,
-                timeout_sec=timeout_sec,
-                max_retry=max_retry,
-            )
-            hh.run(max_steps)
-            for usage in hh.usage_records:
-                with llm_usage_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(usage) + "\n")
-        except Exception as exc:  # noqa: BLE001
-            llm_failed = True
-            with llm_usage_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"ok": False, "reason": repr(exc), "fallback": fallback}) + "\n")
-            method = fallback
-
-    if method == "random_hh":
-        hh = RandomHyperHeuristic(
-            env=env,
-            heuristics=heuristics,
-            rng=rng,
-            selection_frequency=selection_frequency,
-            sa_T0=sa_T0,
-            sa_alpha=sa_alpha,
+        _append_llm_usage(
+            llm_usage_path,
+            {
+                "ok": False,
+                "reason": "llm_unavailable_or_not_configured",
+                "fallback": fallback,
+                "method": method,
+            },
         )
-        hh.run(max_steps)
-    elif method == "heuristic_only" or llm_failed:
-        _greedy_heuristic_loop(env, heuristics, rng, max_steps, sa_T0, sa_alpha)
-
-    evaluator = _build_evaluator(cfg, layout_input)
-    layout_state = _build_state(layout_input, initial_assign.copy())
-    eval_out = evaluator.evaluate(layout_state)
-    best_eval = dict(eval_out)
-    best_assign = initial_assign.copy()
-    accepted_steps = 0
+        method = fallback
 
     trace_path = out_dir / "trace.csv"
     trace_fields = [
@@ -289,49 +236,61 @@ def main() -> None:
         "d_therm",
     ]
 
+    start_time = time.time()
+    accepted_steps = 0
+    temperature = float(baseline_cfg.get("sa_T0", 1.0))
+    alpha = float(baseline_cfg.get("sa_alpha", 0.995))
+
     with trace_path.open("w", encoding="utf-8", newline="") as trace_fp:
         writer = csv.writer(trace_fp)
         writer.writerow(trace_fields)
-        current_assign = initial_assign.copy()
-        for rec in env.recordings:
-            operator = rec["operator"]
-            action = _action_from_operator(operator)
-            candidate_assign = _apply_action(current_assign, action)
-            layout_state.assign = candidate_assign
-            eval_new = evaluator.evaluate(layout_state)
-            d_total = float(eval_new["total_scalar"] - eval_out["total_scalar"])
-            d_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
-            d_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
-            accepted = bool(rec.get("accepted", False))
-            if accepted:
-                current_assign = candidate_assign
-                eval_out = eval_new
+        for step in range(max_steps):
+            action, new_eval, new_assign = _select_action(method, evaluator, layout_state, assign, layout_state.Ns, rng)
+            d_total = new_eval["total"] - float(eval_out["total_scalar"])
+            d_comm = new_eval["comm"] - float(eval_out["comm_norm"])
+            d_therm = new_eval["therm"] - float(eval_out["therm_norm"])
+            accept = (d_total < 0) or (rng.random() < float(np.exp(-d_total / max(temperature, 1e-6))))
+            if accept:
+                assign = new_assign
+                eval_out = {
+                    "total_scalar": new_eval["total"],
+                    "comm_norm": new_eval["comm"],
+                    "therm_norm": new_eval["therm"],
+                    "penalty": {"duplicate": new_eval["dup_pen"], "boundary": new_eval["bnd_pen"]},
+                }
                 accepted_steps += 1
                 if eval_out["total_scalar"] < best_eval["total_scalar"]:
                     best_eval = dict(eval_out)
-                    best_assign = current_assign.copy()
-            signature = _assign_signature(current_assign)
+                    best_assign = assign.copy()
+
+            temperature *= alpha
+
+            action_payload = dict(action)
+            action_payload.setdefault("signature", _signature_for_action(action_payload, assign))
+            signature = str(action_payload["signature"])
             writer.writerow(
                 [
-                    int(rec.get("step", 0)),
+                    step,
                     "heuragenix",
                     action.get("op", "none"),
-                    json.dumps(action),
-                    int(accepted),
+                    json.dumps(action_payload),
+                    int(accept),
                     eval_out["total_scalar"],
                     eval_out["comm_norm"],
                     eval_out["therm_norm"],
                     0,
                     eval_out["penalty"]["duplicate"],
                     eval_out["penalty"]["boundary"],
-                    int(args.seed),
-                    int(rec.get("time_ms", 0)),
+                    seed,
+                    0,
                     signature,
                     d_total,
                     d_comm,
                     d_therm,
                 ]
             )
+            if step % 20 == 0:
+                trace_fp.flush()
 
     detailed_cfg = cfg.get("detailed_place", {})
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
@@ -351,7 +310,7 @@ def main() -> None:
         "best_total": float(best_eval["total_scalar"]),
         "best_comm": float(best_eval["comm_norm"]),
         "best_therm": float(best_eval["therm_norm"]),
-        "steps_total": int(len(env.recordings)),
+        "steps_total": int(max_steps),
         "accepts_total": int(accepted_steps),
         "method": method,
         "runtime_s": float(time.time() - start_time),
