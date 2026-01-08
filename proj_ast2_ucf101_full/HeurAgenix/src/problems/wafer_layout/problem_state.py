@@ -11,7 +11,7 @@ def _top_k_pairs(values: List[Tuple[int, int, float]], k: int) -> List[Tuple[int
     return values[:k]
 
 
-def get_instance_problem_state(instance_data: dict) -> dict:
+def get_instance_problem_state(instance_data: dict, **kwargs) -> dict:
     sites_xy = np.asarray(instance_data["sites"]["sites_xy"], dtype=float)
     radii = np.linalg.norm(sites_xy, axis=1)
     traffic = np.asarray(instance_data["mapping"]["traffic_matrix"], dtype=float)
@@ -34,10 +34,12 @@ def get_instance_problem_state(instance_data: dict) -> dict:
     }
 
 
-def get_solution_problem_state(problem_state: dict) -> dict:
+def get_solution_problem_state(problem_state: dict, current_solution=None, **kwargs) -> dict:
     solution = problem_state.get("solution", {})
     eval_out = problem_state.get("eval", {})
     assign = solution.get("assign", [])
+    if current_solution is not None and hasattr(current_solution, "assign"):
+        assign = current_solution.assign
     assign_arr = np.asarray(assign, dtype=int)
     return {
         "total_scalar": eval_out.get("total_scalar", 0.0),
@@ -49,7 +51,7 @@ def get_solution_problem_state(problem_state: dict) -> dict:
     }
 
 
-def get_observation_problem_state(problem_state: dict) -> dict:
+def get_observation_problem_state(problem_state: dict, **kwargs) -> dict:
     return {
         "instance": problem_state.get("instance", {}),
         "solution": problem_state.get("solution", {}),
