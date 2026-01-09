@@ -3,13 +3,13 @@ from __future__ import annotations
 import random
 from typing import Dict, Tuple
 
-from problems.wafer_layout.components import SwapSlots
+from src.problems.wafer_layout.components import SwapSlots
 
 
 def best_swap_by_total_delta(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[SwapSlots, Dict]:
     env = algorithm_data["env"]
     rng: random.Random = algorithm_data["rng"]
-    solution = problem_state["solution"]
+    solution = problem_state["current_solution"]
     best_op = SwapSlots(0, 0)
     best_delta = float("inf")
     S = solution.S

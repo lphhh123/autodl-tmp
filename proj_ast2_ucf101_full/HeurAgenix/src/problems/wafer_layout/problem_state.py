@@ -1,61 +1,58 @@
 """Problem state helpers for wafer layout."""
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
-
-import numpy as np
+from typing import Dict
 
 
-def _top_k_pairs(values: List[Tuple[int, int, float]], k: int) -> List[Tuple[int, int, float]]:
-    values.sort(key=lambda x: x[2], reverse=True)
-    return values[:k]
+def _infer_slot_count(instance_data: dict) -> int:
+    slots = instance_data.get("slots", [])
+    if isinstance(slots, dict):
+        return int(slots.get("S", len(slots.get("tdp", []) or [])))
+    return int(len(slots))
+
+
+def _infer_site_count(instance_data: dict) -> int:
+    sites_xy = instance_data.get("sites_xy")
+    if sites_xy is None:
+        sites_xy = instance_data.get("sites", {}).get("sites_xy", [])
+    return int(instance_data.get("sites", {}).get("Ns", len(sites_xy or [])))
 
 
 def get_instance_problem_state(instance_data: dict) -> dict:
-    sites_xy = np.asarray(instance_data["sites"]["sites_xy"], dtype=float)
-    radii = np.linalg.norm(sites_xy, axis=1)
-    traffic = np.asarray(instance_data["mapping"]["traffic_matrix"], dtype=float)
-    pairs = []
-    S = int(instance_data["slots"]["S"])
-    Ns = int(instance_data["sites"].get("Ns", len(sites_xy)))
-    for i in range(S):
-        for j in range(i + 1, S):
-            pairs.append((i, j, float(traffic[i, j])))
+    obj = instance_data.get("objective_cfg", {}) or {}
+    baseline = instance_data.get("baseline", {}) or {}
+    scalar = obj.get("scalar_weights", obj) if isinstance(obj, dict) else {}
     return {
-        "S": int(instance_data["slots"]["S"]),
-        "Ns": Ns,
-        "wafer_radius_mm": float(instance_data["wafer"]["radius_mm"]),
-        "objective_cfg": instance_data.get("objective_cfg", {}),
-        "sites_xy": sites_xy.tolist(),
-        "sites_radius_stats": {
-            "min": float(radii.min()) if radii.size else 0.0,
-            "max": float(radii.max()) if radii.size else 0.0,
-            "mean": float(radii.mean()) if radii.size else 0.0,
-        },
-        "traffic_topk": _top_k_pairs(pairs, 10),
+        "num_slots": int(_infer_slot_count(instance_data)),
+        "num_sites": int(_infer_site_count(instance_data)),
+        "wafer_radius": float(instance_data.get("wafer", {}).get("radius_mm", obj.get("wafer_radius", 1.0))),
+        "w_comm": float(scalar.get("w_comm", 1.0)),
+        "w_therm": float(scalar.get("w_therm", 1.0)),
+        "baseline_comm": float(baseline.get("L_comm", obj.get("comm_baseline", 1.0))),
+        "baseline_therm": float(baseline.get("L_therm", obj.get("therm_baseline", 1.0))),
     }
 
 
-def get_solution_problem_state(instance_data: dict, current_solution) -> dict:
-    assign = list(getattr(current_solution, "assign", []) or [])
-    assign_arr = np.asarray(assign, dtype=int)
-    sites_xy = np.asarray(instance_data.get("sites", {}).get("sites_xy", []), dtype=float)
-    Ns = int(instance_data.get("sites", {}).get("Ns", len(sites_xy)))
-    radius_mean = 0.0
-    if sites_xy.size and assign_arr.size:
-        valid = assign_arr[(assign_arr >= 0) & (assign_arr < len(sites_xy))]
-        if valid.size:
-            radius_mean = float(np.linalg.norm(sites_xy[valid], axis=1).mean())
+def get_solution_problem_state(instance_data: dict, solution) -> dict:
+    assign = getattr(solution, "assign", None)
+    if assign is None:
+        assign = solution.get("assign", [])
+
+    n = len(assign)
+    num_placed = sum(1 for a in assign if int(a) >= 0)
+    uniq_sites = len({int(a) for a in assign if int(a) >= 0})
+    dup = max(0, num_placed - uniq_sites)
+
     return {
-        "assign": assign,
-        "free_sites_count": int(Ns - len(set(assign))),
-        "duplicate_count": int(len(assign) - len(set(assign))),
-        "assign_radius_mean": radius_mean,
+        "num_slots": int(n),
+        "num_placed": int(num_placed),
+        "dup_count": int(dup),
     }
 
 
 def get_observation_problem_state(problem_state: dict) -> dict:
     return {
-        "instance": problem_state.get("instance", {}),
-        "solution": problem_state.get("solution", {}),
+        "num_slots": int(problem_state.get("num_slots", 0)),
+        "num_placed": int(problem_state.get("num_placed", 0)),
+        "dup_count": int(problem_state.get("dup_count", 0)),
     }
