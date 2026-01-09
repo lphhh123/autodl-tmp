@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
+from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from scripts.run_layout_agent import _write_pareto_points, compute_oscillation_metrics
@@ -36,6 +37,13 @@ TRACE_FIELDS = [
     "boundary_penalty",
     "seed_id",
     "time_ms",
+    "signature",
+    "d_total",
+    "d_comm",
+    "d_therm",
+    "tabu_hit",
+    "inverse_hit",
+    "cooldown_hit",
 ]
 
 
@@ -256,9 +264,18 @@ def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict
             from_site = int(prev_assign[slot])
         action.update({"i": slot, "site_id": int(op_args.get("site_id", -1)), "from_site": from_site})
     elif op == "cluster_move":
-        action.update({"slots": op_args.get("slots"), "target_sites": op_args.get("target_sites")})
+        action.update(
+            {
+                "slots": op_args.get("slots"),
+                "target_sites": op_args.get("target_sites"),
+                "cluster_id": op_args.get("cluster_id", -1),
+                "region_id": op_args.get("region_id", -1),
+                "from_region": op_args.get("from_region"),
+            }
+        )
     elif op == "random_kick":
         action.update({"k": op_args.get("k")})
+    action.setdefault("from_region", op_args.get("from_region"))
     return action
 
 
@@ -296,7 +313,9 @@ def _write_trace_and_pareto(
             eval_out = evaluator.evaluate(base_state)
             if prev_eval is None:
                 prev_eval = eval_out
-            prev_eval = eval_out
+            d_total = float(eval_out["total_scalar"] - prev_eval.get("total_scalar", 0.0))
+            d_comm = float(eval_out["comm_norm"] - prev_eval.get("comm_norm", 0.0))
+            d_therm = float(eval_out["therm_norm"] - prev_eval.get("therm_norm", 0.0))
 
             accepted = int(bool(rec.get("accepted", True)))
             if accepted:
@@ -307,6 +326,7 @@ def _write_trace_and_pareto(
                 best_step = idx
 
             action = _action_from_record(rec, prev_assign)
+            signature = _signature_for_action(action, prev_assign)
             pareto_added = pareto.add(
                 eval_out["comm_norm"],
                 eval_out["therm_norm"],
@@ -333,9 +353,17 @@ def _write_trace_and_pareto(
                     float(eval_out["penalty"]["boundary"]),
                     seed,
                     int(rec.get("time_ms", 0)),
+                    signature,
+                    d_total,
+                    d_comm,
+                    d_therm,
+                    0,
+                    0,
+                    0,
                 ]
             )
             prev_assign = assign.copy()
+            prev_eval = eval_out
     return {
         "trace_path": trace_path,
         "best_eval": best_eval,
@@ -437,7 +465,7 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    output_root = work_dir / "output" / problem / "test_data" / "result"
+    output_root = work_dir / "output" / problem / "result" / case_name
 
     fallback_used = False
     log_text = ""
@@ -477,6 +505,7 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
+    env["AMLT_OUTPUT_DIR"] = str(work_dir / "output")
     result = subprocess.run(
         launch_cmd,
         cwd=str(work_dir),
