@@ -445,6 +445,12 @@ def main() -> None:
     if not heuragenix_root.exists():
         raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
 
+    method = str(baseline_cfg.get("method", "llm_hh"))
+    fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
+    start_time = time.time()
+    llm_usage_path = out_dir / "llm_usage.jsonl"
+
+    problem = str(baseline_cfg.get("problem", "wafer_layout"))
     work_dir, case_name, case_path = _prepare_work_dir(
         out_dir,
         heuragenix_root,
@@ -452,13 +458,6 @@ def main() -> None:
         problem,
         seed,
     )
-
-    method = str(baseline_cfg.get("method", "llm_hh"))
-    fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
-    start_time = time.time()
-    llm_usage_path = out_dir / "llm_usage.jsonl"
-
-    problem = str(baseline_cfg.get("problem", "wafer_layout"))
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
     num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
@@ -585,7 +584,11 @@ def main() -> None:
         recordings_path.write_text("", encoding="utf-8")
     heuragenix_usage_path = output_dir / "llm_usage.jsonl"
     if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:
-        llm_usage_path.write_text(heuragenix_usage_path.read_text(encoding="utf-8"), encoding="utf-8")
+        llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
+        with llm_usage_path.open("a", encoding="utf-8") as f:
+            for line in heuragenix_usage_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    f.write(line + "\n")
     else:
         _append_llm_usage(
             llm_usage_path,

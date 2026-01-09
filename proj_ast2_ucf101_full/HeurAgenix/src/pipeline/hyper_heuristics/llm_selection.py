@@ -73,9 +73,9 @@ class LLMSelectionHyperHeuristic:
         sa_alpha: float = 0.995,
         timeout_sec: int = 90,
         max_retry: int = 1,
-        llm_timeout_s: float | None = None,
-        max_llm_failures: int = 5,
-        fallback_mode: str = "random",
+        llm_timeout_s: int = 30,
+        max_llm_failures: int = 2,
+        fallback_mode: str = "random_hh",
         stage_name: str = "heuragenix_llm_hh",
         usage_path: str | None = None,
         llm_error: str | None = None,
@@ -95,7 +95,7 @@ class LLMSelectionHyperHeuristic:
             self.sa_alpha = float(sa_alpha)
             self.stage_name = stage_name
             self.llm = llm_client
-            self.llm_timeout_s = llm_timeout_s
+            self.llm_timeout_s = int(llm_timeout_s)
             self.max_llm_failures = int(max_llm_failures)
             self.fallback_mode = fallback_mode
             self.fail_count = 0
@@ -130,7 +130,7 @@ class LLMSelectionHyperHeuristic:
         self.stage_name = stage_name
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
-        self.llm_timeout_s = llm_timeout_s
+        self.llm_timeout_s = int(llm_timeout_s)
         self.max_llm_failures = int(max_llm_failures)
         self.fallback_mode = fallback_mode
         self.fail_count = 0
@@ -302,14 +302,17 @@ class LLMSelectionHyperHeuristic:
         new_solution,
     ) -> None:
         if hasattr(env, "run_operator"):
-            env.run_operator(
-                operator,
-                inplace=accepted,
-                meta=meta,
-                stage=self.stage_name,
-                time_ms=time_ms,
-                new_solution=new_solution if accepted else None,
-            )
+            try:
+                env.run_operator(
+                    operator,
+                    inplace=accepted,
+                    meta=meta,
+                    stage=self.stage_name,
+                    time_ms=time_ms,
+                    new_solution=new_solution if accepted else None,
+                )
+            except TypeError:
+                env.run_operator(operator)
             return
         env.recordings.append(
             {
@@ -396,7 +399,7 @@ class LLMSelectionHyperHeuristic:
         if hasattr(env, "max_steps"):
             env.max_steps = int(steps)
 
-        selection_id = 0
+        selection_round = 0
         step = 0
         while True:
             if hasattr(env, "continue_run"):
@@ -405,9 +408,8 @@ class LLMSelectionHyperHeuristic:
             elif step >= int(steps):
                 break
             step_start = time.perf_counter()
-            step_idx = int(getattr(env, "step_count", getattr(env, "step", step)))
+            step_idx = int(getattr(env, "construction_steps", getattr(env, "step", step)))
             if step % self.selection_frequency == 0 or selected_operator is None:
-                selection_id += 1
                 candidates = self._score_candidates(current_solution, env, rng)
                 candidate_names = [c["name"] for c in candidates]
                 cand_ids = [c["id"] for c in candidates]
@@ -424,10 +426,19 @@ class LLMSelectionHyperHeuristic:
                 matched: List[str] = []
                 ok = True
                 err = None
+                chosen_idx = None
+                usage = {
+                    "round": int(selection_round),
+                    "ok": True,
+                    "model": getattr(self.llm, "name", "unknown"),
+                    "candidates": candidate_names,
+                    "chosen": None,
+                    "fallback_used": False,
+                    "reason": "",
+                }
                 if self.llm_disabled or not self._llm_ready():
                     ok = False
                     err = "llm_disabled" if self.llm_disabled else (self.llm_error or "llm_not_ready")
-                    chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 else:
                     try:
                         picks = self.llm.propose_pick(
@@ -445,13 +456,16 @@ class LLMSelectionHyperHeuristic:
                         err = str(exc)
                         llm_error = f"{type(exc).__name__}: {exc}"
                         llm_traceback = traceback.format_exc()
-                        chosen_idx = int(rng.randint(0, len(candidates) - 1))
 
                 if not ok:
                     self.fail_count += 1
-                    self.llm_disabled = True
+                    if self.fail_count >= self.max_llm_failures:
+                        self.llm_disabled = True
                     if self.fallback_mode == "abort":
+                        usage.update({"ok": False, "reason": err or "", "fallback_used": True})
+                        self._append_usage(usage)
                         raise RuntimeError(err)
+                    chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 if chosen_idx is None:
                     chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
@@ -476,33 +490,34 @@ class LLMSelectionHyperHeuristic:
                         llm_error = llm_error or f"TTS_BON_ERROR: {type(exc).__name__}: {exc}"
 
                 latency_ms = int((time.time() - ts0) * 1000)
-                usage = getattr(self.llm, "last_usage", None) if self.llm else None
+                usage_data = getattr(self.llm, "last_usage", None) if self.llm else None
                 model = getattr(self.llm, "model", None) if self.llm else None
-                record = {
-                    "ts_ms": int(time.time() * 1000),
-                    "engine": "llm_hh",
-                    "selection_idx": selection_id,
-                    "step_begin": step,
-                    "candidate_heuristics": candidate_names,
-                    "matched_heuristics": matched,
-                    "chosen": candidate_names[chosen_idx],
-                    "chosen_heuristic": candidate_names[chosen_idx],
-                    "candidates": candidate_names,
-                    "ok": ok,
-                    "error": err or llm_error,
-                    "latency_ms": latency_ms,
-                    "model": model,
-                    "usage": usage,
-                    "llm_disabled": self.llm_disabled,
-                    "fail_count": self.fail_count,
-                    "llm_timeout_s": self.llm_timeout_s,
-                    "max_llm_failures": self.max_llm_failures,
-                    "fallback_mode": self.fallback_mode,
-                    "traceback": llm_traceback,
-                }
-                self._append_usage(record)
-                self.usage_records.append(record)
-                self.selection_records.append(record)
+                usage.update(
+                    {
+                        "ok": bool(ok),
+                        "chosen": candidate_names[chosen_idx],
+                        "fallback_used": not ok,
+                        "reason": err or llm_error or "",
+                        "latency_ms": latency_ms,
+                        "ts_ms": int(time.time() * 1000),
+                        "engine": "llm_hh",
+                        "selection_idx": selection_round,
+                        "step_begin": step,
+                        "matched_heuristics": matched,
+                        "chosen_heuristic": candidate_names[chosen_idx],
+                        "usage": usage_data,
+                        "model": model,
+                        "llm_disabled": self.llm_disabled,
+                        "fail_count": self.fail_count,
+                        "llm_timeout_s": self.llm_timeout_s,
+                        "max_llm_failures": self.max_llm_failures,
+                        "fallback_mode": self.fallback_mode,
+                        "traceback": llm_traceback,
+                    }
+                )
+                self._append_usage(usage)
+                self.usage_records.append(usage)
+                self.selection_records.append(usage)
                 picked = (
                     chosen_candidate
                     if isinstance(chosen_candidate, dict)
@@ -510,6 +525,7 @@ class LLMSelectionHyperHeuristic:
                 )
                 selected_operator = picked["operator"]
                 selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
+                selection_round += 1
 
             new_solution = selected_operator.run(current_solution)
             new_score = env.get_key_value(new_solution)

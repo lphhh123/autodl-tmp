@@ -33,35 +33,25 @@ class BaseEnv:
         self.solution = self.current_solution
         self.recordings = []
         self.step = 0
+        self.construction_steps = 0
         self.algorithm_data = {}
         self.output_dir = output_dir
 
     def run_operator(
         self,
         operator,
-        inplace: bool = True,
-        meta: Dict[str, Any] | None = None,
-        new_solution: Any | None = None,
-        stage: str | None = None,
-        time_ms: int | None = None,
-    ) -> None:
-        if inplace:
-            if new_solution is None:
-                new_solution = operator.run(self.current_solution)
-            self.current_solution = new_solution
-            self.solution = self.current_solution
-        record = {
-            "step": int(self.step),
-            "operator": operator,
-            "meta": meta or {},
-            "accepted": bool(inplace),
-        }
-        if stage is not None:
-            record["stage"] = stage
-        if time_ms is not None:
-            record["time_ms"] = int(time_ms)
-        self.recordings.append(record)
-        self.step += 1
+    ) -> bool:
+        """Apply operator to current_solution and advance one construction step."""
+        from ..base.operators import BaseOperator
+
+        if not isinstance(operator, BaseOperator):
+            return False
+        self.current_solution = operator.run(self.current_solution)
+        self.problem_state = self.get_problem_state()
+        if getattr(self, "construction_steps", None) is None:
+            self.construction_steps = 0
+        self.construction_steps += 1
+        return True
 
     def dump_result(self) -> None:
         return None
