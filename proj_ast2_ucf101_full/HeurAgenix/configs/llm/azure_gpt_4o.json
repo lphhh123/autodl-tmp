@@ -1,5 +1,13 @@
 {
-  "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+  "type": "azure_gpt",
+  "api_type": "azure",
+  "azure_endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+  "api_version": "2024-02-15-preview",
   "model": "gpt-4o",
+  "temperature": 0.7,
+  "top-p": 0.95,
+  "max_tokens": 3200,
+  "max_attempts": 50,
+  "sleep_time": 10,
   "api_key": "REPLACE_WITH_API_KEY"
 }

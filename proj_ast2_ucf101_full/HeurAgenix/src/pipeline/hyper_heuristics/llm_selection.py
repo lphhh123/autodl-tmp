@@ -69,8 +69,12 @@ class LLMSelectionHyperHeuristic:
         sa_alpha: float = 0.995,
         timeout_sec: int = 90,
         max_retry: int = 1,
+        llm_timeout_s: int = 30,
+        max_llm_failures: int = 2,
+        fallback_mode: str = "random",
         stage_name: str = "heuragenix_llm_hh",
         usage_path: str | None = None,
+        llm_error: str | None = None,
         **kwargs,
     ) -> None:
         self.legacy_mode = False
@@ -85,6 +89,12 @@ class LLMSelectionHyperHeuristic:
             self.sa_alpha = float(sa_alpha)
             self.stage_name = stage_name
             self.llm = llm_client
+            self.llm_timeout_s = int(llm_timeout_s)
+            self.max_llm_failures = int(max_llm_failures)
+            self.fallback_mode = fallback_mode
+            self.fail_count = 0
+            self.llm_disabled = False
+            self.llm_error = llm_error
             self.usage_records: List[Dict[str, Any]] = []
             self.selection_records: List[Dict[str, Any]] = []
             self.usage_path = Path(usage_path) if usage_path else None
@@ -110,6 +120,12 @@ class LLMSelectionHyperHeuristic:
         self.stage_name = stage_name
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
+        self.llm_timeout_s = int(llm_timeout_s)
+        self.max_llm_failures = int(max_llm_failures)
+        self.fallback_mode = fallback_mode
+        self.fail_count = 0
+        self.llm_disabled = False
+        self.llm_error = llm_error
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
         self.usage_path = Path(usage_path) if usage_path else None
@@ -133,6 +149,58 @@ class LLMSelectionHyperHeuristic:
         if self._resolved_heuristics is None:
             self._resolved_heuristics = _resolve_heuristics(self.heuristic_pool, self.problem)
         return self._resolved_heuristics
+
+    def _choose_candidate(
+        self,
+        state_summary: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+        step_idx: int,
+        selection_id: int,
+        rng: random.Random,
+    ) -> int:
+        ok = True
+        err = None
+        chosen_idx: int
+
+        if self.llm_disabled or not self._llm_ready():
+            ok = False
+            err = "llm_disabled" if self.llm_disabled else (self.llm_error or "llm_not_ready")
+            self.fail_count += 1
+            chosen_idx = int(rng.randint(0, len(candidates) - 1))
+            if self.fail_count >= self.max_llm_failures:
+                self.llm_disabled = True
+        else:
+            try:
+                picks = self.llm.propose_pick(state_summary, 1, timeout_s=self.llm_timeout_s)
+                if not picks:
+                    raise RuntimeError("llm_empty_pick")
+                chosen_idx = int(picks[0])
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                err = repr(exc)
+                self.fail_count += 1
+                chosen_idx = int(rng.randint(0, len(candidates) - 1))
+                if self.fail_count >= self.max_llm_failures:
+                    self.llm_disabled = True
+
+        chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
+        usage = {
+            "step": int(step_idx),
+            "ok": bool(ok),
+            "engine": "llm_hh",
+            "candidate_num": int(len(candidates)),
+            "chosen_idx": int(chosen_idx),
+            "chosen_name": candidates[chosen_idx].get("name") if isinstance(candidates[chosen_idx], dict) else str(candidates[chosen_idx]),
+            "error": err,
+            "fail_count": int(self.fail_count),
+            "llm_disabled": bool(self.llm_disabled),
+            "selection_id": int(selection_id),
+        }
+        if hasattr(self.llm, "calls") and self.llm.calls:
+            usage.update(self.llm.calls[-1])
+        self.usage_records.append(usage)
+        self._append_usage(usage)
+        return chosen_idx
 
     def _get_algorithm_data(self, env) -> Dict[str, Any]:
         data = dict(getattr(env, "algorithm_data", {}) or {})
@@ -222,8 +290,6 @@ class LLMSelectionHyperHeuristic:
             env.step += 1
 
     def _run_legacy(self, max_steps: int) -> None:
-        if not self._llm_ready():
-            raise RuntimeError("LLM not configured")
         temperature = self.sa_T0
         current_solution = self.env.solution
         current_score = self.env.get_key_value(current_solution)
@@ -243,41 +309,11 @@ class LLMSelectionHyperHeuristic:
                         {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
                     ],
                 }
-                picks = self.llm.propose_pick(state_summary, 1)
-                usage = dict(getattr(self.llm, "last_usage") or {})
-                usage["step"] = int(step)
-                usage["n_pick"] = len(picks)
-                self.usage_records.append(usage)
-                if not picks or not usage.get("ok", True):
-                    failure = {
-                        "ok": False,
-                        "reason": usage.get("error") or "llm_empty_pick",
-                        "chosen_heuristic": None,
-                        "candidates": [
-                            {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
-                        ],
-                        "selection_id": selection_id,
-                        "step": int(step),
-                        **usage,
-                    }
-                    self.selection_records.append(failure)
-                    self._append_usage(failure)
-                    raise RuntimeError(usage.get("error") or "LLM selection failed")
-                picked = next((c for c in candidates if c["id"] == picks[0]), candidates[0])
+                chosen_idx = self._choose_candidate(state_summary, candidates, step, selection_id, self.rng)
+                picked = next((c for c in candidates if c["id"] == chosen_idx), candidates[0])
                 reason = "llm_pick"
                 selected_operator = picked["operator"]
                 selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
-                selection_payload = {
-                    "ok": True,
-                    "reason": reason,
-                    "chosen_heuristic": picked["name"],
-                    "candidates": [{"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates],
-                    "selection_id": selection_id,
-                    "step": int(step),
-                    **usage,
-                }
-                self.selection_records.append(selection_payload)
-                self._append_usage(selection_payload)
                 selection_id += 1
 
             new_solution = selected_operator.run(current_solution)
@@ -307,8 +343,6 @@ class LLMSelectionHyperHeuristic:
             return self._run_legacy(int(env))
         if env is None:
             raise ValueError("env is required")
-        if not self._llm_ready():
-            raise RuntimeError("LLM not configured")
         rng = getattr(env, "rng", None) or self.rng
         temperature = self.sa_T0
         current_solution = env.solution
@@ -333,41 +367,17 @@ class LLMSelectionHyperHeuristic:
                         {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
                     ],
                 }
-                picks = self.llm.propose_pick(state_summary, 1)
-                usage = dict(getattr(self.llm, "last_usage") or {})
-                usage["step"] = int(getattr(env, "step", step))
-                usage["n_pick"] = len(picks)
-                self.usage_records.append(usage)
-                if not picks or not usage.get("ok", True):
-                    failure = {
-                        "ok": False,
-                        "reason": usage.get("error") or "llm_empty_pick",
-                        "chosen_heuristic": None,
-                        "candidates": [
-                            {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
-                        ],
-                        "selection_id": selection_id,
-                        "step": int(getattr(env, "step", step)),
-                        **usage,
-                    }
-                    self.selection_records.append(failure)
-                    self._append_usage(failure)
-                    raise RuntimeError(usage.get("error") or "LLM selection failed")
-                picked = next((c for c in candidates if c["id"] == picks[0]), candidates[0])
+                chosen_idx = self._choose_candidate(
+                    state_summary,
+                    candidates,
+                    int(getattr(env, "step", step)),
+                    selection_id,
+                    rng,
+                )
+                picked = next((c for c in candidates if c["id"] == chosen_idx), candidates[0])
                 reason = "llm_pick"
                 selected_operator = picked["operator"]
                 selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
-                selection_payload = {
-                    "ok": True,
-                    "reason": reason,
-                    "chosen_heuristic": picked["name"],
-                    "candidates": [{"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates],
-                    "selection_id": selection_id,
-                    "step": int(getattr(env, "step", step)),
-                    **usage,
-                }
-                self.selection_records.append(selection_payload)
-                self._append_usage(selection_payload)
                 selection_id += 1
 
             new_solution = selected_operator.run(current_solution)

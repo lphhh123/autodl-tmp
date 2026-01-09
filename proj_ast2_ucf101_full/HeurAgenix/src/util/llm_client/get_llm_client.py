@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -19,6 +20,9 @@ class OpenAICompatibleClient:
         timeout_sec: int = 90,
         max_retry: int = 1,
         include_model: bool = True,
+        temperature: float = 0.15,
+        top_p: float = 0.9,
+        max_tokens: int = 96,
     ) -> None:
         self.provider = provider
         self.base_url = base_url.rstrip("/")
@@ -27,6 +31,9 @@ class OpenAICompatibleClient:
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
         self.include_model = include_model
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
         self.last_usage: Optional[Dict] = None
         self.calls: List[Dict] = []
 
@@ -77,9 +84,9 @@ class OpenAICompatibleClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": 96,
-            "temperature": 0.15,
-            "top_p": 0.9,
+            "max_tokens": int(self.max_tokens),
+            "temperature": float(self.temperature),
+            "top_p": float(self.top_p),
         }
         if self.include_model:
             payload["model"] = self.model
@@ -152,7 +159,7 @@ class OpenAICompatibleClient:
             return valid_picks, None
         return [], "empty_or_invalid_picks"
 
-    def propose_pick(self, state_summary: Dict, k: int) -> List[int]:
+    def propose_pick(self, state_summary: Dict, k: int, timeout_s: int | None = None) -> List[int]:
         if not self.is_ready():
             self.last_usage = {"ok": False, "reason": "client_not_ready", "provider": self.provider}
             return []
@@ -162,11 +169,12 @@ class OpenAICompatibleClient:
         candidate_ids = state_summary.get("candidate_ids", [])
         forbidden_ids = state_summary.get("forbidden_ids", [])
 
+        timeout = self.timeout_sec if timeout_s is None else int(timeout_s)
         last_error = None
         for attempt in range(self.max_retry + 1):
             start = time.perf_counter()
             try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout_sec)
+                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 if resp.status_code != 200:
                     self.last_usage = {
@@ -226,41 +234,66 @@ def get_llm_client(
         return None
     config = json.loads(path.read_text(encoding="utf-8"))
     provider = (config.get("provider") or config.get("type") or config.get("mode") or "api_model").lower()
-    model = config.get("model") or config.get("model_name") or config.get("deployment") or ""
-    api_key = config.get("api_key") or config.get("key") or config.get("token")
+    model = config.get("model") or config.get("model_name") or config.get("deployment") or config.get("model_path") or ""
+    max_attempts = int(config.get("max_attempts", max_retry + 1))
+    max_retry = max(0, max_attempts - 1)
+    temperature = float(config.get("temperature", 0.15))
+    top_p = float(config.get("top-p", config.get("top_p", 0.9)))
+    max_tokens = int(config.get("max_tokens", 96))
+
+    def _resolve_api_key(env_name: str) -> str:
+        api_key = config.get("api_key") or config.get("key") or config.get("token")
+        if api_key:
+            return str(api_key)
+        env_key = os.getenv(env_name)
+        if env_key:
+            return env_key
+        raise ValueError(f"missing api_key ({env_name})")
 
     if provider in {"azure", "azure_gpt"}:
-        endpoint = (config.get("endpoint") or config.get("base_url") or "").rstrip("/")
-        deployment = config.get("deployment") or model
+        endpoint = (config.get("azure_endpoint") or config.get("api_base") or config.get("endpoint") or "").rstrip("/")
         api_version = config.get("api_version", "2024-02-15-preview")
-        if endpoint and deployment:
-            url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-            return OpenAICompatibleClient(
-                provider="azure_gpt",
-                base_url=url,
-                model=str(deployment),
-                api_key=api_key,
-                timeout_sec=timeout_sec,
-                max_retry=max_retry,
-                include_model=False,
-            )
-        return None
+        if not endpoint:
+            raise ValueError("missing azure_endpoint")
+        if not model:
+            raise ValueError("missing model")
+        api_key = _resolve_api_key("AZURE_OPENAI_API_KEY")
+        url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version={api_version}"
+        return OpenAICompatibleClient(
+            provider="azure_gpt",
+            base_url=url,
+            model=str(model),
+            api_key=api_key,
+            timeout_sec=timeout_sec,
+            max_retry=max_retry,
+            include_model=False,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+        )
 
     if provider in {"local_model", "vllm"}:
         base_url = (config.get("base_url") or config.get("endpoint") or "http://localhost:8000/v1").rstrip("/")
-        url = f"{base_url}/chat/completions"
+        api_key = config.get("api_key", "")
+        url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         return OpenAICompatibleClient(
             provider=provider,
             base_url=url,
             model=str(model or "local-model"),
-            api_key=api_key,
+            api_key=str(api_key),
             timeout_sec=timeout_sec,
             max_retry=max_retry,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
         )
 
-    base_url = (config.get("base_url") or config.get("endpoint") or "").rstrip("/")
-    if base_url:
-        url = f"{base_url}/chat/completions"
+    if provider in {"api_model"}:
+        base_url = (config.get("url") or config.get("base_url") or config.get("endpoint") or "").rstrip("/")
+        if not base_url:
+            raise ValueError("missing url")
+        api_key = _resolve_api_key("OPENAI_API_KEY")
+        url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         return OpenAICompatibleClient(
             provider=provider,
             base_url=url,
@@ -268,5 +301,24 @@ def get_llm_client(
             api_key=api_key,
             timeout_sec=timeout_sec,
             max_retry=max_retry,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+        )
+
+    base_url = (config.get("base_url") or config.get("endpoint") or "").rstrip("/")
+    if base_url:
+        url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+        api_key = config.get("api_key") or os.getenv("OPENAI_API_KEY", "")
+        return OpenAICompatibleClient(
+            provider=provider,
+            base_url=url,
+            model=str(model or "api-model"),
+            api_key=str(api_key),
+            timeout_sec=timeout_sec,
+            max_retry=max_retry,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
         )
     return None

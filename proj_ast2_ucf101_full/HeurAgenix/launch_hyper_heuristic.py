@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parent
 for path in (str(ROOT), str(ROOT / "src")):
@@ -61,6 +61,13 @@ def _resolve_heuristic_files(heuristic_dir: str, problem: str) -> list[str]:
     return files
 
 
+def _write_jsonl(path: Path, records: List[Dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--problem", required=True)
@@ -87,12 +94,17 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     usage_path = output_root / "llm_usage.jsonl"
 
+    llm_error = None
     if args.engine == "llm_hh":
         if not args.llm_config:
-            raise RuntimeError("llm_config is required for llm_hh")
-        llm_client = get_llm_client(args.llm_config)
-        if llm_client is None:
-            raise RuntimeError("Failed to load LLM client config")
+            llm_error = "llm_config is required for llm_hh"
+            llm_client = None
+        else:
+            try:
+                llm_client = get_llm_client(args.llm_config)
+            except Exception as exc:  # noqa: BLE001
+                llm_client = None
+                llm_error = repr(exc)
         hh = LLMSelectionHyperHeuristic(
             llm_client=llm_client,
             heuristic_pool=heuristic_files,
@@ -103,6 +115,7 @@ def main() -> None:
             rollout_budget=args.rollout_budget,
             rng=env.rng,
             usage_path=str(usage_path),
+            llm_error=llm_error,
         )
     else:
         hh = RandomSelectionHyperHeuristic(
@@ -115,10 +128,16 @@ def main() -> None:
 
     hh.run(env)
 
-    if getattr(hh, "usage_records", None) and args.engine != "llm_hh":
-        with usage_path.open("w", encoding="utf-8") as f:
-            for record in hh.usage_records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    records: List[Dict] = []
+    if args.engine == "llm_hh":
+        records = list(getattr(hh, "usage_records", []) or [])
+    elif args.engine == "random_hh":
+        records = list(getattr(hh, "usage_records", []) or [])
+        if not records:
+            records = [{"ok": False, "engine": "random_hh"}]
+    if not records:
+        records = [{"ok": False, "engine": args.engine, "reason": "missing_usage_records"}]
+    _write_jsonl(usage_path, records)
 
     env.dump_result({"engine": args.engine, "steps": steps}, str(output_root))
 
