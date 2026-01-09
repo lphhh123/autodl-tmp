@@ -470,7 +470,7 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    output_root = work_dir / "output" / problem / "result" / case_name
+    output_root = work_dir / "output" / problem
 
     fallback_used = False
     log_text = ""
@@ -566,17 +566,17 @@ def main() -> None:
                     {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
                 )
 
-    output_dir = output_root / f"seed{seed}_{method}"
-    recordings_path = output_dir / "recordings.jsonl"
-    if not recordings_path.exists():
-        candidates = list(output_root.glob(f"seed{seed}_*/recordings.jsonl"))
-        candidate = next((p for p in candidates if p.exists()), None)
-        if candidate is not None:
-            output_dir = candidate.parent
-            recordings_path = candidate
-            method = output_dir.name.split(f"seed{seed}_", 1)[-1]
-            fallback_used = method != baseline_cfg.get("method", "llm_hh")
-    if not recordings_path.exists():
+    cands = list(output_root.glob(f"**/seed{seed}_{method}/recordings.jsonl"))
+    if not cands:
+        cands = list(output_root.glob(f"**/seed{seed}_*/recordings.jsonl"))
+    if cands:
+        recordings_path = cands[0]
+        output_dir = recordings_path.parent
+        method = output_dir.name.split(f"seed{seed}_", 1)[-1]
+        fallback_used = method != baseline_cfg.get("method", "llm_hh")
+    else:
+        output_dir = out_dir
+        recordings_path = out_dir / "recordings.jsonl"
         _append_llm_usage(
             llm_usage_path,
             {"ok": False, "reason": "missing_recordings", "engine": method},

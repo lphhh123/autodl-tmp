@@ -59,6 +59,8 @@ class RandomHyperHeuristic:
         *args,
         heuristic_pool: Any | None = None,
         problem: str | None = None,
+        configs: Dict[str, Any] | None = None,
+        heuristic_functions: Dict[str, Callable[..., Tuple[Any, Dict]]] | None = None,
         iterations_scale_factor: float = 1.0,
         selection_frequency: int = 1,
         rng: random.Random | None = None,
@@ -73,6 +75,8 @@ class RandomHyperHeuristic:
             self.env = args[0]
             self.heuristics = args[1]
             self.rng = args[2]
+            self.configs = dict(configs or {})
+            self.heuristic_functions = heuristic_functions
             self.selection_frequency = max(1, int(selection_frequency))
             self.sa_T0 = float(sa_T0)
             self.sa_alpha = float(sa_alpha)
@@ -85,6 +89,8 @@ class RandomHyperHeuristic:
         if len(args) > 1 and problem is None:
             problem = args[1]
 
+        self.configs = dict(configs or {})
+        self.heuristic_functions = heuristic_functions
         self.heuristic_pool = heuristic_pool
         self.problem = problem
         self.iterations_scale_factor = float(iterations_scale_factor)
@@ -95,16 +101,31 @@ class RandomHyperHeuristic:
         self.stage_name = stage_name
         self.usage_records: List[Dict[str, Any]] = []
         self._resolved_heuristics: List[Callable[..., Tuple[Any, Dict]]] | None = None
+        self._resolved_heuristic_items: List[Tuple[str, Callable[..., Tuple[Any, Dict]]]] | None = None
 
     def _resolve_heuristics(self) -> List[Callable[..., Tuple[Any, Dict]]]:
         if self._resolved_heuristics is None:
             self._resolved_heuristics = _resolve_heuristics(self.heuristic_pool, self.problem)
         return self._resolved_heuristics
 
+    def _resolve_heuristic_items(self) -> List[Tuple[str, Callable[..., Tuple[Any, Dict]]]]:
+        if self._resolved_heuristic_items is not None:
+            return self._resolved_heuristic_items
+        if self.heuristic_functions:
+            self._resolved_heuristic_items = list(self.heuristic_functions.items())
+            return self._resolved_heuristic_items
+        if isinstance(self.heuristic_pool, dict):
+            self._resolved_heuristic_items = list(self.heuristic_pool.items())
+            return self._resolved_heuristic_items
+        heuristics = self._resolve_heuristics()
+        self._resolved_heuristic_items = [(getattr(h, "__name__", "unknown"), h) for h in heuristics]
+        return self._resolved_heuristic_items
+
     def _get_algorithm_data(self, env) -> Dict[str, Any]:
-        data = dict(getattr(env, "algorithm_data", {}) or {})
-        data.setdefault("env", env)
-        data.setdefault("rng", getattr(env, "rng", None) or self.rng)
+        data = dict(self.configs)
+        data.update(dict(getattr(env, "algorithm_data", {}) or {}))
+        data["env"] = env
+        data["rng"] = getattr(env, "rng", None) or self.rng
         return data
 
     def _record_step(
@@ -213,7 +234,7 @@ class RandomHyperHeuristic:
         current_score = env.get_key_value(current_solution)
         selection_id = 0
         selected = None
-        heuristics = self._resolve_heuristics()
+        heuristic_items = self._resolve_heuristic_items()
 
         steps = max_steps
         if steps is None:
@@ -231,14 +252,16 @@ class RandomHyperHeuristic:
             step_start = time.perf_counter()
             step_idx = int(getattr(env, "step_count", getattr(env, "step", step)))
             if step % self.selection_frequency == 0 or selected is None:
-                selected = rng.choice(heuristics)
+                selected_name, selected = rng.choice(heuristic_items)
                 record = {
                     "ts_ms": int(time.time() * 1000),
                     "engine": "random_hh",
                     "selection_idx": selection_id,
                     "step_begin": int(step_idx),
-                    "candidate_heuristics": [getattr(h, "__name__", "unknown") for h in heuristics],
-                    "chosen": getattr(selected, "__name__", "unknown"),
+                    "candidate_heuristics": [name for name, _ in heuristic_items],
+                    "chosen": selected_name,
+                    "chosen_heuristic": selected_name,
+                    "candidates": [name for name, _ in heuristic_items],
                     "ok": True,
                     "error": None,
                 }

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
 from util.get_heuristic import get_heuristic
+from util.llm_client.get_llm_client import get_llm_client
 
 
 def _is_env_like(value: Any) -> bool:
@@ -61,6 +62,8 @@ class LLMSelectionHyperHeuristic:
         llm_client: Any | None = None,
         heuristic_pool: Any | None = None,
         problem: str | None = None,
+        configs: Dict[str, Any] | None = None,
+        heuristic_functions: Dict[str, Callable[..., Tuple[Any, Dict]]] | None = None,
         iterations_scale_factor: float = 1.0,
         selection_frequency: int = 5,
         num_candidate_heuristics: int = 4,
@@ -84,6 +87,8 @@ class LLMSelectionHyperHeuristic:
             self.env = args[0]
             self.heuristics = args[1]
             self.rng = args[2]
+            self.configs = dict(configs or {})
+            self.heuristic_functions = heuristic_functions
             self.selection_frequency = max(1, int(selection_frequency))
             self.num_candidate_heuristics = max(1, int(num_candidate_heuristics))
             self.sa_T0 = float(sa_T0)
@@ -108,6 +113,10 @@ class LLMSelectionHyperHeuristic:
         if len(args) > 2 and problem is None:
             problem = args[2]
 
+        self.configs = dict(configs or {})
+        self.heuristic_functions = heuristic_functions
+        if llm_client is None and self.configs.get("llm_config_file"):
+            llm_client = get_llm_client(self.configs["llm_config_file"])
         self.llm = llm_client
         self.heuristic_pool = heuristic_pool
         self.problem = problem
@@ -131,6 +140,7 @@ class LLMSelectionHyperHeuristic:
         self.selection_records: List[Dict[str, Any]] = []
         self.usage_path = Path(usage_path) if usage_path else None
         self._resolved_heuristics: List[Callable[..., Tuple[Any, Dict]]] | None = None
+        self._resolved_heuristic_items: List[Tuple[str, Callable[..., Tuple[Any, Dict]]]] | None = None
 
     def _append_usage(self, payload: Dict[str, Any]) -> None:
         if not self.usage_path:
@@ -150,6 +160,19 @@ class LLMSelectionHyperHeuristic:
         if self._resolved_heuristics is None:
             self._resolved_heuristics = _resolve_heuristics(self.heuristic_pool, self.problem)
         return self._resolved_heuristics
+
+    def _resolve_heuristic_items(self) -> List[Tuple[str, Callable[..., Tuple[Any, Dict]]]]:
+        if self._resolved_heuristic_items is not None:
+            return self._resolved_heuristic_items
+        if self.heuristic_functions:
+            self._resolved_heuristic_items = list(self.heuristic_functions.items())
+            return self._resolved_heuristic_items
+        if isinstance(self.heuristic_pool, dict):
+            self._resolved_heuristic_items = list(self.heuristic_pool.items())
+            return self._resolved_heuristic_items
+        heuristics = self._resolve_heuristics()
+        self._resolved_heuristic_items = [(getattr(h, "__name__", "unknown"), h) for h in heuristics]
+        return self._resolved_heuristic_items
 
     def _resolve_usage_path(self, env: Any) -> None:
         if self.usage_path is not None:
@@ -222,18 +245,19 @@ class LLMSelectionHyperHeuristic:
         return chosen_idx
 
     def _get_algorithm_data(self, env) -> Dict[str, Any]:
-        data = dict(getattr(env, "algorithm_data", {}) or {})
-        data.setdefault("env", env)
-        data.setdefault("rng", getattr(env, "rng", None) or self.rng)
+        data = dict(self.configs)
+        data.update(dict(getattr(env, "algorithm_data", {}) or {}))
+        data["env"] = env
+        data["rng"] = getattr(env, "rng", None) or self.rng
         return data
 
     def _score_candidates(self, solution, env, rng: random.Random) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
         current_score = env.get_key_value(solution)
         if self.legacy_mode:
-            heuristics = list(self.heuristics)
+            heuristics = [(getattr(h, "__name__", "unknown"), h) for h in list(self.heuristics)]
         else:
-            heuristics = list(self._resolve_heuristics())
+            heuristics = list(self._resolve_heuristic_items())
         if len(heuristics) > self.num_candidate_heuristics:
             heuristics = rng.sample(heuristics, self.num_candidate_heuristics)
         algorithm_data = self._get_algorithm_data(env)
@@ -244,14 +268,14 @@ class LLMSelectionHyperHeuristic:
             except Exception:  # noqa: BLE001
                 problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": solution}
         problem_state["current_solution"] = solution
-        for idx, heuristic in enumerate(heuristics):
+        for idx, (heuristic_name, heuristic) in enumerate(heuristics):
             operator, meta = heuristic(problem_state, algorithm_data)
             new_solution = operator.run(solution)
             new_score = env.get_key_value(new_solution)
             candidates.append(
                 {
                     "id": idx,
-                    "name": getattr(operator, "name", operator.__class__.__name__),
+                    "name": heuristic_name,
                     "d_total": float(new_score - current_score),
                     "operator": operator,
                     "meta": meta,
@@ -395,16 +419,17 @@ class LLMSelectionHyperHeuristic:
                     ],
                 }
                 ts0 = time.time()
-                chosen_idx: int | None = None
                 llm_error = None
                 llm_traceback = None
                 matched: List[str] = []
-                if self.llm_disabled:
+                ok = True
+                err = None
+                if self.llm_disabled or not self._llm_ready():
+                    ok = False
+                    err = "llm_disabled" if self.llm_disabled else (self.llm_error or "llm_not_ready")
                     chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 else:
                     try:
-                        if not self._llm_ready():
-                            raise RuntimeError(self.llm_error or "llm_not_ready")
                         picks = self.llm.propose_pick(
                             state_summary,
                             1,
@@ -416,14 +441,17 @@ class LLMSelectionHyperHeuristic:
                         if 0 <= chosen_idx < len(candidate_names):
                             matched = [candidate_names[chosen_idx]]
                     except Exception as exc:  # noqa: BLE001
+                        ok = False
+                        err = str(exc)
                         llm_error = f"{type(exc).__name__}: {exc}"
                         llm_traceback = traceback.format_exc()
-                        self.fail_count += 1
-                        if self.fallback_mode == "abort":
-                            raise
-                        if self.fail_count >= self.max_llm_failures or self.fallback_mode == "disable_llm":
-                            self.llm_disabled = True
                         chosen_idx = int(rng.randint(0, len(candidates) - 1))
+
+                if not ok:
+                    self.fail_count += 1
+                    self.llm_disabled = True
+                    if self.fallback_mode == "abort":
+                        raise RuntimeError(err)
                 if chosen_idx is None:
                     chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
@@ -458,8 +486,10 @@ class LLMSelectionHyperHeuristic:
                     "candidate_heuristics": candidate_names,
                     "matched_heuristics": matched,
                     "chosen": candidate_names[chosen_idx],
-                    "ok": llm_error is None,
-                    "error": llm_error,
+                    "chosen_heuristic": candidate_names[chosen_idx],
+                    "candidates": candidate_names,
+                    "ok": ok,
+                    "error": err or llm_error,
                     "latency_ms": latency_ms,
                     "model": model,
                     "usage": usage,
@@ -472,6 +502,7 @@ class LLMSelectionHyperHeuristic:
                 }
                 self._append_usage(record)
                 self.usage_records.append(record)
+                self.selection_records.append(record)
                 picked = (
                     chosen_candidate
                     if isinstance(chosen_candidate, dict)
