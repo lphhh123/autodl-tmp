@@ -224,6 +224,22 @@ class OpenAICompatibleClient:
             self.last_usage.setdefault("error", repr(last_error))
         return []
 
+    def choose_heuristic(self, prompt: Dict, candidates: List[str], timeout_s: int | None = None) -> str:
+        candidate_ids = list(range(len(candidates)))
+        state_summary = {
+            "prompt": prompt,
+            "candidate_ids": candidate_ids,
+            "forbidden_ids": [],
+            "candidates": [{"id": idx, "name": name} for idx, name in enumerate(candidates)],
+        }
+        picks = self.propose_pick(state_summary, 1, timeout_s=timeout_s)
+        if not picks:
+            raise ValueError("llm_empty_pick")
+        idx = int(picks[0])
+        if idx < 0 or idx >= len(candidates):
+            raise ValueError("llm_pick_out_of_range")
+        return candidates[idx]
+
 
 def get_llm_client(
     config_path: str,
