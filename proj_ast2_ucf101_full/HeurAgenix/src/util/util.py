@@ -85,3 +85,20 @@ def load_hyper_heuristic_prompt(problem: str):
     base_prompt = (_REPO_ROOT / "src" / "problems" / "base" / "prompt" / "heuristic_selection.txt").read_text(encoding="utf-8")
     prob_desc = (_REPO_ROOT / "src" / "problems" / problem / "prompt" / "problem_description.txt").read_text(encoding="utf-8")
     return prob_desc + "\n\n" + base_prompt
+
+
+def load_function(name: str, problem: str):
+    """Load a heuristic function by name from problems/{problem}/heuristics."""
+    heuristics_root = _REPO_ROOT / "src" / "problems" / problem / "heuristics"
+    candidates = list(heuristics_root.rglob(f"{name}.py")) + list(heuristics_root.rglob(name))
+    if not candidates:
+        raise FileNotFoundError(f"heuristic not found: {name} in {heuristics_root}")
+    path = candidates[0]
+    spec = importlib.util.spec_from_file_location(f"{problem}.heuristics.{path.stem}", str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load heuristic module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, path.stem):
+        raise AttributeError(f"{path} missing function {path.stem}")
+    return getattr(module, path.stem)

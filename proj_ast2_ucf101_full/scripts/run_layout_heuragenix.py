@@ -477,14 +477,16 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    output_root = heuragenix_root / "output" / problem
+    internal_out_base = out_dir / "heuragenix_internal"
+    internal_out_base.mkdir(parents=True, exist_ok=True)
+    output_root = internal_out_base / "output" / problem
 
     fallback_used = False
     log_text = ""
     llm_config = None
     if method == "llm_hh":
         llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
-    output_dir = output_root / f"seed{seed}_{method}"
+    output_dir = output_root / case_name / "result" / method
 
     launch_cmd = [
         sys.executable,
@@ -517,7 +519,7 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    env["AMLT_OUTPUT_DIR"] = str(work_dir)  # IMPORTANT: avoid work_dir/output/output
+    env["AMLT_OUTPUT_DIR"] = str(internal_out_base)
     result = subprocess.run(
         launch_cmd,
         cwd=str(heuragenix_root),
@@ -534,7 +536,7 @@ def main() -> None:
         if method != fallback_method:
             fallback_used = True
             method = fallback_method
-            output_dir = output_root / f"seed{seed}_{method}"
+            output_dir = output_root / case_name / "result" / method
             launch_cmd = [
                 sys.executable,
                 str(heuragenix_root / "launch_hyper_heuristic.py"),
@@ -573,13 +575,13 @@ def main() -> None:
                     {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
                 )
 
-    cands = list(output_root.glob(f"**/seed{seed}_{method}/recordings.jsonl"))
+    cands = list((output_root / case_name / "result" / method).glob("recordings.jsonl"))
     if not cands:
-        cands = list(output_root.glob(f"**/seed{seed}_*/recordings.jsonl"))
+        cands = list((output_root / case_name / "result").glob("*/recordings.jsonl"))
     if cands:
         recordings_path = cands[0]
         output_dir = recordings_path.parent
-        method = output_dir.name.split(f"seed{seed}_", 1)[-1]
+        method = output_dir.name
         fallback_used = method != baseline_cfg.get("method", "llm_hh")
     else:
         output_dir = out_dir

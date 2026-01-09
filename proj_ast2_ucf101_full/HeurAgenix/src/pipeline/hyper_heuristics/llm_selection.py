@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import random
 import time
 import traceback
@@ -11,6 +12,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from src.util.get_heuristic import get_heuristic
 from src.util.llm_client.get_llm_client import get_llm_client
+from src.util.util import load_function
 
 
 def _is_env_like(value: Any) -> bool:
@@ -55,6 +57,10 @@ def _resolve_heuristics(heuristic_pool: Any, problem: str | None) -> List[Callab
     return list(get_heuristic(str(heuristic_pool), problem or "").values())
 
 
+def get_heuristic_names(problem: str, heuristic_dir: str) -> List[str]:
+    return list(get_heuristic(heuristic_dir, problem).keys())
+
+
 class LLMSelectionHyperHeuristic:
     def __init__(
         self,
@@ -68,6 +74,8 @@ class LLMSelectionHyperHeuristic:
         selection_frequency: int = 5,
         num_candidate_heuristics: int = 4,
         rollout_budget: int = 0,
+        heuristic_dir: str = "basic_heuristics",
+        llm_config_file: str | None = None,
         rng: random.Random | None = None,
         sa_T0: float = 1.0,
         sa_alpha: float = 0.995,
@@ -78,6 +86,7 @@ class LLMSelectionHyperHeuristic:
         fallback_mode: str = "random_hh",
         stage_name: str = "heuragenix_llm_hh",
         usage_path: str | None = None,
+        output_dir: str | None = None,
         llm_error: str | None = None,
         **kwargs,
     ) -> None:
@@ -104,6 +113,9 @@ class LLMSelectionHyperHeuristic:
             self.usage_records: List[Dict[str, Any]] = []
             self.selection_records: List[Dict[str, Any]] = []
             self.usage_path = Path(usage_path) if usage_path else None
+            self.output_dir = output_dir
+            self.heuristic_dir = heuristic_dir
+            self.llm_config_file = llm_config_file
             return
 
         if args:
@@ -116,9 +128,9 @@ class LLMSelectionHyperHeuristic:
         self.configs = dict(configs or {})
         self.llm_error = llm_error
         self.heuristic_functions = heuristic_functions
-        if llm_client is None and self.configs.get("llm_config_file"):
+        if llm_client is None and (self.configs.get("llm_config_file") or llm_config_file):
             try:
-                llm_client = get_llm_client(self.configs["llm_config_file"])
+                llm_client = get_llm_client(self.configs.get("llm_config_file") or llm_config_file)
             except Exception as exc:  # noqa: BLE001
                 llm_client = None
                 self.llm_error = f"{type(exc).__name__}: {exc}"
@@ -129,6 +141,8 @@ class LLMSelectionHyperHeuristic:
         self.selection_frequency = max(1, int(selection_frequency))
         self.num_candidate_heuristics = max(1, int(num_candidate_heuristics))
         self.rollout_budget = int(rollout_budget)
+        self.llm_config_file = llm_config_file
+        self.heuristic_dir = heuristic_dir
         self.rng = rng or random.Random(0)
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
@@ -143,6 +157,7 @@ class LLMSelectionHyperHeuristic:
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
         self.usage_path = Path(usage_path) if usage_path else None
+        self.output_dir = output_dir
         self._resolved_heuristics: List[Callable[..., Tuple[Any, Dict]]] | None = None
         self._resolved_heuristic_items: List[Tuple[str, Callable[..., Tuple[Any, Dict]]]] | None = None
 
@@ -382,196 +397,101 @@ class LLMSelectionHyperHeuristic:
             )
             temperature *= self.sa_alpha
 
-    def run(self, env: Any, max_steps: int | None = None) -> None:
-        if self.legacy_mode or isinstance(env, int):
-            return self._run_legacy(int(env))
-        if env is None:
-            raise ValueError("env is required")
-        self._resolve_usage_path(env)
-        if self.usage_path is None:
-            raise ValueError("output_dir is required to record llm_usage.jsonl")
-        rng = getattr(env, "rng", None) or self.rng
-        temperature = self.sa_T0
-        current_solution = env.solution
-        current_score = env.get_key_value(current_solution)
-        selected_operator = None
-        selected_meta: Dict[str, Any] = {}
+    def run(self, env: Any) -> bool:
+        import json
+        import random
+        import traceback
 
-        steps = max_steps
-        if steps is None:
-            problem_size = getattr(env, "problem_size", None) or getattr(env, "S", None) or 1
-            max_steps_env = getattr(env, "max_steps", None)
-            steps = int(max_steps_env) if max_steps_env is not None else max(1, int(problem_size * self.iterations_scale_factor))
-        else:
-            steps = int(steps)
-        if hasattr(env, "max_steps"):
-            env.max_steps = int(steps)
+        usage_path = None
+        if getattr(self, "output_dir", None):
+            usage_path = os.path.join(self.output_dir, "llm_usage.jsonl")
+        elif self.usage_path is not None:
+            usage_path = str(self.usage_path)
 
-        selection_round = 0
-        step = 0
-        while True:
-            current_steps = int(getattr(env, "construction_steps", getattr(env, "step", step)))
-            if current_steps >= int(steps):
+        def _log_usage(rec: dict) -> None:
+            if usage_path:
+                with open(usage_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        llm_ok = True
+        llm_client = self.llm
+        if llm_client is None:
+            try:
+                if self.llm_config_file or self.configs.get("llm_config_file"):
+                    llm_client = get_llm_client(self.llm_config_file or self.configs.get("llm_config_file"))
+                else:
+                    llm_ok = False
+                    _log_usage({"ok": False, "reason": "llm_config_missing"})
+            except Exception as exc:  # noqa: BLE001
+                llm_ok = False
+                _log_usage({"ok": False, "reason": "llm_client_init_failed", "error": str(exc)})
+        if llm_client is None:
+            llm_ok = False
+
+        fail_count = 0
+        while env.continue_run:
+            heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
+            if not heuristic_pool:
+                _log_usage({"ok": False, "reason": "empty_heuristic_pool"})
                 break
-            if hasattr(env, "continue_run") and not env.continue_run:
-                break
-            step_start = time.perf_counter()
-            step_idx = int(getattr(env, "construction_steps", current_steps))
-            if step_idx % self.selection_frequency == 0 or selected_operator is None:
-                candidates = self._score_candidates(current_solution, env, rng)
-                candidate_names = [c["name"] for c in candidates]
-                cand_ids = [c["id"] for c in candidates]
-                state_summary = {
-                    "candidate_ids": cand_ids,
-                    "forbidden_ids": [],
-                    "candidates": [
-                        {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
-                    ],
-                }
-                ts0 = time.time()
-                llm_error = None
-                llm_traceback = None
-                matched: List[str] = []
-                ok = True
-                err = None
-                fallback_used = False
-                chosen_idx = None
-                usage = {
-                    "round": int(selection_round),
-                    "ok": True,
-                    "model": getattr(self.llm, "name", "unknown"),
-                    "candidates": candidate_names,
-                    "chosen": None,
-                    "fallback_used": False,
-                    "reason": "",
-                    "engine": "llm_hh",
-                    "selection_round": int(selection_round),
-                    "chosen_heuristic": None,
-                    "error": None,
-                }
-                if not candidates:
+
+            if len(heuristic_pool) <= self.num_candidate_heuristics:
+                candidates = list(heuristic_pool)
+            else:
+                candidates = random.sample(heuristic_pool, self.num_candidate_heuristics)
+
+            chosen = None
+            ok = False
+            err = None
+
+            if llm_ok and llm_client is not None:
+                try:
+                    prompt = env.summarize_env()
+                    chosen = llm_client.choose_heuristic(
+                        prompt,
+                        candidates,
+                        timeout_s=getattr(self, "llm_timeout_s", 30),
+                    )
+                    ok = True
+                except Exception as exc:  # noqa: BLE001
+                    fail_count += 1
+                    err = traceback.format_exc()
+                    chosen = random.choice(candidates)
                     ok = False
-                    err = "no_candidate_heuristics"
-                    usage.update(
+                    _log_usage(
                         {
                             "ok": False,
-                            "fallback_used": True,
-                            "reason": err,
-                            "error": err,
+                            "reason": "llm_call_failed",
+                            "error": str(exc),
+                            "fail_count": fail_count,
+                            "fallback_pick": chosen,
                         }
                     )
-                    self._append_usage(usage)
-                    raise RuntimeError(err)
-                if self.llm_disabled or not self._llm_ready():
-                    ok = False
-                    err = "llm_disabled" if self.llm_disabled else (self.llm_error or "llm_not_ready")
-                else:
-                    try:
-                        picks = self.llm.propose_pick(
-                            state_summary,
-                            1,
-                            timeout_s=self.llm_timeout_s,
-                        )
-                        if not picks:
-                            raise ValueError("LLM returned no valid heuristic names.")
-                        chosen_idx = int(picks[0])
-                        if 0 <= chosen_idx < len(candidate_names):
-                            matched = [candidate_names[chosen_idx]]
-                    except Exception as exc:  # noqa: BLE001
-                        ok = False
-                        err = str(exc)
-                        llm_error = f"{type(exc).__name__}: {exc}"
-                        llm_traceback = traceback.format_exc()
 
-                if not ok:
-                    self.fail_count += 1
-                    if self.fail_count >= self.max_llm_failures:
-                        self.llm_disabled = True
-                    if self.fallback_mode == "abort":
-                        usage.update({"ok": False, "reason": err or "", "fallback_used": True})
-                        self._append_usage(usage)
-                        raise RuntimeError(err)
-                    fallback_used = True
-                    chosen_idx = int(rng.randint(0, len(candidates) - 1))
-                if chosen_idx is None:
-                    chosen_idx = int(rng.randint(0, len(candidates) - 1))
-                chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
-                chosen_candidate = candidates[chosen_idx]
+                    if fail_count >= getattr(self, "max_llm_failures", 2):
+                        llm_ok = False
+                        _log_usage({"ok": False, "reason": "llm_disabled_after_failures", "fail_count": fail_count})
+            else:
+                err = "llm_disabled_or_unavailable"
 
-                if self.rollout_budget and self.rollout_budget > 0:
-                    try:
-                        from src.util.tts_bon import tts_bon
+            if chosen is None:
+                chosen = random.choice(candidates)
 
-                        chosen_candidate = tts_bon(
-                            env=env,
-                            candidate_heuristics=matched if matched else [chosen_candidate],
-                            heuristic_pool=self._resolve_heuristics(),
-                            problem=self.problem,
-                            iterations_scale_factor=self.iterations_scale_factor,
-                            selection_frequency=self.selection_frequency,
-                            rollout_budget=self.rollout_budget,
-                        )
-                        if isinstance(chosen_candidate, dict) and "id" in chosen_candidate:
-                            chosen_idx = int(chosen_candidate["id"])
-                    except Exception as exc:  # noqa: BLE001
-                        llm_error = llm_error or f"TTS_BON_ERROR: {type(exc).__name__}: {exc}"
-                        fallback_used = True
-
-                latency_ms = int((time.time() - ts0) * 1000)
-                usage_data = getattr(self.llm, "last_usage", None) if self.llm else None
-                model = getattr(self.llm, "model", None) if self.llm else None
-                usage.update(
-                    {
-                        "ok": bool(ok),
-                        "chosen": candidate_names[chosen_idx],
-                        "fallback_used": bool(fallback_used),
-                        "reason": err or llm_error or "",
-                        "latency_ms": latency_ms,
-                        "ts_ms": int(time.time() * 1000),
-                        "engine": "llm_hh",
-                        "selection_idx": selection_round,
-                        "step_begin": step,
-                        "matched_heuristics": matched,
-                        "chosen_heuristic": candidate_names[chosen_idx],
-                        "usage": usage_data,
-                        "model": model,
-                        "llm_disabled": self.llm_disabled,
-                        "fail_count": self.fail_count,
-                        "llm_timeout_s": self.llm_timeout_s,
-                        "max_llm_failures": self.max_llm_failures,
-                        "fallback_mode": self.fallback_mode,
-                        "traceback": llm_traceback,
-                        "error": err or llm_error,
-                    }
-                )
-                self._append_usage(usage)
-                self.usage_records.append(usage)
-                self.selection_records.append(usage)
-                picked = (
-                    chosen_candidate
-                    if isinstance(chosen_candidate, dict)
-                    else next((c for c in candidates if c["id"] == chosen_idx), candidates[0])
-                )
-                selected_operator = picked["operator"]
-                selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
-                selection_round += 1
-
-            new_solution = selected_operator.run(current_solution)
-            new_score = env.get_key_value(new_solution)
-            delta = new_score - current_score
-            accept = self._accept(env, new_solution, delta, temperature, rng)
-            if accept:
-                current_solution = new_solution
-                current_score = new_score
-                env.solution = current_solution
-            self._record_step(
-                env,
-                selected_operator,
-                selected_meta,
-                accept,
-                int((time.perf_counter() - step_start) * 1000),
-                new_solution,
+            _log_usage(
+                {
+                    "ok": ok,
+                    "chosen_heuristic": chosen,
+                    "candidates": candidates,
+                    "selection_frequency": self.selection_frequency,
+                    "error": err,
+                }
             )
-            temperature *= self.sa_alpha
-            step += 1
-        return
+
+            heuristic = load_function(chosen, problem=self.problem)
+            for _ in range(self.selection_frequency):
+                if not env.continue_run:
+                    break
+                env.run_heuristic(heuristic)
+
+        env.dump_result()
+        return bool(getattr(env, "is_valid_solution", getattr(env, "is_complete_solution", True)))
