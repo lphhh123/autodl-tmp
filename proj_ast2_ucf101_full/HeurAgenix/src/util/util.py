@@ -1,6 +1,7 @@
 """Utility helpers for locating files in HeurAgenix."""
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,3 +53,35 @@ def search_file(name: str, problem: str) -> str:
                 return str(hit)
 
     raise FileNotFoundError(f"search_file failed: name={name}, problem={problem}")
+
+def load_heuristic_functions(problem: str, heuristic_dir: str):
+    """
+    Return dict[name] = function, searching:
+      src/problems/{problem}/heuristics/{heuristic_dir}/*.py
+    """
+    base = _REPO_ROOT / "src" / "problems" / problem / "heuristics" / heuristic_dir
+    if not base.exists():
+        raise FileNotFoundError(f"heuristic_dir not found: {base}")
+
+    funcs = {}
+    for py in sorted(base.glob("*.py")):
+        if py.name.startswith("__"):
+            continue
+        name = py.stem
+        spec = importlib.util.spec_from_file_location(f"{problem}.{heuristic_dir}.{name}", str(py))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if not hasattr(mod, name):
+            raise RuntimeError(f"{py} missing function {name}")
+        funcs[name] = getattr(mod, name)
+    return funcs
+
+
+def load_hyper_heuristic_prompt(problem: str):
+    """
+    Minimal prompt loader used by llm_selection.
+    Prefer base prompt heuristic_selection.txt + problem-specific description.
+    """
+    base_prompt = (_REPO_ROOT / "src" / "problems" / "base" / "prompt" / "heuristic_selection.txt").read_text(encoding="utf-8")
+    prob_desc = (_REPO_ROOT / "src" / "problems" / problem / "prompt" / "problem_description.txt").read_text(encoding="utf-8")
+    return prob_desc + "\n\n" + base_prompt
