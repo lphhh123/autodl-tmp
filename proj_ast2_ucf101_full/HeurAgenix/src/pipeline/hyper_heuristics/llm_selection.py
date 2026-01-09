@@ -114,9 +114,14 @@ class LLMSelectionHyperHeuristic:
             problem = args[2]
 
         self.configs = dict(configs or {})
+        self.llm_error = llm_error
         self.heuristic_functions = heuristic_functions
         if llm_client is None and self.configs.get("llm_config_file"):
-            llm_client = get_llm_client(self.configs["llm_config_file"])
+            try:
+                llm_client = get_llm_client(self.configs["llm_config_file"])
+            except Exception as exc:  # noqa: BLE001
+                llm_client = None
+                self.llm_error = f"{type(exc).__name__}: {exc}"
         self.llm = llm_client
         self.heuristic_pool = heuristic_pool
         self.problem = problem
@@ -135,7 +140,6 @@ class LLMSelectionHyperHeuristic:
         self.fallback_mode = fallback_mode
         self.fail_count = 0
         self.llm_disabled = False
-        self.llm_error = llm_error
         self.usage_records: List[Dict[str, Any]] = []
         self.selection_records: List[Dict[str, Any]] = []
         self.usage_path = Path(usage_path) if usage_path else None
@@ -426,6 +430,7 @@ class LLMSelectionHyperHeuristic:
                 matched: List[str] = []
                 ok = True
                 err = None
+                fallback_used = False
                 chosen_idx = None
                 usage = {
                     "round": int(selection_round),
@@ -435,7 +440,24 @@ class LLMSelectionHyperHeuristic:
                     "chosen": None,
                     "fallback_used": False,
                     "reason": "",
+                    "engine": "llm_hh",
+                    "selection_round": int(selection_round),
+                    "chosen_heuristic": None,
+                    "error": None,
                 }
+                if not candidates:
+                    ok = False
+                    err = "no_candidate_heuristics"
+                    usage.update(
+                        {
+                            "ok": False,
+                            "fallback_used": True,
+                            "reason": err,
+                            "error": err,
+                        }
+                    )
+                    self._append_usage(usage)
+                    raise RuntimeError(err)
                 if self.llm_disabled or not self._llm_ready():
                     ok = False
                     err = "llm_disabled" if self.llm_disabled else (self.llm_error or "llm_not_ready")
@@ -465,6 +487,7 @@ class LLMSelectionHyperHeuristic:
                         usage.update({"ok": False, "reason": err or "", "fallback_used": True})
                         self._append_usage(usage)
                         raise RuntimeError(err)
+                    fallback_used = True
                     chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 if chosen_idx is None:
                     chosen_idx = int(rng.randint(0, len(candidates) - 1))
@@ -488,6 +511,7 @@ class LLMSelectionHyperHeuristic:
                             chosen_idx = int(chosen_candidate["id"])
                     except Exception as exc:  # noqa: BLE001
                         llm_error = llm_error or f"TTS_BON_ERROR: {type(exc).__name__}: {exc}"
+                        fallback_used = True
 
                 latency_ms = int((time.time() - ts0) * 1000)
                 usage_data = getattr(self.llm, "last_usage", None) if self.llm else None
@@ -496,7 +520,7 @@ class LLMSelectionHyperHeuristic:
                     {
                         "ok": bool(ok),
                         "chosen": candidate_names[chosen_idx],
-                        "fallback_used": not ok,
+                        "fallback_used": bool(fallback_used),
                         "reason": err or llm_error or "",
                         "latency_ms": latency_ms,
                         "ts_ms": int(time.time() * 1000),
@@ -513,6 +537,7 @@ class LLMSelectionHyperHeuristic:
                         "max_llm_failures": self.max_llm_failures,
                         "fallback_mode": self.fallback_mode,
                         "traceback": llm_traceback,
+                        "error": err or llm_error,
                     }
                 )
                 self._append_usage(usage)

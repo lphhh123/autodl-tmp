@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from src.pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomHyperHeuristic
+from src.util.llm_client.get_llm_client import get_llm_client
 from src.util.util import load_heuristic_functions
 
 
@@ -88,7 +89,15 @@ def main():
         heur_funcs = load_heuristic_functions(args.problem, args.heuristic_dir)
 
         if args.heuristic == "llm_hh":
-            hh = LLMSelectionHyperHeuristic(configs=configs)
+            llm_client = None
+            llm_error = None
+            if args.llm_config_file:
+                try:
+                    llm_client = get_llm_client(args.llm_config_file)
+                except Exception as exc:  # noqa: BLE001
+                    llm_client = None
+                    llm_error = f"{type(exc).__name__}: {exc}"
+            hh = LLMSelectionHyperHeuristic(configs=configs, llm_client=llm_client, llm_error=llm_error)
             hh.heuristic_functions = heur_funcs
             ok = hh.run(env)
         elif args.heuristic == "random_hh":
