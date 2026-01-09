@@ -6,6 +6,7 @@ import csv
 import json
 import random
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -120,9 +121,9 @@ def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
 
 
 def _write_test_data(work_dir: Path, layout_input: dict, cfg: Any, seed: int) -> Tuple[str, Path]:
-    data_dir = work_dir / "data" / "wafer_layout" / "data" / "test_data"
+    data_dir = work_dir / "data" / "wafer_layout" / "test_data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    case_name = f"layout_seed{seed}.json"
+    case_name = f"case_seed{seed}.json"
     payload = dict(layout_input)
     payload["objective_cfg"] = _build_objective_cfg(cfg)
     target = data_dir / case_name
@@ -137,27 +138,23 @@ def _prepare_work_dir(
     cfg: Any,
     seed: int,
 ) -> Tuple[Path, str, Path]:
-    work_dir = out_dir / "_heuragenix_work"
+    work_dir = out_dir / "__heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
     _ensure_prompt_files(work_dir, heuragenix_root)
     case_name, case_path = _write_test_data(work_dir, layout_input, cfg, seed)
     return work_dir, case_name, case_path
 
 
-def _compute_iterations_scale(layout_input: dict, max_steps: int) -> float:
-    slots = layout_input.get("slots", {})
-    S = int(slots.get("S", len(slots.get("tdp", []))))
-    if max_steps <= 0:
-        return 1.0
-    return max(1.0, float(max_steps) / max(1, S))
-
-
-def _ensure_heuragenix_paths(heuragenix_root: Path) -> None:
-    if str(heuragenix_root) not in sys.path:
-        sys.path.insert(0, str(heuragenix_root))
-    src_path = heuragenix_root / "src"
-    if str(src_path) not in sys.path:
-        sys.path.insert(0, str(src_path))
+def infer_problem_size(layout_input: dict) -> int:
+    chiplets = layout_input.get("chiplets", None)
+    if isinstance(chiplets, list) and len(chiplets) > 0:
+        return len(chiplets)
+    if "S" in layout_input:
+        return int(layout_input["S"])
+    slots = layout_input.get("slots", None)
+    if isinstance(slots, dict) and "S" in slots:
+        return int(slots["S"])
+    return 1
 
 
 def _resolve_heuristic_files(heuragenix_root: Path, problem: str, heuristic_dir: str) -> List[str]:
@@ -427,97 +424,143 @@ def main() -> None:
     _seed_everything(seed)
 
     project_root = Path(__file__).resolve().parents[1]
-    baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else {}
+    baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else cfg.get("baseline", {})
     heuragenix_root = _resolve_heuragenix_root(baseline_cfg.get("heuragenix_root"), project_root)
     if not heuragenix_root.exists():
         raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
 
-    _ensure_heuragenix_paths(heuragenix_root)
-    from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomHyperHeuristic
-    from problems.wafer_layout.components import NoOp
-    from problems.wafer_layout.env import Env as WaferLayoutEnv
-    from util.llm_client.get_llm_client import get_llm_client
-
     work_dir, case_name, case_path = _prepare_work_dir(out_dir, heuragenix_root, layout_input, cfg, seed)
 
-    max_steps = int(baseline_cfg.get("max_steps", 1000))
     method = str(baseline_cfg.get("method", "llm_hh"))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
     llm_usage_path = out_dir / "llm_usage.jsonl"
-    llm_usage_path.touch(exist_ok=True)
 
     problem = str(baseline_cfg.get("problem", "wafer_layout"))
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
-    heuristic_files = _resolve_heuristic_files(heuragenix_root, problem, heuristic_dir)
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
     num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
     rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
-
-    env = WaferLayoutEnv(str(case_path), rng=random.Random(seed))
-    iterations_scale = _compute_iterations_scale(layout_input, max_steps)
-    total_steps = max(1, int(iterations_scale * max(1, env.problem_size)))
+    iters_sf = float(baseline_cfg.get("iterations_scale_factor", 2.0))
+    max_steps = baseline_cfg.get("max_steps", None)
+    if max_steps is not None:
+        max_steps = int(max_steps)
+        S = infer_problem_size(layout_input)
+        iters_sf = max(0.1, float(max_steps) / max(1, S))
 
     output_root = work_dir / "output" / problem / case_name / "result"
-    output_dir = output_root / method
-    env.reset(str(output_dir))
 
     fallback_used = False
     log_text = ""
+    llm_config = None
     if method == "llm_hh":
         llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
-        try:
-            if llm_config is None:
-                raise RuntimeError("llm_config is required for llm_hh")
-            prompt_dir = heuragenix_root / "src" / "problems" / "wafer_layout" / "prompt"
-            llm_client = get_llm_client(str(llm_config), prompt_dir=str(prompt_dir), output_dir=str(out_dir))
-            if llm_client is None:
-                raise RuntimeError("Failed to load LLM client config")
-            hh = LLMSelectionHyperHeuristic(
-                llm_client=llm_client,
-                heuristic_pool=heuristic_files,
-                problem=problem,
-                iterations_scale_factor=iterations_scale,
-                selection_frequency=selection_frequency,
-                num_candidate_heuristics=num_candidate_heuristics,
-                rollout_budget=rollout_budget,
-                rng=env.rng,
-                usage_path=str(llm_usage_path),
-            )
-            hh.run(env)
-        except Exception as exc:  # noqa: BLE001
-            log_text = repr(exc)
-            _append_llm_usage(
-                llm_usage_path,
-                {"ok": False, "reason": "llm_hh_failed", "fallback": fallback_method, "error": log_text},
-            )
-            fallback_used = True
-            method = fallback_method
-
-    if method == "random_hh":
-        remaining_steps = max(0, total_steps - len(env.recordings))
-        if remaining_steps > 0:
-            hh = RandomHyperHeuristic(
-                heuristic_pool=heuristic_files,
-                problem=problem,
-                iterations_scale_factor=float(remaining_steps) / max(1, env.problem_size),
-                selection_frequency=selection_frequency,
-                rng=env.rng,
-            )
-            hh.run(env)
-
-    if not env.recordings:
-        env.run_operator(NoOp(), True, meta={"heuristic_name": "noop"}, stage="heuragenix", time_ms=0)
-
-    output_dir = output_root / method
-    env.dump_result({"engine": method, "steps": total_steps}, str(output_dir))
-    if fallback_used:
+    if method == "llm_hh" and llm_config is None:
+        log_text = "llm_config is required for llm_hh"
         _append_llm_usage(
             llm_usage_path,
-            {"ok": False, "reason": "fallback_used", "fallback": method, "fallback_used": True},
+            {"ok": False, "reason": "llm_config_missing", "fallback": fallback_method, "error": log_text},
         )
+        fallback_used = True
+        method = fallback_method
+    output_dir = output_root / method
 
+    launch_cmd = [
+        sys.executable,
+        str(heuragenix_root / "launch_hyper_heuristic.py"),
+        "-p",
+        problem,
+        "-e",
+        method,
+        "-d",
+        heuristic_dir,
+        "-t",
+        case_name,
+        "-n",
+        f"{iters_sf}",
+        "-m",
+        str(selection_frequency),
+        "-c",
+        str(num_candidate_heuristics),
+        "-b",
+        str(rollout_budget),
+        "-r",
+        "result",
+        "--seed",
+        str(seed),
+    ]
+    if method == "llm_hh" and llm_config is not None:
+        launch_cmd.extend(["-l", str(llm_config)])
+
+    result = subprocess.run(
+        launch_cmd,
+        cwd=str(work_dir),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "reason": "launch_failed", "engine": method, "error": log_text},
+        )
+        if method != fallback_method:
+            fallback_used = True
+            method = fallback_method
+            launch_cmd = [
+                sys.executable,
+                str(heuragenix_root / "launch_hyper_heuristic.py"),
+                "-p",
+                problem,
+                "-e",
+                method,
+                "-d",
+                heuristic_dir,
+                "-t",
+                case_name,
+                "-n",
+                f"{iters_sf}",
+                "-m",
+                str(selection_frequency),
+                "-c",
+                str(num_candidate_heuristics),
+                "-b",
+                str(rollout_budget),
+                "-r",
+                "result",
+                "--seed",
+                str(seed),
+            ]
+            result = subprocess.run(
+                launch_cmd,
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+                _append_llm_usage(
+                    llm_usage_path,
+                    {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
+                )
+
+    output_dir = output_root / method
     recordings_path = output_dir / "recordings.jsonl"
+    if not recordings_path.exists():
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "reason": "missing_recordings", "engine": method},
+        )
+        recordings_path.parent.mkdir(parents=True, exist_ok=True)
+        recordings_path.write_text("", encoding="utf-8")
+    heuragenix_usage_path = output_dir / "llm_usage.jsonl"
+    if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:
+        llm_usage_path.write_text(heuragenix_usage_path.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "reason": "missing_llm_usage", "engine": method},
+        )
     trace_info, pareto = _write_trace_and_pareto(out_dir, seed, recordings_path, layout_input, cfg)
     _write_pareto_points(pareto, out_dir / "pareto_points.csv")
 
@@ -545,7 +588,7 @@ def main() -> None:
         "runtime_s": float(time.time() - start_time),
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
-        "iterations_scale_factor": float(iterations_scale),
+        "iterations_scale_factor": float(iters_sf),
         **trace_metrics,
         "raw_dir": str(output_dir),
     }
