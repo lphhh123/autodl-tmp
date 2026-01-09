@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import os
 import random
 import shutil
 import subprocess
@@ -14,7 +16,6 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from scripts.run_layout_agent import _write_pareto_points, compute_oscillation_metrics
@@ -35,13 +36,6 @@ TRACE_FIELDS = [
     "boundary_penalty",
     "seed_id",
     "time_ms",
-    "signature",
-    "d_total",
-    "d_comm",
-    "d_therm",
-    "tabu_hit",
-    "inverse_hit",
-    "cooldown_hit",
 ]
 
 
@@ -68,7 +62,10 @@ def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
     if cfg_root:
         candidate = Path(cfg_root).expanduser()
         if not candidate.is_absolute():
-            candidate = project_root / candidate
+            for base in (project_root, project_root.parent):
+                adjusted = base / candidate
+                if adjusted.exists():
+                    return adjusted
         if candidate.exists():
             return candidate
     fallback = project_root / "HeurAgenix"
@@ -271,6 +268,7 @@ def _write_trace_and_pareto(
     recordings_path: Path,
     layout_input: dict,
     cfg: Any,
+    max_steps: int | None,
 ) -> Tuple[Dict[str, Any], ParetoSet]:
     base_state, evaluator = _build_evaluator(layout_input, cfg)
     pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
@@ -291,14 +289,13 @@ def _write_trace_and_pareto(
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
         for idx, rec in enumerate(_iter_recordings(recordings_path)):
+            if max_steps is not None and idx >= max_steps:
+                break
             assign = np.asarray(rec.get("assign", prev_assign), dtype=int)
             base_state.assign = assign
             eval_out = evaluator.evaluate(base_state)
             if prev_eval is None:
                 prev_eval = eval_out
-            d_total = float(eval_out["total_scalar"] - prev_eval["total_scalar"])
-            d_comm = float(eval_out["comm_norm"] - prev_eval["comm_norm"])
-            d_therm = float(eval_out["therm_norm"] - prev_eval["therm_norm"])
             prev_eval = eval_out
 
             accepted = int(bool(rec.get("accepted", True)))
@@ -310,7 +307,6 @@ def _write_trace_and_pareto(
                 best_step = idx
 
             action = _action_from_record(rec, prev_assign)
-            signature = _signature_for_action(action, prev_assign)
             pareto_added = pareto.add(
                 eval_out["comm_norm"],
                 eval_out["therm_norm"],
@@ -337,13 +333,6 @@ def _write_trace_and_pareto(
                     float(eval_out["penalty"]["boundary"]),
                     seed,
                     int(rec.get("time_ms", 0)),
-                    signature,
-                    d_total,
-                    d_comm,
-                    d_therm,
-                    0,
-                    0,
-                    0,
                 ]
             )
             prev_assign = assign.copy()
@@ -446,24 +435,16 @@ def main() -> None:
     if max_steps is not None:
         max_steps = int(max_steps)
         S = infer_problem_size(layout_input)
-        iters_sf = max(0.1, float(max_steps) / max(1, S))
+        iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    output_root = work_dir / "output" / problem / case_name / "result"
+    output_root = work_dir / "output" / problem / "test_data" / "result"
 
     fallback_used = False
     log_text = ""
     llm_config = None
     if method == "llm_hh":
         llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
-    if method == "llm_hh" and llm_config is None:
-        log_text = "llm_config is required for llm_hh"
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "reason": "llm_config_missing", "fallback": fallback_method, "error": log_text},
-        )
-        fallback_used = True
-        method = fallback_method
-    output_dir = output_root / method
+    output_dir = output_root / f"seed{seed}_{method}"
 
     launch_cmd = [
         sys.executable,
@@ -492,11 +473,16 @@ def main() -> None:
     if method == "llm_hh" and llm_config is not None:
         launch_cmd.extend(["-l", str(llm_config)])
 
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
+    ).strip(os.pathsep)
     result = subprocess.run(
         launch_cmd,
         cwd=str(work_dir),
         capture_output=True,
         text=True,
+        env=env,
     )
     if result.returncode != 0:
         log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
@@ -507,6 +493,7 @@ def main() -> None:
         if method != fallback_method:
             fallback_used = True
             method = fallback_method
+            output_dir = output_root / f"seed{seed}_{method}"
             launch_cmd = [
                 sys.executable,
                 str(heuragenix_root / "launch_hyper_heuristic.py"),
@@ -536,6 +523,7 @@ def main() -> None:
                 cwd=str(work_dir),
                 capture_output=True,
                 text=True,
+                env=env,
             )
             if result.returncode != 0:
                 log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
@@ -544,8 +532,16 @@ def main() -> None:
                     {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
                 )
 
-    output_dir = output_root / method
+    output_dir = output_root / f"seed{seed}_{method}"
     recordings_path = output_dir / "recordings.jsonl"
+    if not recordings_path.exists():
+        candidates = list(output_root.glob(f"seed{seed}_*/recordings.jsonl"))
+        candidate = next((p for p in candidates if p.exists()), None)
+        if candidate is not None:
+            output_dir = candidate.parent
+            recordings_path = candidate
+            method = output_dir.name.split(f"seed{seed}_", 1)[-1]
+            fallback_used = method != baseline_cfg.get("method", "llm_hh")
     if not recordings_path.exists():
         _append_llm_usage(
             llm_usage_path,
@@ -561,7 +557,7 @@ def main() -> None:
             llm_usage_path,
             {"ok": False, "reason": "missing_llm_usage", "engine": method},
         )
-    trace_info, pareto = _write_trace_and_pareto(out_dir, seed, recordings_path, layout_input, cfg)
+    trace_info, pareto = _write_trace_and_pareto(out_dir, seed, recordings_path, layout_input, cfg, max_steps)
     _write_pareto_points(pareto, out_dir / "pareto_points.csv")
 
     best_solution_path = output_dir / "best_solution.json"
@@ -576,9 +572,10 @@ def main() -> None:
     best_eval = trace_info.get("best_eval") or {}
     report = {
         "cfg_path": str(args.cfg),
-        "best_total": float(best_eval.get("total_scalar", 0.0)),
+        "best_total_scalar": float(best_eval.get("total_scalar", 0.0)),
         "best_comm_norm": float(best_eval.get("comm_norm", 0.0)),
         "best_therm_norm": float(best_eval.get("therm_norm", 0.0)),
+        "best_total": float(best_eval.get("total_scalar", 0.0)),
         "steps_total": int(trace_info.get("steps_total", 0)),
         "accepts_total": int(trace_info.get("accepts", 0)),
         "best_step": int(trace_info.get("best_step", -1)),
@@ -589,6 +586,7 @@ def main() -> None:
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
         "iterations_scale_factor": float(iters_sf),
+        "oscillation_metrics": trace_metrics,
         **trace_metrics,
         "raw_dir": str(output_dir),
     }

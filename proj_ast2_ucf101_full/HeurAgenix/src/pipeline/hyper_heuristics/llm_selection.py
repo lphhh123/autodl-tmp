@@ -69,8 +69,8 @@ class LLMSelectionHyperHeuristic:
         sa_alpha: float = 0.995,
         timeout_sec: int = 90,
         max_retry: int = 1,
-        llm_timeout_s: int = 30,
-        max_llm_failures: int = 2,
+        llm_timeout_s: float = 30,
+        max_llm_failures: int = 5,
         fallback_mode: str = "random",
         stage_name: str = "heuragenix_llm_hh",
         usage_path: str | None = None,
@@ -89,7 +89,7 @@ class LLMSelectionHyperHeuristic:
             self.sa_alpha = float(sa_alpha)
             self.stage_name = stage_name
             self.llm = llm_client
-            self.llm_timeout_s = int(llm_timeout_s)
+            self.llm_timeout_s = float(llm_timeout_s)
             self.max_llm_failures = int(max_llm_failures)
             self.fallback_mode = fallback_mode
             self.fail_count = 0
@@ -120,7 +120,7 @@ class LLMSelectionHyperHeuristic:
         self.stage_name = stage_name
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
-        self.llm_timeout_s = int(llm_timeout_s)
+        self.llm_timeout_s = float(llm_timeout_s)
         self.max_llm_failures = int(max_llm_failures)
         self.fallback_mode = fallback_mode
         self.fail_count = 0
@@ -150,6 +150,13 @@ class LLMSelectionHyperHeuristic:
             self._resolved_heuristics = _resolve_heuristics(self.heuristic_pool, self.problem)
         return self._resolved_heuristics
 
+    def _resolve_usage_path(self, env: Any) -> None:
+        if self.usage_path is not None:
+            return
+        output_dir = getattr(env, "output_dir", None)
+        if output_dir:
+            self.usage_path = Path(output_dir) / "llm_usage.jsonl"
+
     def _choose_candidate(
         self,
         state_summary: Dict[str, Any],
@@ -169,6 +176,8 @@ class LLMSelectionHyperHeuristic:
             chosen_idx = int(rng.randint(0, len(candidates) - 1))
             if self.fail_count >= self.max_llm_failures:
                 self.llm_disabled = True
+            if self.fallback_mode == "disable_llm":
+                self.llm_disabled = True
         else:
             try:
                 picks = self.llm.propose_pick(state_summary, 1, timeout_s=self.llm_timeout_s)
@@ -181,6 +190,8 @@ class LLMSelectionHyperHeuristic:
                 self.fail_count += 1
                 chosen_idx = int(rng.randint(0, len(candidates) - 1))
                 if self.fail_count >= self.max_llm_failures:
+                    self.llm_disabled = True
+                if self.fallback_mode == "disable_llm":
                     self.llm_disabled = True
 
         chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
@@ -218,8 +229,15 @@ class LLMSelectionHyperHeuristic:
         if len(heuristics) > self.num_candidate_heuristics:
             heuristics = rng.sample(heuristics, self.num_candidate_heuristics)
         algorithm_data = self._get_algorithm_data(env)
+        problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": solution}
+        if hasattr(env, "get_problem_state"):
+            try:
+                problem_state = dict(env.get_problem_state())
+            except Exception:  # noqa: BLE001
+                problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": solution}
+        problem_state["current_solution"] = solution
         for idx, heuristic in enumerate(heuristics):
-            operator, meta = heuristic({"solution": solution}, algorithm_data)
+            operator, meta = heuristic(problem_state, algorithm_data)
             new_solution = operator.run(solution)
             new_score = env.get_key_value(new_solution)
             candidates.append(
@@ -236,7 +254,8 @@ class LLMSelectionHyperHeuristic:
     def _accept(self, env, new_solution, delta: float, temperature: float, rng: random.Random) -> bool:
         if hasattr(env, "validation_solution"):
             try:
-                return bool(env.validation_solution(new_solution))
+                if not bool(env.validation_solution(new_solution)):
+                    return False
             except Exception:  # noqa: BLE001
                 pass
         return (delta < 0) or (rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
@@ -251,29 +270,15 @@ class LLMSelectionHyperHeuristic:
         new_solution,
     ) -> None:
         if hasattr(env, "run_operator"):
-            try:
-                env.run_operator(
-                    operator,
-                    accepted,
-                    meta=meta,
-                    stage=self.stage_name,
-                    time_ms=time_ms,
-                    new_solution=new_solution if accepted else None,
-                )
-                return
-            except TypeError:
-                env.run_operator(
-                    operator,
-                    accepted,
-                    meta=meta,
-                    new_solution=new_solution if accepted else None,
-                )
-                if env.recordings:
-                    env.recordings[-1]["stage"] = self.stage_name
-                    env.recordings[-1]["time_ms"] = int(time_ms)
-                    if "assign" not in env.recordings[-1] and hasattr(env.solution, "assign"):
-                        env.recordings[-1]["assign"] = list(env.solution.assign)
-                return
+            env.run_operator(
+                operator,
+                inplace=accepted,
+                meta=meta,
+                stage=self.stage_name,
+                time_ms=time_ms,
+                new_solution=new_solution if accepted else None,
+            )
+            return
         env.recordings.append(
             {
                 "step": getattr(env, "step", 0),
@@ -319,7 +324,7 @@ class LLMSelectionHyperHeuristic:
             new_solution = selected_operator.run(current_solution)
             new_score = self.env.get_key_value(new_solution)
             delta = new_score - current_score
-            accept = (delta < 0) or (self.rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
+            accept = self._accept(self.env, new_solution, delta, temperature, self.rng)
             if accept:
                 current_solution = new_solution
                 current_score = new_score
@@ -343,6 +348,7 @@ class LLMSelectionHyperHeuristic:
             return self._run_legacy(int(env))
         if env is None:
             raise ValueError("env is required")
+        self._resolve_usage_path(env)
         rng = getattr(env, "rng", None) or self.rng
         temperature = self.sa_T0
         current_solution = env.solution
@@ -397,3 +403,8 @@ class LLMSelectionHyperHeuristic:
                 new_solution,
             )
             temperature *= self.sa_alpha
+        if self.usage_path and self.usage_records:
+            self.usage_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.usage_path.open("w", encoding="utf-8") as f:
+                for rec in self.usage_records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")

@@ -4,14 +4,21 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from problems.wafer_layout.components import RelocateSlot
+from src.problems.wafer_layout.components import RelocateSlot
 
 
 def therm_driven_push_apart(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[RelocateSlot, Dict]:
-    env = algorithm_data["env"]
-    tdp = np.asarray(env.instance_data["slots"]["tdp"], dtype=float)
-    sites_xy = np.asarray(env.instance_data["sites"]["sites_xy"], dtype=float)
-    S = int(env.instance_data["slots"]["S"])
+    instance = problem_state["instance_data"]
+    slots = instance.get("slots", {})
+    tdp = np.asarray(slots.get("tdp", []), dtype=float)
+    sites_xy = instance.get("sites_xy")
+    if sites_xy is None:
+        sites_xy = instance.get("sites", {}).get("sites_xy", [])
+    sites_xy = np.asarray(sites_xy, dtype=float)
+    if isinstance(slots, dict):
+        S = int(slots.get("S", len(tdp)))
+    else:
+        S = int(len(slots))
     best_pair = (0, 1)
     best_val = -1.0
     for i in range(S):

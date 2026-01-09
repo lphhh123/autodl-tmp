@@ -19,9 +19,10 @@ from util.llm_client.get_llm_client import get_llm_client
 
 def _search_file(filename: str, problem: str, folder: str = "data") -> Path | None:
     base = Path.cwd() / folder / problem
-    direct = base / filename
-    if direct.exists():
-        return direct
+    for subdir in ("test_data", ""):
+        direct = base / subdir / filename
+        if direct.exists():
+            return direct
     for candidate in base.rglob(filename):
         if candidate.is_file():
             return candidate
@@ -39,7 +40,7 @@ def _resolve_test_data(problem: str, test_name: str) -> Path:
 
 
 def _load_env(problem: str, data_path: str, rng_seed: int) -> object:
-    module = __import__(f"problems.{problem}.env", fromlist=["Env"])
+    module = __import__(f"src.problems.{problem}.env", fromlist=["Env"])
     env_cls = getattr(module, "Env")
     import random
 
@@ -88,23 +89,35 @@ def main() -> None:
     env = _load_env(problem, str(test_path), args.seed)
 
     heuristic_files = _resolve_heuristic_files(args.heuristic_dir, problem)
-    steps = max(1, int(float(args.iterations_scale_factor) * getattr(env, "problem_size", 1)))
+    steps = max(1, int(float(args.iterations_scale_factor) * getattr(env, "construction_steps", 1)))
 
-    output_root = Path.cwd() / "output" / problem / test_path.name / args.result / args.engine
-    output_root.mkdir(parents=True, exist_ok=True)
-    usage_path = output_root / "llm_usage.jsonl"
+    test_data_dir = test_path.parent.name
+    base_output_root = Path.cwd() / "output" / problem / test_data_dir / args.result
 
+    engine = args.engine
     llm_error = None
-    if args.engine == "llm_hh":
+    llm_client = None
+    if engine == "llm_hh":
         if not args.llm_config:
             llm_error = "llm_config is required for llm_hh"
-            llm_client = None
         else:
             try:
                 llm_client = get_llm_client(args.llm_config)
             except Exception as exc:  # noqa: BLE001
-                llm_client = None
                 llm_error = repr(exc)
+        if llm_client is None:
+            llm_error = llm_error or "llm_client_unavailable"
+            engine = "random_hh"
+    output_root = base_output_root / f"seed{args.seed}_{engine}"
+    output_root.mkdir(parents=True, exist_ok=True)
+    usage_path = output_root / "llm_usage.jsonl"
+
+    initial_usage: List[Dict] = []
+    if engine != args.engine:
+        initial_usage.append(
+            {"ok": False, "engine": "llm_hh", "reason": "llm_unavailable", "error": llm_error}
+        )
+    if engine == "llm_hh":
         hh = LLMSelectionHyperHeuristic(
             llm_client=llm_client,
             heuristic_pool=heuristic_files,
@@ -126,20 +139,21 @@ def main() -> None:
             rng=env.rng,
         )
 
+    env.reset(str(output_root))
     hh.run(env)
 
     records: List[Dict] = []
-    if args.engine == "llm_hh":
+    if engine == "llm_hh":
         records = list(getattr(hh, "usage_records", []) or [])
-    elif args.engine == "random_hh":
+    elif engine == "random_hh":
         records = list(getattr(hh, "usage_records", []) or [])
         if not records:
             records = [{"ok": False, "engine": "random_hh"}]
     if not records:
-        records = [{"ok": False, "engine": args.engine, "reason": "missing_usage_records"}]
-    _write_jsonl(usage_path, records)
+        records = [{"ok": False, "engine": engine, "reason": "missing_usage_records"}]
+    _write_jsonl(usage_path, initial_usage + records)
 
-    env.dump_result({"engine": args.engine, "steps": steps}, str(output_root))
+    env.dump_result()
 
 
 if __name__ == "__main__":

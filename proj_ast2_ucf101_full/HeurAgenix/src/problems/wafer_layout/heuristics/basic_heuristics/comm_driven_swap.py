@@ -4,13 +4,17 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from problems.wafer_layout.components import SwapSlots
+from src.problems.wafer_layout.components import SwapSlots
 
 
 def comm_driven_swap(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[SwapSlots, Dict]:
-    env = algorithm_data["env"]
-    traffic = np.asarray(env.instance_data["mapping"]["traffic_matrix"], dtype=float)
-    S = int(env.instance_data["slots"]["S"])
+    instance = problem_state["instance_data"]
+    traffic = np.asarray(instance.get("mapping", {}).get("traffic_matrix", []), dtype=float)
+    slots = instance.get("slots", {})
+    if isinstance(slots, dict):
+        S = int(slots.get("S", len(slots.get("tdp", []) or [])))
+    else:
+        S = int(len(slots))
     best_pair = (0, 1)
     best_val = -1.0
     for i in range(S):

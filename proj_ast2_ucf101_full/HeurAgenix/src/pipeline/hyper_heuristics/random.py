@@ -116,29 +116,15 @@ class RandomHyperHeuristic:
         new_solution,
     ) -> None:
         if hasattr(env, "run_operator"):
-            try:
-                env.run_operator(
-                    operator,
-                    accepted,
-                    meta=meta,
-                    stage=self.stage_name,
-                    time_ms=time_ms,
-                    new_solution=new_solution if accepted else None,
-                )
-                return
-            except TypeError:
-                env.run_operator(
-                    operator,
-                    accepted,
-                    meta=meta,
-                    new_solution=new_solution if accepted else None,
-                )
-                if env.recordings:
-                    env.recordings[-1]["stage"] = self.stage_name
-                    env.recordings[-1]["time_ms"] = int(time_ms)
-                    if "assign" not in env.recordings[-1] and hasattr(env.solution, "assign"):
-                        env.recordings[-1]["assign"] = list(env.solution.assign)
-                return
+            env.run_operator(
+                operator,
+                inplace=accepted,
+                meta=meta,
+                stage=self.stage_name,
+                time_ms=time_ms,
+                new_solution=new_solution if accepted else None,
+            )
+            return
         env.recordings.append(
             {
                 "step": getattr(env, "step", 0),
@@ -175,11 +161,24 @@ class RandomHyperHeuristic:
                     }
                 )
                 selection_id += 1
-            operator, meta = selected({"solution": current_solution}, {"env": self.env, "rng": self.rng})
+            problem_state = {"instance_data": getattr(self.env, "instance_data", {}), "current_solution": current_solution}
+            if hasattr(self.env, "get_problem_state"):
+                try:
+                    problem_state = dict(self.env.get_problem_state())
+                except Exception:  # noqa: BLE001
+                    problem_state = {
+                        "instance_data": getattr(self.env, "instance_data", {}),
+                        "current_solution": current_solution,
+                    }
+            problem_state["current_solution"] = current_solution
+            operator, meta = selected(problem_state, {"env": self.env, "rng": self.rng})
             new_solution = operator.run(current_solution)
             new_score = self.env.get_key_value(new_solution)
             delta = new_score - current_score
-            accept = (delta < 0) or (self.rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
+            if hasattr(self.env, "validation_solution") and not self.env.validation_solution(new_solution):
+                accept = False
+            else:
+                accept = (delta < 0) or (self.rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
             if accept:
                 current_solution = new_solution
                 current_score = new_score
@@ -231,11 +230,21 @@ class RandomHyperHeuristic:
                 )
                 selection_id += 1
             algorithm_data = self._get_algorithm_data(env)
-            operator, meta = selected({"solution": current_solution}, algorithm_data)
+            problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": current_solution}
+            if hasattr(env, "get_problem_state"):
+                try:
+                    problem_state = dict(env.get_problem_state())
+                except Exception:  # noqa: BLE001
+                    problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": current_solution}
+            problem_state["current_solution"] = current_solution
+            operator, meta = selected(problem_state, algorithm_data)
             new_solution = operator.run(current_solution)
             new_score = env.get_key_value(new_solution)
             delta = new_score - current_score
-            accept = (delta < 0) or (rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
+            if hasattr(env, "validation_solution") and not env.validation_solution(new_solution):
+                accept = False
+            else:
+                accept = (delta < 0) or (rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
             if accept:
                 current_solution = new_solution
                 current_score = new_score

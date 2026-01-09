@@ -39,24 +39,29 @@ class BaseEnv:
     def run_operator(
         self,
         operator,
-        accepted: bool,
+        inplace: bool = True,
         meta: Dict[str, Any] | None = None,
         new_solution: Any | None = None,
+        stage: str | None = None,
+        time_ms: int | None = None,
     ) -> None:
-        if accepted:
+        if inplace:
             if new_solution is None:
                 new_solution = operator.run(self.current_solution)
             self.current_solution = new_solution
             self.solution = self.current_solution
-        self.recordings.append(
-            {
-                "step": int(self.step),
-                "operator": operator,
-                "meta": meta or {},
-                "accepted": accepted,
-            }
-        )
+        record = {
+            "step": int(self.step),
+            "operator": operator,
+            "meta": meta or {},
+            "accepted": bool(inplace),
+        }
+        if stage is not None:
+            record["stage"] = stage
+        if time_ms is not None:
+            record["time_ms"] = int(time_ms)
+        self.recordings.append(record)
         self.step += 1
 
-    def dump_result(self, content: Dict[str, Any], output_folder: str) -> None:
+    def dump_result(self) -> None:
         return None

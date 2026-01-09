@@ -19,6 +19,7 @@ class OpenAICompatibleClient:
         api_key: Optional[str] = None,
         timeout_sec: int = 90,
         max_retry: int = 1,
+        sleep_time: int = 0,
         include_model: bool = True,
         temperature: float = 0.15,
         top_p: float = 0.9,
@@ -30,6 +31,7 @@ class OpenAICompatibleClient:
         self.api_key = api_key or ""
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
+        self.sleep_time = max(0, int(sleep_time))
         self.include_model = include_model
         self.temperature = temperature
         self.top_p = top_p
@@ -216,6 +218,8 @@ class OpenAICompatibleClient:
                     "model": self.model,
                     "error": repr(exc),
                 }
+            if self.sleep_time and attempt < self.max_retry:
+                time.sleep(self.sleep_time)
         if last_error and self.last_usage is not None:
             self.last_usage.setdefault("error", repr(last_error))
         return []
@@ -233,10 +237,17 @@ def get_llm_client(
     if not path.exists():
         return None
     config = json.loads(path.read_text(encoding="utf-8"))
-    provider = (config.get("provider") or config.get("type") or config.get("mode") or "api_model").lower()
-    model = config.get("model") or config.get("model_name") or config.get("deployment") or config.get("model_path") or ""
+    provider = (config.get("type") or config.get("provider") or config.get("mode") or "api_model").lower()
+    model = (
+        config.get("model")
+        or config.get("model_name")
+        or config.get("deployment")
+        or config.get("model_path")
+        or ""
+    )
     max_attempts = int(config.get("max_attempts", max_retry + 1))
     max_retry = max(0, max_attempts - 1)
+    sleep_time = int(config.get("sleep_time", 0))
     temperature = float(config.get("temperature", 0.15))
     top_p = float(config.get("top-p", config.get("top_p", 0.9)))
     max_tokens = int(config.get("max_tokens", 96))
@@ -253,19 +264,21 @@ def get_llm_client(
     if provider in {"azure", "azure_gpt"}:
         endpoint = (config.get("azure_endpoint") or config.get("api_base") or config.get("endpoint") or "").rstrip("/")
         api_version = config.get("api_version", "2024-02-15-preview")
+        deployment = config.get("deployment") or model
         if not endpoint:
             raise ValueError("missing azure_endpoint")
-        if not model:
-            raise ValueError("missing model")
+        if not deployment:
+            raise ValueError("missing deployment")
         api_key = _resolve_api_key("AZURE_OPENAI_API_KEY")
-        url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version={api_version}"
+        url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
         return OpenAICompatibleClient(
             provider="azure_gpt",
             base_url=url,
-            model=str(model),
+            model=str(deployment),
             api_key=api_key,
             timeout_sec=timeout_sec,
             max_retry=max_retry,
+            sleep_time=sleep_time,
             include_model=False,
             temperature=temperature,
             top_p=top_p,
@@ -279,10 +292,11 @@ def get_llm_client(
         return OpenAICompatibleClient(
             provider=provider,
             base_url=url,
-            model=str(model or "local-model"),
+            model=str(model or config.get("local_model") or "local-model"),
             api_key=str(api_key),
             timeout_sec=timeout_sec,
             max_retry=max_retry,
+            sleep_time=sleep_time,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
@@ -301,6 +315,7 @@ def get_llm_client(
             api_key=api_key,
             timeout_sec=timeout_sec,
             max_retry=max_retry,
+            sleep_time=sleep_time,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
@@ -317,6 +332,7 @@ def get_llm_client(
             api_key=str(api_key),
             timeout_sec=timeout_sec,
             max_retry=max_retry,
+            sleep_time=sleep_time,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
