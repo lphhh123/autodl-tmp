@@ -30,10 +30,9 @@ class Env(BaseEnv):
         super().__init__(data_name, "wafer_layout")
         self.solution = self.current_solution
         self.best_solution = self.solution.copy()
-        self.problem_size = int(self.instance_data.get("num_chiplets", len(self.solution.assign)))
-        self.construction_steps = int(self.problem_size)
-        self.max_steps = int(self.construction_steps)
-        self.step_count = 0
+        self.problem_size = int(self._infer_slot_count())
+        self.construction_steps = 0
+        self.max_steps = int(self.problem_size)
         self.algorithm_data: Dict[str, Any] = {}
         self._evaluator = None
         self._layout_state = None
@@ -155,11 +154,11 @@ class Env(BaseEnv):
 
     @property
     def continue_run(self) -> bool:
-        return self.step_count < self.max_steps
+        return int(self.construction_steps) < int(self.max_steps)
 
     @property
     def is_complete_solution(self) -> bool:
-        return self.step_count >= self.max_steps
+        return int(self.construction_steps) >= int(self.max_steps)
 
     def get_problem_state(self) -> Dict[str, Any]:
         instance_state = get_instance_problem_state(self.instance_data)
@@ -177,7 +176,7 @@ class Env(BaseEnv):
         super().reset(output_dir)
         self.algorithm_data.update({"env": self, "rng": self.rng})
         self.initial_assign = list(getattr(self.solution, "assign", []) or [])
-        self.step_count = 0
+        self.construction_steps = 0
 
     def run_operator(
         self,
@@ -187,42 +186,47 @@ class Env(BaseEnv):
         new_solution: WaferLayoutSolution | None = None,
         stage: str | None = None,
         time_ms: int | None = None,
-    ) -> None:
+    ) -> bool:
         if not self.continue_run:
-            return
+            return False
         if operator is None:
             operator = NoOp()
-        before_metrics = self._evaluate_full(self.solution.assign)
+        pre_assign = list(self.current_solution.assign)
+        before_metrics = self._evaluate_full(pre_assign)
         before_score = float(before_metrics.get("total_scalar", 0.0))
+        accepted = bool(inplace)
         if inplace:
             if new_solution is None:
                 new_solution = operator.run(self.current_solution)
             self.current_solution = new_solution
             self.solution = self.current_solution
-            after_metrics = self._evaluate_full(self.solution.assign)
-        else:
-            after_metrics = before_metrics
+        post_assign = list(self.current_solution.assign)
+        after_metrics = self._evaluate_full(post_assign)
         after_score = float(after_metrics.get("total_scalar", 0.0))
         record: Dict[str, Any] = {
-            "step": int(self.step_count),
+            "step": int(self.construction_steps),
             "operator": operator,
             "meta": meta or {},
-            "accepted": bool(inplace),
-            "assign": list(self.solution.assign),
-            "total_scalar": float(after_score if inplace else before_score),
+            "accepted": accepted,
+            "assign": post_assign,
+            "total_scalar": float(after_score),
             "comm_norm": float(after_metrics.get("comm_norm", 0.0)),
             "therm_norm": float(after_metrics.get("therm_norm", 0.0)),
+            "duplicate_penalty": float(after_metrics.get("penalty", {}).get("duplicate", 0.0)),
+            "boundary_penalty": float(after_metrics.get("penalty", {}).get("boundary", 0.0)),
+            "time_ms": int(time_ms or 0),
+            "stage": stage or "",
+            "pre_total_scalar": before_score,
         }
-        if stage is not None:
-            record["stage"] = stage
-        if time_ms is not None:
-            record["time_ms"] = int(time_ms)
         self.recordings.append(record)
-        if inplace:
-            if after_score < self.get_key_value(self.best_solution) - 1e-12:
-                self.best_solution = self.solution.copy()
-        self.step += 1
-        self.step_count += 1
+        if after_score < self.get_key_value(self.best_solution) - 1e-12:
+            self.best_solution = WaferLayoutSolution(
+                assign=post_assign,
+                S=self.current_solution.S,
+                Ns=self.current_solution.Ns,
+            )
+        self.construction_steps += 1
+        return accepted
 
     @staticmethod
     def _operator_to_dict(operator: WaferLayoutOperator | None, pre_assign: list[int]) -> Dict[str, Any]:
@@ -260,7 +264,7 @@ class Env(BaseEnv):
 
         with open(rec_path, "w", encoding="utf-8") as f:
             for rec in self.recordings:
-                assign = rec.get("assign") or list(self.solution.assign)
+                assign = list(rec.get("assign") or self.current_solution.assign)
                 eval_out = self._evaluate_full(list(assign))
                 if best_eval is None or eval_out.get("total_scalar", float("inf")) < best_eval.get(
                     "total_scalar", float("inf")

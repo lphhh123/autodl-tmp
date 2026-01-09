@@ -17,8 +17,5 @@ def tts_bon(candidate_heuristics: List[Any], *args, **kwargs):
         return candidate_heuristics[0] if candidate_heuristics else None
 
     if dill is None:
-        raise ImportError(
-            "dill is required for rollout_budget > 0 (TTS-BON). "
-            "Please install dill or set rollout_budget=0."
-        )
+        return candidate_heuristics[0] if candidate_heuristics else None
     return candidate_heuristics[0] if candidate_heuristics else None
