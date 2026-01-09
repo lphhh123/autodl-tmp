@@ -96,8 +96,8 @@ def _resolve_llm_config_path(llm_config_file: str | None, heuragenix_root: Path,
     return None
 
 
-def _ensure_prompt_files(work_dir: Path, heuragenix_root: Path) -> None:
-    prompt_dir = work_dir / "data" / "wafer_layout" / "prompt"
+def _ensure_prompt_files(target_root: Path, heuragenix_root: Path) -> None:
+    prompt_dir = target_root / "data" / "wafer_layout" / "prompt"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     candidates = [
         heuragenix_root / "data" / "wafer_layout" / "prompt",
@@ -125,8 +125,9 @@ def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
     }
 
 
-def _write_test_data(layout_input_path: Path, work_dir: Path, problem: str, seed: int) -> Tuple[str, Path]:
-    data_dir = work_dir / "data" / problem / "test_data"
+def _write_test_data(layout_input_path: Path, heuragenix_root: Path, problem: str, seed: int) -> Tuple[str, Path]:
+    # MUST match HeurAgenix launch_hyper_heuristic base_dir/data layout
+    data_dir = heuragenix_root / "data" / problem / "test_data"
     data_dir.mkdir(parents=True, exist_ok=True)
     case_name = f"case_seed{seed}"
     target = data_dir / f"{case_name}.json"
@@ -144,8 +145,8 @@ def _prepare_work_dir(
 ) -> Tuple[Path, str, Path]:
     work_dir = out_dir / "__heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_prompt_files(work_dir, heuragenix_root)
-    case_name, case_path = _write_test_data(layout_input_path, work_dir, problem, seed)
+    _ensure_prompt_files(heuragenix_root, heuragenix_root)
+    case_name, case_path = _write_test_data(layout_input_path, heuragenix_root, problem, seed)
     return work_dir, case_name, case_path
 
 
@@ -294,7 +295,10 @@ def _write_trace_and_pareto(
         max_points=int(pareto_cfg.get("max_points", 2000)),
     )
     trace_path = out_dir / "trace.csv"
-    prev_eval: Dict[str, Any] | None = None
+    prev_metrics = evaluator.evaluate(base_state)
+    prev_total = float(prev_metrics["total_scalar"])
+    prev_comm = float(prev_metrics["comm_norm"])
+    prev_therm = float(prev_metrics["therm_norm"])
     prev_assign = _derive_initial_assign(layout_input)
     best_eval: Dict[str, Any] | None = None
     best_assign: List[int] | None = None
@@ -307,14 +311,13 @@ def _write_trace_and_pareto(
         for idx, rec in enumerate(_iter_recordings(recordings_path)):
             if max_steps is not None and idx >= max_steps:
                 break
-            assign = np.asarray(rec.get("assign", prev_assign), dtype=int)
-            base_state.assign = assign
+            if "assign" in rec and rec["assign"] is not None:
+                base_state.assign = np.asarray(rec["assign"], dtype=int)
+            assign = base_state.assign
             eval_out = evaluator.evaluate(base_state)
-            if prev_eval is None:
-                prev_eval = eval_out
-            d_total = float(eval_out["total_scalar"] - prev_eval.get("total_scalar", 0.0))
-            d_comm = float(eval_out["comm_norm"] - prev_eval.get("comm_norm", 0.0))
-            d_therm = float(eval_out["therm_norm"] - prev_eval.get("therm_norm", 0.0))
+            d_total = float(eval_out["total_scalar"] - prev_total)
+            d_comm = float(eval_out["comm_norm"] - prev_comm)
+            d_therm = float(eval_out["therm_norm"] - prev_therm)
 
             accepted = int(bool(rec.get("accepted", True)))
             if accepted:
@@ -325,7 +328,10 @@ def _write_trace_and_pareto(
                 best_step = idx
 
             action = _action_from_record(rec, prev_assign)
-            signature = _signature_for_action(action, prev_assign)
+            signature = rec.get("signature") or _signature_for_action(
+                {"op": rec.get("op"), **(rec.get("op_args") or {})},
+                prev_assign,
+            )
             pareto_added = pareto.add(
                 eval_out["comm_norm"],
                 eval_out["therm_norm"],
@@ -362,7 +368,9 @@ def _write_trace_and_pareto(
                 ]
             )
             prev_assign = assign.copy()
-            prev_eval = eval_out
+            prev_total = float(eval_out["total_scalar"])
+            prev_comm = float(eval_out["comm_norm"])
+            prev_therm = float(eval_out["therm_norm"])
     return {
         "trace_path": trace_path,
         "best_eval": best_eval,
@@ -469,7 +477,7 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    output_root = work_dir / "output" / problem
+    output_root = heuragenix_root / "output" / problem
 
     fallback_used = False
     log_text = ""
@@ -509,10 +517,10 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    env["AMLT_OUTPUT_DIR"] = str(work_dir / "output")
+    env["AMLT_OUTPUT_DIR"] = str(heuragenix_root / "output")
     result = subprocess.run(
         launch_cmd,
-        cwd=str(work_dir),
+        cwd=str(heuragenix_root),
         capture_output=True,
         text=True,
         env=env,
@@ -553,7 +561,7 @@ def main() -> None:
             ]
             result = subprocess.run(
                 launch_cmd,
-                cwd=str(work_dir),
+                cwd=str(heuragenix_root),
                 capture_output=True,
                 text=True,
                 env=env,
