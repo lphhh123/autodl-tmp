@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import random
 import time
 from pathlib import Path
@@ -202,6 +203,10 @@ class RandomHyperHeuristic:
             return self._run_legacy(int(env))
         if env is None:
             raise ValueError("env is required")
+        output_dir = getattr(env, "output_dir", None)
+        if not output_dir:
+            raise ValueError("output_dir is required to record llm_usage.jsonl")
+        usage_path = Path(output_dir) / "llm_usage.jsonl"
         rng = getattr(env, "rng", None) or self.rng
         temperature = self.sa_T0
         current_solution = env.solution
@@ -227,16 +232,20 @@ class RandomHyperHeuristic:
             step_idx = int(getattr(env, "step_count", getattr(env, "step", step)))
             if step % self.selection_frequency == 0 or selected is None:
                 selected = rng.choice(heuristics)
-                self.usage_records.append(
-                    {
-                        "ok": True,
-                        "reason": "random_pick",
-                        "chosen_heuristic": getattr(selected, "__name__", "unknown"),
-                        "candidates": [getattr(h, "__name__", "unknown") for h in heuristics],
-                        "selection_id": selection_id,
-                        "step": int(step_idx),
-                    }
-                )
+                record = {
+                    "ts_ms": int(time.time() * 1000),
+                    "engine": "random_hh",
+                    "selection_idx": selection_id,
+                    "step_begin": int(step_idx),
+                    "candidate_heuristics": [getattr(h, "__name__", "unknown") for h in heuristics],
+                    "chosen": getattr(selected, "__name__", "unknown"),
+                    "ok": True,
+                    "error": None,
+                }
+                self.usage_records.append(record)
+                usage_path.parent.mkdir(parents=True, exist_ok=True)
+                with usage_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 selection_id += 1
             algorithm_data = self._get_algorithm_data(env)
             problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": current_solution}

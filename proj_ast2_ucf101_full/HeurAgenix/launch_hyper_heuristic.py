@@ -13,7 +13,8 @@ for path in (str(ROOT), str(ROOT / "src")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
+from pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
+from pipeline.hyper_heuristics.random import RandomHyperHeuristic
 from util.llm_client.get_llm_client import get_llm_client
 from util.util import search_file
 
@@ -71,6 +72,25 @@ def main() -> None:
     parser.add_argument("-b", "--rollout_budget", type=int, default=0)
     parser.add_argument("-r", "--result", default="result")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--llm_timeout_s",
+        type=float,
+        default=None,
+        help="Per LLM call timeout (seconds). None = client default.",
+    )
+    parser.add_argument(
+        "--max_llm_failures",
+        type=int,
+        default=5,
+        help="Max LLM failures before disabling LLM and falling back.",
+    )
+    parser.add_argument(
+        "--fallback_mode",
+        type=str,
+        default="random",
+        choices=["random", "disable_llm", "abort"],
+        help="On LLM failure: choose random heuristic / disable llm permanently / abort run.",
+    )
     args = parser.parse_args()
 
     problem = args.problem
@@ -106,6 +126,8 @@ def main() -> None:
         initial_usage.append(
             {"ok": False, "engine": "llm_hh", "reason": "llm_unavailable", "error": llm_error}
         )
+    if initial_usage:
+        _write_jsonl(usage_path, initial_usage)
     if engine == "llm_hh":
         hh = LLMSelectionHyperHeuristic(
             llm_client=llm_client,
@@ -115,12 +137,15 @@ def main() -> None:
             selection_frequency=args.selection_frequency,
             num_candidate_heuristics=args.num_candidate_heuristics,
             rollout_budget=args.rollout_budget,
+            llm_timeout_s=args.llm_timeout_s,
+            max_llm_failures=args.max_llm_failures,
+            fallback_mode=args.fallback_mode,
             rng=env.rng,
             usage_path=str(usage_path),
             llm_error=llm_error,
         )
     else:
-        hh = RandomSelectionHyperHeuristic(
+        hh = RandomHyperHeuristic(
             heuristic_pool=heuristic_files,
             problem=problem,
             iterations_scale_factor=args.iterations_scale_factor,
@@ -131,16 +156,17 @@ def main() -> None:
     env.reset(str(output_root))
     hh.run(env)
 
-    records: List[Dict] = []
-    if engine == "llm_hh":
-        records = list(getattr(hh, "usage_records", []) or [])
-    elif engine == "random_hh":
-        records = list(getattr(hh, "usage_records", []) or [])
+    if not usage_path.exists():
+        records: List[Dict] = []
+        if engine == "llm_hh":
+            records = list(getattr(hh, "usage_records", []) or [])
+        elif engine == "random_hh":
+            records = list(getattr(hh, "usage_records", []) or [])
+            if not records:
+                records = [{"ok": False, "engine": "random_hh"}]
         if not records:
-            records = [{"ok": False, "engine": "random_hh"}]
-    if not records:
-        records = [{"ok": False, "engine": engine, "reason": "missing_usage_records"}]
-    _write_jsonl(usage_path, initial_usage + records)
+            records = [{"ok": False, "engine": engine, "reason": "missing_usage_records"}]
+        _write_jsonl(usage_path, initial_usage + records)
 
     env.dump_result()
 
