@@ -517,7 +517,7 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    env["AMLT_OUTPUT_DIR"] = str(heuragenix_root / "output")
+    env["AMLT_OUTPUT_DIR"] = str(work_dir)  # IMPORTANT: avoid work_dir/output/output
     result = subprocess.run(
         launch_cmd,
         cwd=str(heuragenix_root),
