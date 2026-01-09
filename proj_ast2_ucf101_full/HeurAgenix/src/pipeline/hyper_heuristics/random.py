@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
-from util.get_heuristic import get_heuristic
+from src.util.get_heuristic import get_heuristic
 
 
 def _is_env_like(value: Any) -> bool:
@@ -238,20 +238,24 @@ class RandomHyperHeuristic:
 
         steps = max_steps
         if steps is None:
-            steps = max(1, int(self.iterations_scale_factor * max(1, getattr(env, "construction_steps", getattr(env, "problem_size", 1)))))
+            problem_size = getattr(env, "problem_size", None) or getattr(env, "S", None) or 1
+            max_steps_env = getattr(env, "max_steps", None)
+            steps = int(max_steps_env) if max_steps_env is not None else max(1, int(problem_size * self.iterations_scale_factor))
+        else:
+            steps = int(steps)
         if hasattr(env, "max_steps"):
             env.max_steps = int(steps)
 
         step = 0
         while True:
-            if hasattr(env, "continue_run"):
-                if not env.continue_run:
-                    break
-            elif step >= int(steps):
+            current_steps = int(getattr(env, "construction_steps", getattr(env, "step", step)))
+            if current_steps >= int(steps):
+                break
+            if hasattr(env, "continue_run") and not env.continue_run:
                 break
             step_start = time.perf_counter()
-            step_idx = int(getattr(env, "step_count", getattr(env, "step", step)))
-            if step % self.selection_frequency == 0 or selected is None:
+            step_idx = int(getattr(env, "step_count", current_steps))
+            if step_idx % self.selection_frequency == 0 or selected is None:
                 selected_name, selected = rng.choice(heuristic_items)
                 record = {
                     "ts_ms": int(time.time() * 1000),
