@@ -70,7 +70,7 @@ class LLMSelectionHyperHeuristic:
         timeout_sec: int = 90,
         max_retry: int = 1,
         llm_timeout_s: float = 30,
-        max_llm_failures: int = 5,
+        max_llm_failures: int = 3,
         fallback_mode: str = "random",
         stage_name: str = "heuragenix_llm_hh",
         usage_path: str | None = None,
@@ -168,6 +168,8 @@ class LLMSelectionHyperHeuristic:
         ok = True
         err = None
         chosen_idx: int
+        start_ts = time.time()
+        start_perf = time.perf_counter()
 
         if self.llm_disabled or not self._llm_ready():
             ok = False
@@ -195,17 +197,22 @@ class LLMSelectionHyperHeuristic:
                     self.llm_disabled = True
 
         chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
+        latency_ms = int((time.perf_counter() - start_perf) * 1000)
+        candidate_names = [
+            c.get("name") if isinstance(c, dict) else str(c)
+            for c in candidates
+        ]
+        chosen_name = candidates[chosen_idx].get("name") if isinstance(candidates[chosen_idx], dict) else str(candidates[chosen_idx])
         usage = {
-            "step": int(step_idx),
-            "ok": bool(ok),
+            "ts": float(start_ts),
             "engine": "llm_hh",
-            "candidate_num": int(len(candidates)),
-            "chosen_idx": int(chosen_idx),
-            "chosen_name": candidates[chosen_idx].get("name") if isinstance(candidates[chosen_idx], dict) else str(candidates[chosen_idx]),
-            "error": err,
-            "fail_count": int(self.fail_count),
-            "llm_disabled": bool(self.llm_disabled),
-            "selection_id": int(selection_id),
+            "selection_round": int(selection_id),
+            "step": int(step_idx),
+            "candidates": candidate_names,
+            "chosen": chosen_name,
+            "llm_ok": bool(ok),
+            "llm_error": err,
+            "latency_ms": int(latency_ms),
         }
         if hasattr(self.llm, "calls") and self.llm.calls:
             usage.update(self.llm.calls[-1])
@@ -358,11 +365,20 @@ class LLMSelectionHyperHeuristic:
 
         steps = max_steps
         if steps is None:
-            steps = max(1, int(self.iterations_scale_factor * max(1, getattr(env, "problem_size", 1))))
+            steps = max(1, int(self.iterations_scale_factor * max(1, getattr(env, "construction_steps", getattr(env, "problem_size", 1)))))
+        if hasattr(env, "max_steps"):
+            env.max_steps = int(steps)
 
         selection_id = 0
-        for step in range(int(steps)):
+        step = 0
+        while True:
+            if hasattr(env, "continue_run"):
+                if not env.continue_run:
+                    break
+            elif step >= int(steps):
+                break
             step_start = time.perf_counter()
+            step_idx = int(getattr(env, "step_count", getattr(env, "step", step)))
             if step % self.selection_frequency == 0 or selected_operator is None:
                 candidates = self._score_candidates(current_solution, env, rng)
                 cand_ids = [c["id"] for c in candidates]
@@ -376,7 +392,7 @@ class LLMSelectionHyperHeuristic:
                 chosen_idx = self._choose_candidate(
                     state_summary,
                     candidates,
-                    int(getattr(env, "step", step)),
+                    step_idx,
                     selection_id,
                     rng,
                 )
@@ -403,6 +419,7 @@ class LLMSelectionHyperHeuristic:
                 new_solution,
             )
             temperature *= self.sa_alpha
+            step += 1
         if self.usage_path and self.usage_records:
             self.usage_path.parent.mkdir(parents=True, exist_ok=True)
             with self.usage_path.open("w", encoding="utf-8") as f:

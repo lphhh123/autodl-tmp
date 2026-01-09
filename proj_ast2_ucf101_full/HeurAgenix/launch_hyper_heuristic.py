@@ -15,27 +15,16 @@ for path in (str(ROOT), str(ROOT / "src")):
 
 from pipeline.hyper_heuristics import LLMSelectionHyperHeuristic, RandomSelectionHyperHeuristic
 from util.llm_client.get_llm_client import get_llm_client
-
-
-def _search_file(filename: str, problem: str, folder: str = "data") -> Path | None:
-    base = Path.cwd() / folder / problem
-    for subdir in ("test_data", ""):
-        direct = base / subdir / filename
-        if direct.exists():
-            return direct
-    for candidate in base.rglob(filename):
-        if candidate.is_file():
-            return candidate
-    return None
+from util.util import search_file
 
 
 def _resolve_test_data(problem: str, test_name: str) -> Path:
     test_path = Path(test_name)
     if test_path.exists():
         return test_path
-    candidate = _search_file(test_name, problem, folder="data")
-    if candidate is not None:
-        return candidate
+    candidate = search_file(test_name, problem)
+    if candidate:
+        return Path(candidate)
     raise FileNotFoundError(f"test_data '{test_name}' not found under data/{problem}")
 
 
@@ -91,8 +80,8 @@ def main() -> None:
     heuristic_files = _resolve_heuristic_files(args.heuristic_dir, problem)
     steps = max(1, int(float(args.iterations_scale_factor) * getattr(env, "construction_steps", 1)))
 
-    test_data_dir = test_path.parent.name
-    base_output_root = Path.cwd() / "output" / problem / test_data_dir / args.result
+    output_root = Path(os.environ.get("AMLT_OUTPUT_DIR", "output"))
+    base_output_root = output_root / problem / args.result / test_path.name
 
     engine = args.engine
     llm_error = None

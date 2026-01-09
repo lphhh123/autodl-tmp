@@ -212,10 +212,19 @@ class RandomHyperHeuristic:
 
         steps = max_steps
         if steps is None:
-            steps = max(1, int(self.iterations_scale_factor * max(1, getattr(env, "problem_size", 1))))
+            steps = max(1, int(self.iterations_scale_factor * max(1, getattr(env, "construction_steps", getattr(env, "problem_size", 1)))))
+        if hasattr(env, "max_steps"):
+            env.max_steps = int(steps)
 
-        for step in range(int(steps)):
+        step = 0
+        while True:
+            if hasattr(env, "continue_run"):
+                if not env.continue_run:
+                    break
+            elif step >= int(steps):
+                break
             step_start = time.perf_counter()
+            step_idx = int(getattr(env, "step_count", getattr(env, "step", step)))
             if step % self.selection_frequency == 0 or selected is None:
                 selected = rng.choice(heuristics)
                 self.usage_records.append(
@@ -225,7 +234,7 @@ class RandomHyperHeuristic:
                         "chosen_heuristic": getattr(selected, "__name__", "unknown"),
                         "candidates": [getattr(h, "__name__", "unknown") for h in heuristics],
                         "selection_id": selection_id,
-                        "step": int(getattr(env, "step", step)),
+                        "step": int(step_idx),
                     }
                 )
                 selection_id += 1
@@ -258,3 +267,4 @@ class RandomHyperHeuristic:
                 new_solution,
             )
             temperature *= self.sa_alpha
+            step += 1

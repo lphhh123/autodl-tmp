@@ -28,8 +28,12 @@ class Env(BaseEnv):
     def __init__(self, data_name: str, rng=None):
         self.rng = rng
         super().__init__(data_name, "wafer_layout")
-        self.construction_steps = int(self._infer_slot_count())
-        self.problem_size = int(self.construction_steps)
+        self.solution = self.current_solution
+        self.best_solution = self.solution.copy()
+        self.problem_size = int(self.instance_data.get("num_chiplets", len(self.solution.assign)))
+        self.construction_steps = int(self.problem_size)
+        self.max_steps = int(self.construction_steps)
+        self.step_count = 0
         self.algorithm_data: Dict[str, Any] = {}
         self._evaluator = None
         self._layout_state = None
@@ -145,8 +149,13 @@ class Env(BaseEnv):
         metrics = self._evaluate_full(solution.assign)
         return float(metrics.get("total_scalar", 0.0))
 
-    def is_complete_solution(self, solution: WaferLayoutSolution) -> bool:
-        return False
+    @property
+    def continue_run(self) -> bool:
+        return self.step_count < self.max_steps
+
+    @property
+    def is_complete_solution(self) -> bool:
+        return self.step_count >= self.max_steps
 
     def get_problem_state(self) -> Dict[str, Any]:
         instance_state = get_instance_problem_state(self.instance_data)
@@ -164,6 +173,7 @@ class Env(BaseEnv):
         super().reset(output_dir)
         self.algorithm_data.update({"env": self, "rng": self.rng})
         self.initial_assign = list(getattr(self.solution, "assign", []) or [])
+        self.step_count = 0
 
     def run_operator(
         self,
@@ -174,26 +184,41 @@ class Env(BaseEnv):
         stage: str | None = None,
         time_ms: int | None = None,
     ) -> None:
+        if not self.continue_run:
+            return
         if operator is None:
             operator = NoOp()
+        before_metrics = self._evaluate_full(self.solution.assign)
+        before_score = float(before_metrics.get("total_scalar", 0.0))
         if inplace:
             if new_solution is None:
                 new_solution = operator.run(self.current_solution)
             self.current_solution = new_solution
             self.solution = self.current_solution
+            after_metrics = self._evaluate_full(self.solution.assign)
+        else:
+            after_metrics = before_metrics
+        after_score = float(after_metrics.get("total_scalar", 0.0))
         record: Dict[str, Any] = {
-            "step": int(self.step),
+            "step": int(self.step_count),
             "operator": operator,
             "meta": meta or {},
             "accepted": bool(inplace),
             "assign": list(self.solution.assign),
+            "total_scalar": float(after_score if inplace else before_score),
+            "comm_norm": float(after_metrics.get("comm_norm", 0.0)),
+            "therm_norm": float(after_metrics.get("therm_norm", 0.0)),
         }
         if stage is not None:
             record["stage"] = stage
         if time_ms is not None:
             record["time_ms"] = int(time_ms)
         self.recordings.append(record)
+        if inplace:
+            if after_score < self.get_key_value(self.best_solution) - 1e-12:
+                self.best_solution = self.solution.copy()
         self.step += 1
+        self.step_count += 1
 
     @staticmethod
     def _operator_to_dict(operator: WaferLayoutOperator | None, pre_assign: list[int]) -> Dict[str, Any]:
@@ -223,6 +248,7 @@ class Env(BaseEnv):
         os.makedirs(self.output_dir, exist_ok=True)
         rec_path = os.path.join(self.output_dir, "recordings.jsonl")
         best_path = os.path.join(self.output_dir, "best_solution.json")
+        finished_path = os.path.join(self.output_dir, "finished.txt")
 
         best_eval: Dict[str, Any] | None = None
         best_assign: list[int] | None = None
@@ -263,3 +289,5 @@ class Env(BaseEnv):
         }
         with open(best_path, "w", encoding="utf-8") as f:
             json.dump(best_payload, f, ensure_ascii=False, indent=2)
+        with open(finished_path, "w", encoding="utf-8") as f:
+            f.write("ok\n")
