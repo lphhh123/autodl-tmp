@@ -64,16 +64,20 @@ class Env(BaseEnv):
         baseline = self.instance_data.get("baseline", {})
         seed = self.instance_data.get("seed", {})
         assign = None
-        if seed.get("assign_seed") is not None:
-            assign = list(seed.get("assign_seed"))
+        seed_assign = seed.get("assign_seed")
+        if seed_assign is None:
+            seed_assign = self.instance_data.get("seed_assign")
+        baseline_assign = baseline.get("assign_grid")
+        if baseline_assign is None:
+            baseline_assign = self.instance_data.get("baseline_assign")
+        if seed_assign is not None:
+            assign = list(seed_assign)
         elif seed.get("seed_assign") is not None:
             assign = list(seed.get("seed_assign"))
-        elif baseline.get("assign_grid") is not None:
-            assign = list(baseline.get("assign_grid"))
+        elif baseline_assign is not None:
+            assign = list(baseline_assign)
         elif self.instance_data.get("baseline_assign_grid") is not None:
             assign = list(self.instance_data.get("baseline_assign_grid"))
-        elif self.instance_data.get("baseline_assign") is not None:
-            assign = list(self.instance_data.get("baseline_assign"))
         else:
             if Ns <= 0:
                 assign = [0 for _ in range(slots)]

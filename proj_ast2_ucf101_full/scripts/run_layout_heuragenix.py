@@ -125,28 +125,27 @@ def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
     }
 
 
-def _write_test_data(work_dir: Path, layout_input: dict, cfg: Any, seed: int) -> Tuple[str, Path]:
-    data_dir = work_dir / "data" / "wafer_layout" / "test_data"
+def _write_test_data(layout_input_path: Path, work_dir: Path, problem: str, seed: int) -> Tuple[str, Path]:
+    data_dir = work_dir / "data" / problem / "test_data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    case_name = f"case_seed{seed}.json"
-    payload = dict(layout_input)
-    payload["objective_cfg"] = _build_objective_cfg(cfg)
-    target = data_dir / case_name
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    case_name = f"case_seed{seed}"
+    target = data_dir / f"{case_name}.json"
+    layout_input = json.loads(layout_input_path.read_text(encoding="utf-8"))
+    target.write_text(json.dumps(layout_input, ensure_ascii=False, indent=2), encoding="utf-8")
     return case_name, target
 
 
 def _prepare_work_dir(
     out_dir: Path,
     heuragenix_root: Path,
-    layout_input: dict,
-    cfg: Any,
+    layout_input_path: Path,
+    problem: str,
     seed: int,
 ) -> Tuple[Path, str, Path]:
     work_dir = out_dir / "__heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
     _ensure_prompt_files(work_dir, heuragenix_root)
-    case_name, case_path = _write_test_data(work_dir, layout_input, cfg, seed)
+    case_name, case_path = _write_test_data(layout_input_path, work_dir, problem, seed)
     return work_dir, case_name, case_path
 
 
@@ -446,7 +445,13 @@ def main() -> None:
     if not heuragenix_root.exists():
         raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
 
-    work_dir, case_name, case_path = _prepare_work_dir(out_dir, heuragenix_root, layout_input, cfg, seed)
+    work_dir, case_name, case_path = _prepare_work_dir(
+        out_dir,
+        heuragenix_root,
+        layout_input_path,
+        problem,
+        seed,
+    )
 
     method = str(baseline_cfg.get("method", "llm_hh"))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))

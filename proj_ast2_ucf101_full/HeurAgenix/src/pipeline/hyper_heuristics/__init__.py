@@ -1,4 +1,5 @@
-from .llm_selection import LLMSelectionHyperHeuristic  # noqa: F401
-from .random import RandomHyperHeuristic  # noqa: F401
+"""Hyper-heuristic implementations.
 
-RandomSelectionHyperHeuristic = RandomHyperHeuristic
+Do NOT eager-import heavy modules here.
+Import hyper-heuristics explicitly in launch_hyper_heuristic.py when needed.
+"""
