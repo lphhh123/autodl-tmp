@@ -2,7 +2,8 @@ _base_: base_layout.yaml
 
 baseline:
   name: heuragenix_llm_hh
-  heuragenix_root: HeurAgenix
+  # sibling 目录（HeurAgenix 与主项目同级）
+  heuragenix_root: ../HeurAgenix
   problem: wafer_layout
   heuristic_dir: basic_heuristics
   method: llm_hh

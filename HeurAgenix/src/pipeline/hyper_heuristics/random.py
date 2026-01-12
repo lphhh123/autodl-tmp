@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
 from src.util.get_heuristic import get_heuristic
+from src.util.util import load_function
 
 
 def _is_env_like(value: Any) -> bool:
@@ -64,6 +65,7 @@ class RandomHyperHeuristic:
         iterations_scale_factor: float = 1.0,
         selection_frequency: int = 1,
         rng: random.Random | None = None,
+        seed: int = 0,
         sa_T0: float = 1.0,
         sa_alpha: float = 0.995,
         stage_name: str = "heuragenix_random_hh",
@@ -96,6 +98,7 @@ class RandomHyperHeuristic:
         self.iterations_scale_factor = float(iterations_scale_factor)
         self.selection_frequency = max(1, int(selection_frequency))
         self.rng = rng or random.Random(0)
+        self.seed = int(seed)
         self.sa_T0 = float(sa_T0)
         self.sa_alpha = float(sa_alpha)
         self.stage_name = stage_name
@@ -219,88 +222,26 @@ class RandomHyperHeuristic:
             )
             temperature *= self.sa_alpha
 
-    def run(self, env: Any, max_steps: int | None = None) -> None:
+    def run(self, env: Any, max_steps: int | None = None) -> bool:
+        import random as _random
+
         if self.legacy_mode or isinstance(env, int):
             return self._run_legacy(int(env))
         if env is None:
             raise ValueError("env is required")
-        output_dir = getattr(env, "output_dir", None)
-        if not output_dir:
-            raise ValueError("output_dir is required to record llm_usage.jsonl")
-        usage_path = Path(output_dir) / "llm_usage.jsonl"
-        rng = getattr(env, "rng", None) or self.rng
-        temperature = self.sa_T0
-        current_solution = env.solution
-        current_score = env.get_key_value(current_solution)
-        selection_id = 0
-        selected = None
-        heuristic_items = self._resolve_heuristic_items()
 
-        steps = max_steps
-        if steps is None:
-            problem_size = getattr(env, "problem_size", None) or getattr(env, "S", None) or 1
-            max_steps_env = getattr(env, "max_steps", None)
-            steps = int(max_steps_env) if max_steps_env is not None else max(1, int(problem_size * self.iterations_scale_factor))
-        else:
-            steps = int(steps)
-        if hasattr(env, "max_steps"):
-            env.max_steps = int(steps)
+        algorithm_data = {
+            "rng": _random.Random(int(getattr(self, "seed", 0))),
+            "env": env,
+        }
 
-        step = 0
-        while True:
-            current_steps = int(getattr(env, "construction_steps", getattr(env, "step", step)))
-            if current_steps >= int(steps):
-                break
-            if hasattr(env, "continue_run") and not env.continue_run:
-                break
-            step_start = time.perf_counter()
-            step_idx = int(getattr(env, "step_count", current_steps))
-            if step_idx % self.selection_frequency == 0 or selected is None:
-                selected_name, selected = rng.choice(heuristic_items)
-                record = {
-                    "ts_ms": int(time.time() * 1000),
-                    "engine": "random_hh",
-                    "selection_idx": selection_id,
-                    "step_begin": int(step_idx),
-                    "candidate_heuristics": [name for name, _ in heuristic_items],
-                    "chosen": selected_name,
-                    "chosen_heuristic": selected_name,
-                    "candidates": [name for name, _ in heuristic_items],
-                    "ok": True,
-                    "error": None,
-                }
-                self.usage_records.append(record)
-                usage_path.parent.mkdir(parents=True, exist_ok=True)
-                with usage_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                selection_id += 1
-            algorithm_data = self._get_algorithm_data(env)
-            problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": current_solution}
-            if hasattr(env, "get_problem_state"):
-                try:
-                    problem_state = dict(env.get_problem_state())
-                except Exception:  # noqa: BLE001
-                    problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": current_solution}
-            problem_state["current_solution"] = current_solution
-            operator, meta = selected(problem_state, algorithm_data)
-            new_solution = operator.run(current_solution)
-            new_score = env.get_key_value(new_solution)
-            delta = new_score - current_score
-            if hasattr(env, "validation_solution") and not env.validation_solution(new_solution):
-                accept = False
-            else:
-                accept = (delta < 0) or (rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
-            if accept:
-                current_solution = new_solution
-                current_score = new_score
-                env.solution = current_solution
-            self._record_step(
-                env,
-                operator,
-                meta,
-                accept,
-                int((time.perf_counter() - step_start) * 1000),
-                new_solution,
+        while env.continue_run:
+            heuristic_name = _random.choice(self.heuristic_pool)
+            heuristic = load_function(heuristic_name, problem=self.problem)
+            env.run_heuristic(
+                heuristic,
+                algorithm_data=algorithm_data,
+                add_record_item={"selection": "random_hh"},
             )
-            temperature *= self.sa_alpha
-            step += 1
+
+        return bool(env.is_valid_solution(env.current_solution))

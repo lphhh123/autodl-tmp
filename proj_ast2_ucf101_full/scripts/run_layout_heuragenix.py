@@ -7,7 +7,6 @@ import json
 import math
 import os
 import random
-import shutil
 import subprocess
 import sys
 import time
@@ -74,20 +73,26 @@ def _seed_everything(seed: int) -> None:
 
 
 def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
-    if cfg_root:
-        candidate = Path(cfg_root).expanduser()
-        if not candidate.is_absolute():
-            for base in (project_root, project_root.parent):
-                adjusted = base / candidate
-                if adjusted.exists():
-                    return adjusted
-        if candidate.exists():
-            return candidate
-    fallback = project_root / "HeurAgenix"
-    if fallback.exists():
-        return fallback
-    sibling = project_root.parent / "HeurAgenix"
-    return sibling
+    heuragenix_root_cfg = cfg_root or "../HeurAgenix"
+    hx = Path(heuragenix_root_cfg).expanduser()
+
+    if not hx.is_absolute():
+        cand_parent = (project_root.parent / hx).resolve()
+        cand_local = (project_root / hx).resolve()
+        if cand_parent.exists():
+            heuragenix_root = cand_parent
+        else:
+            heuragenix_root = cand_local
+    else:
+        heuragenix_root = hx
+
+    local_dup = project_root / "HeurAgenix"
+    parent_dup = project_root.parent / "HeurAgenix"
+    if local_dup.exists() and parent_dup.exists():
+        print(f"[WARN] Detected two HeurAgenix copies: {local_dup} and {parent_dup}. Use sibling one.")
+        heuragenix_root = parent_dup.resolve()
+
+    return heuragenix_root
 
 
 def _resolve_llm_config_path(llm_config_file: str | None, heuragenix_root: Path, project_root: Path) -> Path | None:
@@ -103,22 +108,6 @@ def _resolve_llm_config_path(llm_config_file: str | None, heuragenix_root: Path,
     return None
 
 
-def _ensure_prompt_files(target_root: Path, heuragenix_root: Path) -> None:
-    prompt_dir = target_root / "data" / "wafer_layout" / "prompt"
-    prompt_dir.mkdir(parents=True, exist_ok=True)
-    candidates = [
-        heuragenix_root / "data" / "wafer_layout" / "prompt",
-        heuragenix_root / "src" / "problems" / "wafer_layout" / "prompt",
-    ]
-    source = next((c for c in candidates if c.exists()), None)
-    if source is None:
-        return
-    for file in source.glob("*.txt"):
-        target = prompt_dir / file.name
-        if not target.exists():
-            shutil.copyfile(file, target)
-
-
 def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
     objective = cfg.objective if hasattr(cfg, "objective") else {}
     scalar = objective.get("scalar_weights", {}) if isinstance(objective, dict) else objective.scalar_weights
@@ -132,29 +121,38 @@ def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
     }
 
 
-def _write_test_data(layout_input_path: Path, heuragenix_root: Path, problem: str, seed: int) -> Tuple[str, Path]:
-    # MUST match HeurAgenix launch_hyper_heuristic base_dir/data layout
-    data_dir = heuragenix_root / "data" / problem / "test_data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    case_name = f"case_seed{seed}"
-    target = data_dir / f"{case_name}.json"
-    layout_input = json.loads(layout_input_path.read_text(encoding="utf-8"))
-    target.write_text(json.dumps(layout_input, ensure_ascii=False, indent=2), encoding="utf-8")
-    return case_name, target
+def _write_test_data(case: dict, seed: int, data_base: Path, problem: str = "wafer_layout") -> Tuple[str, str]:
+    """
+    Write <data_base>/<problem>/test_data/case_seed{seed}.json
+    Return:
+      case_stem: "case_seed{seed}"
+      case_file: "case_seed{seed}.json"
+    """
+    case_stem = f"case_seed{seed}"
+    case_file = f"{case_stem}.json"
+
+    test_dir = data_base / problem / "test_data"
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = dict(case)
+    payload["assign_seed"] = int(seed)
+
+    target = test_dir / case_file
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return case_stem, case_file
 
 
 def _prepare_work_dir(
     out_dir: Path,
     heuragenix_root: Path,
-    layout_input_path: Path,
-    problem: str,
+    case: dict,
     seed: int,
-) -> Tuple[Path, str, Path]:
+    internal_data_base: Path,
+) -> Tuple[Path, str, str]:
     work_dir = out_dir / "__heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_prompt_files(heuragenix_root, heuragenix_root)
-    case_name, case_path = _write_test_data(layout_input_path, heuragenix_root, problem, seed)
-    return work_dir, case_name, case_path
+    case_stem, case_file = _write_test_data(case, seed, internal_data_base, problem="wafer_layout")
+    return work_dir, case_stem, case_file
 
 
 def infer_problem_size(layout_input: dict) -> int:
@@ -339,6 +337,10 @@ def _write_trace_and_pareto(
                 {"op": rec.get("op"), **(rec.get("op_args") or {})},
                 prev_assign,
             )
+            meta = rec.get("meta", {}) or {}
+            tabu_hit = int(meta.get("tabu_hit", 0))
+            inverse_hit = int(meta.get("inverse_hit", 0))
+            cooldown_hit = int(meta.get("cooldown_hit", 0))
             pareto_added = pareto.add(
                 eval_out["comm_norm"],
                 eval_out["therm_norm"],
@@ -369,9 +371,9 @@ def _write_trace_and_pareto(
                     d_total,
                     d_comm,
                     d_therm,
-                    0,
-                    0,
-                    0,
+                    tabu_hit,
+                    inverse_hit,
+                    cooldown_hit,
                 ]
             )
             prev_assign = assign.copy()
@@ -466,12 +468,16 @@ def main() -> None:
     llm_usage_path = out_dir / "llm_usage.jsonl"
 
     problem = str(baseline_cfg.get("problem", "wafer_layout"))
-    work_dir, case_name, case_path = _prepare_work_dir(
+    internal_out = out_dir / "heuragenix_internal"
+    internal_out.mkdir(parents=True, exist_ok=True)
+    internal_data_base = internal_out / "data"
+    internal_data_base.mkdir(parents=True, exist_ok=True)
+    work_dir, case_name, case_file = _prepare_work_dir(
         out_dir,
         heuragenix_root,
-        layout_input_path,
-        problem,
+        layout_input,
         seed,
+        internal_data_base,
     )
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
@@ -484,8 +490,6 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    internal_out = out_dir / "heuragenix_internal"
-    internal_out.mkdir(parents=True, exist_ok=True)
     output_root = internal_out / "output" / problem
 
     fallback_used = False
@@ -505,7 +509,7 @@ def main() -> None:
         "-d",
         heuristic_dir,
         "-t",
-        case_name,
+        case_file,
         "-n",
         f"{iters_sf}",
         "-m",
@@ -527,6 +531,7 @@ def main() -> None:
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
     env["AMLT_OUTPUT_DIR"] = str(internal_out)
+    env["AMLT_DATA_DIR"] = str(internal_data_base)
     result = subprocess.run(
         launch_cmd,
         cwd=str(heuragenix_root),
@@ -554,7 +559,7 @@ def main() -> None:
                 "-d",
                 heuristic_dir,
                 "-t",
-                case_name,
+                case_file,
                 "-n",
                 f"{iters_sf}",
                 "-m",

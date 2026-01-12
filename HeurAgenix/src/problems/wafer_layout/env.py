@@ -228,6 +228,27 @@ class Env(BaseEnv):
         self.construction_steps += 1
         return accepted
 
+    def run_heuristic(self, heuristic: callable, algorithm_data: dict = None, add_record_item: dict = None):
+        """
+        Override BaseEnv.run_heuristic to avoid double recordings.
+        We rely on wafer_layout.Env.run_operator() to record exactly once.
+        """
+        if algorithm_data is None:
+            algorithm_data = {}
+        if add_record_item is None:
+            add_record_item = {}
+
+        op, delta = heuristic(self.get_problem_state(), algorithm_data)
+        if delta:
+            algorithm_data.update(delta)
+
+        meta = dict(add_record_item)
+        meta.setdefault("heuristic_name", getattr(heuristic, "__name__", "heuristic"))
+
+        # run_operator will append a single well-formed record
+        self.run_operator(op, inplace=True, meta=meta)
+        return True
+
     @staticmethod
     def _operator_to_dict(operator: WaferLayoutOperator | None, pre_assign: list[int]) -> Dict[str, Any]:
         if operator is None:
