@@ -227,13 +227,13 @@ class RandomHyperHeuristic:
     def run(self, env: Any, max_steps: int | None = None) -> bool:
         import random as _random
 
-        # legacy path (keep)
+        # keep legacy behavior
         if self.legacy_mode or isinstance(env, int):
             return self._run_legacy(int(env))
         if env is None:
             raise ValueError("env is required")
 
-        # Make sure we have a pool of heuristic NAMES (strings)
+        # pool
         if not self.heuristic_pool:
             if self.problem and self.heuristic_dir:
                 from src.util.util import get_heuristic_names
@@ -242,24 +242,27 @@ class RandomHyperHeuristic:
             if not self.heuristic_pool:
                 return False
 
-        # local rng for reproducibility
         rng = _random.Random(int(getattr(self, "seed", 0)))
+        K = int(getattr(self, "selection_frequency", 1))
+        K = max(1, K)
 
         chosen_name = None
+        kcnt = 0
+
         while getattr(env, "continue_run", True):
-            if chosen_name is None:
+            if (chosen_name is None) or (kcnt % K == 0):
                 chosen_name = rng.choice(self.heuristic_pool)
 
             heuristic = load_function(chosen_name, problem=self.problem)
             env.run_heuristic(
                 heuristic,
                 algorithm_data={"rng": rng, "env": env},
-                add_record_item={"selection": "random_hh"},
+                add_record_item={"selection": "random_hh", "chosen_heuristic": chosen_name},
             )
 
-            if int(getattr(env, "current_steps", 0)) % max(1, int(getattr(self, "selection_frequency", 1))) == 0:
-                chosen_name = rng.choice(self.heuristic_pool)
+            kcnt += 1
 
+        # IMPORTANT: do NOT call env.is_valid_solution (not implemented)
         if hasattr(env, "validate_solution"):
             return bool(env.validate_solution(getattr(env, "current_solution", None)))
         return True

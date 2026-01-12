@@ -301,15 +301,13 @@ class Env(BaseEnv):
 
         delta = float(new_key - old_key)
         accept = bool(inplace) and (delta <= 0.0)
-        if bool(inplace):
-            if not accept:
-                T = float(getattr(self, "_sa_T", self.temp_init))
-                if T > 1e-12:
-                    p = float(np.exp(-delta / max(T, 1e-12)))
-                    if self.rng.random() < p:
-                        accept = True
+        if (not accept) and bool(inplace):
             T = float(getattr(self, "_sa_T", self.temp_init))
-            T = max(self.temp_min, T * self.temp_decay)
+            if T > 1e-12:
+                p = float(np.exp(-delta / max(T, 1e-12)))
+                if self.rng.random() < p:
+                    accept = True
+            T = max(float(self.temp_min), float(T) * float(self.temp_decay))
             self._sa_T = float(T)
         if not accept:
             self.current_solution.assign = old_assign
@@ -343,6 +341,9 @@ class Env(BaseEnv):
         duplicate_penalty = float(penalty.get("duplicate", 0.0))
         boundary_penalty = float(penalty.get("boundary", 0.0))
         meta = meta or {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+        meta["sa_T"] = float(getattr(self, "_sa_T", self.temp_init))
+        meta["sa_accept"] = 1 if accept and delta > 0 else 0
+        meta["delta_total"] = float(delta)
         line = {
             "iter": self._step_id,
             "stage": stage,
