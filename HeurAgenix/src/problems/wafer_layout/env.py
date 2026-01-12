@@ -16,7 +16,6 @@ from .components import (
 )
 
 from layout.evaluator import LayoutEvaluator, LayoutState
-from .problem_state import attach_key_value
 
 
 class Env(BaseEnv):
@@ -144,21 +143,45 @@ class Env(BaseEnv):
         self.problem_state = self.get_problem_state()
 
     def run_heuristic(self, heuristic, **kwargs):
-        self.problem_state = self.get_problem_state()
-        if not hasattr(self, "key_value"):
-            self.key_value = self.get_key_value()
-        self.problem_state = attach_key_value(self.problem_state, self.key_value)
-        op, delta = heuristic(self.problem_state, self.algorithm_data, **kwargs)
+        import time
+
+        t0 = time.time()
+
+        op, delta = heuristic(self.get_problem_state(), self.algorithm_data, **kwargs)
         if op is None:
             op = NoOpOperator()
-            delta = {}
 
-        return self.run_operator(
-            op,
-            inplace=True,
-            meta=delta,
-            stage=getattr(heuristic, "__name__", "heuristic"),
-        )
+        new_sol = op.run(self.instance_data, self.current_solution)
+        self.current_solution = new_sol
+        self.is_valid_solution = self.validation_solution(self.current_solution)
+
+        metrics = self.evaluate_assign(self.current_solution.assign)
+        total_scalar = float(metrics.get("total_scalar", 0.0))
+        comm_norm = float(metrics.get("comm_norm", 0.0))
+        therm_norm = float(metrics.get("therm_norm", 0.0))
+
+        self.key_value = total_scalar
+        self.is_complete_solution = True
+
+        if (self.best_solution is None) or (total_scalar < self.best_key_value):
+            self.best_solution = self.current_solution.copy()
+            self.best_key_value = total_scalar
+
+        rec = {
+            "step_idx": int(self.current_steps),
+            "heuristic": getattr(heuristic, "__name__", str(heuristic)),
+            "op": getattr(op, "op_name", op.__class__.__name__),
+            "op_args_json": op.to_json() if hasattr(op, "to_json") else {},
+            "accepted": 1,
+            "objective_scalar": total_scalar,
+            "comm_norm": comm_norm,
+            "therm_norm": therm_norm,
+            "assign": self.current_solution.to_list(),
+            "time_ms": int((time.time() - t0) * 1000),
+        }
+        self.recordings.append(rec)
+        self.current_steps += 1
+        return op
 
     def run_operator(
         self,
@@ -221,11 +244,11 @@ class Env(BaseEnv):
     def dump_result(self) -> None:
         out_dir = Path(self.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+
         rec_path = out_dir / "recordings.jsonl"
-        if not rec_path.exists():
-            with rec_path.open("w", encoding="utf-8") as f:
-                for r in self.recordings:
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        with open(rec_path, "w", encoding="utf-8") as f:
+            for r in self.recordings:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
         best_assign = (
             self.best_solution.to_list()
@@ -233,27 +256,21 @@ class Env(BaseEnv):
             else self.current_solution.to_list()
         )
         best_eval = self.evaluate_assign(np.asarray(best_assign, dtype=np.int64))
-
-        best_path = out_dir / "best_solution.json"
-        best_path.write_text(
-            json.dumps(
-                {
-                    "problem": "wafer_layout",
-                    "seed_id": self._resolve_seed_id(),
-                    "best_assign": best_assign,
-                    "best_key_value": float(self.best_key_value)
-                    if self.best_solution is not None
-                    else float(self.key_value),
-                    "best_eval": best_eval,
-                    "meta": {
-                        "S": int(self.instance_data["S"]),
-                        "Ns": int(self.instance_data["Ns"]),
-                        "weights": self.instance_data.get("weights", {}),
-                    },
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
+        best_info = {
+            "problem": "wafer_layout",
+            "seed": int(self.instance_data.get("assign_seed", 0)),
+            "best_key_value": float(self.best_key_value),
+            "best_assign": best_assign,
+            "best_eval": best_eval,
+            "meta": {
+                "S": int(self.instance_data.get("S", 0)),
+                "Ns": int(self.instance_data.get("Ns", 0)),
+                "weights": self.instance_data.get("weights", {}),
+                "sigma": self.instance_data.get("sigma", 1.0),
+            },
+        }
+        (out_dir / "best_solution.json").write_text(
+            json.dumps(best_info, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
