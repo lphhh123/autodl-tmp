@@ -1,6 +1,7 @@
 """Load LLM clients from config files compatible with HeurAgenix README."""
 from __future__ import annotations
 
+import ast
 import json
 import time
 import os
@@ -38,6 +39,9 @@ class OpenAICompatibleClient:
         self.max_tokens = max_tokens
         self.last_usage: Optional[Dict] = None
         self.calls: List[Dict] = []
+        self.support_tool_calling = False
+        self.prompt_dir: Optional[str] = None
+        self.output_dir: Optional[str] = None
 
     def is_ready(self) -> bool:
         return bool(self.base_url and self.model)
@@ -240,6 +244,29 @@ class OpenAICompatibleClient:
             raise ValueError("llm_pick_out_of_range")
         return candidates[idx]
 
+    def load(self, background_info: Dict, background_file: str | None = None) -> str:
+        _ = background_file
+        self.last_usage = {"ok": True, "background_loaded": True, "info": background_info}
+        return "is_cop:yes"
+
+    def chat(self, prompt: Dict, text_file: str | None = None) -> str:
+        _ = text_file
+        candidates_raw = prompt.get("candidate_heuristics", [])
+        candidates = candidates_raw
+        if isinstance(candidates_raw, str):
+            try:
+                candidates = ast.literal_eval(candidates_raw)
+            except Exception:
+                candidates = [c.strip() for c in candidates_raw.split(",") if c.strip()]
+        if not candidates:
+            raise ValueError("missing_candidate_heuristics")
+        return self.choose_heuristic(prompt, list(candidates))
+
+    def chat_with_tools(self, prompt: Dict, tools: Optional[List] = None) -> Dict:
+        _ = tools
+        choice = self.chat(prompt)
+        return {"heuristic": choice}
+
 
 def get_llm_client(
     config_path: str,
@@ -248,7 +275,11 @@ def get_llm_client(
     prompt_dir: str | None = None,
     output_dir: str | None = None,
 ) -> Optional[OpenAICompatibleClient]:
-    _ = prompt_dir, output_dir
+    def _finalize_client(client: OpenAICompatibleClient) -> OpenAICompatibleClient:
+        client.prompt_dir = prompt_dir
+        client.output_dir = output_dir
+        return client
+
     path = Path(config_path)
     if not path.exists():
         return None
@@ -287,35 +318,39 @@ def get_llm_client(
             raise ValueError("missing deployment")
         api_key = _resolve_api_key("AZURE_OPENAI_API_KEY")
         url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-        return OpenAICompatibleClient(
-            provider="azure_gpt",
-            base_url=url,
-            model=str(deployment),
-            api_key=api_key,
-            timeout_sec=timeout_sec,
-            max_retry=max_retry,
-            sleep_time=sleep_time,
-            include_model=False,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
+        return _finalize_client(
+            OpenAICompatibleClient(
+                provider="azure_gpt",
+                base_url=url,
+                model=str(deployment),
+                api_key=api_key,
+                timeout_sec=timeout_sec,
+                max_retry=max_retry,
+                sleep_time=sleep_time,
+                include_model=False,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
         )
 
     if provider in {"local_model", "vllm"}:
         base_url = (config.get("base_url") or config.get("endpoint") or "http://localhost:8000/v1").rstrip("/")
         api_key = config.get("api_key", "")
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
-        return OpenAICompatibleClient(
-            provider=provider,
-            base_url=url,
-            model=str(model or config.get("local_model") or "local-model"),
-            api_key=str(api_key),
-            timeout_sec=timeout_sec,
-            max_retry=max_retry,
-            sleep_time=sleep_time,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
+        return _finalize_client(
+            OpenAICompatibleClient(
+                provider=provider,
+                base_url=url,
+                model=str(model or config.get("local_model") or "local-model"),
+                api_key=str(api_key),
+                timeout_sec=timeout_sec,
+                max_retry=max_retry,
+                sleep_time=sleep_time,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
         )
 
     if provider in {"api_model"}:
@@ -324,33 +359,37 @@ def get_llm_client(
             raise ValueError("missing url")
         api_key = _resolve_api_key("OPENAI_API_KEY")
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
-        return OpenAICompatibleClient(
-            provider=provider,
-            base_url=url,
-            model=str(model or "api-model"),
-            api_key=api_key,
-            timeout_sec=timeout_sec,
-            max_retry=max_retry,
-            sleep_time=sleep_time,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
+        return _finalize_client(
+            OpenAICompatibleClient(
+                provider=provider,
+                base_url=url,
+                model=str(model or "api-model"),
+                api_key=api_key,
+                timeout_sec=timeout_sec,
+                max_retry=max_retry,
+                sleep_time=sleep_time,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
         )
 
     base_url = (config.get("base_url") or config.get("endpoint") or "").rstrip("/")
     if base_url:
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         api_key = config.get("api_key") or os.getenv("OPENAI_API_KEY", "")
-        return OpenAICompatibleClient(
-            provider=provider,
-            base_url=url,
-            model=str(model or "api-model"),
-            api_key=str(api_key),
-            timeout_sec=timeout_sec,
-            max_retry=max_retry,
-            sleep_time=sleep_time,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
+        return _finalize_client(
+            OpenAICompatibleClient(
+                provider=provider,
+                base_url=url,
+                model=str(model or "api-model"),
+                api_key=str(api_key),
+                timeout_sec=timeout_sec,
+                max_retry=max_retry,
+                sleep_time=sleep_time,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
         )
     return None

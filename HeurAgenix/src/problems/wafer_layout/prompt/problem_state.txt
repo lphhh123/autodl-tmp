@@ -1,3 +1,13 @@
-Choose heuristics that reduce total_scalar.
-Avoid no-op if any heuristic can reduce comm_norm or therm_norm.
-If no improvement is obvious, prefer small relocations or swaps to escape local minima.
+Problem State (dict) fields used for heuristic selection:
+
+instance_problem_state:
+  S, Ns, wafer_radius, weights, sigma
+
+solution_problem_state:
+  unique_sites, dup_sites, assign_head
+
+key_item:
+  "total_scalar" (lower is better)
+
+key_value:
+  current scalar objective value

@@ -1,58 +1,42 @@
-"""Problem state helpers for wafer layout."""
-from __future__ import annotations
-
-from typing import Dict
-
-
-def _infer_slot_count(instance_data: dict) -> int:
-    slots = instance_data.get("slots", [])
-    if isinstance(slots, dict):
-        return int(slots.get("S", len(slots.get("tdp", []) or [])))
-    return int(len(slots))
-
-
-def _infer_site_count(instance_data: dict) -> int:
-    sites_xy = instance_data.get("sites_xy")
-    if sites_xy is None:
-        sites_xy = instance_data.get("sites", {}).get("sites_xy", [])
-    return int(instance_data.get("sites", {}).get("Ns", len(sites_xy or [])))
+import numpy as np
 
 
 def get_instance_problem_state(instance_data: dict) -> dict:
-    obj = instance_data.get("objective_cfg", {}) or {}
-    baseline = instance_data.get("baseline", {}) or {}
-    scalar = obj.get("scalar_weights", obj) if isinstance(obj, dict) else {}
+    s_count = int(instance_data.get("S", 1))
+    ns_count = int(instance_data.get("Ns", 1))
+    w = instance_data.get("weights", {})
+    sigma = float(instance_data.get("sigma", 1.0))
     return {
-        "num_slots": int(_infer_slot_count(instance_data)),
-        "num_sites": int(_infer_site_count(instance_data)),
-        "wafer_radius": float(instance_data.get("wafer", {}).get("radius_mm", obj.get("wafer_radius", 1.0))),
-        "w_comm": float(scalar.get("w_comm", 1.0)),
-        "w_therm": float(scalar.get("w_therm", 1.0)),
-        "baseline_comm": float(baseline.get("L_comm", obj.get("comm_baseline", 1.0))),
-        "baseline_therm": float(baseline.get("L_therm", obj.get("therm_baseline", 1.0))),
+        "S": s_count,
+        "Ns": ns_count,
+        "wafer_radius": float(instance_data.get("wafer", {}).get("radius", 1.0)),
+        "weights": {
+            "w_comm": float(w.get("w_comm", 0.5)),
+            "w_therm": float(w.get("w_therm", 0.5)),
+        },
+        "sigma": sigma,
     }
 
 
-def get_solution_problem_state(instance_data: dict, solution) -> dict:
-    assign = getattr(solution, "assign", None)
-    if assign is None:
-        assign = solution.get("assign", [])
-
-    n = len(assign)
-    num_placed = sum(1 for a in assign if int(a) >= 0)
-    uniq_sites = len({int(a) for a in assign if int(a) >= 0})
-    dup = max(0, num_placed - uniq_sites)
-
+def get_solution_problem_state(instance_data: dict, current_solution) -> dict:
+    assign = np.asarray(getattr(current_solution, "assign", []), dtype=np.int64)
+    uniq = int(len(set(assign.tolist()))) if assign.size > 0 else 0
+    dup = int(assign.size - uniq)
     return {
-        "num_slots": int(n),
-        "num_placed": int(num_placed),
-        "dup_count": int(dup),
+        "unique_sites": uniq,
+        "dup_sites": dup,
+        "assign_head": [int(x) for x in assign.tolist()[: min(16, assign.size)]],
     }
 
 
 def get_observation_problem_state(problem_state: dict) -> dict:
+    inst = problem_state.get("instance_problem_state", {})
+    sol = problem_state.get("solution_problem_state", {})
+    key_item = problem_state.get("key_item", "total_scalar")
+    key_val = problem_state.get("key_value", None)
     return {
-        "num_slots": int(problem_state.get("num_slots", 0)),
-        "num_placed": int(problem_state.get("num_placed", 0)),
-        "dup_count": int(problem_state.get("dup_count", 0)),
+        "instance": inst,
+        "solution": sol,
+        "key_item": key_item,
+        "key_value": key_val,
     }

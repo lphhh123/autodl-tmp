@@ -1,143 +1,199 @@
-import os
-import sys
 import argparse
+import os
 import random
-import importlib
 from pathlib import Path
 
-# make runnable from anywhere
-REPO_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from src.util.output_dir import get_output_dir
-from src.util.data_path import get_data_path
-from src.util.util import load_function, get_heuristic_names
-from src.util.llm_client.get_llm_client import get_llm_client
-
-from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
-from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
-from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
+import numpy as np
 
 
-def _load_env(problem: str, data_name: str):
-    mod = importlib.import_module(f"src.problems.{problem}.env")
-    Env = getattr(mod, "Env")
-    return Env(data_name)
+def _get_problem_pool():
+    problems_dir = Path("src") / "problems"
+    pool = []
+    if problems_dir.exists():
+        for d in problems_dir.iterdir():
+            if d.is_dir() and not d.name.startswith("_") and d.name != "base":
+                pool.append(d.name)
+    return sorted(pool)
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Launch HeurAgenix hyper-heuristic on a problem.")
-    parser.add_argument("-p", "--problem", type=str, required=True)
-    parser.add_argument("-e", "--heuristic", type=str, required=True)  # llm_hh / random_hh / or a single heuristic
-    parser.add_argument("-d", "--heuristic_dir", type=str, default="basic_heuristics")
-    parser.add_argument("-t", "--test_data", type=str, default="")  # comma-separated file names, e.g. a280.tsp,case.json
-    parser.add_argument("-n", "--iterations_scale_factor", type=float, default=1.0)
-    parser.add_argument("-m", "--selection_frequency", type=int, default=5)
-    parser.add_argument("-c", "--num_candidate_heuristics", type=int, default=1)
-    parser.add_argument("-b", "--rollout_budget", type=int, default=0)
-    parser.add_argument("-r", "--result_dir", type=str, default="result")
-    parser.add_argument("-l", "--llm_config_file", type=str, default="azure_gpt_4o.json")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--tool_calling", action="store_true")
+def _resolve_heuristic_dir(problem: str, heuristic_dir: str) -> Path:
+    p = Path(heuristic_dir)
+    if p.is_absolute():
+        return p
+    return Path("src") / "problems" / problem / "heuristics" / heuristic_dir
 
-    # backward compat (optional)
-    parser.add_argument("-res", "--result_name", type=str, default=None)
-    parser.add_argument("-exp", "--experiment_name", type=str, default=None)
-    return parser.parse_args()
+
+def _list_heuristics(heur_dir: Path):
+    if not heur_dir.exists():
+        return []
+    hs = []
+    for f in sorted(heur_dir.glob("*.py")):
+        if f.name.startswith("__"):
+            continue
+        hs.append(f.stem)
+    return hs
 
 
 def main():
-    args = parse_arguments()
+    parser = argparse.ArgumentParser(
+        description="Launch Hyper Heuristic (patched for wrapper/spec)"
+    )
 
-    # backward compat mapping
-    if args.result_name and args.result_dir == "result":
-        args.result_dir = args.result_name
-    if args.experiment_name:
-        args.heuristic = args.experiment_name
+    parser.add_argument("-p", "--problem", type=str, required=True, choices=_get_problem_pool())
+    parser.add_argument(
+        "-e",
+        "--heuristic",
+        type=str,
+        required=True,
+        help="heuristic name OR llm_hh OR random_hh",
+    )
+    parser.add_argument(
+        "-d",
+        "--heuristic_dir",
+        type=str,
+        default="basic_heuristics",
+        help="subdir under src/problems/{problem}/heuristics, or absolute path",
+    )
 
-    random.seed(int(args.seed))
+    parser.add_argument(
+        "-t",
+        "--test_data",
+        type=str,
+        default=None,
+        help=(
+            "comma-split list of test filenames (e.g., case_seed1.json). "
+            "If None, run all in test_data/"
+        ),
+    )
+    parser.add_argument("-l", "--llm_config_file", type=str, default=None)
 
-    # data root
-    data_root = get_data_path()
-    test_data_dir = data_root / args.problem / "test_data"
-    if not test_data_dir.exists():
-        # fallback: allow data_root/problem (search_file will still find)
-        test_data_dir = data_root / args.problem
+    parser.add_argument("-n", "--iterations_scale_factor", type=float, default=2.0)
+    parser.add_argument("-m", "--selection_frequency", type=int, default=5)
+    parser.add_argument("-c", "--num_candidate_heuristics", type=int, default=1)
+    parser.add_argument("-b", "--rollout_budget", type=int, default=0)
 
-    # decide data_name_list (keep file names with extension)
-    if args.test_data.strip():
-        data_name_list = [x.strip() for x in args.test_data.split(",") if x.strip()]
+    parser.add_argument(
+        "-r",
+        "--result_dir",
+        type=str,
+        default="result",
+        help="result folder name (default: result)",
+    )
+
+    parser.add_argument("--seed", type=int, default=1)
+    args = parser.parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
+    problem = args.problem
+    engine = args.heuristic
+
+    amlt_out = os.getenv("AMLT_OUTPUT_DIR", None)
+    base_output_dir = (Path(amlt_out) / "output") if amlt_out else Path("output")
+
+    amlt_data = os.getenv("AMLT_DATA_DIR", None)
+    data_root = Path(amlt_data) if amlt_data else Path("data")
+    test_data_dir = data_root / problem / "test_data"
+
+    if args.test_data is None:
+        data_name_list = [p.name for p in sorted(test_data_dir.glob("*.json"))]
     else:
-        # list all files under test_data_dir
-        data_name_list = []
-        if test_data_dir.exists():
-            for p in sorted(test_data_dir.iterdir()):
-                if p.is_file():
-                    data_name_list.append(p.name)
+        data_name_list = [x.strip() for x in args.test_data.split(",") if x.strip()]
 
     if not data_name_list:
         raise RuntimeError(
-            f"No test data found. test_data_dir={test_data_dir}, --test_data='{args.test_data}'"
+            f"No test cases found. test_data_dir={test_data_dir}, test_data={args.test_data}"
         )
 
-    # output base dir: <AMLT_OUTPUT_DIR>/output
-    output_base_dir = get_output_dir()
-    output_base_dir.mkdir(parents=True, exist_ok=True)
+    mod = __import__(f"src.problems.{problem}.env", fromlist=["Env"])
+    Env = getattr(mod, "Env")
 
-    # prepare heuristic pool if needed
-    heuristic_pool = None
-    if args.heuristic in ("llm_hh", "random_hh"):
-        heuristic_pool = get_heuristic_names(args.problem, args.heuristic_dir)
-        if not heuristic_pool:
-            raise RuntimeError(f"Empty heuristic pool under {args.problem}/{args.heuristic_dir}")
+    heur_dir = _resolve_heuristic_dir(problem, args.heuristic_dir)
+    heuristic_pool = _list_heuristics(heur_dir)
 
     for data_name in data_name_list:
-        test_stem = Path(data_name).stem
-        out_dir = output_base_dir / args.problem / test_stem / args.result_dir / args.heuristic
+        case_stem = Path(data_name).stem
+        out_dir = base_output_dir / problem / case_stem / args.result_dir / engine
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        env = _load_env(args.problem, data_name)
+        env = Env(data_name=data_name)
         env.reset(output_dir=str(out_dir))
 
-        # IMPORTANT: make budget effective
-        ps = int(getattr(env, "problem_size", 1) or 1)
-        env.max_steps = max(1, int(float(args.iterations_scale_factor) * ps))
-        env.construction_steps = 0
+        if getattr(env, "construction_steps", None) is None:
+            s_value = env.instance_data.get("S", None)
+            if s_value is None:
+                chiplets = env.instance_data.get("chiplets", {}).get("S", None)
+                s_value = chiplets
+            env.construction_steps = int(s_value) if s_value else 1
 
-        if args.heuristic == "random_hh":
+        usage_path = out_dir / "llm_usage.jsonl"
+        if not usage_path.exists():
+            usage_path.write_text("", encoding="utf-8")
+
+        if engine == "random_hh":
+            from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
+
             runner = RandomHyperHeuristic(
                 heuristic_pool=heuristic_pool,
-                problem=args.problem,
+                problem=problem,
                 iterations_scale_factor=float(args.iterations_scale_factor),
-                seed=int(args.seed),
+                heuristic_dir=str(heur_dir),
             )
-        elif args.heuristic == "llm_hh":
-            llm_client = get_llm_client(
-                args.llm_config_file,
-                prompt_dir=str(REPO_ROOT / "src" / "problems" / "base" / "prompt"),
-                output_dir=str(out_dir),
-            )
-            runner = LLMSelectionHyperHeuristic(
-                llm_client=llm_client,
-                heuristic_pool=heuristic_pool,
-                problem=args.problem,
-                tool_calling=bool(args.tool_calling),
-                iterations_scale_factor=float(args.iterations_scale_factor),
-                selection_frequency=int(args.selection_frequency),
-                num_candidate_heuristics=int(args.num_candidate_heuristics),
-                rollout_budget=int(args.rollout_budget),
-                output_dir=str(out_dir),
-                seed=int(args.seed),
-            )
-        else:
-            runner = SingleHyperHeuristic(
-                heuristic=args.heuristic,
-                problem=args.problem,
-                seed=int(args.seed),
-            )
+            runner.run(env)
 
-        runner.run(env)
+        elif engine == "llm_hh":
+            from src.pipeline.hyper_heuristics.llm_selection import (
+                LLMSelectionHyperHeuristic,
+            )
+            from src.util.llm_client.get_llm_client import get_llm_client
+
+            llm_ok = True
+            llm_client = None
+            try:
+                prompt_dir = str(Path("src") / "problems" / problem / "prompt")
+                llm_client = get_llm_client(
+                    args.llm_config_file,
+                    prompt_dir=prompt_dir,
+                    output_dir=str(out_dir),
+                )
+            except Exception as e:
+                llm_ok = False
+                with open(usage_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f'{{"ok": false, "reason": "llm_client_init_failed", "error": "{str(e)}"}}\n'
+                    )
+
+            if llm_ok:
+                runner = LLMSelectionHyperHeuristic(
+                    heuristic_pool=heuristic_pool,
+                    llm_client=llm_client,
+                    problem=problem,
+                    iterations_scale_factor=float(args.iterations_scale_factor),
+                    selection_frequency=int(args.selection_frequency),
+                    num_candidate_heuristics=int(args.num_candidate_heuristics),
+                    rollout_budget=int(args.rollout_budget),
+                )
+                runner.run(env)
+            else:
+                from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
+
+                runner = RandomHyperHeuristic(
+                    heuristic_pool=heuristic_pool,
+                    problem=problem,
+                    iterations_scale_factor=float(args.iterations_scale_factor),
+                    heuristic_dir=str(heur_dir),
+                )
+                runner.run(env)
+
+        else:
+            from src.util.util import load_function
+
+            fn = load_function(engine, problem=problem)
+            max_steps = int(env.construction_steps * float(args.iterations_scale_factor))
+            while env.current_steps < max_steps and env.continue_run:
+                env.run_heuristic(fn)
+
         env.dump_result()
 
 
