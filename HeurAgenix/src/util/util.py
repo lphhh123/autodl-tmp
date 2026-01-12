@@ -122,7 +122,12 @@ def get_heuristic_names(problem: str, heuristic_dir: str):
 
     names = []
     for fn in os.listdir(base):
-        if fn.endswith(".py") and fn != "__init__.py":
-            names.append(fn[:-3])
+        if not fn.endswith(".py"):
+            continue
+        if fn == "__init__.py":
+            continue
+        if fn.startswith("_"):
+            continue
+        names.append(fn[:-3])
     names.sort()
     return names

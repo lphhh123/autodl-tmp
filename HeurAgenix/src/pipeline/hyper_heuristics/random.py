@@ -63,6 +63,7 @@ class RandomHyperHeuristic:
         configs: Dict[str, Any] | None = None,
         heuristic_functions: Dict[str, Callable[..., Tuple[Any, Dict]]] | None = None,
         iterations_scale_factor: float = 1.0,
+        heuristic_dir: str | None = None,
         selection_frequency: int = 1,
         rng: random.Random | None = None,
         seed: int = 0,
@@ -96,6 +97,7 @@ class RandomHyperHeuristic:
         self.heuristic_pool = heuristic_pool
         self.problem = problem
         self.iterations_scale_factor = float(iterations_scale_factor)
+        self.heuristic_dir = heuristic_dir
         self.selection_frequency = max(1, int(selection_frequency))
         self.rng = rng or random.Random(0)
         self.seed = int(seed)
@@ -225,23 +227,39 @@ class RandomHyperHeuristic:
     def run(self, env: Any, max_steps: int | None = None) -> bool:
         import random as _random
 
+        # legacy path (keep)
         if self.legacy_mode or isinstance(env, int):
             return self._run_legacy(int(env))
         if env is None:
             raise ValueError("env is required")
 
-        algorithm_data = {
-            "rng": _random.Random(int(getattr(self, "seed", 0))),
-            "env": env,
-        }
+        # Make sure we have a pool of heuristic NAMES (strings)
+        if not self.heuristic_pool:
+            if self.problem and self.heuristic_dir:
+                from src.util.util import get_heuristic_names
 
-        while env.continue_run:
-            heuristic_name = _random.choice(self.heuristic_pool)
-            heuristic = load_function(heuristic_name, problem=self.problem)
+                self.heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
+            if not self.heuristic_pool:
+                return False
+
+        # local rng for reproducibility
+        rng = _random.Random(int(getattr(self, "seed", 0)))
+
+        chosen_name = None
+        while getattr(env, "continue_run", True):
+            if chosen_name is None:
+                chosen_name = rng.choice(self.heuristic_pool)
+
+            heuristic = load_function(chosen_name, problem=self.problem)
             env.run_heuristic(
                 heuristic,
-                algorithm_data=algorithm_data,
+                algorithm_data={"rng": rng, "env": env},
                 add_record_item={"selection": "random_hh"},
             )
 
-        return bool(env.is_valid_solution(env.current_solution))
+            if int(getattr(env, "current_steps", 0)) % max(1, int(getattr(self, "selection_frequency", 1))) == 0:
+                chosen_name = rng.choice(self.heuristic_pool)
+
+        if hasattr(env, "validate_solution"):
+            return bool(env.validate_solution(getattr(env, "current_solution", None)))
+        return True

@@ -80,6 +80,8 @@ class LLMSelectionHyperHeuristic:
             if not self.llm_config_file:
                 raise FileNotFoundError("llm_config_file is None/empty")
             llm_client = get_llm_client(self.llm_config_file)
+            if llm_client is None:
+                raise RuntimeError("get_llm_client returned None")
         except Exception as e:  # noqa: BLE001
             llm_ok = False
             self._log_usage({"ok": False, "reason": "llm_init_failed", "error": str(e)})
@@ -160,4 +162,6 @@ class LLMSelectionHyperHeuristic:
             selection_round += 1
 
         env.dump_result()
-        return bool(getattr(env, "is_valid_solution", True))
+        if hasattr(env, "validate_solution"):
+            return bool(env.validate_solution(getattr(env, "current_solution", None)))
+        return True
