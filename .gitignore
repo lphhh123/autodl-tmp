@@ -1,4 +1,6 @@
 data/
+!HeurAgenix/src/problems/wafer_layout/data/
+!HeurAgenix/src/problems/wafer_layout/data/generate_data.py
 
 *.avi
 *.jpg

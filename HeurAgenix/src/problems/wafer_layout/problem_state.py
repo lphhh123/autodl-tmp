@@ -40,3 +40,8 @@ def get_observation_problem_state(problem_state: dict) -> dict:
         "key_item": key_item,
         "key_value": key_val,
     }
+
+
+def attach_key_value(problem_state: dict, key_value: float):
+    problem_state["key_value"] = float(key_value)
+    return problem_state

@@ -16,6 +16,7 @@ from .components import (
 )
 
 from layout.evaluator import LayoutEvaluator, LayoutState
+from .problem_state import attach_key_value
 
 
 class Env(BaseEnv):
@@ -97,14 +98,23 @@ class Env(BaseEnv):
         return self._evaluator.evaluate(self._state_template)
 
     def get_problem_state(self) -> dict:
-        ps = super().get_problem_state()
-        ps["eval_assign"] = self.evaluate_assign
+        ps = {
+            "instance_data": self.instance_data,
+            "current_solution": self.current_solution,
+            "key_item": self.key_item,
+            "key_value": getattr(self, "key_value", None),
+            "eval_assign": self.evaluate_assign,
+        }
         return ps
 
     def run_heuristic(self, heuristic, **kwargs):
         t0 = time.time()
 
-        op, delta = heuristic(self.get_problem_state(), self.algorithm_data, **kwargs)
+        self.problem_state = self.get_problem_state()
+        if not hasattr(self, "key_value"):
+            self.key_value = self.get_key_value()
+        self.problem_state = attach_key_value(self.problem_state, self.key_value)
+        op, delta = heuristic(self.problem_state, self.algorithm_data, **kwargs)
         if op is None:
             op = NoOpOperator()
             delta = {}
@@ -125,13 +135,14 @@ class Env(BaseEnv):
             "step_idx": int(self.current_steps),
             "heuristic": getattr(heuristic, "__name__", str(heuristic)),
             "op": getattr(op, "op_name", op.__class__.__name__),
-            "op_args": op.to_json() if hasattr(op, "to_json") else {},
+            "op_args_json": op.to_json() if hasattr(op, "to_json") else {},
             "accepted": 1,
+            "total_scalar": float(metrics["total_scalar"]),
+            "comm_norm": float(metrics.get("comm_norm", 0.0)),
+            "therm_norm": float(metrics.get("therm_norm", 0.0)),
+            "objective_scalar": float(metrics["total_scalar"]),
             "assign": self.current_solution.to_list(),
             "time_ms": int((time.time() - t0) * 1000),
-            "total_scalar": float(metrics["total_scalar"]),
-            "comm_norm": float(metrics["comm_norm"]),
-            "therm_norm": float(metrics["therm_norm"]),
         }
         _ = delta
         self.recordings.append(rec)
@@ -159,11 +170,18 @@ class Env(BaseEnv):
         best_path.write_text(
             json.dumps(
                 {
+                    "problem": "wafer_layout",
+                    "seed_id": int(self.instance_data.get("assign_seed", 0)),
                     "best_assign": best_assign,
                     "best_key_value": float(self.best_key_value)
                     if self.best_solution is not None
                     else float(self.key_value),
                     "best_eval": best_eval,
+                    "meta": {
+                        "S": int(self.instance_data["S"]),
+                        "Ns": int(self.instance_data["Ns"]),
+                        "weights": self.instance_data.get("weights", {}),
+                    },
                 },
                 indent=2,
                 ensure_ascii=False,

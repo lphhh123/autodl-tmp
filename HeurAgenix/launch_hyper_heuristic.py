@@ -128,6 +128,7 @@ def main():
             env.construction_steps = int(s_value) if s_value else 1
 
         usage_path = out_dir / "llm_usage.jsonl"
+        usage_path.parent.mkdir(parents=True, exist_ok=True)
         if not usage_path.exists():
             usage_path.write_text("", encoding="utf-8")
 
@@ -195,6 +196,7 @@ def main():
                 env.run_heuristic(fn)
 
         env.dump_result()
+    print(f"[HeurAgenix] run finished seed={args.seed}, results saved to {base_output_dir}")
 
 
 if __name__ == "__main__":
