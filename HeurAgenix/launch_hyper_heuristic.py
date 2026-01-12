@@ -81,6 +81,7 @@ def main():
     )
 
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--max_steps", type=int, default=None)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -135,10 +136,16 @@ def main():
         if engine == "random_hh":
             from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
 
+            iterations_scale_factor = float(args.iterations_scale_factor)
+            if args.max_steps is not None:
+                iterations_scale_factor = max(
+                    1.0,
+                    float(args.max_steps) / max(1, env.construction_steps),
+                )
             runner = RandomHyperHeuristic(
                 heuristic_pool=heuristic_pool,
                 problem=problem,
-                iterations_scale_factor=float(args.iterations_scale_factor),
+                iterations_scale_factor=iterations_scale_factor,
                 heuristic_dir=str(heur_dir),
             )
             runner.run(env)
@@ -166,11 +173,17 @@ def main():
                     )
 
             if llm_ok:
+                iterations_scale_factor = float(args.iterations_scale_factor)
+                if args.max_steps is not None:
+                    iterations_scale_factor = max(
+                        1.0,
+                        float(args.max_steps) / max(1, env.construction_steps),
+                    )
                 runner = LLMSelectionHyperHeuristic(
                     heuristic_pool=heuristic_pool,
                     llm_client=llm_client,
                     problem=problem,
-                    iterations_scale_factor=float(args.iterations_scale_factor),
+                    iterations_scale_factor=iterations_scale_factor,
                     selection_frequency=int(args.selection_frequency),
                     num_candidate_heuristics=int(args.num_candidate_heuristics),
                     rollout_budget=int(args.rollout_budget),
@@ -191,7 +204,10 @@ def main():
             from src.util.util import load_function
 
             fn = load_function(engine, problem=problem)
-            max_steps = int(env.construction_steps * float(args.iterations_scale_factor))
+            if args.max_steps is not None:
+                max_steps = int(args.max_steps)
+            else:
+                max_steps = int(env.construction_steps * float(args.iterations_scale_factor))
             while env.current_steps < max_steps and env.continue_run:
                 env.run_heuristic(fn)
 

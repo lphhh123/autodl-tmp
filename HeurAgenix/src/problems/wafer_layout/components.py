@@ -9,15 +9,17 @@ from src.problems.base.components import BaseOperator, BaseSolution
 @dataclass
 class WaferLayoutSolution(BaseSolution):
     assign: np.ndarray
+    S: int
+    Ns: int
 
     def copy(self):
-        return WaferLayoutSolution(assign=self.assign.copy())
+        return WaferLayoutSolution(assign=self.assign.copy(), S=int(self.S), Ns=int(self.Ns))
 
     def to_list(self) -> List[int]:
         return [int(x) for x in self.assign.tolist()]
 
     def __str__(self) -> str:
-        s_size = int(self.assign.shape[0])
+        s_size = int(self.S)
         head = self.to_list()[: min(16, s_size)]
         return f"WaferLayoutSolution(S={s_size}, head_assign={head}...)"
 
