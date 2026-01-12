@@ -1,33 +1,44 @@
 from __future__ import annotations
 
+import random
 from typing import Dict, Tuple
 
 import numpy as np
 
-from src.problems.wafer_layout.components import RelocateSlot
+from src.problems.wafer_layout.components import NoopOperator, SwapOperator
 
 
-def therm_driven_push_apart(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[RelocateSlot, Dict]:
-    instance = problem_state["instance_data"]
-    slots = instance.get("slots", {})
-    tdp = np.asarray(slots.get("tdp", []), dtype=float)
-    sites_xy = instance.get("sites_xy")
-    if sites_xy is None:
-        sites_xy = instance.get("sites", {}).get("sites_xy", [])
-    sites_xy = np.asarray(sites_xy, dtype=float)
-    if isinstance(slots, dict):
-        S = int(slots.get("S", len(tdp)))
-    else:
-        S = int(len(slots))
-    best_pair = (0, 1)
-    best_val = -1.0
-    for i in range(S):
-        for j in range(i + 1, S):
-            val = float(tdp[i] * tdp[j])
-            if val > best_val:
-                best_val = val
-                best_pair = (i, j)
-    target_slot = best_pair[0]
-    radii = np.linalg.norm(sites_xy, axis=1)
-    far_site = int(np.argmax(radii)) if radii.size else 0
-    return RelocateSlot(target_slot, far_site), {"pair": best_pair, "site": far_site}
+def therm_driven_push_apart(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[SwapOperator, Dict]:
+    instance_data = problem_state["instance_data"]
+    helper = problem_state.get("helper_function", {}) or {}
+    rng = helper.get("rng", random)
+    solution = problem_state["current_solution"]
+
+    assign = list(solution.assign)
+    S = len(assign)
+    if S < 2:
+        return NoopOperator(), {}
+
+    slots = instance_data.get("slots", {}) or {}
+    slot_tdp = np.asarray(slots.get("tdp", slots.get("slot_tdp_w", [])), dtype=float)
+    sites = instance_data.get("sites", {}) or {}
+    sites_xy = np.asarray(sites.get("sites_xy", []), dtype=float)
+
+    if slot_tdp.shape[0] != S or sites_xy.shape[0] == 0:
+        i, j = rng.sample(range(S), 2)
+        return SwapOperator(i, j), {"reason": "random_fallback"}
+
+    hot_idx = int(np.argmax(slot_tdp))
+    hot_site = assign[hot_idx]
+    if hot_site < 0 or hot_site >= sites_xy.shape[0]:
+        i, j = rng.sample(range(S), 2)
+        return SwapOperator(i, j), {"reason": "random_fallback"}
+
+    pos = sites_xy[assign]
+    dists = np.linalg.norm(pos - pos[hot_idx], axis=1)
+    far_idx = int(np.argmax(dists))
+    if far_idx == hot_idx:
+        i, j = rng.sample(range(S), 2)
+        return SwapOperator(i, j), {"reason": "random_fallback"}
+
+    return SwapOperator(hot_idx, far_idx), {"hot_idx": hot_idx, "far_idx": far_idx}

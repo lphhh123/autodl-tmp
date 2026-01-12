@@ -29,15 +29,31 @@ class RelocateOperator(BaseOperator):
         self.i = int(i)
         self.site_id = int(site_id)
         self.from_site = None if from_site is None else int(from_site)
+        self.degraded_swap_with: int | None = None
 
     def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
         a = solution.assign
         self.from_site = int(a[self.i])
-        a[self.i] = self.site_id
+        self.degraded_swap_with = None
+        try:
+            j = a.index(self.site_id)
+        except ValueError:
+            j = None
+        if j is not None and j != self.i:
+            a[self.i], a[j] = a[j], a[self.i]
+            self.degraded_swap_with = int(j)
+        else:
+            a[self.i] = self.site_id
         return solution
 
     def to_action(self) -> Dict[str, Any]:
-        return {"op": "relocate", "i": self.i, "site_id": self.site_id, "from_site": self.from_site}
+        return {
+            "op": "relocate",
+            "i": self.i,
+            "site_id": self.site_id,
+            "from_site": self.from_site,
+            "degraded_swap_with": self.degraded_swap_with,
+        }
 
 
 class RandomKickOperator(BaseOperator):

@@ -1,11 +1,20 @@
-import numpy as np
+from __future__ import annotations
 
-from ...components import SwapOperator
+import random
+from typing import Dict, Tuple
+
+from src.problems.wafer_layout.components import NoopOperator, SwapOperator
 
 
-def random_swap(problem_state: dict, algorithm_data: dict, **kwargs):
-    """Randomly swap two chiplets."""
-    sol = problem_state["current_solution"]
-    s_count = int(getattr(sol, "assign").shape[0])
-    i, j = np.random.randint(0, s_count), np.random.randint(0, s_count)
+def random_swap(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[SwapOperator, Dict]:
+    helper = problem_state.get("helper_function", {}) or {}
+    rng = helper.get("rng", random)
+    solution = problem_state["current_solution"]
+
+    assign = list(solution.assign)
+    S = len(assign)
+    if S < 2:
+        return NoopOperator(), {}
+
+    i, j = rng.sample(range(S), 2)
     return SwapOperator(i, j), {}
