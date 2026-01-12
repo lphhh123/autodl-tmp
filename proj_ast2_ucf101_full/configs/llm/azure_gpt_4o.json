@@ -1,0 +1,11 @@
+{
+  "type": "azure_gpt",
+  "azure_endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+  "api_version": "2024-02-15-preview",
+  "deployment": "gpt-4o",
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "max_tokens": 3200,
+  "max_attempts": 50,
+  "sleep_time": 10
+}

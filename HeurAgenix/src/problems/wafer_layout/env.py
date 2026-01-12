@@ -1,285 +1,273 @@
+from __future__ import annotations
+import importlib
 import json
+import os
 import time
-from pathlib import Path
+import random
+from typing import Any, Dict
 
 import numpy as np
 
 from src.problems.base.env import BaseEnv
-
-from .components import (
-    WaferLayoutSolution,
-    SwapOperator,
-    RelocateOperator,
-    ClusterMoveOperator,
-    RandomKickOperator,
-    NoOpOperator,
+from src.problems.wafer_layout.components import WaferLayoutSolution
+from src.problems.wafer_layout.problem_state import (
+    get_instance_problem_state,
+    get_solution_problem_state,
+    get_observation_problem_state,
 )
 
-from layout.evaluator import LayoutEvaluator, LayoutState
+
+def _load_layout_evaluator():
+    if importlib.util.find_spec("layout.evaluator") is None:
+        return None, None
+    module = importlib.import_module("layout.evaluator")
+    return module.LayoutEvaluator, module.LayoutState
 
 
 class Env(BaseEnv):
-    def __init__(self, data_name: str, **kwargs):
-        super().__init__(data_name, problem="wafer_layout")
+    def load_data(self, data_path: str) -> dict:
+        with open(data_path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        assert "slots" in d and "sites" in d and "mapping" in d, f"bad instance: {data_path}"
+        return d
 
-        self.key_item = "total_scalar"
-        self.compare = lambda x, y: (y - x)
-        self.problem_size = self.get_problem_size()
-        self.construction_steps = int(self.problem_size)
-        self.current_steps = 0
-        self.continue_run = True
-        self.best_solution = None
-        self.best_key_value = float("inf")
-        self.key_value = self.get_key_value()
+    def __init__(self, data_name: str):
+        super().__init__(data_name)
+
+        self.problem = "wafer_layout"
+
+        slots = self.instance_data.get("slots", {})
+        sites = self.instance_data.get("sites", {})
+        self.S = int(slots.get("S", len(slots.get("tdp", slots.get("slot_tdp_w", [])))))
+        self.Ns = int(sites.get("Ns", len(sites.get("sites_xy", []))))
+        self.problem_size = self.S
+        self.construction_steps = self.S
+
+        obj = self.instance_data.get("objective_cfg", {}) or self.instance_data.get("objective", {})
+        self.sigma_mm = float(obj.get("sigma_mm", 20.0))
+        w = obj.get("scalar_weights", {}) or {}
+        self.w_comm = float(w.get("w_comm", 0.7))
+        self.w_therm = float(w.get("w_therm", 0.3))
+        self.w_penalty = float(w.get("w_penalty", w.get("w_dup", 0.1) + w.get("w_boundary", 0.2)))
+
+        base = self.instance_data.get("baseline", {}) or {}
+        self.base_comm = float(base.get("L_comm", 1.0)) if base.get("L_comm", 0.0) else 1.0
+        self.base_therm = float(base.get("L_therm", 1.0)) if base.get("L_therm", 0.0) else 1.0
+
+        self.temp_init = float(obj.get("temp_init", 0.05))
+        self.temp_min = float(obj.get("temp_min", 0.005))
+        self.temp_decay = float(obj.get("temp_decay", 0.999))
+
+        self._rec_fp = None
+        self._rec_path = None
+        self._best_path = None
+
+        self._LayoutEvaluator, self._LayoutState = _load_layout_evaluator()
+        self._evaluator = None
+        self._layout_state = None
+        self._init_evaluator()
 
         self.problem_state = self.get_problem_state()
 
-    def load_data(self, data_path: str) -> dict:
-        d = json.loads(Path(data_path).read_text(encoding="utf-8"))
+    def _init_evaluator(self):
+        if self._LayoutEvaluator is None or self._LayoutState is None:
+            self._evaluator = None
+            self._layout_state = None
+            return
 
-        slots = d.get("slots", {})
-        sites = d.get("sites", {})
-        mapping = d.get("mapping", {})
-        wafer = d.get("wafer", {})
-        baseline = d.get("baseline", {})
-        objective_cfg = d.get("objective_cfg", {})
-        scalar_weights = objective_cfg.get("scalar_weights", {})
+        slots = self.instance_data.get("slots", {})
+        sites = self.instance_data.get("sites", {})
+        mapping = self.instance_data.get("mapping", {})
+        wafer = self.instance_data.get("wafer", {})
 
         sites_xy = np.asarray(sites.get("sites_xy", []), dtype=np.float32)
-        tdp = np.asarray(slots.get("tdp", []), dtype=np.float32)
-        traffic = np.asarray(mapping.get("traffic_matrix", []), dtype=np.float32)
-
-        s_count = int(slots.get("S", len(tdp)))
-        ns_count = int(sites.get("Ns", sites_xy.shape[0]))
+        site_tdp_w = np.asarray(sites.get("site_tdp_w", np.zeros(len(sites_xy))), dtype=np.float32)
+        traffic = np.asarray(mapping.get("traffic_matrix", mapping.get("traffic_bytes", [])), dtype=np.float32)
+        slot_tdp = np.asarray(slots.get("tdp", slots.get("slot_tdp_w", [])), dtype=np.float32)
         if traffic.size == 0:
-            traffic = np.zeros((s_count, s_count), dtype=np.float32)
+            traffic = np.zeros((self.S, self.S), dtype=np.float32)
 
-        d["_sites_xy"] = sites_xy
-        d["_tdp"] = tdp
-        d["_traffic"] = traffic
-        d["S"] = s_count
-        d["Ns"] = ns_count
-
-        baseline_dict = {
-            "L_comm_baseline": float(baseline.get("L_comm", 1.0)),
-            "L_therm_baseline": float(baseline.get("L_therm", 1.0)),
-        }
-        sigma = float(objective_cfg.get("sigma_mm", 20.0))
-        scalar_w = {
-            "w_comm": float(scalar_weights.get("w_comm", 0.7)),
-            "w_therm": float(scalar_weights.get("w_therm", 0.3)),
-            "w_penalty": float(scalar_weights.get("w_penalty", 1000.0)),
-        }
-
-        self._evaluator = LayoutEvaluator(
-            sigma_mm=sigma,
-            baseline=baseline_dict,
-            scalar_w=scalar_w,
-        )
-
-        self._state_template = LayoutState(
-            S=s_count,
-            Ns=ns_count,
+        self._layout_state = self._LayoutState(
+            S=int(self.S),
+            Ns=int(self.Ns),
             wafer_radius_mm=float(wafer.get("radius_mm", 0.0)),
             sites_xy_mm=sites_xy,
-            assign=np.zeros(s_count, dtype=np.int64),
-            chip_tdp_w=tdp,
+            assign=np.zeros(self.S, dtype=np.int64),
+            chip_tdp_w=slot_tdp,
             traffic_bytes=traffic,
             meta={"margin_mm": float(wafer.get("margin_mm", 0.0))},
         )
-        return d
+        self._evaluator = self._LayoutEvaluator(
+            sigma_mm=self.sigma_mm,
+            baseline={"L_comm_baseline": self.base_comm, "L_therm_baseline": self.base_therm},
+            scalar_w={"w_comm": self.w_comm, "w_therm": self.w_therm, "w_penalty": self.w_penalty},
+        )
 
     def init_solution(self) -> WaferLayoutSolution:
-        s_count = int(self.instance_data["S"])
-        ns_count = int(self.instance_data["Ns"])
-
-        seed_payload = self.instance_data.get("seed", {}) or {}
-        seed_assign = seed_payload.get("assign_seed")
-        if isinstance(seed_assign, (list, tuple, np.ndarray)) and len(seed_assign) > 0:
-            assign = np.asarray(seed_assign, dtype=np.int64)
+        seed = (self.instance_data.get("seed", {}) or {}).get("assign_seed", None)
+        if seed is None:
+            seed = [min(i, max(0, self.Ns - 1)) for i in range(self.S)]
+        seed = list(seed)
+        if len(seed) != self.S:
+            seed = (seed + [0] * self.S)[: self.S]
+        if self.Ns <= 0:
+            seed = [0 for _ in range(self.S)]
         else:
-            seed = int(seed_payload.get("assign_seed", 1))
-            rng = np.random.default_rng(seed)
-            if ns_count <= 0:
-                assign = np.zeros(s_count, dtype=np.int64)
-            elif ns_count >= s_count:
-                assign = rng.choice(ns_count, size=s_count, replace=False).astype(np.int64)
-            else:
-                assign = rng.integers(low=0, high=ns_count, size=s_count, dtype=np.int64)
+            seed = [int(x) % self.Ns for x in seed]
+        return WaferLayoutSolution(assign=np.asarray(seed, dtype=np.int64))
 
-        return WaferLayoutSolution(assign=assign, S=s_count, Ns=ns_count)
-
-    def get_problem_size(self) -> int:
-        return int(self.instance_data.get("S", 1))
-
-    def get_key_value(self) -> float:
-        metrics = self.evaluate_assign(self.current_solution.assign)
-        return float(metrics["total_scalar"])
-
-    def validation_solution(self, solution: WaferLayoutSolution) -> bool:
+    def is_complete_solution(self) -> bool:
         return True
 
-    def evaluate_assign(self, assign: np.ndarray) -> dict:
-        self._state_template.assign = np.asarray(assign, dtype=np.int64)
-        return self._evaluator.evaluate(self._state_template)
+    def validate_solution(self, solution: WaferLayoutSolution) -> bool:
+        if solution is None or not hasattr(solution, "assign"):
+            return False
+        a = list(solution.assign)
+        if len(a) != self.S:
+            return False
+        for x in a:
+            if not (0 <= int(x) < self.Ns):
+                return False
+        return True
 
-    def get_problem_state(self) -> dict:
-        ps = {
-            "instance_data": self.instance_data,
-            "current_solution": self.current_solution,
-            "key_item": self.key_item,
-            "key_value": getattr(self, "key_value", None),
-            "eval_assign": self.evaluate_assign,
+    def compare(self, x, y):
+        return y - x
+
+    def get_key_value(self, solution: WaferLayoutSolution | None = None) -> float:
+        sol = solution if solution is not None else self.current_solution
+        if self._evaluator is None or self._layout_state is None:
+            a = sol.assign
+            dup = len(a) - len(set(a))
+            return float(dup)
+        self._layout_state.assign = np.asarray(sol.assign, dtype=np.int64)
+        metrics = self._evaluator.evaluate(self._layout_state)
+        return float(metrics["total_scalar"])
+
+    def summarize_env(self) -> str:
+        curr = float(self.key_value)
+        best = float(getattr(self, "best_key_value", curr))
+        return f"wafer_layout: S={self.S}, Ns={self.Ns}, step={self.current_steps}/{self.max_steps}, curr={curr:.6f}, best={best:.6f}"
+
+    def get_problem_state(self) -> Dict[str, Any]:
+        instance_state = get_instance_problem_state(self.instance_data)
+        solution_state = get_solution_problem_state(self.instance_data, self.current_solution)
+        state = {
+            "instance_problem_state": instance_state,
+            "solution_problem_state": solution_state,
         }
-        return ps
+        state["observation_problem_state"] = get_observation_problem_state(state)
+        return state
 
-    def reset(self, output_dir: str | None = None) -> None:
-        super().reset(output_dir=output_dir)
-        self.current_steps = 0
-        self.continue_run = True
-        self.best_solution = None
-        self.best_key_value = float("inf")
-        self.key_value = self.get_key_value()
+    def update_problem_state(self) -> None:
         self.problem_state = self.get_problem_state()
 
-    def run_heuristic(self, heuristic, **kwargs):
-        import time
+    def reset(self, output_dir: str = None):
+        super().reset(output_dir=output_dir)
 
-        t0 = time.time()
+        self._rec_path = os.path.join(self.output_dir, "recordings.jsonl")
+        self._best_path = os.path.join(self.output_dir, "best_solution.json")
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._rec_fp = open(self._rec_path, "w", encoding="utf-8")
 
-        op, delta = heuristic(self.get_problem_state(), self.algorithm_data, **kwargs)
-        if op is None:
-            op = NoOpOperator()
+        self.key_value = self.get_key_value(self.current_solution)
+        self.best_key_value = float(self.key_value)
+        self.best_solution = WaferLayoutSolution(assign=list(self.current_solution.assign))
 
-        new_sol = op.run(self.instance_data, self.current_solution)
-        self.current_solution = new_sol
-        self.is_valid_solution = self.validation_solution(self.current_solution)
+        self._dump_best()
+        self.update_problem_state()
 
-        metrics = self.evaluate_assign(self.current_solution.assign)
-        total_scalar = float(metrics.get("total_scalar", 0.0))
-        comm_norm = float(metrics.get("comm_norm", 0.0))
-        therm_norm = float(metrics.get("therm_norm", 0.0))
-
-        self.key_value = total_scalar
-        self.is_complete_solution = True
-
-        if (self.best_solution is None) or (total_scalar < self.best_key_value):
-            self.best_solution = self.current_solution.copy()
-            self.best_key_value = total_scalar
-
+    def _dump_best(self):
         rec = {
-            "step_idx": int(self.current_steps),
-            "heuristic": getattr(heuristic, "__name__", str(heuristic)),
-            "op": getattr(op, "op_name", op.__class__.__name__),
-            "op_args_json": op.to_json() if hasattr(op, "to_json") else {},
-            "accepted": 1,
-            "objective_scalar": total_scalar,
-            "comm_norm": comm_norm,
-            "therm_norm": therm_norm,
-            "assign": self.current_solution.to_list(),
-            "time_ms": int((time.time() - t0) * 1000),
+            "best_assign": list(self.best_solution.assign),
+            "best": {"assign": list(self.best_solution.assign)},
+            "assign": list(self.best_solution.assign),
+            "key_value": float(self.best_key_value),
+            "problem": "wafer_layout",
+            "S": int(self.S),
+            "Ns": int(self.Ns),
         }
-        self.recordings.append(rec)
-        self.current_steps += 1
-        return op
+        with open(self._best_path, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
 
-    def run_operator(
-        self,
-        operator,
-        inplace: bool = True,
-        meta: dict | None = None,
-        stage: str | None = None,
-        time_ms: int = 0,
-        new_solution: WaferLayoutSolution | None = None,
-        **kwargs,
-    ):
+    def run_heuristic(self, heuristic, algorithm_data: dict = {}, record: bool = True, **kwargs):
         t0 = time.time()
+        try:
+            operator, algorithm_data = heuristic(self.problem_state, algorithm_data, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            dt = (time.time() - t0) * 1000.0
+            line = {"op": "error", "op_args": {"error": str(e)}, "accepted": 0, "time_ms": dt, "meta": {}}
+            self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
+            self._rec_fp.flush()
+            self.current_steps += 1
+            return f"[heuristic_error] {e}"
 
-        accepted = bool(inplace)
-        if accepted:
-            if new_solution is not None:
-                self.current_solution = new_solution
-            else:
-                self.current_solution = operator.run(self.instance_data, self.current_solution)
-            self.is_valid_solution = self.validation_solution(self.current_solution)
-            self.solution = self.current_solution
+        if not hasattr(operator, "run"):
+            dt = (time.time() - t0) * 1000.0
+            line = {"op": "invalid_operator", "op_args": {}, "accepted": 0, "time_ms": dt, "meta": {}}
+            self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
+            self._rec_fp.flush()
+            self.current_steps += 1
+            return "[invalid_operator]"
 
-        metrics = self.evaluate_assign(self.current_solution.assign)
-        self.key_value = float(metrics["total_scalar"])
-        self.is_complete_solution = True
+        old_assign = np.asarray(self.current_solution.assign).copy()
+        old_key = float(self.key_value)
 
-        if (self.best_solution is None) or (self.compare(self.key_value, self.best_key_value) > 0):
-            self.best_solution = self.current_solution.copy()
-            self.best_key_value = float(self.key_value)
+        operator.run(self.current_solution)
+        new_key = float(self.get_key_value(self.current_solution))
 
-        op_payload = operator.to_json() if hasattr(operator, "to_json") else {}
-        op_name = op_payload.get("op", getattr(operator, "op_name", operator.__class__.__name__))
-        op_args = {k: v for k, v in op_payload.items() if k != "op"}
+        accept = False
+        if new_key <= old_key:
+            accept = True
+        else:
+            delta = new_key - old_key
+            temp = max(self.temp_min, self.temp_init * (self.temp_decay ** max(0, self.current_steps)))
+            prob = float(np.exp(-delta / max(1e-9, temp)))
+            if random.random() < prob:
+                accept = True
 
-        rec = {
-            "op": op_name,
+        if not accept:
+            self.current_solution.assign = old_assign
+            new_key = old_key
+
+        self.key_value = float(new_key)
+        if float(new_key) < float(self.best_key_value):
+            self.best_key_value = float(new_key)
+            self.best_solution = WaferLayoutSolution(assign=list(self.current_solution.assign))
+            self._dump_best()
+
+        self.update_problem_state()
+
+        dt = (time.time() - t0) * 1000.0
+        op_args = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
+        op = op_args.get("op", type(operator).__name__)
+
+        meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+        line = {
+            "op": op,
             "op_args": op_args,
-            "accepted": int(accepted),
-            "assign": self.current_solution.to_list(),
-            "total_scalar": float(metrics["total_scalar"]),
-            "comm_norm": float(metrics.get("comm_norm", 0.0)),
-            "therm_norm": float(metrics.get("therm_norm", 0.0)),
-            "time_ms": int(time_ms) if time_ms else int((time.time() - t0) * 1000),
+            "accepted": 1 if accept else 0,
+            "time_ms": dt,
+            "assign": list(self.current_solution.assign),
+            "meta": meta,
         }
-        if meta:
-            rec["meta"] = meta
-        if stage:
-            rec["stage"] = stage
-
-        self.recordings.append(rec)
-        if self.output_dir:
-            rec_path = Path(self.output_dir) / "recordings.jsonl"
-            rec_path.parent.mkdir(parents=True, exist_ok=True)
-            with rec_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
+        self._rec_fp.flush()
 
         self.current_steps += 1
         return operator
 
-    def dump_result(self) -> None:
-        out_dir = Path(self.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+    @property
+    def continue_run(self) -> bool:
+        if getattr(self, "max_steps", None) is None:
+            return True
+        return int(self.current_steps) < int(self.max_steps)
 
-        rec_path = out_dir / "recordings.jsonl"
-        with open(rec_path, "w", encoding="utf-8") as f:
-            for r in self.recordings:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-        best_assign = (
-            self.best_solution.to_list()
-            if self.best_solution is not None
-            else self.current_solution.to_list()
-        )
-        best_eval = self.evaluate_assign(np.asarray(best_assign, dtype=np.int64))
-        best_info = {
-            "problem": "wafer_layout",
-            "seed": int(self.instance_data.get("assign_seed", 0)),
-            "best_key_value": float(self.best_key_value),
-            "best_assign": best_assign,
-            "best_eval": best_eval,
-            "meta": {
-                "S": int(self.instance_data.get("S", 0)),
-                "Ns": int(self.instance_data.get("Ns", 0)),
-                "weights": self.instance_data.get("weights", {}),
-                "sigma": self.instance_data.get("sigma", 1.0),
-            },
-        }
-        (out_dir / "best_solution.json").write_text(
-            json.dumps(best_info, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-    def _resolve_seed_id(self) -> int:
-        seed_payload = self.instance_data.get("seed", {}) or {}
-        seed_value = seed_payload.get("assign_seed", 0)
-        if isinstance(seed_value, (int, float, str)):
+    def dump_result(self):
+        if self._rec_fp is not None:
             try:
-                return int(seed_value)
-            except ValueError:
-                return 0
-        return 0
+                self._rec_fp.flush()
+                self._rec_fp.close()
+            except Exception:
+                pass
+            self._rec_fp = None
+        super().dump_result()

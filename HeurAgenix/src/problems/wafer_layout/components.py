@@ -1,120 +1,66 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-import numpy as np
-
-from src.problems.base.components import BaseOperator, BaseSolution
+from src.problems.base.components import BaseSolution, BaseOperator
 
 
 @dataclass
 class WaferLayoutSolution(BaseSolution):
-    assign: np.ndarray
-    S: int
-    Ns: int
-
-    def copy(self):
-        return WaferLayoutSolution(assign=self.assign.copy(), S=int(self.S), Ns=int(self.Ns))
-
-    def to_list(self) -> List[int]:
-        return [int(x) for x in self.assign.tolist()]
-
-    def __str__(self) -> str:
-        s_size = int(self.S)
-        head = self.to_list()[: min(16, s_size)]
-        return f"WaferLayoutSolution(S={s_size}, head_assign={head}...)"
+    """A full assignment solution: slot i -> site_id"""
+    assign: List[int]
 
 
 class SwapOperator(BaseOperator):
-    op_name = "swap"
-
     def __init__(self, i: int, j: int):
         self.i = int(i)
         self.j = int(j)
 
-    def run(self, instance_data: dict, solution: WaferLayoutSolution) -> WaferLayoutSolution:
-        sol = solution.copy()
-        if self.i == self.j:
-            return sol
-        sol.assign[self.i], sol.assign[self.j] = sol.assign[self.j], sol.assign[self.i]
-        return sol
+    def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
+        a = solution.assign
+        a[self.i], a[self.j] = a[self.j], a[self.i]
+        return solution
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_action(self) -> Dict[str, Any]:
         return {"op": "swap", "i": self.i, "j": self.j}
 
 
 class RelocateOperator(BaseOperator):
-    op_name = "relocate"
-
-    def __init__(self, i: int, site_id: int):
+    def __init__(self, i: int, site_id: int, from_site: int | None = None):
         self.i = int(i)
         self.site_id = int(site_id)
+        self.from_site = None if from_site is None else int(from_site)
 
-    def run(self, instance_data: dict, solution: WaferLayoutSolution) -> WaferLayoutSolution:
-        sol = solution.copy()
-        target = self.site_id
-        pos = np.where(sol.assign == target)[0]
-        if pos.size > 0:
-            j = int(pos[0])
-            sol.assign[self.i], sol.assign[j] = sol.assign[j], sol.assign[self.i]
-        else:
-            sol.assign[self.i] = target
-        return sol
+    def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
+        a = solution.assign
+        self.from_site = int(a[self.i])
+        a[self.i] = self.site_id
+        return solution
 
-    def to_json(self) -> Dict[str, Any]:
-        return {"op": "relocate", "i": self.i, "site_id": self.site_id}
-
-
-class ClusterMoveOperator(BaseOperator):
-    op_name = "cluster_move"
-
-    def __init__(self, i_list: List[int], site_list: List[int]):
-        self.i_list = [int(x) for x in i_list]
-        self.site_list = [int(x) for x in site_list]
-
-    def run(self, instance_data: dict, solution: WaferLayoutSolution) -> WaferLayoutSolution:
-        sol = solution.copy()
-        for i, site in zip(self.i_list, self.site_list):
-            sol.assign[int(i)] = int(site)
-        return sol
-
-    def to_json(self) -> Dict[str, Any]:
-        return {"op": "cluster_move", "i_list": self.i_list, "site_list": self.site_list}
+    def to_action(self) -> Dict[str, Any]:
+        return {"op": "relocate", "i": self.i, "site_id": self.site_id, "from_site": self.from_site}
 
 
 class RandomKickOperator(BaseOperator):
-    op_name = "random_kick"
+    def __init__(self, idxs: List[int], site_ids: List[int]):
+        self.idxs = [int(x) for x in idxs]
+        self.site_ids = [int(x) for x in site_ids]
 
-    def __init__(self, moves: List[Dict[str, Any]]):
-        self.moves = moves
+    def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
+        a = solution.assign
+        for i, s in zip(self.idxs, self.site_ids):
+            a[i] = s
+        return solution
 
-    def run(self, instance_data: dict, solution: WaferLayoutSolution) -> WaferLayoutSolution:
-        sol = solution.copy()
-        for mv in self.moves:
-            t = mv.get("type")
-            if t == "swap":
-                i = int(mv["i"])
-                j = int(mv["j"])
-                sol.assign[i], sol.assign[j] = sol.assign[j], sol.assign[i]
-            elif t == "relocate":
-                i = int(mv["i"])
-                site = int(mv["site_id"])
-                pos = np.where(sol.assign == site)[0]
-                if pos.size > 0:
-                    j = int(pos[0])
-                    sol.assign[i], sol.assign[j] = sol.assign[j], sol.assign[i]
-                else:
-                    sol.assign[i] = site
-        return sol
-
-    def to_json(self) -> Dict[str, Any]:
-        return {"op": "random_kick", "moves": self.moves}
+    def to_action(self) -> Dict[str, Any]:
+        return {"op": "random_kick", "idxs": self.idxs, "site_ids": self.site_ids}
 
 
-class NoOpOperator(BaseOperator):
-    op_name = "noop"
+class NoopOperator(BaseOperator):
+    def __init__(self):
+        pass
 
-    def run(self, instance_data: dict, solution: WaferLayoutSolution) -> WaferLayoutSolution:
-        return solution.copy()
+    def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
+        return solution
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_action(self) -> Dict[str, Any]:
         return {"op": "noop"}

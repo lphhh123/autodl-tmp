@@ -1,17 +1,5 @@
-Wafer-Level Chiplet Placement (wafer_layout)
-
-We have S chiplets to place onto Ns candidate sites on a wafer.
-A solution is an assignment: assign[i] = site_id, mapping each chiplet i to a site.
-
-Objective is a weighted sum:
-- Communication cost: based on traffic between chiplets and Euclidean distance between their assigned sites.
-- Thermal cost: based on chiplet TDP and its radial position, with additional spatial spreading effect.
-The final scalar objective is:
-total = w_comm * comm_norm + w_therm * therm_norm
-(lower is better)
-
-Operators:
-- swap(i,j): swap two chiplets’ assigned sites
-- relocate(i,site_id): move chiplet i to a target site (if occupied, swap)
-- cluster_move(i_list, site_list): set a group assignment
-- random_kick(moves): a sequence of random swaps/relocates
+Wafer-level chiplet placement (wafer_layout).
+We assign each slot (chiplet/task segment) to a physical site on a wafer.
+Objective is a weighted scalar of (normalized communication cost, normalized thermal cost)
+plus penalties for duplicates and boundary violations.
+A move operator modifies the assignment (swap / relocate / random_kick / noop).

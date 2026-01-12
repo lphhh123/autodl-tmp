@@ -1,3 +1,4 @@
-problem_state fields:
-- instance: fixed layout instance info (S, Ns, wafer radius, objective config, top traffic pairs).
-- solution: current solution metrics (total_scalar, comm_norm, therm_norm) and assignment stats.
+Problem state is a dict containing:
+- instance_problem_state: {S, Ns, wafer_radius_mm, traffic_sum, tdp_sum}
+- solution_problem_state: {assign, used_sites, empty_sites, duplicate_count}
+- observation_problem_state: compact summary for LLM.
