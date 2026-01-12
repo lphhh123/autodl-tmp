@@ -400,98 +400,78 @@ class LLMSelectionHyperHeuristic:
     def run(self, env: Any) -> bool:
         import json
         import random
-        import traceback
+        import time
 
-        usage_path = None
-        if getattr(self, "output_dir", None):
-            usage_path = os.path.join(self.output_dir, "llm_usage.jsonl")
-        elif self.usage_path is not None:
-            usage_path = str(self.usage_path)
+        out_dir = getattr(self, "output_dir", None) or getattr(env, "output_dir", None)
+        usage_path = os.path.join(out_dir, "llm_usage.jsonl") if out_dir else None
 
-        def _log_usage(rec: dict) -> None:
+        def _log(entry: dict) -> None:
             if usage_path:
+                entry.setdefault("timestamp", time.time())
                 with open(usage_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        llm_ok = True
-        llm_client = self.llm
-        if llm_client is None:
-            try:
-                if self.llm_config_file or self.configs.get("llm_config_file"):
-                    llm_client = get_llm_client(self.llm_config_file or self.configs.get("llm_config_file"))
-                else:
-                    llm_ok = False
-                    _log_usage({"ok": False, "reason": "llm_config_missing"})
-            except Exception as exc:  # noqa: BLE001
-                llm_ok = False
-                _log_usage({"ok": False, "reason": "llm_client_init_failed", "error": str(exc)})
-        if llm_client is None:
-            llm_ok = False
+        def _list_heuristics() -> list[str]:
+            base = Path(f"src/problems/{self.problem}/heuristics")
+            if not base.exists():
+                return []
+            return [p.stem for p in base.glob("*.py") if not p.name.startswith("_")]
 
         fail_count = 0
-        while env.continue_run:
-            heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
-            if not heuristic_pool:
-                _log_usage({"ok": False, "reason": "empty_heuristic_pool"})
+        llm_enabled = True
+        sel_freq = max(1, int(getattr(self, "selection_frequency", 1)))
+        num_cand = max(1, int(getattr(self, "num_candidate_heuristics", 1)))
+        max_fail = int(getattr(self, "max_llm_failures", 2))
+
+        while getattr(env, "continue_run", True):
+            pool = _list_heuristics()
+            if not pool:
+                _log({"ok": False, "reason": "empty_pool"})
                 break
-
-            if len(heuristic_pool) <= self.num_candidate_heuristics:
-                candidates = list(heuristic_pool)
-            else:
-                candidates = random.sample(heuristic_pool, self.num_candidate_heuristics)
-
+            candidates = pool if len(pool) <= num_cand else random.sample(pool, num_cand)
             chosen = None
             ok = False
-            err = None
-
-            if llm_ok and llm_client is not None:
+            if llm_enabled:
                 try:
-                    prompt = env.summarize_env()
-                    chosen = llm_client.choose_heuristic(
-                        prompt,
-                        candidates,
-                        timeout_s=getattr(self, "llm_timeout_s", 30),
-                    )
+                    llm = getattr(self, "llm_client", None)
+                    if llm and hasattr(llm, "choose_heuristic"):
+                        chosen = llm.choose_heuristic(candidates)
+                    elif hasattr(self, "select_by_llm"):
+                        chosen = self.select_by_llm(candidates)
+                    else:
+                        raise RuntimeError("no llm interface")
                     ok = True
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     fail_count += 1
-                    err = traceback.format_exc()
                     chosen = random.choice(candidates)
-                    ok = False
-                    _log_usage(
+                    _log(
                         {
                             "ok": False,
-                            "reason": "llm_call_failed",
+                            "reason": "llm_fail",
                             "error": str(exc),
+                            "fallback": chosen,
                             "fail_count": fail_count,
-                            "fallback_pick": chosen,
                         }
                     )
-
-                    if fail_count >= getattr(self, "max_llm_failures", 2):
-                        llm_ok = False
-                        _log_usage({"ok": False, "reason": "llm_disabled_after_failures", "fail_count": fail_count})
+                    if fail_count >= max_fail:
+                        llm_enabled = False
+                        _log({"ok": False, "reason": "llm_disabled"})
             else:
-                err = "llm_disabled_or_unavailable"
-
-            if chosen is None:
                 chosen = random.choice(candidates)
 
-            _log_usage(
-                {
-                    "ok": ok,
-                    "chosen_heuristic": chosen,
-                    "candidates": candidates,
-                    "selection_frequency": self.selection_frequency,
-                    "error": err,
-                }
-            )
-
-            heuristic = load_function(chosen, problem=self.problem)
-            for _ in range(self.selection_frequency):
-                if not env.continue_run:
+            _log({"ok": ok, "chosen": chosen, "candidates": candidates, "sel_freq": sel_freq})
+            fn = load_function(chosen, problem=self.problem)
+            for _ in range(sel_freq):
+                if not getattr(env, "continue_run", True):
                     break
-                env.run_heuristic(heuristic)
-
-        env.dump_result()
-        return bool(getattr(env, "is_valid_solution", getattr(env, "is_complete_solution", True)))
+                if hasattr(env, "run_heuristic"):
+                    env.run_heuristic(fn)
+                else:
+                    op, _ = fn(getattr(env, "problem_state", {}), {})
+                    if hasattr(env, "run_operator"):
+                        env.run_operator(op, inplace=True)
+                    elif hasattr(env, "step"):
+                        env.step(op)
+                    else:
+                        raise RuntimeError("env has no run method")
+        return True
