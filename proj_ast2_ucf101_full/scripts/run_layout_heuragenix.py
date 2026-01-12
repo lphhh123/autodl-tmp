@@ -566,15 +566,33 @@ def main() -> None:
     ).strip(os.pathsep)
     env["AMLT_OUTPUT_DIR"] = str(internal_out)
     env["AMLT_DATA_DIR"] = str(internal_data_base)
-    result = subprocess.run(
-        launch_cmd,
-        cwd=str(heuragenix_root),
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if result.returncode != 0:
-        log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+    timeout_s = int(baseline_cfg.get("subprocess_timeout_s", 1800))
+    try:
+        result = subprocess.run(
+            launch_cmd,
+            cwd=str(heuragenix_root),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log_text = f"timeout after {timeout_s}s"
+        _append_llm_usage(
+            llm_usage_path,
+            {
+                "ok": False,
+                "reason": "subprocess_timeout",
+                "engine": method,
+                "error": log_text,
+                "stdout": (exc.stdout or "").strip(),
+                "stderr": (exc.stderr or "").strip(),
+            },
+        )
+        result = None
+    if result is None or result.returncode != 0:
+        if result is not None:
+            log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
         _append_llm_usage(
             llm_usage_path,
             {"ok": False, "reason": "launch_failed", "engine": method, "error": log_text},
@@ -609,15 +627,32 @@ def main() -> None:
             ]
             if max_steps is not None:
                 launch_cmd.extend(["--max_steps", str(max_steps)])
-            result = subprocess.run(
-                launch_cmd,
-                cwd=str(heuragenix_root),
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            if result.returncode != 0:
-                log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+            try:
+                result = subprocess.run(
+                    launch_cmd,
+                    cwd=str(heuragenix_root),
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=timeout_s,
+                )
+            except subprocess.TimeoutExpired as exc:
+                log_text = f"timeout after {timeout_s}s"
+                _append_llm_usage(
+                    llm_usage_path,
+                    {
+                        "ok": False,
+                        "reason": "subprocess_timeout",
+                        "engine": method,
+                        "error": log_text,
+                        "stdout": (exc.stdout or "").strip(),
+                        "stderr": (exc.stderr or "").strip(),
+                    },
+                )
+                result = None
+            if result is None or result.returncode != 0:
+                if result is not None:
+                    log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
                 _append_llm_usage(
                     llm_usage_path,
                     {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},

@@ -15,6 +15,8 @@ class BaseEnv:
         self.step = 0
         self.algorithm_data: Dict[str, Any] = {}
         self.output_dir: Optional[str] = None
+        self.current_steps = 0
+        self.max_steps = None
 
     def load_data(self, path: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -42,6 +44,7 @@ class BaseEnv:
         self.recordings = []
         self.step = 0
         self.construction_steps = 0
+        self.current_steps = 0
         self.algorithm_data = {}
         self.output_dir = output_dir
 
