@@ -88,6 +88,7 @@ class LLMSelectionHyperHeuristic:
 
         fail_count = 0
         selection_round = 0
+        llm_disabled = not llm_ok
 
         max_steps = int(getattr(env, "max_steps", 0) or 0)
         if max_steps <= 0:
@@ -164,6 +165,10 @@ class LLMSelectionHyperHeuristic:
                     if fail_count >= self.max_llm_failures:
                         llm_ok = False
                         self._log_usage({"ok": False, "reason": "llm_disabled_after_failures", "fail_count": fail_count})
+                        llm_disabled = True
+            elif not llm_ok and self.fallback_on_llm_failure == "stop":
+                self._log_usage({"ok": False, "reason": "llm_disabled_stop", "fail_count": fail_count})
+                break
 
             dt_ms = (time.time() - t0) * 1000.0
             self._log_usage(
@@ -187,11 +192,22 @@ class LLMSelectionHyperHeuristic:
                     break
                 if int(getattr(env, "current_steps", 0)) >= max_steps:
                     break
-                env.run_heuristic(heuristic_fn, algorithm_data=algo_data, record=True)
+                env.run_heuristic(
+                    heuristic_fn,
+                    algorithm_data=algo_data,
+                    record=True,
+                    add_record_item={
+                        "selection": "llm_hh",
+                        "chosen_heuristic": chosen,
+                        "candidates": candidates,
+                        "selection_round": selection_round,
+                        "llm_ok": bool(ok),
+                        "llm_fail_count": int(fail_count),
+                        "llm_disabled": bool(llm_disabled),
+                    },
+                )
 
             selection_round += 1
 
         env.dump_result()
-        if hasattr(env, "validate_solution"):
-            return bool(env.validate_solution(getattr(env, "current_solution", None)))
-        return True
+        return bool(env.is_valid_solution(env.current_solution))

@@ -248,21 +248,25 @@ class RandomHyperHeuristic:
 
         chosen_name = None
         kcnt = 0
+        selection_round = 0
 
         while getattr(env, "continue_run", True):
             if (chosen_name is None) or (kcnt % K == 0):
                 chosen_name = rng.choice(self.heuristic_pool)
+                selection_round += 1
 
             heuristic = load_function(chosen_name, problem=self.problem)
             env.run_heuristic(
                 heuristic,
                 algorithm_data={"rng": rng, "env": env},
-                add_record_item={"selection": "random_hh", "chosen_heuristic": chosen_name},
+                add_record_item={
+                    "selection": "random_hh",
+                    "chosen_heuristic": chosen_name,
+                    "candidates": list(self.heuristic_pool),
+                    "selection_round": selection_round,
+                },
             )
 
             kcnt += 1
 
-        # IMPORTANT: do NOT call env.is_valid_solution (not implemented)
-        if hasattr(env, "validate_solution"):
-            return bool(env.validate_solution(getattr(env, "current_solution", None)))
-        return True
+        return bool(env.is_valid_solution(env.current_solution))

@@ -18,6 +18,7 @@ class OpenAICompatibleClient:
         base_url: str,
         model: str,
         api_key: Optional[str] = None,
+        api_type: Optional[str] = None,
         timeout_sec: int = 90,
         max_retry: int = 1,
         sleep_time: int = 0,
@@ -27,6 +28,7 @@ class OpenAICompatibleClient:
         max_tokens: int = 96,
     ) -> None:
         self.provider = provider
+        self.api_type = api_type
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key or ""
@@ -50,7 +52,9 @@ class OpenAICompatibleClient:
         headers = {"Content-Type": "application/json"}
         if not self.api_key:
             return headers
-        if self.provider in {"azure", "azure_gpt"} or "/openai/deployments/" in self.base_url:
+        provider = str(self.provider).lower()
+        api_type = str(self.api_type).lower() if self.api_type is not None else ""
+        if provider in {"azure", "azure_gpt"} or api_type == "azure" or "/openai/deployments/" in self.base_url:
             headers["api-key"] = self.api_key
         else:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -289,6 +293,7 @@ def get_llm_client(
         return None
     config = json.loads(path.read_text(encoding="utf-8"))
     provider = (config.get("type") or config.get("provider") or config.get("mode") or "api_model").lower()
+    api_type = config.get("api_type")
     model = (
         config.get("model")
         or config.get("model_name")
@@ -328,6 +333,7 @@ def get_llm_client(
                 base_url=url,
                 model=str(deployment),
                 api_key=api_key,
+                api_type=api_type or "azure",
                 timeout_sec=timeout_sec,
                 max_retry=max_retry,
                 sleep_time=sleep_time,
@@ -348,6 +354,7 @@ def get_llm_client(
                 base_url=url,
                 model=str(model or config.get("local_model") or "local-model"),
                 api_key=str(api_key),
+                api_type=api_type,
                 timeout_sec=timeout_sec,
                 max_retry=max_retry,
                 sleep_time=sleep_time,
@@ -369,6 +376,7 @@ def get_llm_client(
                 base_url=url,
                 model=str(model or "api-model"),
                 api_key=api_key,
+                api_type=api_type,
                 timeout_sec=timeout_sec,
                 max_retry=max_retry,
                 sleep_time=sleep_time,
@@ -388,6 +396,7 @@ def get_llm_client(
                 base_url=url,
                 model=str(model or "api-model"),
                 api_key=str(api_key),
+                api_type=api_type,
                 timeout_sec=timeout_sec,
                 max_retry=max_retry,
                 sleep_time=sleep_time,
