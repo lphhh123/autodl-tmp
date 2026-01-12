@@ -345,11 +345,14 @@ class Env(BaseEnv):
         meta["sa_accept"] = 1 if accept and delta > 0 else 0
         meta["delta_total"] = float(delta)
         line = {
-            "iter": self._step_id,
-            "stage": stage,
-            "op": op_name,
+            "iter": int(self._step_id),
+            "stage": str(stage),
+            "op": str(op_name),
+            # ---- for wrapper compatibility ----
             "op_args": op_args,
             "op_args_json": op_args,
+            "assign": list(self.current_solution.assign),
+            "seed_id": int(self._seed_id),
             "accepted": 1 if accept else 0,
             "total_scalar": float(new_key),
             "comm_norm": float(new_comm),
@@ -371,7 +374,21 @@ class Env(BaseEnv):
         t0 = time.time()
         add_record_item = kwargs.get("add_record_item") or {}
         stage = add_record_item.get("selection", self._stage)
-        extra_meta = add_record_item.get("meta", {}) if isinstance(add_record_item, dict) else {}
+        # ---- build extra_meta: merge add_record_item + add_record_item["meta"] ----
+        extra_meta = {}
+        if isinstance(add_record_item, dict):
+            # copy top-level keys (except "meta")
+            for k, v in add_record_item.items():
+                if k == "meta":
+                    continue
+                extra_meta[k] = v
+            # merge nested meta if present
+            nested = add_record_item.get("meta")
+            if isinstance(nested, dict):
+                for k, v in nested.items():
+                    extra_meta[k] = v
+        if not extra_meta:
+            extra_meta = None
         try:
             operator, algorithm_data = heuristic(self.problem_state, algorithm_data, **kwargs)
         except Exception as e:  # noqa: BLE001
@@ -388,11 +405,14 @@ class Env(BaseEnv):
             if isinstance(extra_meta, dict):
                 meta.update(extra_meta)
             line = {
-                "iter": self._step_id,
-                "stage": stage,
+                "iter": int(self._step_id),
+                "stage": str(stage),
                 "op": "error",
+                # ---- for wrapper compatibility ----
                 "op_args": {"error": str(e)},
                 "op_args_json": {"error": str(e)},
+                "assign": list(self.current_solution.assign),
+                "seed_id": int(self._seed_id),
                 "accepted": 0,
                 "total_scalar": float(total_scalar),
                 "comm_norm": float(comm_norm),
@@ -423,11 +443,14 @@ class Env(BaseEnv):
             if isinstance(extra_meta, dict):
                 meta.update(extra_meta)
             line = {
-                "iter": self._step_id,
-                "stage": stage,
+                "iter": int(self._step_id),
+                "stage": str(stage),
                 "op": "invalid_operator",
+                # ---- for wrapper compatibility ----
                 "op_args": {},
                 "op_args_json": {},
+                "assign": list(self.current_solution.assign),
+                "seed_id": int(self._seed_id),
                 "accepted": 0,
                 "total_scalar": float(total_scalar),
                 "comm_norm": float(comm_norm),

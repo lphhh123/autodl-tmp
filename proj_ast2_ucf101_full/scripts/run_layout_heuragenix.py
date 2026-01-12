@@ -162,6 +162,7 @@ def _write_test_data(
     payload = dict(case)
     seed_payload = dict(payload.get("seed", {}) or {})
     seed_payload["assign_seed"] = [int(x) for x in seed_assign]
+    seed_payload["seed_id"] = int(seed)
     payload["seed"] = seed_payload
 
     target = test_dir / case_file
@@ -312,33 +313,66 @@ def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict
     return action
 
 
-def _assign_from_record_signature(rec: dict, S: int) -> np.ndarray | None:
+def _assign_from_signature(sig: str) -> np.ndarray | None:
     """
-    Prefer rec['assign'] if exists; otherwise parse rec['signature'] like:
-      "assign:0,3,5,..."
-    Return np.ndarray[int] or None.
+    Env signature format: "assign:0,1,2,..."
+    Return np.ndarray[int] or None
     """
-    a = rec.get("assign", None)
-    if isinstance(a, (list, tuple)):
-        try:
-            aa = [int(x) for x in a]
-            if len(aa) == S:
-                return np.asarray(aa, dtype=int)
-        except Exception:
-            pass
+    if not isinstance(sig, str):
+        return None
+    if not sig.startswith("assign:"):
+        return None
+    body = sig[len("assign:") :]
+    if not body:
+        return None
+    parts = [p for p in body.split(",") if p != ""]
+    try:
+        return np.asarray([int(x) for x in parts], dtype=int)
+    except Exception:
+        return None
 
-    sig = rec.get("signature", "")
-    if isinstance(sig, str) and sig.startswith("assign:"):
-        body = sig[len("assign:") :].strip()
-        if body:
-            try:
-                parts = [p for p in body.split(",") if p.strip() != ""]
-                aa = [int(x) for x in parts]
-                if len(aa) == S:
-                    return np.asarray(aa, dtype=int)
-            except Exception:
-                return None
-    return None
+
+def _apply_action(prev_assign: np.ndarray, action: Dict[str, Any], Ns: int) -> np.ndarray:
+    if prev_assign is None:
+        return prev_assign
+    assign = np.asarray(prev_assign, dtype=int).copy()
+    op = action.get("op")
+    if op == "swap":
+        i = int(action.get("i", -1))
+        j = int(action.get("j", -1))
+        if 0 <= i < len(assign) and 0 <= j < len(assign):
+            assign[i], assign[j] = assign[j], assign[i]
+        return assign
+    if op == "relocate":
+        i = int(action.get("i", -1))
+        site_id = int(action.get("site_id", -1))
+        if 0 <= i < len(assign) and 0 <= site_id < Ns:
+            assign[i] = site_id
+        return assign
+    if op == "cluster_move":
+        slots = action.get("slots")
+        target_sites = action.get("target_sites")
+        if isinstance(slots, (list, tuple)) and isinstance(target_sites, (list, tuple)):
+            for slot, site in zip(slots, target_sites):
+                try:
+                    slot_idx = int(slot)
+                    site_id = int(site)
+                except Exception:
+                    continue
+                if 0 <= slot_idx < len(assign) and 0 <= site_id < Ns:
+                    assign[slot_idx] = site_id
+        return assign
+    if op == "random_kick":
+        k = action.get("k")
+        try:
+            k = int(k)
+        except Exception:
+            k = 0
+        if k > 0 and Ns > 0:
+            for idx in range(min(k, len(assign))):
+                assign[idx] = (assign[idx] + 1) % Ns
+        return assign
+    return assign
 
 
 def _write_trace_and_pareto(
@@ -380,13 +414,23 @@ def _write_trace_and_pareto(
 
             accepted = int(rec.get("accepted", 1))
             op = rec.get("op", "noop")
-            op_args = rec.get("op_args", {}) or {}
+            op_args = rec.get("op_args") or rec.get("op_args_json") or {}
             if not isinstance(op_args, dict):
                 op_args = {"raw": str(op_args)}
 
-            new_assign = _assign_from_record_signature(rec, base_state.S)
-            if new_assign is not None:
-                base_state.assign = new_assign
+            # ---- update assign for this step ----
+            assign_arr = None
+            if isinstance(rec.get("assign"), list) and rec["assign"]:
+                assign_arr = np.asarray(rec["assign"], dtype=int)
+            if assign_arr is None:
+                assign_arr = _assign_from_signature(rec.get("signature"))
+            if assign_arr is None:
+                if accepted == 1:
+                    action = _action_from_record(rec, prev_assign)
+                    assign_arr = _apply_action(prev_assign, action, base_state.Ns)
+                else:
+                    assign_arr = np.asarray(prev_assign, dtype=int)
+            base_state.assign = assign_arr
 
             eval_out = evaluator.evaluate(base_state)
             signature = f"assign:{','.join(map(str, base_state.assign.tolist()))}"
@@ -447,7 +491,8 @@ def _write_trace_and_pareto(
                     cooldown_hit,
                 ]
             )
-            prev_assign = base_state.assign.copy()
+            if accepted == 1:
+                prev_assign = base_state.assign.copy()
             prev_total = float(eval_out.get("total_scalar", 0.0))
             prev_comm = float(eval_out.get("comm_norm", 0.0))
             prev_therm = float(eval_out.get("therm_norm", 0.0))
@@ -641,6 +686,7 @@ def main() -> None:
     _seed_everything(seed)
     seed_assign = _build_seed_assign(layout_input, seed)
     layout_input.setdefault("seed", {})["assign_seed"] = list(seed_assign)
+    layout_input.setdefault("seed", {})["seed_id"] = int(seed)
 
     project_root = Path(__file__).resolve().parents[1]
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else cfg.get("baseline", {})
@@ -861,13 +907,20 @@ def main() -> None:
         )
         recordings_path.parent.mkdir(parents=True, exist_ok=True)
         recordings_path.write_text("", encoding="utf-8")
+    # merge heuragenix internal llm_usage into wrapper llm_usage.jsonl
     heuragenix_usage_path = output_dir / "llm_usage.jsonl"
     if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:
-        llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
-        with llm_usage_path.open("a", encoding="utf-8") as f:
-            for line in heuragenix_usage_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    f.write(line + "\n")
+        with heuragenix_usage_path.open("r", encoding="utf-8") as rf:
+            for line in rf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    obj = {"raw": line}
+                obj = {"source": "heuragenix", **(obj if isinstance(obj, dict) else {"obj": obj})}
+                _append_llm_usage(llm_usage_path, obj)
     else:
         _append_llm_usage(
             llm_usage_path,
