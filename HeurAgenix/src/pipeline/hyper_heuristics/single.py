@@ -10,27 +10,26 @@ class SingleHyperHeuristic:
         heuristic: Callable[..., Tuple[Any, Dict]],
         iterations_scale_factor: float = 1.0,
         output_dir: str | None = None,
+        seed: int = 0,
     ) -> None:
         self.heuristic = heuristic
         self.iterations_scale_factor = float(iterations_scale_factor)
         self.output_dir = output_dir
+        self.seed = int(seed)
 
-    def run(self, env: Any) -> None:
-        while getattr(env, "continue_run", True):
-            problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": env.solution}
-            if hasattr(env, "get_problem_state"):
-                try:
-                    problem_state = dict(env.get_problem_state())
-                except Exception:  # noqa: BLE001
-                    problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": env.solution}
-            algorithm_data = {"env": env, "rng": getattr(env, "rng", None)}
-            operator, meta = self.heuristic(problem_state, algorithm_data=algorithm_data)
-            if operator is None:
-                break
-            if hasattr(env, "run_operator"):
-                try:
-                    env.run_operator(operator, heuristic_name=getattr(self.heuristic, "__name__", "heuristic"), meta=meta)
-                except TypeError:
-                    env.run_operator(operator)
-            else:
-                break
+    def run(self, env: Any) -> bool:
+        import random as _random
+
+        algorithm_data = {
+            "rng": _random.Random(int(getattr(self, "seed", 0))),
+            "env": env,
+        }
+
+        while env.continue_run:
+            env.run_heuristic(
+                self.heuristic,
+                algorithm_data=algorithm_data,
+                add_record_item={"selection": "single"},
+            )
+
+        return bool(env.is_valid_solution(env.current_solution))

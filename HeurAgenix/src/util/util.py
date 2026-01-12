@@ -102,3 +102,27 @@ def load_function(name: str, problem: str):
     if not hasattr(module, path.stem):
         raise AttributeError(f"{path} missing function {path.stem}")
     return getattr(module, path.stem)
+
+
+def get_heuristic_names(problem: str, heuristic_dir: str):
+    """
+    List heuristic python modules (stems) under:
+      src/problems/<problem>/heuristics/<heuristic_dir>/
+    heuristic_dir can also be a relative/absolute path.
+    """
+    import os
+
+    if os.path.isabs(heuristic_dir) or (os.sep in heuristic_dir):
+        base = heuristic_dir
+    else:
+        base = os.path.join("src", "problems", problem, "heuristics", heuristic_dir)
+
+    if not os.path.isdir(base):
+        raise FileNotFoundError(f"heuristic_dir not found: {base}")
+
+    names = []
+    for fn in os.listdir(base):
+        if fn.endswith(".py") and fn != "__init__.py":
+            names.append(fn[:-3])
+    names.sort()
+    return names

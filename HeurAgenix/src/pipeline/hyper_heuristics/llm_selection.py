@@ -1,477 +1,195 @@
-"""LLM-selection hyper-heuristic baseline."""
-from __future__ import annotations
-
-import importlib.util
-import json
 import os
-import random
 import time
+import json
+import random
 import traceback
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import List, Optional
 
-from src.util.get_heuristic import get_heuristic
-from src.util.llm_client.get_llm_client import get_llm_client
-from src.util.util import load_function
-
-
-def _is_env_like(value: Any) -> bool:
-    return hasattr(value, "get_key_value") and hasattr(value, "solution")
-
-
-def _load_heuristic_from_path(path: Path) -> Callable[..., Tuple[Any, Dict]]:
-    name = path.stem
-    spec = importlib.util.spec_from_file_location(f"heuristics.{name}", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load heuristic module: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # type: ignore[arg-type]
-    if not hasattr(module, name):
-        raise AttributeError(f"Missing heuristic function '{name}' in {path}")
-    return getattr(module, name)
-
-
-def _resolve_heuristics(heuristic_pool: Any, problem: str | None) -> List[Callable[..., Tuple[Any, Dict]]]:
-    if heuristic_pool is None:
-        raise ValueError("heuristic_pool is required")
-    if isinstance(heuristic_pool, dict):
-        return list(heuristic_pool.values())
-    if isinstance(heuristic_pool, (list, tuple)):
-        if heuristic_pool and callable(heuristic_pool[0]):
-            return list(heuristic_pool)
-        resolved: List[Callable[..., Tuple[Any, Dict]]] = []
-        for item in heuristic_pool:
-            if callable(item):
-                resolved.append(item)
-                continue
-            path = Path(str(item))
-            if not path.exists() and problem:
-                heuristics_root = Path(__file__).resolve().parents[2] / "problems" / problem / "heuristics"
-                candidates = list(heuristics_root.rglob(path.name)) + list(heuristics_root.rglob(f"{path.name}.py"))
-                if candidates:
-                    path = candidates[0]
-            if not path.exists():
-                raise FileNotFoundError(f"Heuristic file not found: {item}")
-            resolved.append(_load_heuristic_from_path(path))
-        return resolved
-    return list(get_heuristic(str(heuristic_pool), problem or "").values())
-
-
-def get_heuristic_names(problem: str, heuristic_dir: str) -> List[str]:
-    return list(get_heuristic(heuristic_dir, problem).keys())
+from src.problems.base.env import BaseEnv
+from src.util.util import load_function, extract, find_closest_match
 
 
 class LLMSelectionHyperHeuristic:
     def __init__(
         self,
-        *args,
-        llm_client: Any | None = None,
-        heuristic_pool: Any | None = None,
-        problem: str | None = None,
-        configs: Dict[str, Any] | None = None,
-        heuristic_functions: Dict[str, Callable[..., Tuple[Any, Dict]]] | None = None,
+        llm_client,
+        heuristic_pool: List[str],
+        problem: str,
+        tool_calling: bool = False,
         iterations_scale_factor: float = 1.0,
         selection_frequency: int = 5,
-        num_candidate_heuristics: int = 4,
+        num_candidate_heuristics: int = 1,
         rollout_budget: int = 0,
-        heuristic_dir: str = "basic_heuristics",
-        llm_config_file: str | None = None,
-        rng: random.Random | None = None,
-        sa_T0: float = 1.0,
-        sa_alpha: float = 0.995,
-        timeout_sec: int = 90,
-        max_retry: int = 1,
-        llm_timeout_s: int = 30,
+        output_dir: Optional[str] = None,
+        seed: int = 0,
         max_llm_failures: int = 2,
-        fallback_mode: str = "random_hh",
-        stage_name: str = "heuragenix_llm_hh",
-        usage_path: str | None = None,
-        output_dir: str | None = None,
-        llm_error: str | None = None,
-        **kwargs,
-    ) -> None:
-        self.legacy_mode = False
-        if args and _is_env_like(args[0]):
-            self.legacy_mode = True
-            self.env = args[0]
-            self.heuristics = args[1]
-            self.rng = args[2]
-            self.configs = dict(configs or {})
-            self.heuristic_functions = heuristic_functions
-            self.selection_frequency = max(1, int(selection_frequency))
-            self.num_candidate_heuristics = max(1, int(num_candidate_heuristics))
-            self.sa_T0 = float(sa_T0)
-            self.sa_alpha = float(sa_alpha)
-            self.stage_name = stage_name
-            self.llm = llm_client
-            self.llm_timeout_s = int(llm_timeout_s)
-            self.max_llm_failures = int(max_llm_failures)
-            self.fallback_mode = fallback_mode
-            self.fail_count = 0
-            self.llm_disabled = False
-            self.llm_error = llm_error
-            self.usage_records: List[Dict[str, Any]] = []
-            self.selection_records: List[Dict[str, Any]] = []
-            self.usage_path = Path(usage_path) if usage_path else None
-            self.output_dir = output_dir
-            self.heuristic_dir = heuristic_dir
-            self.llm_config_file = llm_config_file
-            return
-
-        if args:
-            llm_client = llm_client or args[0]
-        if len(args) > 1 and heuristic_pool is None:
-            heuristic_pool = args[1]
-        if len(args) > 2 and problem is None:
-            problem = args[2]
-
-        self.configs = dict(configs or {})
-        self.llm_error = llm_error
-        self.heuristic_functions = heuristic_functions
-        if llm_client is None and (self.configs.get("llm_config_file") or llm_config_file):
-            try:
-                llm_client = get_llm_client(self.configs.get("llm_config_file") or llm_config_file)
-            except Exception as exc:  # noqa: BLE001
-                llm_client = None
-                self.llm_error = f"{type(exc).__name__}: {exc}"
-        self.llm = llm_client
-        self.heuristic_pool = heuristic_pool
+    ):
+        self.llm_client = llm_client
+        self.heuristic_pool = list(heuristic_pool)
         self.problem = problem
+
+        self.tool_calling = bool(tool_calling)
         self.iterations_scale_factor = float(iterations_scale_factor)
-        self.selection_frequency = max(1, int(selection_frequency))
-        self.num_candidate_heuristics = max(1, int(num_candidate_heuristics))
+        self.selection_frequency = int(selection_frequency)
+        self.num_candidate_heuristics = int(num_candidate_heuristics)
         self.rollout_budget = int(rollout_budget)
-        self.llm_config_file = llm_config_file
-        self.heuristic_dir = heuristic_dir
-        self.rng = rng or random.Random(0)
-        self.sa_T0 = float(sa_T0)
-        self.sa_alpha = float(sa_alpha)
-        self.stage_name = stage_name
-        self.timeout_sec = timeout_sec
-        self.max_retry = max_retry
-        self.llm_timeout_s = int(llm_timeout_s)
-        self.max_llm_failures = int(max_llm_failures)
-        self.fallback_mode = fallback_mode
-        self.fail_count = 0
-        self.llm_disabled = False
-        self.usage_records: List[Dict[str, Any]] = []
-        self.selection_records: List[Dict[str, Any]] = []
-        self.usage_path = Path(usage_path) if usage_path else None
+
         self.output_dir = output_dir
-        self._resolved_heuristics: List[Callable[..., Tuple[Any, Dict]]] | None = None
-        self._resolved_heuristic_items: List[Tuple[str, Callable[..., Tuple[Any, Dict]]]] | None = None
+        self.seed = int(seed)
+        self.max_llm_failures = int(max_llm_failures)
 
-    def _append_usage(self, payload: Dict[str, Any]) -> None:
-        if not self.usage_path:
+        self.tools = None
+        if self.tool_calling:
+            # convert each heuristic into a "tool"
+            from src.util.util import search_file, convert_function_to_tool
+            tools = []
+            for h in self.heuristic_pool:
+                path = search_file(h + ".py", problem)
+                with open(path, "r", encoding="utf-8") as f:
+                    code = f.read()
+                tools.append(convert_function_to_tool(code))
+            self.tools = tools
+
+    def _usage_path(self):
+        if not self.output_dir:
+            return None
+        return os.path.join(self.output_dir, "llm_usage.jsonl")
+
+    def _log_usage(self, rec: dict):
+        p = self._usage_path()
+        if not p:
             return
-        self.usage_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.usage_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        rec = dict(rec)
+        rec.setdefault("ts", time.time())
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    def _llm_ready(self) -> bool:
-        if self.llm is None:
-            return False
-        if hasattr(self.llm, "is_ready"):
-            return bool(self.llm.is_ready())
-        return bool(getattr(self.llm, "base_url", None) and getattr(self.llm, "model", None))
+    def _choose_candidates(self, rng: random.Random):
+        if self.num_candidate_heuristics <= 0 or self.num_candidate_heuristics >= len(self.heuristic_pool):
+            return list(self.heuristic_pool)
+        return rng.sample(self.heuristic_pool, self.num_candidate_heuristics)
 
-    def _resolve_heuristics(self) -> List[Callable[..., Tuple[Any, Dict]]]:
-        if self._resolved_heuristics is None:
-            self._resolved_heuristics = _resolve_heuristics(self.heuristic_pool, self.problem)
-        return self._resolved_heuristics
+    def _llm_pick(self, candidates: List[str]):
+        """
+        Return heuristic_name.
+        tool_calling: use chat_with_tools -> [(fn_name, params)]
+        text: parse "Selected heuristic: <name>"
+        """
+        if self.tool_calling:
+            calls = self.llm_client.chat_with_tools(self.tools)
+            if not calls:
+                raise RuntimeError("empty tool calls")
+            # pick first tool name
+            return calls[0][0]
 
-    def _resolve_heuristic_items(self) -> List[Tuple[str, Callable[..., Tuple[Any, Dict]]]]:
-        if self._resolved_heuristic_items is not None:
-            return self._resolved_heuristic_items
-        if self.heuristic_functions:
-            self._resolved_heuristic_items = list(self.heuristic_functions.items())
-            return self._resolved_heuristic_items
-        if isinstance(self.heuristic_pool, dict):
-            self._resolved_heuristic_items = list(self.heuristic_pool.items())
-            return self._resolved_heuristic_items
-        heuristics = self._resolve_heuristics()
-        self._resolved_heuristic_items = [(getattr(h, "__name__", "unknown"), h) for h in heuristics]
-        return self._resolved_heuristic_items
+        # text mode
+        action = self.llm_client.chat()
+        picked = extract(action, "Selected heuristic")
+        if picked is None:
+            # try fuzzy match from whole response
+            picked = find_closest_match(action, candidates)
 
-    def _resolve_usage_path(self, env: Any) -> None:
-        if self.usage_path is not None:
-            return
-        output_dir = getattr(env, "output_dir", None)
-        if output_dir:
-            self.usage_path = Path(output_dir) / "llm_usage.jsonl"
+        if picked not in candidates:
+            picked = find_closest_match(str(picked), candidates)
+        return picked
 
-    def _choose_candidate(
-        self,
-        state_summary: Dict[str, Any],
-        candidates: List[Dict[str, Any]],
-        step_idx: int,
-        selection_id: int,
-        rng: random.Random,
-    ) -> int:
-        ok = True
-        err = None
-        chosen_idx: int
-        start_ts = time.time()
-        start_perf = time.perf_counter()
+    def run(self, env: BaseEnv) -> bool:
+        rng = random.Random(self.seed)
+        algorithm_data = {"rng": rng, "env": env}
 
-        if self.llm_disabled or not self._llm_ready():
-            ok = False
-            err = "llm_disabled" if self.llm_disabled else (self.llm_error or "llm_not_ready")
-            self.fail_count += 1
-            chosen_idx = int(rng.randint(0, len(candidates) - 1))
-            if self.fail_count >= self.max_llm_failures:
-                self.llm_disabled = True
-            if self.fallback_mode == "disable_llm":
-                self.llm_disabled = True
-        else:
-            try:
-                picks = self.llm.propose_pick(state_summary, 1, timeout_s=self.llm_timeout_s)
-                if not picks:
-                    raise RuntimeError("llm_empty_pick")
-                chosen_idx = int(picks[0])
-            except Exception as exc:  # noqa: BLE001
-                ok = False
-                err = repr(exc)
-                self.fail_count += 1
-                chosen_idx = int(rng.randint(0, len(candidates) - 1))
-                if self.fail_count >= self.max_llm_failures:
-                    self.llm_disabled = True
-                if self.fallback_mode == "disable_llm":
-                    self.llm_disabled = True
-
-        chosen_idx = max(0, min(chosen_idx, len(candidates) - 1))
-        latency_ms = int((time.perf_counter() - start_perf) * 1000)
-        candidate_names = [
-            c.get("name") if isinstance(c, dict) else str(c)
-            for c in candidates
-        ]
-        chosen_name = candidates[chosen_idx].get("name") if isinstance(candidates[chosen_idx], dict) else str(candidates[chosen_idx])
-        usage = {
-            "ts": float(start_ts),
-            "engine": "llm_hh",
-            "selection_round": int(selection_id),
-            "step": int(step_idx),
-            "candidates": candidate_names,
-            "chosen": chosen_name,
-            "llm_ok": bool(ok),
-            "llm_error": err,
-            "latency_ms": int(latency_ms),
-        }
-        if hasattr(self.llm, "calls") and self.llm.calls:
-            usage.update(self.llm.calls[-1])
-        self.usage_records.append(usage)
-        self._append_usage(usage)
-        return chosen_idx
-
-    def _get_algorithm_data(self, env) -> Dict[str, Any]:
-        data = dict(self.configs)
-        data.update(dict(getattr(env, "algorithm_data", {}) or {}))
-        data["env"] = env
-        data["rng"] = getattr(env, "rng", None) or self.rng
-        return data
-
-    def _score_candidates(self, solution, env, rng: random.Random) -> List[Dict[str, Any]]:
-        candidates: List[Dict[str, Any]] = []
-        current_score = env.get_key_value(solution)
-        if self.legacy_mode:
-            heuristics = [(getattr(h, "__name__", "unknown"), h) for h in list(self.heuristics)]
-        else:
-            heuristics = list(self._resolve_heuristic_items())
-        if len(heuristics) > self.num_candidate_heuristics:
-            heuristics = rng.sample(heuristics, self.num_candidate_heuristics)
-        algorithm_data = self._get_algorithm_data(env)
-        problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": solution}
-        if hasattr(env, "get_problem_state"):
-            try:
-                problem_state = dict(env.get_problem_state())
-            except Exception:  # noqa: BLE001
-                problem_state = {"instance_data": getattr(env, "instance_data", {}), "current_solution": solution}
-        problem_state["current_solution"] = solution
-        for idx, (heuristic_name, heuristic) in enumerate(heuristics):
-            operator, meta = heuristic(problem_state, algorithm_data)
-            new_solution = operator.run(solution)
-            new_score = env.get_key_value(new_solution)
-            candidates.append(
-                {
-                    "id": idx,
-                    "name": heuristic_name,
-                    "d_total": float(new_score - current_score),
-                    "operator": operator,
-                    "meta": meta,
-                }
-            )
-        return candidates
-
-    def _accept(self, env, new_solution, delta: float, temperature: float, rng: random.Random) -> bool:
-        if hasattr(env, "validation_solution"):
-            try:
-                if not bool(env.validation_solution(new_solution)):
-                    return False
-            except Exception:  # noqa: BLE001
-                pass
-        return (delta < 0) or (rng.random() < pow(2.718281828, -delta / max(temperature, 1e-6)))
-
-    def _record_step(
-        self,
-        env,
-        operator,
-        meta: Dict[str, Any],
-        accepted: bool,
-        time_ms: int,
-        new_solution,
-    ) -> None:
-        if hasattr(env, "run_operator"):
-            try:
-                env.run_operator(
-                    operator,
-                    inplace=accepted,
-                    meta=meta,
-                    stage=self.stage_name,
-                    time_ms=time_ms,
-                    new_solution=new_solution if accepted else None,
-                )
-            except TypeError:
-                env.run_operator(operator)
-            return
-        env.recordings.append(
-            {
-                "step": getattr(env, "step", 0),
-                "stage": self.stage_name,
-                "operator": operator,
-                "meta": meta,
-                "accepted": accepted,
-                "score": env.get_key_value(env.solution),
-                "time_ms": int(time_ms),
-                "assign": list(getattr(env.solution, "assign", [])),
-            }
-        )
-        if hasattr(env, "step"):
-            env.step += 1
-
-    def _run_legacy(self, max_steps: int) -> None:
-        temperature = self.sa_T0
-        current_solution = self.env.solution
-        current_score = self.env.get_key_value(current_solution)
-        selected_operator = None
-        selected_meta: Dict[str, Any] = {}
-
-        selection_id = 0
-        for step in range(max_steps):
-            step_start = time.perf_counter()
-            if step % self.selection_frequency == 0 or selected_operator is None:
-                candidates = self._score_candidates(current_solution, self.env, self.rng)
-                cand_ids = [c["id"] for c in candidates]
-                state_summary = {
-                    "candidate_ids": cand_ids,
-                    "forbidden_ids": [],
-                    "candidates": [
-                        {"id": c["id"], "type": c["name"], "d_total": c["d_total"]} for c in candidates
-                    ],
-                }
-                chosen_idx = self._choose_candidate(state_summary, candidates, step, selection_id, self.rng)
-                picked = next((c for c in candidates if c["id"] == chosen_idx), candidates[0])
-                reason = "llm_pick"
-                selected_operator = picked["operator"]
-                selected_meta = {"heuristic_id": picked["id"], "heuristic_name": picked["name"], **picked.get("meta", {})}
-                selection_id += 1
-
-            new_solution = selected_operator.run(current_solution)
-            new_score = self.env.get_key_value(new_solution)
-            delta = new_score - current_score
-            accept = self._accept(self.env, new_solution, delta, temperature, self.rng)
-            if accept:
-                current_solution = new_solution
-                current_score = new_score
-                self.env.solution = current_solution
-            self.env.recordings.append(
-                {
-                    "step": step,
-                    "stage": self.stage_name,
-                    "operator": selected_operator,
-                    "meta": selected_meta,
-                    "accepted": accept,
-                    "score": current_score,
-                    "time_ms": int((time.perf_counter() - step_start) * 1000),
-                    "assign": list(current_solution.assign),
-                }
-            )
-            temperature *= self.sa_alpha
-
-    def run(self, env: Any) -> bool:
-        import json
-        import random
-        import time
-
-        out_dir = getattr(self, "output_dir", None) or getattr(env, "output_dir", None)
-        usage_path = os.path.join(out_dir, "llm_usage.jsonl") if out_dir else None
-
-        def _log(entry: dict) -> None:
-            if usage_path:
-                entry.setdefault("timestamp", time.time())
-                with open(usage_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-        def _list_heuristics() -> list[str]:
-            base = Path(f"src/problems/{self.problem}/heuristics")
-            if not base.exists():
-                return []
-            return [p.stem for p in base.glob("*.py") if not p.name.startswith("_")]
-
-        fail_count = 0
+        # init LLM background (best-effort)
         llm_enabled = True
-        sel_freq = max(1, int(getattr(self, "selection_frequency", 1)))
-        num_cand = max(1, int(getattr(self, "num_candidate_heuristics", 1)))
-        max_fail = int(getattr(self, "max_llm_failures", 2))
+        fail_count = 0
+        try:
+            self.llm_client.reset()
+            # keep "without_code" to reduce tokens
+            self.llm_client.load_background("background_without_code.txt")
+            if self.tool_calling:
+                self.llm_client.load("heuristic_selection_with_tool.txt")
+            else:
+                self.llm_client.load("heuristic_selection.txt")
+        except Exception as e:
+            llm_enabled = False
+            self._log_usage({"ok": False, "reason": "llm_init_failed", "error": str(e)})
 
-        while getattr(env, "continue_run", True):
-            pool = _list_heuristics()
-            if not pool:
-                _log({"ok": False, "reason": "empty_pool"})
-                break
-            candidates = pool if len(pool) <= num_cand else random.sample(pool, num_cand)
-            chosen = None
+        selection_round = 0
+        while env.continue_run:
+            candidates = self._choose_candidates(rng)
+
+            t0 = time.time()
             ok = False
+            chosen = None
+            err = None
+
+            # rollout_budget>0 才允许用 tts_bon（懒加载，避免 dill/依赖炸）
+            if self.rollout_budget > 0 and len(candidates) > 1:
+                try:
+                    from src.util.tts_bon import tts_bon
+                    candidates = tts_bon(
+                        env,
+                        candidates,
+                        rollout_budget=self.rollout_budget,
+                        problem=self.problem,
+                        iterations_scale_factor=self.iterations_scale_factor,
+                    )
+                except Exception as e:
+                    # rollout 失败不影响主流程
+                    self._log_usage({"ok": False, "reason": "rollout_failed", "error": str(e)})
+
             if llm_enabled:
                 try:
-                    llm = getattr(self, "llm_client", None)
-                    if llm and hasattr(llm, "choose_heuristic"):
-                        chosen = llm.choose_heuristic(candidates)
-                    elif hasattr(self, "select_by_llm"):
-                        chosen = self.select_by_llm(candidates)
-                    else:
-                        raise RuntimeError("no llm interface")
+                    prompt = env.summarize_env() if hasattr(env, "summarize_env") else str(env.get_problem_state())
+                    # 将候选集合写入对话上下文
+                    self.llm_client.chat(prompt + "\n\nCandidates:\n" + "\n".join([f"- {x}" for x in candidates]))
+                    chosen = self._llm_pick(candidates)
                     ok = True
-                except Exception as exc:
+                except Exception as e:
                     fail_count += 1
-                    chosen = random.choice(candidates)
-                    _log(
-                        {
-                            "ok": False,
-                            "reason": "llm_fail",
-                            "error": str(exc),
-                            "fallback": chosen,
-                            "fail_count": fail_count,
-                        }
-                    )
-                    if fail_count >= max_fail:
+                    err = traceback.format_exc()
+                    chosen = rng.choice(candidates)
+                    ok = False
+                    self._log_usage({
+                        "ok": False,
+                        "reason": "llm_call_failed",
+                        "fail_count": fail_count,
+                        "error": str(e),
+                        "fallback_pick": chosen,
+                    })
+                    if fail_count >= self.max_llm_failures:
                         llm_enabled = False
-                        _log({"ok": False, "reason": "llm_disabled"})
-            else:
-                chosen = random.choice(candidates)
+                        self._log_usage({"ok": False, "reason": "llm_disabled", "fail_count": fail_count})
 
-            _log({"ok": ok, "chosen": chosen, "candidates": candidates, "sel_freq": sel_freq})
-            fn = load_function(chosen, problem=self.problem)
-            for _ in range(sel_freq):
-                if not getattr(env, "continue_run", True):
+            if chosen is None:
+                chosen = rng.choice(candidates)
+
+            dt_ms = int((time.time() - t0) * 1000)
+            self._log_usage({
+                "ok": ok,
+                "selection_round": selection_round,
+                "chosen_heuristic": chosen,
+                "candidates": candidates,
+                "tool_calling": self.tool_calling,
+                "time_ms": dt_ms,
+                "error": err,
+            })
+
+            heuristic = load_function(chosen, problem=self.problem)
+
+            # execute selection_frequency steps
+            for _ in range(self.selection_frequency):
+                if not env.continue_run:
                     break
-                if hasattr(env, "run_heuristic"):
-                    env.run_heuristic(fn)
-                else:
-                    op, _ = fn(getattr(env, "problem_state", {}), {})
-                    if hasattr(env, "run_operator"):
-                        env.run_operator(op, inplace=True)
-                    elif hasattr(env, "step"):
-                        env.step(op)
-                    else:
-                        raise RuntimeError("env has no run method")
-        return True
+                env.run_heuristic(
+                    heuristic,
+                    algorithm_data=algorithm_data,
+                    add_record_item={
+                        "selection_round": selection_round,
+                        "chosen_heuristic": chosen,
+                        "candidates": candidates,
+                        "llm_ok": ok,
+                    },
+                )
+
+            selection_round += 1
+
+        return bool(env.is_valid_solution(env.current_solution))
