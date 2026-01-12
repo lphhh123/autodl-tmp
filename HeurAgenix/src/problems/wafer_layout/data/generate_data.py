@@ -16,6 +16,13 @@ def gen_case(seed=1, S=8, Ns=16):
     }
 
 
+def gen_smoke_dataset():
+    base = Path(__file__).resolve().parents[0] / "smoke_data"
+    base.mkdir(parents=True, exist_ok=True)
+    for i in range(3):
+        (base / f"case_{i}.json").write_text(json.dumps(gen_case(seed=i), indent=2))
+
+
 def main():
     base = Path(__file__).resolve().parents[2] / "data" / "wafer_layout" / "test_data"
     base.mkdir(parents=True, exist_ok=True)
