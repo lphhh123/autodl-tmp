@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 import importlib
 
-from src.util.util import load_function
+from src.util.util import get_heuristic_names, load_function, load_heuristic_functions
 from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
 from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
@@ -77,16 +77,21 @@ def launch_heuristic_selector(
         out_dir = output_base_dir / problem / test_stem / result_dir / engine_name
         os.makedirs(out_dir, exist_ok=True)
         env.reset(output_dir=str(out_dir))
+        heur_names = get_heuristic_names(problem, heuristic_dir)
+        heur_funcs = load_heuristic_functions(problem, heuristic_dir)
         if engine_name == "random_hh":
             runner = RandomHyperHeuristic(
-                heuristic_pool=None,
+                heuristic_pool=heur_names,
                 problem=problem,
+                heuristic_functions=heur_funcs,
                 iterations_scale_factor=float(iterations_scale_factor),
-                heuristic_dir=heuristic_dir,
+                selection_frequency=int(selection_frequency),
+                seed=getattr(env, "seed", 0),
+                stage_name="heuragenix_random_hh",
             )
         else:
             runner = LLMSelectionHyperHeuristic(
-                heuristic_pool=None,
+                heuristic_pool=heur_names,
                 problem=problem,
                 heuristic_dir=heuristic_dir,
                 llm_config_file=llm_config_file,
@@ -95,6 +100,7 @@ def launch_heuristic_selector(
                 num_candidate_heuristics=int(num_candidate_heuristics),
                 rollout_budget=int(rollout_budget),
                 output_dir=str(out_dir),
+                seed=getattr(env, "seed", 0),
             )
         runner.run(env)
         env.dump_result()

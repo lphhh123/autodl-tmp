@@ -37,7 +37,12 @@ class Env(BaseEnv):
         self.problem = "wafer_layout"
         self._step_id = 0
         self._stage = "llm_hh"
-        self._seed_id = int(self.instance_data.get("seed", {}).get("assign_seed", 0))
+        seed_info = self.instance_data.get("seed", {}) or {}
+        assign_seed = seed_info.get("assign_seed", 0)
+        if isinstance(assign_seed, int):
+            self._seed_id = int(assign_seed)
+        else:
+            self._seed_id = int(seed_info.get("seed_id", 0))
         self.rng = random.Random(self._seed_id)
 
         slots = self.instance_data.get("slots", {})
@@ -150,21 +155,23 @@ class Env(BaseEnv):
         return assign
 
     def init_solution(self) -> WaferLayoutSolution:
-        seed_block = self.instance_data.get("seed", {}) or {}
-        seed = seed_block.get("assign_seed", None)
-        if seed is not None and len(seed) == self.S:
-            assign = list(seed)
+        seed_obj = self.instance_data.get("seed", {}) or {}
+        baseline = self.instance_data.get("baseline", {}) or {}
+
+        if isinstance(seed_obj, dict) and seed_obj.get("assign_seed") is not None:
+            assign = list(map(int, seed_obj["assign_seed"]))
+        elif baseline.get("assign_grid") is not None:
+            assign = list(map(int, baseline["assign_grid"]))
         else:
-            baseline = (self.instance_data.get("baseline", {}) or {}).get("assign_grid", None)
-            if baseline is not None:
-                assign = list(baseline)
+            if self.Ns >= self.S:
+                assign = self.rng.sample(range(self.Ns), self.S)
             else:
-                if self.Ns > 0:
-                    assign = self.rng.sample(range(self.Ns), min(self.S, self.Ns))
-                else:
-                    assign = [0 for _ in range(self.S)]
+                assign = [i % max(1, self.Ns) for i in range(self.S)]
+
+        if len(assign) != self.S:
+            assign = (assign + list(range(self.S)))[: self.S]
         assign = self._sanitize_assign(assign)
-        return WaferLayoutSolution(assign=np.asarray(assign, dtype=np.int64))
+        return WaferLayoutSolution(assign=assign)
 
     def is_complete_solution(self) -> bool:
         return True
@@ -196,7 +203,7 @@ class Env(BaseEnv):
     def get_problem_state(self) -> Dict[str, Any]:
         instance_state = get_instance_problem_state(self.instance_data)
         solution_state = get_solution_problem_state(self.instance_data, {"assign": list(self.current_solution.assign)})
-        current_eval = self._eval_assign(list(self.current_solution.assign))
+        current_eval = dict(getattr(self, "current_eval", None) or self._eval_assign(list(self.current_solution.assign)))
         state = {
             "instance_data": self.instance_data,
             "current_solution": self.current_solution,
@@ -223,13 +230,13 @@ class Env(BaseEnv):
         os.makedirs(self.output_dir, exist_ok=True)
         self._rec_fp = open(self._rec_path, "w", encoding="utf-8")
 
-        total_scalar, comm_norm, therm_norm = self._evaluate_assign(list(self.current_solution.assign))
-        self.key_value = float(total_scalar)
-        self.current_comm = float(comm_norm)
-        self.current_therm = float(therm_norm)
+        self.current_eval = self._eval_assign(list(self.current_solution.assign))
+        self.key_value = float(self.current_eval.get("total_scalar", 0.0))
+        self.current_comm = float(self.current_eval.get("comm_norm", 0.0))
+        self.current_therm = float(self.current_eval.get("therm_norm", 0.0))
         self.best_key_value = float(self.key_value)
-        self.best_comm = float(comm_norm)
-        self.best_therm = float(therm_norm)
+        self.best_comm = float(self.current_comm)
+        self.best_therm = float(self.current_therm)
         self.best_solution = WaferLayoutSolution(assign=list(self.current_solution.assign))
 
         self._dump_best()
@@ -238,7 +245,7 @@ class Env(BaseEnv):
     def _dump_best(self):
         best = {
             "problem": "wafer_layout",
-            "seed_id": int(self.instance_data.get("seed", {}).get("assign_seed", 0)),
+            "seed_id": int(self._seed_id),
             "best_assign": list(self.best_solution.assign),
             "best_key_value": float(self.best_key_value),
             "best_comm_norm": float(self.best_comm),
@@ -252,6 +259,87 @@ class Env(BaseEnv):
         }
         with open(self._best_path, "w", encoding="utf-8") as f:
             json.dump(best, f, ensure_ascii=False, indent=2)
+
+    def run_operator(
+        self,
+        operator,
+        inplace: bool = True,
+        meta: dict | None = None,
+        stage: str = "heuragenix",
+        time_ms: float | None = None,
+        new_solution=None,
+    ):
+        t0 = time.time()
+        old_assign = list(self.current_solution.assign)
+        old_eval = dict(self.current_eval or {})
+        old_key = float(old_eval.get("total_scalar", 0.0))
+        old_comm = float(old_eval.get("comm_norm", 0.0))
+        old_therm = float(old_eval.get("therm_norm", 0.0))
+
+        if new_solution is None:
+            operator.run(self.current_solution)
+        else:
+            self.current_solution = new_solution
+
+        new_eval = self._eval_assign(list(self.current_solution.assign))
+        new_key = float(new_eval.get("total_scalar", 0.0))
+        new_comm = float(new_eval.get("comm_norm", 0.0))
+        new_therm = float(new_eval.get("therm_norm", 0.0))
+
+        accept = bool(inplace) and new_key <= old_key
+        if not accept:
+            self.current_solution.assign = old_assign
+            self.current_eval = old_eval
+            new_key = old_key
+            new_comm = old_comm
+            new_therm = old_therm
+        else:
+            self.current_eval = new_eval
+
+        self.key_value = float(new_key)
+        self.current_comm = float(new_comm)
+        self.current_therm = float(new_therm)
+        if float(new_key) < float(self.best_key_value):
+            self.best_key_value = float(new_key)
+            self.best_comm = float(new_comm)
+            self.best_therm = float(new_therm)
+            self.best_solution = WaferLayoutSolution(assign=list(self.current_solution.assign))
+            self._dump_best()
+
+        self.update_problem_state()
+
+        dt = (time.time() - t0) * 1000.0 if time_ms is None else float(time_ms)
+        op_args = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
+        op_name = op_args.get("op", type(operator).__name__)
+        op_args_json = dict(op_args)
+        op_args_json.pop("op", None)
+        signature = f"assign:{','.join(map(str, self.current_solution.assign))}"
+        eval_for_record = self.current_eval if accept else old_eval
+        penalty = eval_for_record.get("penalty", {}) if isinstance(eval_for_record.get("penalty", {}), dict) else {}
+        duplicate_penalty = float(penalty.get("duplicate", 0.0))
+        boundary_penalty = float(penalty.get("boundary", 0.0))
+        meta = meta or {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+        line = {
+            "iter": self._step_id,
+            "stage": stage,
+            "op": op_name,
+            "op_args_json": op_args_json,
+            "accepted": 1 if accept else 0,
+            "total_scalar": float(new_key),
+            "comm_norm": float(new_comm),
+            "therm_norm": float(new_therm),
+            "duplicate_penalty": duplicate_penalty,
+            "boundary_penalty": boundary_penalty,
+            "time_ms": int(dt),
+            "signature": signature,
+            "meta": meta,
+        }
+        self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
+        self._rec_fp.flush()
+
+        self._step_id += 1
+        self.current_steps += 1
+        return operator
 
     def run_heuristic(self, heuristic, algorithm_data: dict = {}, record: bool = True, **kwargs):
         t0 = time.time()
@@ -328,76 +416,11 @@ class Env(BaseEnv):
             self.current_steps += 1
             return "[invalid_operator]"
 
-        old_assign = np.asarray(self.current_solution.assign).copy()
-        old_key = float(self.key_value)
-        old_comm = float(getattr(self, "current_comm", 0.0))
-        old_therm = float(getattr(self, "current_therm", 0.0))
-
-        operator.run(self.current_solution)
-        new_key, new_comm, new_therm = self._evaluate_assign(list(self.current_solution.assign))
-
-        accept = False
-        if new_key <= old_key:
-            accept = True
-        else:
-            delta = new_key - old_key
-            temp = max(self.temp_min, self.temp_init * (self.temp_decay ** max(0, self.current_steps)))
-            prob = float(np.exp(-delta / max(1e-9, temp)))
-            if random.random() < prob:
-                accept = True
-
-        if not accept:
-            self.current_solution.assign = old_assign
-            new_key = old_key
-            new_comm = old_comm
-            new_therm = old_therm
-
-        self.key_value = float(new_key)
-        self.current_comm = float(new_comm)
-        self.current_therm = float(new_therm)
-        if float(new_key) < float(self.best_key_value):
-            self.best_key_value = float(new_key)
-            self.best_comm = float(new_comm)
-            self.best_therm = float(new_therm)
-            self.best_solution = WaferLayoutSolution(assign=list(self.current_solution.assign))
-            self._dump_best()
-
-        self.update_problem_state()
-
-        dt = (time.time() - t0) * 1000.0
-        op_args = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
-        op_name = op_args.get("op", type(operator).__name__)
-        op_args_json = dict(op_args)
-        op_args_json.pop("op", None)
-        signature = f"assign:{','.join(map(str, self.current_solution.assign))}"
-        metrics = self._eval_assign(list(self.current_solution.assign))
-        penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
-        duplicate_penalty = float(penalty.get("duplicate", 0.0))
-        boundary_penalty = float(penalty.get("boundary", 0.0))
         meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
         if isinstance(extra_meta, dict):
             meta.update(extra_meta)
-        line = {
-            "iter": self._step_id,
-            "stage": stage,
-            "op": op_name,
-            "op_args_json": op_args_json,
-            "accepted": 1 if accept else 0,
-            "total_scalar": float(new_key),
-            "comm_norm": float(new_comm),
-            "therm_norm": float(new_therm),
-            "duplicate_penalty": duplicate_penalty,
-            "boundary_penalty": boundary_penalty,
-            "time_ms": int(dt),
-            "signature": signature,
-            "meta": meta or {},
-        }
-        self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
-        self._rec_fp.flush()
-
-        self._step_id += 1
-        self.current_steps += 1
-        return operator
+        dt = (time.time() - t0) * 1000.0
+        return self.run_operator(operator, inplace=True, meta=meta, stage=stage, time_ms=dt)
 
     @property
     def continue_run(self) -> bool:

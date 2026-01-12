@@ -35,15 +35,16 @@ class RelocateOperator(BaseOperator):
         a = solution.assign
         self.from_site = int(a[self.i])
         self.degraded_swap_with = None
+        target = int(self.site_id)
         try:
-            j = a.index(self.site_id)
+            j = a.index(target)
         except ValueError:
-            j = None
-        if j is not None and j != self.i:
+            j = -1
+        if j >= 0 and j != self.i:
             a[self.i], a[j] = a[j], a[self.i]
             self.degraded_swap_with = int(j)
         else:
-            a[self.i] = self.site_id
+            a[self.i] = target
         return solution
 
     def to_action(self) -> Dict[str, Any]:
@@ -63,8 +64,16 @@ class RandomKickOperator(BaseOperator):
 
     def run(self, solution: WaferLayoutSolution) -> WaferLayoutSolution:
         a = solution.assign
-        for i, s in zip(self.idxs, self.site_ids):
-            a[i] = s
+        for i, target in zip(self.idxs, self.site_ids):
+            target = int(target)
+            try:
+                j = a.index(target)
+            except ValueError:
+                j = -1
+            if j >= 0 and j != i:
+                a[i], a[j] = a[j], a[i]
+            else:
+                a[i] = target
         return solution
 
     def to_action(self) -> Dict[str, Any]:
