@@ -115,8 +115,10 @@ def main():
 
     for data_name in data_name_list:
         case_stem = Path(data_name).stem
-        out_dir = base_output_dir / problem / case_stem / args.result_dir / engine
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = os.path.join(
+            base_output_dir, problem, case_stem, args.result_dir, args.heuristic
+        )
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
 
         env = Env(data_name=data_name)
         env.reset(output_dir=str(out_dir))
@@ -128,7 +130,7 @@ def main():
                 s_value = chiplets
             env.construction_steps = int(s_value) if s_value else 1
 
-        usage_path = out_dir / "llm_usage.jsonl"
+        usage_path = Path(out_dir) / "llm_usage.jsonl"
         usage_path.parent.mkdir(parents=True, exist_ok=True)
         if not usage_path.exists():
             usage_path.write_text("", encoding="utf-8")

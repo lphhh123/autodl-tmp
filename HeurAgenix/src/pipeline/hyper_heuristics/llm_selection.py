@@ -126,16 +126,22 @@ class LLMSelectionHyperHeuristic:
         return picked
 
     def run(self, env: BaseEnv) -> bool:
-        import json
-        import time
-        import traceback
+        usage_path = None
+        if getattr(self, "output_dir", None):
+            usage_path = os.path.join(self.output_dir, "llm_usage.jsonl")
+
+        def _log_usage(rec: dict):
+            if usage_path:
+                rec["timestamp"] = time.time()
+                with open(usage_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         out_dir = getattr(self.llm_client, "output_dir", None)
-        usage_path = os.path.join(out_dir, "llm_usage.jsonl") if out_dir else None
+        usage_path_client = os.path.join(out_dir, "llm_usage.jsonl") if out_dir else None
 
         def log_usage(rec: dict):
-            if usage_path:
-                with open(usage_path, "a", encoding="utf-8") as f:
+            if usage_path_client:
+                with open(usage_path_client, "a", encoding="utf-8") as f:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         if not self.heuristic_pool:
@@ -157,6 +163,7 @@ class LLMSelectionHyperHeuristic:
 
         if not self.heuristic_pool:
             log_usage({"ok": False, "reason": "empty_heuristic_pool"})
+            _log_usage({"ok": False, "reason": "empty_heuristic_pool"})
             return False
 
         max_steps = int(env.construction_steps * self.iterations_scale_factor)
@@ -223,6 +230,7 @@ class LLMSelectionHyperHeuristic:
                 err = traceback.format_exc()
                 chosen = random.choice(candidate_heuristics)
                 ok = False
+                _log_usage({"ok": False, "reason": "llm_call_failed", "error": str(e)})
                 log_usage(
                     {
                         "ok": False,
@@ -236,6 +244,7 @@ class LLMSelectionHyperHeuristic:
                 )
 
             if (not ok) and fail_count >= max_fail:
+                _log_usage({"ok": False, "reason": "llm_call_failed", "error": err or ""})
                 log_usage(
                     {
                         "ok": False,
@@ -259,6 +268,7 @@ class LLMSelectionHyperHeuristic:
                     "time_ms": int((time.time() - t0) * 1000),
                 }
             )
+            _log_usage({"ok": True, "chosen": chosen})
 
             heuristic = load_function(chosen, problem=self.problem)
             for _ in range(self.selection_frequency):
