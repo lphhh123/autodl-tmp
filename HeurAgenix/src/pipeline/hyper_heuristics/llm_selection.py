@@ -107,17 +107,42 @@ class LLMSelectionHyperHeuristic:
             ok = False
             err = None
             t0 = time.time()
+            llm_meta = {}
 
             if llm_ok and llm_client is not None:
                 try:
                     prompt = env.summarize_env()
                     chosen = llm_client.choose_heuristic(prompt, candidates, timeout_s=self.llm_timeout_s)
                     ok = True
+                    last = getattr(llm_client, "last_usage", None)
+                    if isinstance(last, dict):
+                        llm_meta = {
+                            "provider": last.get("provider"),
+                            "model": last.get("model"),
+                            "prompt_tokens": last.get("prompt_tokens"),
+                            "completion_tokens": last.get("completion_tokens"),
+                            "total_tokens": last.get("total_tokens"),
+                            "duration_ms": last.get("duration_ms"),
+                            "status_code": last.get("status_code"),
+                            "llm_error": last.get("error"),
+                        }
                 except Exception as e:  # noqa: BLE001
                     fail_count += 1
                     err = traceback.format_exc()
                     ok = False
                     chosen = self.rng.choice(candidates)
+                    last = getattr(llm_client, "last_usage", None)
+                    if isinstance(last, dict):
+                        llm_meta = {
+                            "provider": last.get("provider"),
+                            "model": last.get("model"),
+                            "prompt_tokens": last.get("prompt_tokens"),
+                            "completion_tokens": last.get("completion_tokens"),
+                            "total_tokens": last.get("total_tokens"),
+                            "duration_ms": last.get("duration_ms"),
+                            "status_code": last.get("status_code"),
+                            "llm_error": last.get("error"),
+                        }
 
                     self._log_usage(
                         {
@@ -129,7 +154,10 @@ class LLMSelectionHyperHeuristic:
                             "fail_count": fail_count,
                             "fallback_pick": chosen,
                             "candidates": candidates,
+                            "selection_frequency": self.selection_frequency,
                             "rollout_budget": self.rollout_budget,
+                            "fallback_used": True,
+                            **llm_meta,
                         }
                     )
 
@@ -145,8 +173,10 @@ class LLMSelectionHyperHeuristic:
                     "chosen_heuristic": chosen,
                     "candidates": candidates,
                     "time_ms": dt_ms,
+                    "selection_frequency": self.selection_frequency,
                     "rollout_budget": self.rollout_budget,
                     "fallback_used": not ok,
+                    **(llm_meta if llm_ok and llm_client is not None else {}),
                 }
             )
 

@@ -48,7 +48,11 @@ class OpenAICompatibleClient:
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
+        if not self.api_key:
+            return headers
+        if self.provider in {"azure", "azure_gpt"} or "/openai/deployments/" in self.base_url:
+            headers["api-key"] = self.api_key
+        else:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
