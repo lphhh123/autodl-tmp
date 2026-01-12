@@ -24,6 +24,17 @@ def _load_layout_evaluator():
     return module.LayoutEvaluator, module.LayoutState
 
 
+def _make_signature(assign: list[int]) -> str:
+    try:
+        import layout.candidate_pool as candidate_pool
+        signature_fn = getattr(candidate_pool, "signature_from_assign", None)
+        if callable(signature_fn):
+            return signature_fn(assign)
+    except Exception:
+        pass
+    return f"assign:{','.join(map(str, assign))}"
+
+
 class Env(BaseEnv):
     def load_data(self, data_path: str) -> dict:
         with open(data_path, "r", encoding="utf-8") as f:
@@ -309,11 +320,11 @@ class Env(BaseEnv):
         self.update_problem_state()
 
         dt = (time.time() - t0) * 1000.0 if time_ms is None else float(time_ms)
-        op_args = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
-        op_name = op_args.get("op", type(operator).__name__)
-        op_args_json = dict(op_args)
-        op_args_json.pop("op", None)
-        signature = f"assign:{','.join(map(str, self.current_solution.assign))}"
+        op_args_full = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
+        op_name = op_args_full.get("op", type(operator).__name__)
+        op_args = dict(op_args_full)
+        op_args.pop("op", None)
+        signature = _make_signature(list(self.current_solution.assign))
         eval_for_record = self.current_eval if accept else old_eval
         penalty = eval_for_record.get("penalty", {}) if isinstance(eval_for_record.get("penalty", {}), dict) else {}
         duplicate_penalty = float(penalty.get("duplicate", 0.0))
@@ -323,7 +334,8 @@ class Env(BaseEnv):
             "iter": self._step_id,
             "stage": stage,
             "op": op_name,
-            "op_args_json": op_args_json,
+            "op_args": op_args,
+            "op_args_json": op_args,
             "accepted": 1 if accept else 0,
             "total_scalar": float(new_key),
             "comm_norm": float(new_comm),
@@ -357,7 +369,7 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            signature = f"assign:{','.join(map(str, self.current_solution.assign))}"
+            signature = _make_signature(list(self.current_solution.assign))
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             if isinstance(extra_meta, dict):
                 meta.update(extra_meta)
@@ -365,6 +377,7 @@ class Env(BaseEnv):
                 "iter": self._step_id,
                 "stage": stage,
                 "op": "error",
+                "op_args": {"error": str(e)},
                 "op_args_json": {"error": str(e)},
                 "accepted": 0,
                 "total_scalar": float(total_scalar),
@@ -391,7 +404,7 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            signature = f"assign:{','.join(map(str, self.current_solution.assign))}"
+            signature = _make_signature(list(self.current_solution.assign))
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             if isinstance(extra_meta, dict):
                 meta.update(extra_meta)
@@ -399,6 +412,7 @@ class Env(BaseEnv):
                 "iter": self._step_id,
                 "stage": stage,
                 "op": "invalid_operator",
+                "op_args": {},
                 "op_args_json": {},
                 "accepted": 0,
                 "total_scalar": float(total_scalar),

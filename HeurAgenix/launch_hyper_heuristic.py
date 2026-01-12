@@ -104,8 +104,9 @@ def main():
         raise FileNotFoundError(f"heuristic_dir not found: {heur_dir.resolve()}")
 
     heuristic_pool_files = [
-        f.name for f in heur_dir.iterdir()
-        if f.is_file() and f.suffix == ".py" and not f.name.startswith("_")
+        f.stem
+        for f in heur_dir.iterdir()
+        if f.is_file() and f.suffix == ".py" and not f.name.startswith("_") and f.name != "__init__.py"
     ]
 
     engine = args.heuristic
@@ -118,7 +119,7 @@ def main():
         data_path = (test_data_dir / data_name).resolve()
         env = Env(str(data_path))
 
-        problem_size = int(getattr(env, "problem_size", getattr(env, "construction_steps", 1)) or 1)
+        problem_size = int(getattr(env, "problem_size", None) or getattr(env, "S", None) or 1)
         if args.max_steps is not None:
             env.max_steps = int(args.max_steps)
         else:
@@ -131,6 +132,10 @@ def main():
         case_stem = Path(data_name).stem
         out_dir = (output_base / args.problem / case_stem / args.result_dir / engine).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
+        usage_path = out_dir / "llm_usage.jsonl"
+        usage_path.parent.mkdir(parents=True, exist_ok=True)
+        if not usage_path.exists():
+            usage_path.write_text("", encoding="utf-8")
         env.reset(output_dir=str(out_dir))
 
         if args.heuristic == "random_hh":
