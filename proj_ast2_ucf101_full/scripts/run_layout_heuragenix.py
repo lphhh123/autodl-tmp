@@ -287,7 +287,7 @@ def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
 
 def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict[str, Any]:
     op = record.get("op", "noop")
-    op_args = record.get("op_args", {}) or {}
+    op_args = record.get("op_args") or record.get("op_args_json") or {}
     action = {"op": op, "type": op}
     if op == "swap":
         action.update({"i": int(op_args.get("i", -1)), "j": int(op_args.get("j", -1))})
@@ -363,7 +363,7 @@ def _write_trace_and_pareto(
 
             action = _action_from_record(rec, prev_assign)
             signature = rec.get("signature") or _signature_for_action(
-                {"op": rec.get("op"), **(rec.get("op_args") or {})},
+                {"op": rec.get("op"), **(rec.get("op_args") or rec.get("op_args_json") or {})},
                 prev_assign,
             )
             meta = rec.get("meta", {}) or {}
