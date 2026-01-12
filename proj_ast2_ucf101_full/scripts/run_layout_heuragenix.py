@@ -121,7 +121,33 @@ def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
     }
 
 
-def _write_test_data(case: dict, seed: int, data_base: Path, problem: str = "wafer_layout") -> Tuple[str, str]:
+def _build_seed_assign(layout_input: dict, seed: int) -> List[int]:
+    seed_payload = layout_input.setdefault("seed", {}) or {}
+    assign_seed = seed_payload.get("assign_seed")
+    if isinstance(assign_seed, (list, tuple, np.ndarray)) and len(assign_seed) > 0:
+        return [int(x) for x in list(assign_seed)]
+
+    slots = layout_input.get("slots", {})
+    sites = layout_input.get("sites", {})
+    tdp = np.asarray(slots.get("tdp", []), dtype=int)
+    S = int(slots.get("S", len(tdp)))
+    sites_xy = np.asarray(sites.get("sites_xy", []), dtype=float)
+    Ns = int(sites.get("Ns", len(sites_xy)))
+    rng = np.random.default_rng(int(seed))
+    if Ns <= 0:
+        return [0 for _ in range(S)]
+    if Ns >= S:
+        return rng.choice(Ns, size=S, replace=False).astype(int).tolist()
+    return rng.integers(low=0, high=Ns, size=S, dtype=int).tolist()
+
+
+def _write_test_data(
+    case: dict,
+    seed: int,
+    data_base: Path,
+    seed_assign: List[int],
+    problem: str = "wafer_layout",
+) -> Tuple[str, str]:
     """
     Write <data_base>/<problem>/test_data/case_seed{seed}.json
     Return:
@@ -135,7 +161,9 @@ def _write_test_data(case: dict, seed: int, data_base: Path, problem: str = "waf
     test_dir.mkdir(parents=True, exist_ok=True)
 
     payload = dict(case)
-    payload["assign_seed"] = int(seed)
+    seed_payload = dict(payload.get("seed", {}) or {})
+    seed_payload["assign_seed"] = [int(x) for x in seed_assign]
+    payload["seed"] = seed_payload
 
     target = test_dir / case_file
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -148,10 +176,11 @@ def _prepare_work_dir(
     case: dict,
     seed: int,
     internal_data_base: Path,
+    seed_assign: List[int],
 ) -> Tuple[Path, str, str]:
     work_dir = out_dir / "__heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    case_stem, case_file = _write_test_data(case, seed, internal_data_base, problem="wafer_layout")
+    case_stem, case_file = _write_test_data(case, seed, internal_data_base, seed_assign, problem="wafer_layout")
     return work_dir, case_stem, case_file
 
 
@@ -455,6 +484,8 @@ def main() -> None:
 
     seed = int(args.seed)
     _seed_everything(seed)
+    seed_assign = _build_seed_assign(layout_input, seed)
+    layout_input.setdefault("seed", {})["assign_seed"] = list(seed_assign)
 
     project_root = Path(__file__).resolve().parents[1]
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else cfg.get("baseline", {})
@@ -478,6 +509,7 @@ def main() -> None:
         layout_input,
         seed,
         internal_data_base,
+        seed_assign,
     )
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
@@ -523,6 +555,8 @@ def main() -> None:
         "--seed",
         str(seed),
     ]
+    if max_steps is not None:
+        launch_cmd.extend(["--max_steps", str(max_steps)])
     if method == "llm_hh" and llm_config is not None:
         launch_cmd.extend(["-l", str(llm_config)])
 
@@ -573,6 +607,8 @@ def main() -> None:
                 "--seed",
                 str(seed),
             ]
+            if max_steps is not None:
+                launch_cmd.extend(["--max_steps", str(max_steps)])
             result = subprocess.run(
                 launch_cmd,
                 cwd=str(heuragenix_root),
