@@ -22,7 +22,6 @@ if str(heuragenix_root) not in sys.path:
     sys.path.insert(0, str(heuragenix_root))
 # =============================
 
-from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from scripts.run_layout_agent import _write_pareto_points, compute_oscillation_metrics
@@ -313,6 +312,35 @@ def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict
     return action
 
 
+def _assign_from_record_signature(rec: dict, S: int) -> np.ndarray | None:
+    """
+    Prefer rec['assign'] if exists; otherwise parse rec['signature'] like:
+      "assign:0,3,5,..."
+    Return np.ndarray[int] or None.
+    """
+    a = rec.get("assign", None)
+    if isinstance(a, (list, tuple)):
+        try:
+            aa = [int(x) for x in a]
+            if len(aa) == S:
+                return np.asarray(aa, dtype=int)
+        except Exception:
+            pass
+
+    sig = rec.get("signature", "")
+    if isinstance(sig, str) and sig.startswith("assign:"):
+        body = sig[len("assign:") :].strip()
+        if body:
+            try:
+                parts = [p for p in body.split(",") if p.strip() != ""]
+                aa = [int(x) for x in parts]
+                if len(aa) == S:
+                    return np.asarray(aa, dtype=int)
+            except Exception:
+                return None
+    return None
+
+
 def _write_trace_and_pareto(
     out_dir: Path,
     seed: int,
@@ -338,6 +366,7 @@ def _write_trace_and_pareto(
     best_assign: List[int] | None = None
     accepts = 0
     best_step = -1
+    improve_cnt = 0
     has_records = False
 
     with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
@@ -347,55 +376,66 @@ def _write_trace_and_pareto(
             has_records = True
             if max_steps is not None and idx >= max_steps:
                 break
-            if "assign" in rec and rec["assign"] is not None:
-                base_state.assign = np.asarray(rec["assign"], dtype=int)
-            assign = base_state.assign
+            step_id = int(rec.get("iter", idx))
+
+            accepted = int(rec.get("accepted", 1))
+            op = rec.get("op", "noop")
+            op_args = rec.get("op_args", {}) or {}
+            if not isinstance(op_args, dict):
+                op_args = {"raw": str(op_args)}
+
+            new_assign = _assign_from_record_signature(rec, base_state.S)
+            if new_assign is not None:
+                base_state.assign = new_assign
+
             eval_out = evaluator.evaluate(base_state)
-            d_total = float(eval_out["total_scalar"] - prev_total)
-            d_comm = float(eval_out["comm_norm"] - prev_comm)
-            d_therm = float(eval_out["therm_norm"] - prev_therm)
+            signature = f"assign:{','.join(map(str, base_state.assign.tolist()))}"
 
-            accepted = int(bool(rec.get("accepted", True)))
-            if accepted:
+            d_total = float(eval_out["total_scalar"]) - float(prev_total)
+            d_comm = float(eval_out["comm_norm"]) - float(prev_comm)
+            d_therm = float(eval_out["therm_norm"]) - float(prev_therm)
+
+            if accepted == 1:
                 accepts += 1
-            if best_eval is None or eval_out["total_scalar"] < best_eval.get("total_scalar", float("inf")):
-                best_eval = dict(eval_out)
-                best_assign = list(assign)
-                best_step = idx
 
-            action = _action_from_record(rec, prev_assign)
-            signature = rec.get("signature") or _signature_for_action(
-                {"op": rec.get("op"), **(rec.get("op_args") or rec.get("op_args_json") or {})},
-                prev_assign,
-            )
+            pareto_added = 0
+            if accepted == 1:
+                pareto_added = pareto.add(
+                    float(eval_out["comm_norm"]),
+                    float(eval_out["therm_norm"]),
+                    {
+                        "assign": base_state.assign.copy(),
+                        "total_scalar": float(eval_out["total_scalar"]),
+                        "stage": "heuragenix",
+                        "iter": step_id,
+                        "seed": seed,
+                    },
+                )
+
+            if accepted == 1 and d_total < 0:
+                improve_cnt += 1
+
             meta = rec.get("meta", {}) or {}
             tabu_hit = int(meta.get("tabu_hit", 0))
             inverse_hit = int(meta.get("inverse_hit", 0))
             cooldown_hit = int(meta.get("cooldown_hit", 0))
-            pareto_added = pareto.add(
-                eval_out["comm_norm"],
-                eval_out["therm_norm"],
-                {
-                    "assign": assign.copy(),
-                    "total_scalar": eval_out["total_scalar"],
-                    "stage": "heuragenix",
-                    "iter": idx,
-                    "seed": seed,
-                },
-            )
+
+            pen = eval_out.get("penalty", {}) or {}
+            dup_pen = float(pen.get("duplicate", 0.0))
+            bnd_pen = float(pen.get("boundary", 0.0))
             writer.writerow(
                 [
-                    idx,
+                    step_id,
                     "heuragenix",
-                    action.get("op", "noop"),
-                    json.dumps(action, ensure_ascii=False, sort_keys=True),
+                    op,
+                    json.dumps({"op": op, **op_args}, ensure_ascii=False, sort_keys=True),
                     accepted,
-                    float(eval_out["total_scalar"]),
-                    float(eval_out["comm_norm"]),
-                    float(eval_out["therm_norm"]),
+                    float(eval_out.get("total_scalar", 0.0)),
+                    float(eval_out.get("comm_norm", 0.0)),
+                    float(eval_out.get("therm_norm", 0.0)),
                     int(pareto_added),
-                    float(eval_out["penalty"]["duplicate"]),
-                    float(eval_out["penalty"]["boundary"]),
+                    dup_pen,
+                    bnd_pen,
                     seed,
                     int(rec.get("time_ms", 0)),
                     signature,
@@ -407,21 +447,29 @@ def _write_trace_and_pareto(
                     cooldown_hit,
                 ]
             )
-            prev_assign = assign.copy()
-            prev_total = float(eval_out["total_scalar"])
-            prev_comm = float(eval_out["comm_norm"])
-            prev_therm = float(eval_out["therm_norm"])
+            prev_assign = base_state.assign.copy()
+            prev_total = float(eval_out.get("total_scalar", 0.0))
+            prev_comm = float(eval_out.get("comm_norm", 0.0))
+            prev_therm = float(eval_out.get("therm_norm", 0.0))
+            if float(eval_out.get("total_scalar", 0.0)) < float(best_eval.get("total_scalar", 1e30) if best_eval else 1e30):
+                best_eval = dict(eval_out)
+                best_assign = base_state.assign.tolist()
+                best_step = step_id
     status = "ok" if has_records else "no_recordings"
     if not has_records:
         best_assign = list(prev_assign)
         best_eval = dict(prev_metrics)
+    steps_total = idx + 1 if "idx" in locals() else 0
+    improve_step_ratio = (float(improve_cnt) / float(steps_total)) if steps_total > 0 else 0.0
     return {
         "trace_path": trace_path,
         "best_eval": best_eval,
         "best_assign": best_assign,
         "accepts": accepts,
         "best_step": best_step,
-        "steps_total": idx + 1 if "idx" in locals() else 0,
+        "steps_total": steps_total,
+        "num_steps": steps_total,
+        "improve_step_ratio": improve_step_ratio,
         "status": status,
     }, pareto
 
@@ -475,6 +523,106 @@ def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def _run_heuragenix_inprocess(
+    *,
+    heuragenix_root: Path,
+    project_root: Path,
+    problem: str,
+    method: str,
+    heuristic_dir: str,
+    case_name: str,
+    case_file: str,
+    internal_data_base: Path,
+    output_root: Path,
+    seed: int,
+    iters_sf: float,
+    selection_frequency: int,
+    num_candidate_heuristics: int,
+    rollout_budget: int,
+    llm_config: Path | None,
+    max_steps: int | None,
+    baseline_cfg: Dict[str, Any],
+) -> Path:
+    for entry in (heuragenix_root, heuragenix_root / "src", project_root):
+        if str(entry) not in sys.path:
+            sys.path.insert(0, str(entry))
+
+    import importlib
+
+    from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
+    from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
+    from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
+    from src.util.util import load_function
+
+    env_module = importlib.import_module(f"src.problems.{problem}.env")
+    Env = getattr(env_module, "Env")
+
+    data_path = (internal_data_base / problem / "test_data" / case_file).resolve()
+    env = Env(str(data_path))
+
+    problem_size = int(getattr(env, "problem_size", None) or getattr(env, "S", None) or 1)
+    if max_steps is not None:
+        env.max_steps = int(max_steps)
+    else:
+        env.max_steps = max(1, int(float(iters_sf) * max(1, problem_size)))
+
+    env.llm_timeout_s = int(baseline_cfg.get("llm_timeout_s", 30))
+    env.max_llm_failures = int(baseline_cfg.get("max_llm_failures", 2))
+    env.fallback_on_llm_failure = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
+
+    heur_dir = heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir
+    if not heur_dir.exists():
+        raise FileNotFoundError(f"heuristic_dir not found: {heur_dir.resolve()}")
+    heuristic_pool_files = [
+        f.stem
+        for f in heur_dir.iterdir()
+        if f.is_file() and f.suffix == ".py" and not f.name.startswith("_") and f.name != "__init__.py"
+    ]
+
+    out_dir = (output_root / problem / case_name / "result" / method).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    usage_path = out_dir / "llm_usage.jsonl"
+    usage_path.parent.mkdir(parents=True, exist_ok=True)
+    if not usage_path.exists():
+        usage_path.write_text("", encoding="utf-8")
+    env.reset(output_dir=str(out_dir))
+
+    if method == "random_hh":
+        runner = RandomHyperHeuristic(
+            heuristic_pool=heuristic_pool_files,
+            problem=problem,
+            iterations_scale_factor=float(iters_sf),
+            heuristic_dir=str(heur_dir),
+            selection_frequency=int(selection_frequency),
+            seed=int(seed),
+        )
+    elif method == "llm_hh":
+        runner = LLMSelectionHyperHeuristic(
+            heuristic_pool=heuristic_pool_files,
+            problem=problem,
+            heuristic_dir=str(heur_dir),
+            llm_config_file=str(llm_config) if llm_config else None,
+            iterations_scale_factor=float(iters_sf),
+            selection_frequency=int(selection_frequency),
+            num_candidate_heuristics=int(num_candidate_heuristics),
+            rollout_budget=int(rollout_budget),
+            output_dir=str(out_dir),
+            llm_timeout_s=int(baseline_cfg.get("llm_timeout_s", 30)),
+            max_llm_failures=int(baseline_cfg.get("max_llm_failures", 2)),
+            fallback_on_llm_failure=str(baseline_cfg.get("fallback_on_llm_failure", "random_hh")),
+        )
+    else:
+        fn = load_function(method, problem=problem)
+        runner = SingleHyperHeuristic(
+            heuristic=fn,
+            iterations_scale_factor=float(iters_sf),
+        )
+
+    runner.run(env)
+    env.dump_result()
+    return out_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--layout_input", type=str, required=True)
@@ -500,6 +648,7 @@ def main() -> None:
     if not heuragenix_root.exists():
         raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
 
+    run_mode = baseline_cfg.get("run_mode", "inprocess")
     method = str(baseline_cfg.get("method", "llm_hh"))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
@@ -529,43 +678,14 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    output_root = internal_out / "output" / problem
+    output_root = internal_out / "output"
 
     fallback_used = False
     log_text = ""
     llm_config = None
     if method == "llm_hh":
         llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
-    output_dir = output_root / case_name / "result" / method
-
-    launch_cmd = [
-        sys.executable,
-        str(heuragenix_root / "launch_hyper_heuristic.py"),
-        "-p",
-        problem,
-        "-e",
-        method,
-        "-d",
-        heuristic_dir,
-        "-t",
-        case_file,
-        "-n",
-        f"{iters_sf}",
-        "-m",
-        str(selection_frequency),
-        "-c",
-        str(num_candidate_heuristics),
-        "-b",
-        str(rollout_budget),
-        "-r",
-        "result",
-        "--seed",
-        str(seed),
-    ]
-    if max_steps is not None:
-        launch_cmd.extend(["--max_steps", str(max_steps)])
-    if method == "llm_hh" and llm_config is not None:
-        launch_cmd.extend(["-l", str(llm_config)])
+    output_dir = output_root / problem / case_name / "result" / method
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -574,100 +694,159 @@ def main() -> None:
     env["AMLT_OUTPUT_DIR"] = str(internal_out)
     env["AMLT_DATA_DIR"] = str(internal_data_base)
     timeout_s = int(baseline_cfg.get("subprocess_timeout_s", 1800))
-    try:
-        result = subprocess.run(
-            launch_cmd,
-            cwd=str(heuragenix_root),
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired as exc:
-        log_text = f"timeout after {timeout_s}s"
-        _append_llm_usage(
-            llm_usage_path,
-            {
-                "ok": False,
-                "reason": "subprocess_timeout",
-                "engine": method,
-                "error": log_text,
-                "stdout": (exc.stdout or "").strip(),
-                "stderr": (exc.stderr or "").strip(),
-            },
-        )
-        result = None
-    if result is None or result.returncode != 0:
-        if result is not None:
-            log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "reason": "launch_failed", "engine": method, "error": log_text},
-        )
-        if method != fallback_method:
-            fallback_used = True
-            method = fallback_method
-            output_dir = output_root / case_name / "result" / method
-            launch_cmd = [
-                sys.executable,
-                str(heuragenix_root / "launch_hyper_heuristic.py"),
-                "-p",
-                problem,
-                "-e",
-                method,
-                "-d",
-                heuristic_dir,
-                "-t",
-                case_file,
-                "-n",
-                f"{iters_sf}",
-                "-m",
-                str(selection_frequency),
-                "-c",
-                str(num_candidate_heuristics),
-                "-b",
-                str(rollout_budget),
-                "-r",
-                "result",
-                "--seed",
-                str(seed),
-            ]
-            if max_steps is not None:
-                launch_cmd.extend(["--max_steps", str(max_steps)])
-            try:
-                result = subprocess.run(
-                    launch_cmd,
-                    cwd=str(heuragenix_root),
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=timeout_s,
-                )
-            except subprocess.TimeoutExpired as exc:
-                log_text = f"timeout after {timeout_s}s"
-                _append_llm_usage(
-                    llm_usage_path,
-                    {
-                        "ok": False,
-                        "reason": "subprocess_timeout",
-                        "engine": method,
-                        "error": log_text,
-                        "stdout": (exc.stdout or "").strip(),
-                        "stderr": (exc.stderr or "").strip(),
-                    },
-                )
-                result = None
-            if result is None or result.returncode != 0:
-                if result is not None:
-                    log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
-                _append_llm_usage(
-                    llm_usage_path,
-                    {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
-                )
+    result = None
+    if run_mode == "inprocess":
+        try:
+            output_dir = _run_heuragenix_inprocess(
+                heuragenix_root=heuragenix_root,
+                project_root=project_root,
+                problem=problem,
+                method=method,
+                heuristic_dir=heuristic_dir,
+                case_name=case_name,
+                case_file=case_file,
+                internal_data_base=internal_data_base,
+                output_root=output_root,
+                seed=seed,
+                iters_sf=iters_sf,
+                selection_frequency=selection_frequency,
+                num_candidate_heuristics=num_candidate_heuristics,
+                rollout_budget=rollout_budget,
+                llm_config=llm_config,
+                max_steps=max_steps,
+                baseline_cfg=baseline_cfg,
+            )
+        except Exception as exc:
+            log_text = f"inprocess_failed: {exc!r}"
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "inprocess_failed", "engine": method, "error": log_text},
+            )
+            run_mode = "subprocess"
 
-    cands = list((output_root / case_name / "result" / method).glob("recordings.jsonl"))
+    if run_mode != "inprocess":
+        launch_cmd = [
+            sys.executable,
+            str(heuragenix_root / "launch_hyper_heuristic.py"),
+            "-p",
+            problem,
+            "-e",
+            method,
+            "-d",
+            heuristic_dir,
+            "-t",
+            case_file,
+            "-n",
+            f"{iters_sf}",
+            "-m",
+            str(selection_frequency),
+            "-c",
+            str(num_candidate_heuristics),
+            "-b",
+            str(rollout_budget),
+            "-r",
+            "result",
+            "--seed",
+            str(seed),
+        ]
+        if max_steps is not None:
+            launch_cmd.extend(["--max_steps", str(max_steps)])
+        if method == "llm_hh" and llm_config is not None:
+            launch_cmd.extend(["-l", str(llm_config)])
+        try:
+            result = subprocess.run(
+                launch_cmd,
+                cwd=str(heuragenix_root),
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            log_text = f"timeout after {timeout_s}s"
+            _append_llm_usage(
+                llm_usage_path,
+                {
+                    "ok": False,
+                    "reason": "subprocess_timeout",
+                    "engine": method,
+                    "error": log_text,
+                    "stdout": (exc.stdout or "").strip(),
+                    "stderr": (exc.stderr or "").strip(),
+                },
+            )
+            result = None
+        if result is None or result.returncode != 0:
+            if result is not None:
+                log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "launch_failed", "engine": method, "error": log_text},
+            )
+            if method != fallback_method:
+                fallback_used = True
+                method = fallback_method
+                output_dir = output_root / problem / case_name / "result" / method
+                launch_cmd = [
+                    sys.executable,
+                    str(heuragenix_root / "launch_hyper_heuristic.py"),
+                    "-p",
+                    problem,
+                    "-e",
+                    method,
+                    "-d",
+                    heuristic_dir,
+                    "-t",
+                    case_file,
+                    "-n",
+                    f"{iters_sf}",
+                    "-m",
+                    str(selection_frequency),
+                    "-c",
+                    str(num_candidate_heuristics),
+                    "-b",
+                    str(rollout_budget),
+                    "-r",
+                    "result",
+                    "--seed",
+                    str(seed),
+                ]
+                if max_steps is not None:
+                    launch_cmd.extend(["--max_steps", str(max_steps)])
+                try:
+                    result = subprocess.run(
+                        launch_cmd,
+                        cwd=str(heuragenix_root),
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=timeout_s,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    log_text = f"timeout after {timeout_s}s"
+                    _append_llm_usage(
+                        llm_usage_path,
+                        {
+                            "ok": False,
+                            "reason": "subprocess_timeout",
+                            "engine": method,
+                            "error": log_text,
+                            "stdout": (exc.stdout or "").strip(),
+                            "stderr": (exc.stderr or "").strip(),
+                        },
+                    )
+                    result = None
+                if result is None or result.returncode != 0:
+                    if result is not None:
+                        log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+                    _append_llm_usage(
+                        llm_usage_path,
+                        {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
+                    )
+
+    cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
     if not cands:
-        cands = list((output_root / case_name / "result").glob("*/recordings.jsonl"))
+        cands = list((output_root / problem / case_name / "result").glob("*/recordings.jsonl"))
     if cands:
         recordings_path = cands[0]
         output_dir = recordings_path.parent
@@ -715,6 +894,9 @@ def main() -> None:
         "best_total": float(best_eval.get("total_scalar", 0.0)),
         "steps_total": int(trace_info.get("steps_total", 0)),
         "accepts_total": int(trace_info.get("accepts", 0)),
+        "num_steps": int(trace_info.get("steps_total", 0)),
+        "accepts": int(trace_info.get("accepts", 0)),
+        "improve_step_ratio": float(trace_info.get("improve_step_ratio", 0.0)),
         "best_step": int(trace_info.get("best_step", -1)),
         "status": trace_info.get("status", "ok"),
         "method": method,
