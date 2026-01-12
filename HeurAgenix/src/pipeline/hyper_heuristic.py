@@ -1,20 +1,33 @@
-# HeurAgenix/src/pipeline/hyper_heuristic.py
 import os
 from pathlib import Path
 from typing import List, Optional
+import importlib
 
 from src.util.util import load_function
 from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
 from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
 
-import importlib
 
-
-def _load_env(problem: str, data_name: str):
+def _load_env(problem: str, test_data_dir: Path, data_name: str):
     mod = importlib.import_module(f"src.problems.{problem}.env")
     Env = getattr(mod, "Env")
-    return Env(data_name)
+    full_path = str((test_data_dir / data_name).resolve())
+    try:
+        return Env(full_path)
+    except Exception:
+        env = Env(data_name)
+        if hasattr(env, "data_dir"):
+            env.data_dir = str(test_data_dir)
+        return env
+
+
+def _apply_budget(env, iterations_scale_factor: float):
+    ps = getattr(env, "problem_size", None) or getattr(env, "S", 1)
+    env.problem_size = int(ps)
+    env.max_steps = max(1, int(float(iterations_scale_factor) * max(1, int(env.problem_size))))
+    if hasattr(env, "construction_steps"):
+        env.construction_steps = 0
 
 
 def launch_heuristic(
@@ -26,25 +39,19 @@ def launch_heuristic(
     iterations_scale_factor: float,
     result_dir: str = "result",
 ):
-    """
-    Run a single heuristic function (not llm_hh/random_hh).
-    """
     for data_name in data_name_list:
-        env = _load_env(problem, data_name)
-        # IMPORTANT: make steps effective
-        if getattr(env, "problem_size", None) is None:
-            env.problem_size = getattr(env, "S", 1)
-        env.max_steps = max(1, int(float(iterations_scale_factor) * max(1, int(env.problem_size))))
-        env.construction_steps = 0
-
-        # output dir = output/{problem}/{test_data}/{result}/{heuristic_name}
+        env = _load_env(problem, test_data_dir, data_name)
+        _apply_budget(env, iterations_scale_factor)
         test_stem = Path(data_name).stem
         out_dir = output_base_dir / problem / test_stem / result_dir / heuristic_name
         os.makedirs(out_dir, exist_ok=True)
         env.reset(output_dir=str(out_dir))
-
         fn = load_function(heuristic_name, problem=problem)
-        runner = SingleHyperHeuristic(fn, iterations_scale_factor=float(iterations_scale_factor), output_dir=str(out_dir))
+        runner = SingleHyperHeuristic(
+            fn,
+            iterations_scale_factor=float(iterations_scale_factor),
+            output_dir=str(out_dir),
+        )
         runner.run(env)
         env.dump_result()
 
@@ -63,23 +70,13 @@ def launch_heuristic_selector(
     rollout_budget: int,
     result_dir: str = "result",
 ):
-    """
-    Run llm_hh / random_hh.
-    Output layout MUST follow README:
-      output/{problem}/{test_data}/{result}/{engine}/...
-    """
     for data_name in data_name_list:
-        env = _load_env(problem, data_name)
-        if getattr(env, "problem_size", None) is None:
-            env.problem_size = getattr(env, "S", 1)
-        env.max_steps = max(1, int(float(iterations_scale_factor) * max(1, int(env.problem_size))))
-        env.construction_steps = 0
-
+        env = _load_env(problem, test_data_dir, data_name)
+        _apply_budget(env, iterations_scale_factor)
         test_stem = Path(data_name).stem
         out_dir = output_base_dir / problem / test_stem / result_dir / engine_name
         os.makedirs(out_dir, exist_ok=True)
         env.reset(output_dir=str(out_dir))
-
         if engine_name == "random_hh":
             runner = RandomHyperHeuristic(
                 heuristic_pool=None,
@@ -99,6 +96,5 @@ def launch_heuristic_selector(
                 rollout_budget=int(rollout_budget),
                 output_dir=str(out_dir),
             )
-
         runner.run(env)
         env.dump_result()

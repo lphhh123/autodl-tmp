@@ -16,6 +16,13 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 
+# === HeurAgenix import fix ===
+project_root = Path(__file__).resolve().parents[1]
+heuragenix_root = project_root.parent / "HeurAgenix"
+if str(heuragenix_root) not in sys.path:
+    sys.path.insert(0, str(heuragenix_root))
+# =============================
+
 from layout.candidate_pool import _signature_for_action
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
@@ -477,9 +484,9 @@ def main() -> None:
         S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
 
-    internal_out_base = out_dir / "heuragenix_internal"
-    internal_out_base.mkdir(parents=True, exist_ok=True)
-    output_root = internal_out_base / "output" / problem
+    internal_out = out_dir / "heuragenix_internal"
+    internal_out.mkdir(parents=True, exist_ok=True)
+    output_root = internal_out / "output" / problem
 
     fallback_used = False
     log_text = ""
@@ -519,7 +526,7 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    env["AMLT_OUTPUT_DIR"] = str(internal_out_base)
+    env["AMLT_OUTPUT_DIR"] = str(internal_out)
     result = subprocess.run(
         launch_cmd,
         cwd=str(heuragenix_root),
