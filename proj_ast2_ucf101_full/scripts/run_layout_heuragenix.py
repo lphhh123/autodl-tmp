@@ -338,11 +338,13 @@ def _write_trace_and_pareto(
     best_assign: List[int] | None = None
     accepts = 0
     best_step = -1
+    has_records = False
 
     with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
         for idx, rec in enumerate(_iter_recordings(recordings_path)):
+            has_records = True
             if max_steps is not None and idx >= max_steps:
                 break
             if "assign" in rec and rec["assign"] is not None:
@@ -409,6 +411,10 @@ def _write_trace_and_pareto(
             prev_total = float(eval_out["total_scalar"])
             prev_comm = float(eval_out["comm_norm"])
             prev_therm = float(eval_out["therm_norm"])
+    status = "ok" if has_records else "no_recordings"
+    if not has_records:
+        best_assign = list(prev_assign)
+        best_eval = dict(prev_metrics)
     return {
         "trace_path": trace_path,
         "best_eval": best_eval,
@@ -416,6 +422,7 @@ def _write_trace_and_pareto(
         "accepts": accepts,
         "best_step": best_step,
         "steps_total": idx + 1 if "idx" in locals() else 0,
+        "status": status,
     }, pareto
 
 
@@ -709,6 +716,7 @@ def main() -> None:
         "steps_total": int(trace_info.get("steps_total", 0)),
         "accepts_total": int(trace_info.get("accepts", 0)),
         "best_step": int(trace_info.get("best_step", -1)),
+        "status": trace_info.get("status", "ok"),
         "method": method,
         "fallback_used": fallback_used,
         "fallback_method": fallback_method if fallback_used else None,

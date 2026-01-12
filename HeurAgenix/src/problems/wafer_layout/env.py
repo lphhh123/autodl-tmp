@@ -77,6 +77,7 @@ class Env(BaseEnv):
         self.temp_init = float(obj.get("temp_init", 0.05))
         self.temp_min = float(obj.get("temp_min", 0.005))
         self.temp_decay = float(obj.get("temp_decay", 0.999))
+        self._sa_T = float(self.temp_init)
 
         self._rec_fp = None
         self._rec_path = None
@@ -235,6 +236,7 @@ class Env(BaseEnv):
     def reset(self, output_dir: str = None):
         super().reset(output_dir=output_dir)
         self._step_id = 0
+        self._sa_T = float(self.temp_init)
 
         self._rec_path = os.path.join(self.output_dir, "recordings.jsonl")
         self._best_path = os.path.join(self.output_dir, "best_solution.json")
@@ -297,7 +299,18 @@ class Env(BaseEnv):
         new_comm = float(new_eval.get("comm_norm", 0.0))
         new_therm = float(new_eval.get("therm_norm", 0.0))
 
-        accept = bool(inplace) and new_key <= old_key
+        delta = float(new_key - old_key)
+        accept = bool(inplace) and (delta <= 0.0)
+        if bool(inplace):
+            if not accept:
+                T = float(getattr(self, "_sa_T", self.temp_init))
+                if T > 1e-12:
+                    p = float(np.exp(-delta / max(T, 1e-12)))
+                    if self.rng.random() < p:
+                        accept = True
+            T = float(getattr(self, "_sa_T", self.temp_init))
+            T = max(self.temp_min, T * self.temp_decay)
+            self._sa_T = float(T)
         if not accept:
             self.current_solution.assign = old_assign
             self.current_eval = old_eval
