@@ -1,14 +1,13 @@
-from __future__ import annotations
+import numpy as np
 
-import random
-from typing import Dict, Tuple
-
-from src.problems.wafer_layout.components import RelocateSlot
+from ...components import RelocateOperator
 
 
-def random_relocate(problem_state: Dict, algorithm_data: Dict, **kwargs) -> Tuple[RelocateSlot, Dict]:
-    rng: random.Random = algorithm_data["rng"]
-    solution = problem_state["current_solution"]
-    i = rng.randrange(solution.S)
-    site = rng.randrange(solution.Ns)
-    return RelocateSlot(i, site), {"slot": i, "site": site}
+def random_relocate(problem_state: dict, algorithm_data: dict, **kwargs):
+    """Randomly relocate one chiplet to a random site."""
+    inst = problem_state["instance_data"]
+    s_count = int(inst["S"])
+    ns_count = int(inst["Ns"])
+    i = int(np.random.randint(0, s_count))
+    site = int(np.random.randint(0, ns_count))
+    return RelocateOperator(i, site), {}

@@ -5,8 +5,39 @@ import random
 import traceback
 from typing import List, Optional
 
+import numpy as np
+
 from src.problems.base.env import BaseEnv
 from src.util.util import load_function, extract, find_closest_match
+
+
+select_heuristic_tool = [
+    {
+        "type": "function",
+        "function": {
+            "name": "select_heuristic",
+            "description": "Select a heuristic name from the candidate list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "heuristic": {"type": "string"},
+                },
+                "required": ["heuristic"],
+            },
+        },
+    }
+]
+
+
+def generate_heuristic_pool_introduction(candidate_heuristics: List[str], problem: str) -> str:
+    lines = [f"Heuristic pool for problem: {problem}"]
+    for idx, name in enumerate(candidate_heuristics, start=1):
+        lines.append(f"{idx}. {name}")
+    return "\n".join(lines)
+
+
+def filter_dict_to_str(items: List[dict]) -> str:
+    return json.dumps(items, ensure_ascii=False, default=str)
 
 
 class LLMSelectionHyperHeuristic:
@@ -37,6 +68,7 @@ class LLMSelectionHyperHeuristic:
         self.output_dir = output_dir
         self.seed = int(seed)
         self.max_llm_failures = int(max_llm_failures)
+        self.heuristic_dir = "basic_heuristics"
 
         self.tools = None
         if self.tool_calling:
@@ -94,102 +126,145 @@ class LLMSelectionHyperHeuristic:
         return picked
 
     def run(self, env: BaseEnv) -> bool:
-        rng = random.Random(self.seed)
-        algorithm_data = {"rng": rng, "env": env}
+        import json
+        import time
+        import traceback
 
-        # init LLM background (best-effort)
-        llm_enabled = True
+        out_dir = getattr(self.llm_client, "output_dir", None)
+        usage_path = os.path.join(out_dir, "llm_usage.jsonl") if out_dir else None
+
+        def log_usage(rec: dict):
+            if usage_path:
+                with open(usage_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        if not self.heuristic_pool:
+            try:
+                cand_dir = os.path.join(
+                    "src",
+                    "problems",
+                    self.problem,
+                    "heuristics",
+                    self.heuristic_dir,
+                )
+                self.heuristic_pool = [
+                    x.split(".")[0]
+                    for x in os.listdir(cand_dir)
+                    if x.endswith(".py") and not x.startswith("__")
+                ]
+            except Exception:
+                pass
+
+        if not self.heuristic_pool:
+            log_usage({"ok": False, "reason": "empty_heuristic_pool"})
+            return False
+
+        max_steps = int(env.construction_steps * self.iterations_scale_factor)
+        max_rounds = int(np.ceil(max_steps / max(1, self.selection_frequency)))
+
         fail_count = 0
-        try:
-            self.llm_client.reset()
-            # keep "without_code" to reduce tokens
-            self.llm_client.load_background("background_without_code.txt")
-            if self.tool_calling:
-                self.llm_client.load("heuristic_selection_with_tool.txt")
-            else:
-                self.llm_client.load("heuristic_selection.txt")
-        except Exception as e:
-            llm_enabled = False
-            self._log_usage({"ok": False, "reason": "llm_init_failed", "error": str(e)})
+        max_fail = getattr(self, "max_llm_failures", 2)
 
         selection_round = 0
-        while env.continue_run:
-            candidates = self._choose_candidates(rng)
-
-            t0 = time.time()
-            ok = False
-            chosen = None
-            err = None
-
-            # rollout_budget>0 才允许用 tts_bon（懒加载，避免 dill/依赖炸）
-            if self.rollout_budget > 0 and len(candidates) > 1:
-                try:
-                    from src.util.tts_bon import tts_bon
-                    candidates = tts_bon(
-                        env,
-                        candidates,
-                        rollout_budget=self.rollout_budget,
-                        problem=self.problem,
-                        iterations_scale_factor=self.iterations_scale_factor,
-                    )
-                except Exception as e:
-                    # rollout 失败不影响主流程
-                    self._log_usage({"ok": False, "reason": "rollout_failed", "error": str(e)})
-
-            if llm_enabled:
-                try:
-                    prompt = env.summarize_env() if hasattr(env, "summarize_env") else str(env.get_problem_state())
-                    # 将候选集合写入对话上下文
-                    self.llm_client.chat(prompt + "\n\nCandidates:\n" + "\n".join([f"- {x}" for x in candidates]))
-                    chosen = self._llm_pick(candidates)
-                    ok = True
-                except Exception as e:
-                    fail_count += 1
-                    err = traceback.format_exc()
-                    chosen = rng.choice(candidates)
-                    ok = False
-                    self._log_usage({
-                        "ok": False,
-                        "reason": "llm_call_failed",
-                        "fail_count": fail_count,
-                        "error": str(e),
-                        "fallback_pick": chosen,
-                    })
-                    if fail_count >= self.max_llm_failures:
-                        llm_enabled = False
-                        self._log_usage({"ok": False, "reason": "llm_disabled", "fail_count": fail_count})
-
-            if chosen is None:
-                chosen = rng.choice(candidates)
-
-            dt_ms = int((time.time() - t0) * 1000)
-            self._log_usage({
-                "ok": ok,
-                "selection_round": selection_round,
-                "chosen_heuristic": chosen,
-                "candidates": candidates,
-                "tool_calling": self.tool_calling,
-                "time_ms": dt_ms,
-                "error": err,
-            })
-
-            heuristic = load_function(chosen, problem=self.problem)
-
-            # execute selection_frequency steps
-            for _ in range(self.selection_frequency):
-                if not env.continue_run:
-                    break
-                env.run_heuristic(
-                    heuristic,
-                    algorithm_data=algorithm_data,
-                    add_record_item={
-                        "selection_round": selection_round,
-                        "chosen_heuristic": chosen,
-                        "candidates": candidates,
-                        "llm_ok": ok,
-                    },
-                )
-
+        while selection_round < max_rounds and env.current_steps < max_steps and env.continue_run:
             selection_round += 1
 
-        return bool(env.is_valid_solution(env.current_solution))
+            if len(self.heuristic_pool) <= self.num_candidate_heuristics:
+                candidate_heuristics = list(self.heuristic_pool)
+            else:
+                candidate_heuristics = random.sample(
+                    self.heuristic_pool, self.num_candidate_heuristics
+                )
+
+            t0 = time.time()
+            chosen = None
+            ok = False
+            err = None
+
+            try:
+                heuristic_intros = generate_heuristic_pool_introduction(
+                    candidate_heuristics, self.problem
+                )
+
+                background_info = {
+                    "problem": self.problem,
+                    "problem_description": env.prompt,
+                }
+                is_cop = self.llm_client.load(
+                    background_info, background_file="background_without_code.txt"
+                )
+                if isinstance(is_cop, str) and "is_cop:no" in is_cop:
+                    raise RuntimeError("LLM says is_cop:no")
+
+                problem_state = env.get_problem_state()
+                prompt_dict = {
+                    "heuristic_pool_introduction": heuristic_intros,
+                    "task": f"Select a heuristic for {self.problem}.",
+                    "problem_state": filter_dict_to_str([problem_state]),
+                    "candidate_heuristics": str(candidate_heuristics),
+                }
+
+                if self.llm_client.support_tool_calling:
+                    resp = self.llm_client.chat_with_tools(
+                        prompt_dict, tools=select_heuristic_tool
+                    )
+                    name = resp.get("heuristic", None) if isinstance(resp, dict) else None
+                    if not name:
+                        raise RuntimeError(f"tool_call_empty: {resp}")
+                    chosen = find_closest_match(name, candidate_heuristics)
+                else:
+                    resp = self.llm_client.chat(prompt_dict, text_file="select_heuristic.txt")
+                    chosen = find_closest_match(resp, candidate_heuristics)
+
+                ok = True
+
+            except Exception as e:
+                fail_count += 1
+                err = traceback.format_exc()
+                chosen = random.choice(candidate_heuristics)
+                ok = False
+                log_usage(
+                    {
+                        "ok": False,
+                        "reason": "llm_choose_failed",
+                        "round": selection_round,
+                        "error": str(e),
+                        "fail_count": fail_count,
+                        "candidates": candidate_heuristics,
+                        "fallback_pick": chosen,
+                    }
+                )
+
+            if (not ok) and fail_count >= max_fail:
+                log_usage(
+                    {
+                        "ok": False,
+                        "reason": "llm_disabled_after_failures",
+                        "fail_count": fail_count,
+                    }
+                )
+                while env.current_steps < max_steps and env.continue_run:
+                    name = random.choice(self.heuristic_pool)
+                    h = load_function(name, problem=self.problem)
+                    env.run_heuristic(h)
+                env.dump_result()
+                return env.is_complete_solution and env.is_valid_solution
+
+            log_usage(
+                {
+                    "ok": ok,
+                    "round": selection_round,
+                    "chosen": chosen,
+                    "candidates": candidate_heuristics,
+                    "time_ms": int((time.time() - t0) * 1000),
+                }
+            )
+
+            heuristic = load_function(chosen, problem=self.problem)
+            for _ in range(self.selection_frequency):
+                if env.current_steps >= max_steps or (not env.continue_run):
+                    break
+                env.run_heuristic(heuristic)
+
+        env.dump_result()
+        return env.is_complete_solution and env.is_valid_solution
