@@ -72,7 +72,12 @@ def parse_arguments():
 
     parser.add_argument("-r", "--result_dir", type=str, default="result")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=0,
+        help="Optional override for env.max_steps (exact budget). 0 means use iterations_scale_factor * problem_size.",
+    )
 
     parser.add_argument("--llm_timeout_s", type=int, default=30)
     parser.add_argument("--max_llm_failures", type=int, default=2)
@@ -122,7 +127,7 @@ def main():
         env = Env(str(data_path))
 
         problem_size = int(getattr(env, "problem_size", None) or getattr(env, "S", None) or 1)
-        if args.max_steps is not None:
+        if int(args.max_steps) > 0:
             env.max_steps = int(args.max_steps)
         else:
             env.max_steps = max(1, int(float(args.iterations_scale_factor) * max(1, problem_size)))
