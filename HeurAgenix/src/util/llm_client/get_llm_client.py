@@ -329,9 +329,6 @@ def get_llm_client(
     sleep_base = float(config.get("sleep_base", config.get("sleep_time", config.get("retry_sleep", 1.0))))
 
     def _resolve_api_key(env_names: List[str], allow_empty: bool = False) -> str:
-        api_key = config.get("api_key") or config.get("key") or config.get("token")
-        if api_key:
-            return str(api_key)
         for env_name in env_names:
             env_key = os.getenv(env_name)
             if env_key:
@@ -340,10 +337,16 @@ def get_llm_client(
             return ""
         raise ValueError(f"missing api_key ({', '.join(env_names)})")
 
+    def _resolve_api_key_with_config(config: dict, env_names: List[str], allow_empty: bool = False) -> str:
+        api_key = str(config.get("api_key") or config.get("key") or "").strip()
+        if api_key:
+            return api_key
+        return _resolve_api_key(env_names, allow_empty=allow_empty)
+
     explicit_url = config.get("url")
     if explicit_url:
         base_url = str(explicit_url).rstrip("/")
-        api_key = _resolve_api_key(["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"], allow_empty=True)
+        api_key = _resolve_api_key_with_config(config, ["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"], allow_empty=True)
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         return _finalize_client(
             OpenAICompatibleClient(
@@ -372,7 +375,7 @@ def get_llm_client(
             raise ValueError("missing deployment")
         if not api_version:
             raise ValueError("missing api_version")
-        api_key = _resolve_api_key(["AZURE_OPENAI_API_KEY", "OPENAI_API_KEY"], allow_empty=False)
+        api_key = _resolve_api_key_with_config(config, ["AZURE_OPENAI_API_KEY", "OPENAI_API_KEY"], allow_empty=False)
         url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
         return _finalize_client(
             OpenAICompatibleClient(
@@ -394,7 +397,7 @@ def get_llm_client(
 
     if provider in {"local_model", "vllm"}:
         base_url = (config.get("base_url") or config.get("endpoint") or "http://localhost:8000/v1").rstrip("/")
-        api_key = config.get("api_key", "")
+        api_key = _resolve_api_key_with_config(config, ["OPENAI_API_KEY"], allow_empty=True)
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         return _finalize_client(
             OpenAICompatibleClient(
@@ -416,7 +419,7 @@ def get_llm_client(
         base_url = (config.get("url") or config.get("base_url") or config.get("endpoint") or "").rstrip("/")
         if not base_url:
             raise ValueError("missing url")
-        api_key = _resolve_api_key(["OPENAI_API_KEY"], allow_empty=False)
+        api_key = _resolve_api_key_with_config(config, ["OPENAI_API_KEY"], allow_empty=False)
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         return _finalize_client(
             OpenAICompatibleClient(
@@ -437,7 +440,7 @@ def get_llm_client(
     base_url = (config.get("base_url") or config.get("endpoint") or "").rstrip("/")
     if base_url:
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
-        api_key = _resolve_api_key(["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"], allow_empty=True)
+        api_key = _resolve_api_key_with_config(config, ["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"], allow_empty=True)
         return _finalize_client(
             OpenAICompatibleClient(
                 provider=provider,

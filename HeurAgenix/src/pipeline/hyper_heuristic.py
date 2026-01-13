@@ -37,11 +37,13 @@ def launch_heuristic(
     output_base_dir: Path,
     heuristic_name: str,
     iterations_scale_factor: float,
+    seed: int = 0,
     result_dir: str = "result",
 ):
     for data_name in data_name_list:
         env = _load_env(problem, test_data_dir, data_name)
         _apply_budget(env, iterations_scale_factor)
+        seed_val = int(getattr(env, "seed", seed))
         test_stem = Path(data_name).stem
         out_dir = output_base_dir / problem / test_stem / result_dir / heuristic_name
         os.makedirs(out_dir, exist_ok=True)
@@ -51,6 +53,7 @@ def launch_heuristic(
             fn,
             iterations_scale_factor=float(iterations_scale_factor),
             output_dir=str(out_dir),
+            seed=seed_val,
         )
         runner.run(env)
         env.dump_result()
@@ -68,11 +71,13 @@ def launch_heuristic_selector(
     selection_frequency: int,
     num_candidate_heuristics: int,
     rollout_budget: int,
+    seed: int = 0,
     result_dir: str = "result",
 ):
     for data_name in data_name_list:
         env = _load_env(problem, test_data_dir, data_name)
         _apply_budget(env, iterations_scale_factor)
+        seed_val = int(getattr(env, "seed", seed))
         test_stem = Path(data_name).stem
         out_dir = output_base_dir / problem / test_stem / result_dir / engine_name
         os.makedirs(out_dir, exist_ok=True)
@@ -86,7 +91,7 @@ def launch_heuristic_selector(
                 heuristic_functions=heur_funcs,
                 iterations_scale_factor=float(iterations_scale_factor),
                 selection_frequency=int(selection_frequency),
-                seed=int(getattr(env, "seed", getattr(env, "_seed_id", 0))),
+                seed=seed_val,
                 stage_name="heuragenix_random_hh",
             )
         else:
@@ -100,7 +105,7 @@ def launch_heuristic_selector(
                 num_candidate_heuristics=int(num_candidate_heuristics),
                 rollout_budget=int(rollout_budget),
                 output_dir=str(out_dir),
-                seed=int(getattr(env, "seed", getattr(env, "_seed_id", 0))),
+                seed=seed_val,
             )
         runner.run(env)
         env.dump_result()
