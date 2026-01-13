@@ -17,6 +17,7 @@ class BaseEnv:
         self.output_dir: Optional[str] = None
         self.current_steps = 0
         self.max_steps = None
+        self.seed = 0
 
     def load_data(self, path: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -85,3 +86,30 @@ class BaseEnv:
 
     def dump_result(self) -> None:
         return None
+
+    def validate_solution(self, solution=None) -> bool:
+        """
+        Default validator.
+        Most built-in problems implement `validation_solution(solution=None)`.
+        wafer_layout implements `validate_solution(solution)`.
+        """
+        vs = getattr(self, "validation_solution", None)
+        if callable(vs):
+            try:
+                return bool(vs(solution))
+            except TypeError:
+                return bool(vs())
+        return True
+
+    @property
+    def is_valid_solution(self) -> bool:
+        """
+        Unified validity flag (bool property).
+        It will call `validate_solution(...)` (possibly overridden), and fall back to True.
+        """
+        try:
+            return bool(self.validate_solution(getattr(self, "current_solution", None)))
+        except TypeError:
+            return bool(self.validate_solution())
+        except Exception:
+            return True

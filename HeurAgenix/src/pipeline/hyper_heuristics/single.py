@@ -33,9 +33,4 @@ class SingleHyperHeuristic:
             )
 
         env.dump_result()
-        sol = getattr(env, "current_solution", None)
-        if hasattr(env, "validate_solution"):
-            return bool(env.validate_solution(sol))
-        if hasattr(env, "is_valid_solution"):
-            return bool(env.is_valid_solution(sol))
-        return True
+        return bool(getattr(env, "is_complete_solution", True)) and bool(getattr(env, "is_valid_solution", True))

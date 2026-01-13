@@ -54,6 +54,9 @@ class Env(BaseEnv):
             self._seed_id = int(assign_seed)
         else:
             self._seed_id = int(seed_info.get("seed_id", 0))
+        self.seed = int(self._seed_id)
+        random.seed(self.seed)
+        np.random.seed(self.seed)
         self.rng = random.Random(self._seed_id)
 
         slots = self.instance_data.get("slots", {})
@@ -185,8 +188,12 @@ class Env(BaseEnv):
         assign = self._sanitize_assign(assign)
         return WaferLayoutSolution(assign=assign)
 
+    @property
     def is_complete_solution(self) -> bool:
-        return True
+        ms = getattr(self, "max_steps", None)
+        if ms is None:
+            return False
+        return int(self.current_steps) >= int(ms)
 
     def validate_solution(self, solution: WaferLayoutSolution) -> bool:
         if solution is None or not hasattr(solution, "assign"):
@@ -199,8 +206,9 @@ class Env(BaseEnv):
                 return False
         return True
 
-    def is_valid_solution(self, sol) -> bool:
-        return bool(self.validate_solution(sol))
+    @property
+    def is_valid_solution(self) -> bool:
+        return bool(self.validate_solution(getattr(self, "current_solution", None)))
 
     def compare(self, x, y):
         return y - x

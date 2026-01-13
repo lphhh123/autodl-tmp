@@ -653,6 +653,7 @@ def _run_heuragenix_inprocess(
             num_candidate_heuristics=int(num_candidate_heuristics),
             rollout_budget=int(rollout_budget),
             output_dir=str(out_dir),
+            seed=int(seed),
             llm_timeout_s=int(baseline_cfg.get("llm_timeout_s", 30)),
             max_llm_failures=int(baseline_cfg.get("max_llm_failures", 2)),
             fallback_on_llm_failure=str(baseline_cfg.get("fallback_on_llm_failure", "random_hh")),
@@ -662,6 +663,8 @@ def _run_heuragenix_inprocess(
         runner = SingleHyperHeuristic(
             heuristic=fn,
             iterations_scale_factor=float(iters_sf),
+            output_dir=str(out_dir),
+            seed=int(seed),
         )
 
     runner.run(env)
