@@ -18,10 +18,13 @@ from src.problems.wafer_layout.problem_state import (
 
 
 def _load_layout_evaluator():
-    if importlib.util.find_spec("layout.evaluator") is None:
-        return None, None
-    module = importlib.import_module("layout.evaluator")
-    return module.LayoutEvaluator, module.LayoutState
+    try:
+        if importlib.util.find_spec("layout.evaluator") is None:
+            return None, None, "layout.evaluator not found"
+        module = importlib.import_module("layout.evaluator")
+    except Exception as exc:  # noqa: BLE001
+        return None, None, repr(exc)
+    return module.LayoutEvaluator, module.LayoutState, ""
 
 
 def _make_signature(assign: list[int]) -> str:
@@ -86,7 +89,34 @@ class Env(BaseEnv):
         self._rec_path = None
         self._best_path = None
 
-        self._LayoutEvaluator, self._LayoutState = _load_layout_evaluator()
+        self._force_main_evaluator = bool(self.instance_data.get("force_main_evaluator", True))
+        self._allow_fallback_evaluator = bool(self.instance_data.get("allow_fallback_evaluator", False))
+        self._require_main_evaluator = bool(self.instance_data.get("require_main_evaluator", True))
+
+        self._evaluator_source = "main_project"
+        self._evaluator_import_error = ""
+        self._LayoutEvaluator, self._LayoutState, import_error = _load_layout_evaluator()
+        if import_error:
+            self._evaluator_import_error = str(import_error)
+            if self._force_main_evaluator or self._require_main_evaluator:
+                raise RuntimeError(
+                    "Failed to import main layout evaluator. "
+                    "Check PYTHONPATH, sibling repo structure, and wrapper settings. "
+                    f"Import error: {import_error}"
+                )
+            if self._allow_fallback_evaluator:
+                self._LayoutEvaluator, self._LayoutState = None, None
+                self._evaluator_source = "fallback_penalty"
+            else:
+                raise RuntimeError(
+                    "Main evaluator import failed and fallback is disabled. "
+                    "Set allow_fallback_evaluator=True only for debug. "
+                    f"Import error: {import_error}"
+                )
+        self._meta_base = {
+            "evaluator_source": self._evaluator_source,
+            "evaluator_import_error": self._evaluator_import_error,
+        }
         self._evaluator = None
         self._layout_state = None
         self._init_evaluator()
@@ -279,6 +309,8 @@ class Env(BaseEnv):
                 "Ns": self.Ns,
                 "radius_mm": self.instance_data.get("wafer", {}).get("radius_mm", 0.0),
                 "weights": self.instance_data.get("objective_cfg", {}).get("scalar_weights", {}),
+                "evaluator_source": self._evaluator_source,
+                "evaluator_import_error": self._evaluator_import_error,
             },
         }
         with open(self._best_path, "w", encoding="utf-8") as f:
@@ -352,6 +384,7 @@ class Env(BaseEnv):
         duplicate_penalty = float(penalty.get("duplicate", 0.0))
         boundary_penalty = float(penalty.get("boundary", 0.0))
         meta = meta or {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+        meta.update(self._meta_base)
         meta["sa_T"] = float(getattr(self, "_sa_T", self.temp_init))
         meta["sa_accept"] = 1 if accept and delta > 0 else 0
         meta["delta_total"] = float(delta)
@@ -409,6 +442,7 @@ class Env(BaseEnv):
             boundary_penalty = float(penalty.get("boundary", 0.0))
             signature = _make_signature(list(self.current_solution.assign))
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+            meta.update(self._meta_base)
             if isinstance(meta_full, dict):
                 meta.update(meta_full)
             line = {
@@ -447,6 +481,7 @@ class Env(BaseEnv):
             boundary_penalty = float(penalty.get("boundary", 0.0))
             signature = _make_signature(list(self.current_solution.assign))
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+            meta.update(self._meta_base)
             if isinstance(meta_full, dict):
                 meta.update(meta_full)
             line = {
@@ -475,6 +510,7 @@ class Env(BaseEnv):
             return "[invalid_operator]"
 
         meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
+        meta.update(self._meta_base)
         if isinstance(meta_full, dict):
             meta.update(meta_full)
         dt = (time.time() - t0) * 1000.0

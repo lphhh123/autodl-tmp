@@ -64,6 +64,20 @@ class LLMSelectionHyperHeuristic:
         with open(self.usage_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    def _with_usage_base(self, env: BaseEnv, rec: Dict[str, Any]) -> Dict[str, Any]:
+        base = {
+            "case_name": str(getattr(env, "data_name", "")),
+            "seed_id": int(getattr(env, "seed", 0)),
+            "method": "llm_hh",
+            "max_steps": int(getattr(env, "max_steps", 0)),
+            "selection_frequency": int(self.selection_frequency),
+            "num_candidate_heuristics": int(self.num_candidate_heuristics),
+            "rollout_budget": int(self.rollout_budget),
+        }
+        for key, value in base.items():
+            rec.setdefault(key, value)
+        return rec
+
     def _get_algorithm_data(self, env: BaseEnv) -> Dict[str, Any]:
         data = dict(getattr(env, "algorithm_data", {}) or {})
         data["env"] = env
@@ -84,7 +98,7 @@ class LLMSelectionHyperHeuristic:
                 raise RuntimeError("get_llm_client returned None")
         except Exception as e:  # noqa: BLE001
             llm_ok = False
-            self._log_usage({"ok": False, "reason": "llm_init_failed", "error": str(e)})
+            self._log_usage(self._with_usage_base(env, {"ok": False, "reason": "llm_init_failed", "error": str(e)}))
 
         fail_count = 0
         selection_round = 0
@@ -146,7 +160,9 @@ class LLMSelectionHyperHeuristic:
                         }
 
                     self._log_usage(
-                        {
+                        self._with_usage_base(
+                            env,
+                            {
                             "ok": False,
                             "reason": "llm_call_failed",
                             "round": selection_round,
@@ -159,20 +175,30 @@ class LLMSelectionHyperHeuristic:
                             "rollout_budget": self.rollout_budget,
                             "fallback_used": True,
                             **llm_meta,
-                        }
+                            },
+                        )
                     )
 
                     if fail_count >= self.max_llm_failures:
                         llm_ok = False
-                        self._log_usage({"ok": False, "reason": "llm_disabled_after_failures", "fail_count": fail_count})
+                        self._log_usage(
+                            self._with_usage_base(
+                                env,
+                                {"ok": False, "reason": "llm_disabled_after_failures", "fail_count": fail_count},
+                            )
+                        )
                         llm_disabled = True
             elif not llm_ok and self.fallback_on_llm_failure == "stop":
-                self._log_usage({"ok": False, "reason": "llm_disabled_stop", "fail_count": fail_count})
+                self._log_usage(
+                    self._with_usage_base(env, {"ok": False, "reason": "llm_disabled_stop", "fail_count": fail_count})
+                )
                 break
 
             dt_ms = (time.time() - t0) * 1000.0
             self._log_usage(
-                {
+                self._with_usage_base(
+                    env,
+                    {
                     "ok": ok,
                     "round": selection_round,
                     "chosen_heuristic": chosen,
@@ -182,7 +208,8 @@ class LLMSelectionHyperHeuristic:
                     "rollout_budget": self.rollout_budget,
                     "fallback_used": not ok,
                     **(llm_meta if llm_ok and llm_client is not None else {}),
-                }
+                    },
+                )
             )
 
             heuristic_fn = load_function(chosen, problem=self.problem)

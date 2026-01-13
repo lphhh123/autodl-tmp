@@ -22,6 +22,7 @@ class OpenAICompatibleClient:
         timeout_sec: int = 90,
         max_retry: int = 1,
         sleep_time: int = 0,
+        sleep_base: float | None = None,
         include_model: bool = True,
         temperature: float = 0.15,
         top_p: float = 0.9,
@@ -34,7 +35,8 @@ class OpenAICompatibleClient:
         self.api_key = api_key or ""
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
-        self.sleep_time = max(0, int(sleep_time))
+        sleep_val = float(sleep_time) if sleep_base is None else float(sleep_base)
+        self.sleep_time = max(0.0, sleep_val)
         self.include_model = include_model
         self.temperature = temperature
         self.top_p = top_p
@@ -250,6 +252,18 @@ class OpenAICompatibleClient:
         idx = int(picks[0])
         if idx < 0 or idx >= len(candidates):
             raise ValueError("llm_pick_out_of_range")
+        if self.last_usage is None:
+            self.last_usage = {}
+        effective_timeout = self.timeout_sec if timeout_s is None else float(timeout_s)
+        self.last_usage.update(
+            {
+                "temperature": float(self.temperature),
+                "top_p": float(self.top_p),
+                "max_tokens": int(self.max_tokens),
+                "timeout_s": float(effective_timeout),
+                "max_retry": int(self.max_retry),
+            }
+        )
         return candidates[idx]
 
     def load(self, background_info: Dict, background_file: str | None = None) -> str:
@@ -301,12 +315,12 @@ def get_llm_client(
         or config.get("model_path")
         or ""
     )
-    max_attempts = int(config.get("max_attempts", max_retry + 1))
-    max_retry = max(0, max_attempts - 1)
-    sleep_time = int(config.get("sleep_time", 0))
-    temperature = float(config.get("temperature", 0.15))
-    top_p = float(config.get("top-p", config.get("top_p", 0.9)))
-    max_tokens = int(config.get("max_tokens", 96))
+    temperature = float(config.get("temperature", 0.7))
+    top_p = float(config.get("top_p", config.get("top-p", 1.0)))
+    max_tokens = int(config.get("max_tokens", 1024))
+    timeout_s = float(config.get("timeout_s", config.get("timeout", config.get("request_timeout", 60.0))))
+    max_retry = int(config.get("max_retry", config.get("max_attempts", 5)))
+    sleep_base = float(config.get("sleep_base", config.get("sleep_time", config.get("retry_sleep", 1.0))))
 
     def _resolve_api_key(env_name: str) -> str:
         api_key = config.get("api_key") or config.get("key") or config.get("token")
@@ -334,9 +348,9 @@ def get_llm_client(
                 model=str(deployment),
                 api_key=api_key,
                 api_type=api_type or "azure",
-                timeout_sec=timeout_sec,
+                timeout_sec=timeout_s,
                 max_retry=max_retry,
-                sleep_time=sleep_time,
+                sleep_base=sleep_base,
                 include_model=False,
                 temperature=temperature,
                 top_p=top_p,
@@ -355,9 +369,9 @@ def get_llm_client(
                 model=str(model or config.get("local_model") or "local-model"),
                 api_key=str(api_key),
                 api_type=api_type,
-                timeout_sec=timeout_sec,
+                timeout_sec=timeout_s,
                 max_retry=max_retry,
-                sleep_time=sleep_time,
+                sleep_base=sleep_base,
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
@@ -377,9 +391,9 @@ def get_llm_client(
                 model=str(model or "api-model"),
                 api_key=api_key,
                 api_type=api_type,
-                timeout_sec=timeout_sec,
+                timeout_sec=timeout_s,
                 max_retry=max_retry,
-                sleep_time=sleep_time,
+                sleep_base=sleep_base,
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
@@ -397,9 +411,9 @@ def get_llm_client(
                 model=str(model or "api-model"),
                 api_key=str(api_key),
                 api_type=api_type,
-                timeout_sec=timeout_sec,
+                timeout_sec=timeout_s,
                 max_retry=max_retry,
-                sleep_time=sleep_time,
+                sleep_base=sleep_base,
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,

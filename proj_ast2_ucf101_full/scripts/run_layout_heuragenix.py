@@ -145,6 +145,7 @@ def _write_test_data(
     seed: int,
     data_base: Path,
     seed_assign: List[int],
+    baseline_cfg: Dict[str, Any],
     problem: str = "wafer_layout",
 ) -> Tuple[str, str]:
     """
@@ -165,6 +166,12 @@ def _write_test_data(
     seed_payload["seed_id"] = int(seed)
     seed_payload["rng_seed"] = int(seed)
     payload["seed"] = seed_payload
+    force_main = bool(baseline_cfg.get("force_main_evaluator", True))
+    allow_fb = bool(baseline_cfg.get("allow_fallback_evaluator", False))
+    require_main = bool(baseline_cfg.get("require_main_evaluator", True))
+    payload["force_main_evaluator"] = force_main
+    payload["allow_fallback_evaluator"] = allow_fb
+    payload["require_main_evaluator"] = require_main
 
     target = test_dir / case_file
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -178,10 +185,18 @@ def _prepare_work_dir(
     seed: int,
     internal_data_base: Path,
     seed_assign: List[int],
+    baseline_cfg: Dict[str, Any],
 ) -> Tuple[Path, str, str]:
     work_dir = out_dir / "__heuragenix_work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    case_stem, case_file = _write_test_data(case, seed, internal_data_base, seed_assign, problem="wafer_layout")
+    case_stem, case_file = _write_test_data(
+        case,
+        seed,
+        internal_data_base,
+        seed_assign,
+        baseline_cfg,
+        problem="wafer_layout",
+    )
     return work_dir, case_stem, case_file
 
 
@@ -563,6 +578,15 @@ def _read_best_assign(best_solution_path: Path, fallback_assign: List[int]) -> L
     return payload.get("best_assign") or payload.get("best", {}).get("assign") or fallback_assign
 
 
+def _read_best_solution_payload(best_solution_path: Path) -> Dict[str, Any]:
+    if not best_solution_path.exists():
+        return {}
+    try:
+        return json.loads(best_solution_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -707,7 +731,7 @@ def main() -> None:
     problem = str(baseline_cfg.get("problem", "wafer_layout"))
     internal_out = out_dir / "heuragenix_internal"
     internal_out.mkdir(parents=True, exist_ok=True)
-    internal_data_base = internal_out / "data"
+    internal_data_base = internal_out
     internal_data_base.mkdir(parents=True, exist_ok=True)
     work_dir, case_name, case_file = _prepare_work_dir(
         out_dir,
@@ -716,6 +740,7 @@ def main() -> None:
         seed,
         internal_data_base,
         seed_assign,
+        baseline_cfg,
     )
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
@@ -923,8 +948,23 @@ def main() -> None:
                     obj = json.loads(line)
                 except Exception:
                     obj = {"raw": line}
-                obj = {"source": "heuragenix", **(obj if isinstance(obj, dict) else {"obj": obj})}
-                _append_llm_usage(llm_usage_path, obj)
+                if isinstance(obj, dict):
+                    obj.setdefault("source", "heuragenix")
+                    obj.setdefault("wrapper_case_name", case_name)
+                    obj.setdefault("wrapper_seed_id", int(seed))
+                    obj.setdefault("wrapper_method", method)
+                    obj.setdefault("wrapper_run_mode", run_mode)
+                    merged = obj
+                else:
+                    merged = {
+                        "source": "heuragenix",
+                        "wrapper_case_name": case_name,
+                        "wrapper_seed_id": int(seed),
+                        "wrapper_method": method,
+                        "wrapper_run_mode": run_mode,
+                        "obj": obj,
+                    }
+                _append_llm_usage(llm_usage_path, merged)
     else:
         _append_llm_usage(
             llm_usage_path,
@@ -935,6 +975,7 @@ def main() -> None:
 
     best_solution_path = output_dir / "best_solution.json"
     best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
+    best_solution_payload = _read_best_solution_payload(best_solution_path)
     _write_layout_best(out_dir, layout_input, cfg, pareto, best_assign)
 
     detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
@@ -943,6 +984,9 @@ def main() -> None:
     trace_metrics = compute_oscillation_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
 
     best_eval = trace_info.get("best_eval") or {}
+    best_meta = best_solution_payload.get("meta", {}) if isinstance(best_solution_payload, dict) else {}
+    evaluator_source = str(best_meta.get("evaluator_source", ""))
+    evaluator_import_error = str(best_meta.get("evaluator_import_error", ""))
     report = {
         "cfg_path": str(args.cfg),
         "best_total_scalar": float(best_eval.get("total_scalar", 0.0)),
@@ -966,9 +1010,18 @@ def main() -> None:
         "oscillation_metrics": trace_metrics,
         **trace_metrics,
         "raw_dir": str(output_dir),
+        "evaluator_source": evaluator_source,
+        "evaluator_import_error": evaluator_import_error,
+        "success": True,
     }
+    require_main = bool(baseline_cfg.get("require_main_evaluator", True))
+    if require_main and evaluator_source != "main_project":
+        report["success"] = False
+        report["error"] = "HeurAgenix evaluator fallback detected; baseline is not comparable to main evaluator."
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+    if require_main and evaluator_source != "main_project":
+        raise RuntimeError(report["error"])
 
 
 if __name__ == "__main__":
