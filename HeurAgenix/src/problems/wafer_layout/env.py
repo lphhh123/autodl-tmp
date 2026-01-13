@@ -219,8 +219,6 @@ class Env(BaseEnv):
             else:
                 assign = [i % max(1, self.Ns) for i in range(self.S)]
 
-        if len(assign) != self.S:
-            assign = (assign + list(range(self.S)))[: self.S]
         assign = self._sanitize_assign(assign)
         return WaferLayoutSolution(assign=assign)
 

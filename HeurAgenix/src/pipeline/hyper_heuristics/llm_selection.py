@@ -102,7 +102,22 @@ class LLMSelectionHyperHeuristic:
         llm_ok = True
         llm_client = None
         try:
-            llm_client = get_llm_client(self.llm_config_file)
+            llm_client = get_llm_client(
+                self.llm_config_file,
+                timeout_sec=self.llm_timeout_s,
+                max_retry=1,
+            )
+            if llm_client is None:
+                llm_ok = False
+                _log(
+                    {
+                        "ok": False,
+                        "reason": "missing_llm_config_or_client_none",
+                        "engine_used": "random_hh",
+                        "fallback_used": True,
+                        "llm_config_file": self.llm_config_file,
+                    }
+                )
         except Exception as e:
             llm_ok = False
             _log(
@@ -134,11 +149,11 @@ class LLMSelectionHyperHeuristic:
             if len(heuristic_pool) <= C:
                 candidates = list(heuristic_pool)
             else:
-                candidates = random.sample(list(heuristic_pool), C)
+                candidates = self.rng.sample(list(heuristic_pool), C)
 
             selection_round += 1
             chosen = None
-            engine_used = "random_hh"
+            stage_name = "random_hh"
             ok = False
             reason = "random_pick_default"
             err = None
@@ -165,20 +180,25 @@ class LLMSelectionHyperHeuristic:
                         candidates,
                         timeout_s=timeout_s,
                     )
-                    engine_used = "llm_hh"
+                    stage_name = "llm_hh"
                     ok = True
                     reason = "llm_pick"
+                    if chosen not in candidates:
+                        ok = False
+                        reason = "llm_pick_not_in_candidates"
+                        chosen = self.rng.choice(candidates)
+                        stage_name = "random_hh"
                 except Exception as e:
                     fail_count += 1
                     err = traceback.format_exc()
-                    chosen = random.choice(candidates)
-                    engine_used = "random_hh"
+                    chosen = self.rng.choice(candidates)
+                    stage_name = "random_hh"
                     ok = False
                     reason = "llm_call_failed_fallback_random"
                     _log(
                         {
                             "ok": False,
-                            "engine_used": engine_used,
+                            "engine_used": stage_name,
                             "reason": reason,
                             "error": str(e),
                             "fail_count": fail_count,
@@ -192,16 +212,16 @@ class LLMSelectionHyperHeuristic:
                         _log(
                             {
                                 "ok": False,
-                                "engine_used": "random_hh",
                                 "reason": "llm_disabled_after_failures",
                                 "fail_count": fail_count,
-                                "selection_round": selection_round,
+                                "engine_used": "random_hh",
+                                "fallback_used": True,
                             }
                         )
 
             if chosen is None:
-                chosen = random.choice(candidates)
-                engine_used = "random_hh"
+                chosen = self.rng.choice(candidates)
+                stage_name = "random_hh"
                 ok = False
                 reason = "llm_disabled_random_pick"
 
@@ -209,7 +229,7 @@ class LLMSelectionHyperHeuristic:
             _log(
                 {
                     "ok": ok,
-                    "engine_used": engine_used,
+                    "engine_used": stage_name,
                     "reason": reason,
                     "chosen_heuristic": chosen,
                     "candidates": candidates,
@@ -227,10 +247,11 @@ class LLMSelectionHyperHeuristic:
                     break
                 env.run_heuristic(
                     heuristic,
+                    selection=stage_name,
                     algorithm_data={"env": env, "rng": getattr(env, "rng", None)},
                     add_record_item={
                         # ★关键：让 recordings 的 stage/selection 反映真实 engine
-                        "selection": engine_used,
+                        "selection": stage_name,
                         "chosen_heuristic": chosen,
                         "candidates": candidates,
                         "selection_round": selection_round,

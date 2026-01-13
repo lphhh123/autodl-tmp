@@ -8,6 +8,7 @@ import numpy as np
 from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
 from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
 from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
+from src.pipeline.hyper_heuristics.heuristic_only import HeuristicOnlyHyperHeuristic
 from src.util.util import load_function
 
 
@@ -58,8 +59,12 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Launch Hyper-Heuristic")
     parser.add_argument("-p", "--problem", type=str, required=True, choices=problems)
     parser.add_argument(
-        "-e", "--heuristic", type=str, required=True,
-        help="heuristic function name OR llm_hh/random_hh"
+        "-e",
+        "--heuristic",
+        type=str,
+        required=True,
+        choices=["llm_hh", "random_hh", "heuristic_only"],
+        help="heuristic engine name: llm_hh/random_hh/heuristic_only",
     )
     parser.add_argument("-d", "--heuristic_dir", type=str, default="basic_heuristics")
     parser.add_argument("-t", "--test_data", type=str, default=None,
@@ -146,7 +151,17 @@ def main():
             usage_path.write_text("", encoding="utf-8")
         env.reset(output_dir=str(out_dir))
 
-        if args.heuristic == "random_hh":
+        if args.heuristic == "heuristic_only":
+            runner = HeuristicOnlyHyperHeuristic(
+                heuristic_pool=heuristic_pool_files,
+                problem=args.problem,
+                heuristic_dir=str(heur_dir),
+                iterations_scale_factor=float(args.iterations_scale_factor),
+                selection_frequency=int(args.selection_frequency),
+                output_dir=str(out_dir),
+                seed=seed_val,
+            )
+        elif args.heuristic == "random_hh":
             runner = RandomHyperHeuristic(
                 heuristic_pool=heuristic_pool_files,
                 problem=args.problem,

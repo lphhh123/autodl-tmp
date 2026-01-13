@@ -759,12 +759,20 @@ def _read_best_solution_meta(best_solution_path: Path) -> Dict[str, Any]:
 
 def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
     if not path.exists():
-        return {"total": 0, "ok": 0, "ok_rate": 0.0, "disabled_after_failures": False}
+        return {
+            "total": 0,
+            "ok": 0,
+            "ok_rate": 0.0,
+            "disabled_after_failures": False,
+            "fallback_used_any": False,
+        }
     total = 0
     ok = 0
     disabled_after_failures = False
+    fallback_used_any = False
+    fallback_first_idx = None
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for idx, line in enumerate(f):
             line = line.strip()
             if not line:
                 continue
@@ -778,12 +786,18 @@ def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
                     ok += 1
                 if payload.get("reason") == "llm_disabled_after_failures":
                     disabled_after_failures = True
+                if payload.get("fallback_used") is True or payload.get("engine_used") == "random_hh":
+                    fallback_used_any = True
+                    if fallback_first_idx is None:
+                        fallback_first_idx = idx
     ok_rate = ok / max(1, total)
     return {
         "total": total,
         "ok": ok,
         "ok_rate": ok_rate,
         "disabled_after_failures": disabled_after_failures,
+        "fallback_used_any": fallback_used_any,
+        "fallback_first_idx": fallback_first_idx,
     }
 
 
@@ -819,6 +833,7 @@ def _run_heuragenix_inprocess(
 
     import importlib
 
+    from src.pipeline.hyper_heuristics.heuristic_only import HeuristicOnlyHyperHeuristic
     from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
     from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
     from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
@@ -857,7 +872,17 @@ def _run_heuragenix_inprocess(
         usage_path.write_text("", encoding="utf-8")
     env.reset(output_dir=str(out_dir))
 
-    if method == "random_hh":
+    if method == "heuristic_only":
+        runner = HeuristicOnlyHyperHeuristic(
+            heuristic_pool=heuristic_pool_files,
+            problem=problem,
+            heuristic_dir=str(heur_dir),
+            iterations_scale_factor=float(iters_sf),
+            selection_frequency=int(selection_frequency),
+            output_dir=str(out_dir),
+            seed=int(seed),
+        )
+    elif method == "random_hh":
         runner = RandomHyperHeuristic(
             heuristic_pool=heuristic_pool_files,
             problem=problem,
@@ -926,6 +951,7 @@ def main() -> None:
 
     run_mode = baseline_cfg.get("run_mode", "inprocess")
     method = str(baseline_cfg.get("method", "llm_hh"))
+    baseline_method = str(method)
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
     llm_usage_path = out_dir / "llm_usage.jsonl"
@@ -1137,7 +1163,7 @@ def main() -> None:
         recordings_path = cands[0]
         output_dir = recordings_path.parent
         method = output_dir.name
-        fallback_used = method != baseline_cfg.get("method", "llm_hh")
+        fallback_used = method != baseline_method
     else:
         output_dir = out_dir
         recordings_path = out_dir / "recordings.jsonl"
@@ -1209,6 +1235,10 @@ def main() -> None:
     knee_comm, knee_therm, _ = pareto.knee_point()
     accept_rate = float(trace_info.get("accepts", 0)) / max(1, int(trace_info.get("num_steps", 0)))
     llm_summary = _summarize_llm_usage(llm_usage_path)
+    if llm_summary.get("fallback_used_any"):
+        fallback_used = True
+        if method == baseline_method:
+            fallback_method = "random_hh"
     problem_size_eff = int(infer_problem_size(layout_input))
     effective_max_steps = (
         int(max_steps)
