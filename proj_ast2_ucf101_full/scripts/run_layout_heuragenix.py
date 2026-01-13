@@ -588,7 +588,8 @@ def _write_trace_and_pareto(
             has_records = True
             if max_steps is not None and idx >= max_steps:
                 break
-            step_id = int(rec.get("iter", idx))
+            step_id = int(rec.get("iter", rec.get("step", idx)))
+            stage = str(rec.get("stage", "heuragenix"))
 
             accepted = int(rec.get("accepted", 1))
             op = rec.get("op", "noop")
@@ -628,7 +629,7 @@ def _write_trace_and_pareto(
                     {
                         "assign": base_state.assign.copy(),
                         "total_scalar": float(eval_out["total_scalar"]),
-                        "stage": "heuragenix",
+                        "stage": stage,
                         "iter": step_id,
                         "seed": seed,
                     },
@@ -651,7 +652,7 @@ def _write_trace_and_pareto(
             writer.writerow(
                 [
                     step_id,
-                    "heuragenix",
+                    stage,
                     op,
                     json.dumps({"op": op, **op_args}, ensure_ascii=False, sort_keys=True),
                     accepted,
@@ -949,7 +950,7 @@ def main() -> None:
     rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
     iters_sf = float(baseline_cfg.get("iterations_scale_factor", 2.0))
     max_steps = baseline_cfg.get("max_steps", None)
-    S = infer_problem_size(layout_input)
+    S = int(infer_problem_size(layout_input))
     if max_steps is not None and int(max_steps) > 0:
         max_steps = int(max_steps)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
@@ -958,7 +959,7 @@ def main() -> None:
     effective_max_steps = (
         int(max_steps)
         if max_steps is not None and int(max_steps) > 0
-        else int(math.ceil(float(iters_sf) * max(1, S)))
+        else int(max(1, round(float(iters_sf) * max(1, S))))
     )
 
     output_root = internal_out / "output"
@@ -1208,6 +1209,12 @@ def main() -> None:
     knee_comm, knee_therm, _ = pareto.knee_point()
     accept_rate = float(trace_info.get("accepts", 0)) / max(1, int(trace_info.get("num_steps", 0)))
     llm_summary = _summarize_llm_usage(llm_usage_path)
+    problem_size_eff = int(infer_problem_size(layout_input))
+    effective_max_steps = (
+        int(max_steps)
+        if (max_steps is not None and int(max_steps) > 0)
+        else int(max(1, round(float(iters_sf) * max(1, problem_size_eff))))
+    )
     report = {
         "success": True,
         "error": "",
@@ -1216,10 +1223,12 @@ def main() -> None:
         "run_mode": str(run_mode),
         "cfg_path": str(args.cfg),
         "budget": {
-            "problem_size": int(S),
+            "problem_size": problem_size_eff,
             "iterations_scale_factor": float(iters_sf),
-            "max_steps_configured": int(max_steps) if max_steps is not None else None,
-            "max_steps_effective": int(effective_max_steps),
+            # ★按“实际预算”写入，而不是 None->0
+            "max_steps": effective_max_steps,
+            # ★可选：把用户是否显式指定也写清楚，方便复盘
+            "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) > 0) else None,
         },
         "evaluator": {
             "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),
