@@ -85,7 +85,7 @@ class LLMSelectionHyperHeuristic:
         return data
 
     def run(self, env: BaseEnv) -> bool:
-        import os, json, time, random, traceback
+        import os, json, time, traceback
 
         # ---------- paths ----------
         usage_path = None
@@ -112,6 +112,7 @@ class LLMSelectionHyperHeuristic:
                 _log(
                     {
                         "ok": False,
+                        "method": "llm_hh",
                         "reason": "missing_llm_config_or_client_none",
                         "engine_used": "random_hh",
                         "fallback_used": True,
@@ -123,6 +124,7 @@ class LLMSelectionHyperHeuristic:
             _log(
                 {
                     "ok": False,
+                    "method": "llm_hh",
                     "engine_used": "random_hh",
                     "reason": "llm_client_init_failed",
                     "error": str(e),
@@ -138,9 +140,23 @@ class LLMSelectionHyperHeuristic:
 
         # ---------- run loop ----------
         while getattr(env, "continue_run", True):
-            heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
+            heuristic_pool = (
+                list(self.heuristic_pool)
+                if self.heuristic_pool
+                else get_heuristic_names(self.problem, self.heuristic_dir)
+            )
+            heuristic_pool = sorted([h for h in heuristic_pool if h and not str(h).startswith("_")])
             if not heuristic_pool:
-                _log({"ok": False, "engine_used": "random_hh", "reason": "empty_heuristic_pool"})
+                _log(
+                    {
+                        "ok": False,
+                        "method": "llm_hh",
+                        "engine_used": "random_hh",
+                        "reason": "empty_heuristic_pool",
+                        "fallback_used": True,
+                        "fallback_reason": "empty_heuristic_pool",
+                    }
+                )
                 break
 
             # candidate set
@@ -163,6 +179,7 @@ class LLMSelectionHyperHeuristic:
                 _log(
                     {
                         "ok": False,
+                        "method": "llm_hh",
                         "engine_used": "stop",
                         "reason": "llm_unavailable_and_stop",
                         "fail_count": fail_count,
@@ -198,6 +215,7 @@ class LLMSelectionHyperHeuristic:
                     _log(
                         {
                             "ok": False,
+                            "method": "llm_hh",
                             "engine_used": stage_name,
                             "reason": reason,
                             "error": str(e),
@@ -205,6 +223,8 @@ class LLMSelectionHyperHeuristic:
                             "max_llm_failures": max_fail,
                             "selection_round": selection_round,
                             "fallback_pick": chosen,
+                            "fallback_used": True,
+                            "fallback_reason": reason,
                         }
                     )
                     if fail_count >= max_fail:
@@ -212,10 +232,12 @@ class LLMSelectionHyperHeuristic:
                         _log(
                             {
                                 "ok": False,
+                                "method": "llm_hh",
                                 "reason": "llm_disabled_after_failures",
                                 "fail_count": fail_count,
                                 "engine_used": "random_hh",
                                 "fallback_used": True,
+                                "fallback_reason": "llm_disabled_after_failures",
                             }
                         )
 
@@ -226,9 +248,11 @@ class LLMSelectionHyperHeuristic:
                 reason = "llm_disabled_random_pick"
 
             # always record one usage line for THIS selection
+            fallback_used = bool(stage_name != "llm_hh")
             _log(
                 {
                     "ok": ok,
+                    "method": "llm_hh",
                     "engine_used": stage_name,
                     "reason": reason,
                     "chosen_heuristic": chosen,
@@ -237,6 +261,8 @@ class LLMSelectionHyperHeuristic:
                     "selection_frequency": K,
                     "fail_count": fail_count,
                     "llm_enabled": bool(llm_ok and llm_client is not None),
+                    "fallback_used": fallback_used,
+                    "fallback_reason": reason if fallback_used else None,
                 }
             )
 
@@ -258,6 +284,8 @@ class LLMSelectionHyperHeuristic:
                         "llm_enabled": bool(llm_ok and llm_client is not None),
                         "llm_fail_count": int(fail_count),
                         "fallback_mode": fallback_mode,
+                        "fallback_used": fallback_used,
+                        "fallback_reason": reason if fallback_used else None,
                     },
                 )
 

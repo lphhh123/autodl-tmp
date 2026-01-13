@@ -764,15 +764,18 @@ def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
             "ok": 0,
             "ok_rate": 0.0,
             "disabled_after_failures": False,
-            "fallback_used_any": False,
+            "fallback_used": False,
+            "fallback_count": 0,
+            "fallback_last_engine": None,
         }
     total = 0
     ok = 0
     disabled_after_failures = False
-    fallback_used_any = False
-    fallback_first_idx = None
+    fallback_used = False
+    fallback_count = 0
+    fallback_last_engine = None
     with path.open("r", encoding="utf-8") as f:
-        for idx, line in enumerate(f):
+        for line in f:
             line = line.strip()
             if not line:
                 continue
@@ -786,18 +789,21 @@ def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
                     ok += 1
                 if payload.get("reason") == "llm_disabled_after_failures":
                     disabled_after_failures = True
-                if payload.get("fallback_used") is True or payload.get("engine_used") == "random_hh":
-                    fallback_used_any = True
-                    if fallback_first_idx is None:
-                        fallback_first_idx = idx
+                method = payload.get("method")
+                engine = payload.get("engine_used") or payload.get("selection")
+                if method and engine and engine != method:
+                    fallback_used = True
+                    fallback_count += 1
+                    fallback_last_engine = engine
     ok_rate = ok / max(1, total)
     return {
         "total": total,
         "ok": ok,
         "ok_rate": ok_rate,
         "disabled_after_failures": disabled_after_failures,
-        "fallback_used_any": fallback_used_any,
-        "fallback_first_idx": fallback_first_idx,
+        "fallback_used": fallback_used,
+        "fallback_count": fallback_count,
+        "fallback_last_engine": fallback_last_engine,
     }
 
 
@@ -1235,7 +1241,7 @@ def main() -> None:
     knee_comm, knee_therm, _ = pareto.knee_point()
     accept_rate = float(trace_info.get("accepts", 0)) / max(1, int(trace_info.get("num_steps", 0)))
     llm_summary = _summarize_llm_usage(llm_usage_path)
-    if llm_summary.get("fallback_used_any"):
+    if llm_summary.get("fallback_used"):
         fallback_used = True
         if method == baseline_method:
             fallback_method = "random_hh"
@@ -1293,7 +1299,10 @@ def main() -> None:
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
         "raw_dir": str(output_dir),
-        "llm": llm_summary,
+        "llm_usage": llm_summary,
+        "llm_fallback_used": bool(llm_summary.get("fallback_used", False)),
+        "llm_fallback_count": int(llm_summary.get("fallback_count", 0)),
+        "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
     }
     require_main = bool(layout_input.get("require_main_evaluator", True))
     if require_main and evaluator_source != "main_project":
