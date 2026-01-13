@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from mapping.mapping_solver import MappingSolver
-from mapping.segments import LayerNode, Segment, build_coarse_segments, build_layer_nodes_from_model
+from mapping.segments import LayerNode, Segment, build_coarse_segments, build_layer_nodes_from_model, build_segments_from_model
 from layout.wafer_layout import WaferLayout
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 
@@ -49,8 +49,8 @@ class PartitionPlanner:
         return objective, stats
 
     # SPEC v4 §10.3
-    def _build_coarse(self, layer_nodes: List[LayerNode], eff_specs: Dict[str, torch.Tensor]) -> List[Segment]:
-        return build_coarse_segments(layer_nodes, eff_specs, self.cfg)
+    def _build_coarse(self, layer_nodes: List[LayerNode], alpha: torch.Tensor) -> List[Segment]:
+        return build_coarse_segments(layer_nodes, alpha, self.cfg)
 
     # SPEC v4 §10.5
     def _select_split_candidates(self, layer_nodes: List[LayerNode], segments: List[Segment], mapping: List[int], cost: Dict[str, torch.Tensor], eff_specs: Dict[str, torch.Tensor]) -> List[LayerNode]:
@@ -79,7 +79,7 @@ class PartitionPlanner:
             segments,
             eff_specs,
             self.hw_proxy,
-            layout_positions=self.wafer_layout.current_pos,
+            layout_positions=self.wafer_layout.current_pos_continuous(),
         )
         objective, hw_stats = self._compute_objective(segments, mapping_obj, cost)
         return objective, cost, mapping_obj
@@ -93,42 +93,46 @@ class PartitionPlanner:
             if ln.id not in seg.layer_ids:
                 segments_split.append(seg)
                 continue
-            # split into two sub-segments with half flops/bytes
-            mid_flops = seg.flops / 2.0
-            mid_bytes = seg.bytes / 2.0
-            traffic_half = seg.traffic_out_bytes / 2.0
-            seg1 = Segment(
+            if seg.layer_ids != [ln.id]:
+                segments_split.append(seg)
+                continue
+            attn_seg = Segment(
                 id=seg.id * 10 + 1,
-                layer_ids=[ln.id],
-                flops=mid_flops,
-                bytes=mid_bytes,
+                layer_ids=[ln.id * 2],
+                flops=ln.attn_flops,
+                bytes=ln.attn_bytes,
                 seq_len=seg.seq_len,
                 embed_dim=seg.embed_dim,
                 num_heads=seg.num_heads,
                 mlp_ratio=seg.mlp_ratio,
                 precision=seg.precision,
-                traffic_in_bytes=seg.traffic_in_bytes,
-                traffic_out_bytes=traffic_half,
+                traffic_in_bytes=ln.attn_bytes,
+                traffic_out_bytes=ln.attn_bytes,
+                kind="attn",
+                block_idx=ln.block_idx,
+                keep_factors=ln.keep_factors,
             )
-            seg2 = Segment(
+            mlp_seg = Segment(
                 id=seg.id * 10 + 2,
-                layer_ids=[ln.id],
-                flops=mid_flops,
-                bytes=mid_bytes,
+                layer_ids=[ln.id * 2 + 1],
+                flops=ln.mlp_flops,
+                bytes=ln.mlp_bytes,
                 seq_len=seg.seq_len,
                 embed_dim=seg.embed_dim,
                 num_heads=seg.num_heads,
                 mlp_ratio=seg.mlp_ratio,
                 precision=seg.precision,
-                traffic_in_bytes=seg.traffic_in_bytes,
-                traffic_out_bytes=traffic_half,
+                traffic_in_bytes=ln.attn_bytes,
+                traffic_out_bytes=ln.mlp_bytes,
+                kind="mlp",
+                block_idx=ln.block_idx,
+                keep_factors=ln.keep_factors,
             )
-            segments_split.extend([seg1, seg2])
+            segments_split.extend([attn_seg, mlp_seg])
             split_applied = True
             local_plan = {
-                "layer_id": ln.id,
-                "num_groups": 2,
-                "group_channel_ranges": [(0, seg.embed_dim // 2), (seg.embed_dim // 2, seg.embed_dim)],
+                "block_idx": ln.block_idx,
+                "segments": ["attn", "mlp"],
                 "group_to_slot": [],
             }
         if not split_applied:
@@ -156,9 +160,16 @@ class PartitionPlanner:
         rewrite_plan = GraphRewritePlan(splits=[best_plan[2]])
         return new_segments, rewrite_plan
 
-    def plan(self, model: torch.nn.Module, eff_specs: Dict[str, torch.Tensor], use_fine_split: bool = True) -> Dict[str, Any]:
-        layer_nodes = build_layer_nodes_from_model(model)
-        segments_base = self._build_coarse(layer_nodes, eff_specs)
+    def plan(
+        self,
+        model: torch.nn.Module,
+        eff_specs: Dict[str, torch.Tensor],
+        alpha: torch.Tensor,
+        model_info: Optional[Dict[str, torch.Tensor]] = None,
+        use_fine_split: bool = True,
+    ) -> Dict[str, Any]:
+        layer_nodes = build_layer_nodes_from_model(model, model_info=model_info)
+        segments_base = self._build_coarse(layer_nodes, alpha)
         objective_base, cost_base, mapping_base = self._evaluate(segments_base, eff_specs)
         if not use_fine_split:
             return {
@@ -168,25 +179,14 @@ class PartitionPlanner:
                 "objective": objective_base,
                 "hw_stats": {},
             }
-        candidates = self._select_split_candidates(layer_nodes, segments_base, mapping_base.get("mapping", []), cost_base, eff_specs)
-        split_plans = []
-        for ln in candidates:
-            ok, gain_ratio, new_segments, new_mapping, local_plan = self._simulate_split_for_layer(ln, segments_base, eff_specs)
-            if ok:
-                split_plans.append((ln.id, gain_ratio, local_plan, new_segments, new_mapping))
-        accepted = self._select_accepted_splits(split_plans)
-        if not accepted:
-            return {
-                "segments": segments_base,
-                "mapping": mapping_base.get("mapping", []),
-                "rewrite_plan": None,
-                "objective": objective_base,
-                "hw_stats": {},
-            }
-        segments_final, rewrite_plan = self._apply_split_plans(segments_base, accepted)
-        objective_final, cost_final, mapping_final = self._evaluate(segments_final, eff_specs)
+
+        segments_fine = build_segments_from_model(model, self.cfg, model_info=model_info)
+        objective_final, cost_final, mapping_final = self._evaluate(segments_fine, eff_specs)
+        rewrite_plan = GraphRewritePlan(
+            splits=[{"block_idx": idx, "segments": ["attn", "mlp"]} for idx in range(model.cfg.depth)]
+        )
         return {
-            "segments": segments_final,
+            "segments": segments_fine,
             "mapping": mapping_final.get("mapping", []),
             "rewrite_plan": rewrite_plan,
             "objective": objective_final,

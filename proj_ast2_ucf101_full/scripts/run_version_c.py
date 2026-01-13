@@ -1,13 +1,16 @@
 """Entry for Version-C full training."""
 import argparse
-import random
+import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Union
 
-import numpy as np
-import torch
+import yaml
 
 from utils.config import load_config
+from utils.config_validate import cfg_to_dict, validate_cfg
+from utils.seed import seed_everything
 from trainer.trainer_version_c import train_version_c
 
 
@@ -45,11 +48,7 @@ def main():
     parser.add_argument("--export_dir", type=str, default=None, help="Directory to write layout artifacts")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    seed_everything(int(args.seed))
     if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
@@ -66,6 +65,28 @@ def main():
             export_dir = str(out_dir)
     if export_layout_input and export_dir is None:
         export_dir = "outputs/P3/A3"
+    validate_cfg(cfg)
+    out_dir_path = Path(cfg.train.out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    config_path = out_dir_path / "config_resolved.yaml"
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg_to_dict(cfg), f, sort_keys=False)
+    try:
+        repo_root = Path(__file__).resolve().parents[1]
+        git_hash = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_root)
+            .decode("utf-8")
+            .strip()
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        git_hash = "unknown"
+    run_meta = {
+        "argv": sys.argv,
+        "git_hash": git_hash,
+        "python_version": sys.version,
+    }
+    with (out_dir_path / "run_meta.json").open("w", encoding="utf-8") as f:
+        json.dump(run_meta, f, indent=2)
     train_version_c(cfg, export_layout_input=export_layout_input, export_dir=export_dir)
 
 

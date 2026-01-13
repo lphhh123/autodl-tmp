@@ -26,21 +26,47 @@ class WaferLayout(nn.Module):
             self.register_buffer("assign", assign.long())
             self.pos = nn.Parameter(self.sites_xy[self.assign].clone())
 
+    def current_pos_continuous(self) -> torch.Tensor:
+        """Return learnable continuous positions for training-time optimization."""
+        return self.pos
+
+    def pos_from_assign(self, assign: torch.Tensor) -> torch.Tensor:
+        """Return discrete positions from a given site assignment."""
+        if self.sites_xy is None:
+            raise ValueError("sites_xy is required to materialize discrete positions.")
+        return self.sites_xy[assign]
+
+    def project_pos_to_sites(self, pos: torch.Tensor) -> torch.Tensor:
+        """Project continuous positions to nearest unique discrete sites."""
+        if self.sites_xy is None:
+            raise ValueError("sites_xy is required to project positions.")
+        sites_xy = self.sites_xy
+        S = pos.shape[0]
+        Ns = sites_xy.shape[0]
+        dists = torch.cdist(pos, sites_xy)
+        min_dist, _ = dists.min(dim=1)
+        slot_order = torch.argsort(min_dist)
+        assign = torch.full((S,), -1, device=pos.device, dtype=torch.long)
+        used = torch.zeros(Ns, device=pos.device, dtype=torch.bool)
+        for slot_idx in slot_order:
+            candidates = torch.argsort(dists[slot_idx])
+            for site_idx in candidates:
+                if not used[site_idx]:
+                    assign[slot_idx] = site_idx
+                    used[site_idx] = True
+                    break
+        if (assign < 0).any():
+            raise ValueError("Failed to assign all slots to unique sites.")
+        return assign
+
     @property
     def current_pos(self) -> torch.Tensor:
-        """Return the current chiplet center positions.
-
-        When discrete sites/assign are provided, use the derived positions to
-        keep penalties tied to the latest assignment. Otherwise fall back to the
-        learnable continuous coordinates.
-        """
-        if self.sites_xy is None or self.assign is None:
-            return self.pos
-        return self.sites_xy[self.assign]
+        """Backward-compatible access to continuous positions."""
+        return self.current_pos_continuous()
 
     # SPEC §10.2
     def boundary_penalty(self, eff_specs: Dict[str, torch.Tensor], margin: float = 0.0):
-        centers = self.current_pos
+        centers = self.current_pos_continuous()
         r_center = torch.sqrt((centers ** 2).sum(dim=1) + 1e-6)
         r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
         violation = torch.relu(r_center + r_chip + margin - self.wafer_radius_mm)
@@ -48,7 +74,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.3
     def overlap_penalty(self, eff_specs: Dict[str, torch.Tensor]):
-        centers = self.current_pos
+        centers = self.current_pos_continuous()
         r_chip = torch.sqrt(eff_specs["area_mm2"] / math.pi + 1e-6)
         S = centers.shape[0]
         penalty = centers.new_tensor(0.0)
@@ -62,7 +88,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.4
     def comm_loss(self, mapping: List[int], segments: List[Segment], eff_specs: Dict[str, torch.Tensor], distance_scale: float):
-        centers = self.current_pos
+        centers = self.current_pos_continuous()
         comm_cost = centers.new_tensor(0.0)
         for k in range(len(segments) - 1):
             d1, d2 = mapping[k], mapping[k + 1]
@@ -75,7 +101,7 @@ class WaferLayout(nn.Module):
 
     # SPEC §10.5
     def thermal_penalty(self, eff_specs: Dict[str, torch.Tensor], T_ambient: float = 25.0, T_limit: float = 85.0, sigma_mm: float = 50.0, alpha: float = 0.01):
-        centers = self.current_pos
+        centers = self.current_pos_continuous()
         power = eff_specs["tdp_w"]
         S = centers.shape[0]
         temps = []

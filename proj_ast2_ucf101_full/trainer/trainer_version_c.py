@@ -23,10 +23,10 @@ from layout.sites import build_sites
 from layout.wafer_layout import WaferLayout
 from mapping.mapping_solver import MappingSolver
 from mapping.partitioner import PartitionPlanner
-from mapping.segments import build_segments_from_model
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
+from utils.seed import seed_everything
 
 
 def _as_float(val, name: str) -> float:
@@ -39,8 +39,7 @@ def _as_float(val, name: str) -> float:
 
 def _seed_worker(worker_id: int, base_seed: int) -> None:
     seed = base_seed + worker_id
-    random.seed(seed)
-    np.random.seed(seed)
+    seed_everything(seed)
 
 
 def build_dataloader(cfg):
@@ -345,6 +344,7 @@ def compute_hw_loss(
     wafer_layout: WaferLayout,
     partitioner: PartitionPlanner,
     hw_cfg: Dict,
+    model_info: Dict | None = None,
     stable_hw_cfg: Dict | None = None,
     stable_hw_state: Dict | None = None,
 ):
@@ -354,7 +354,13 @@ def compute_hw_loss(
     chip_used_prob = 1.0 - alpha[:, -1]
     L_chip_count = hw_cfg.lambda_chip * chip_used_prob.sum()
 
-    partition_result = partitioner.plan(model=model, eff_specs=eff_specs, use_fine_split=getattr(hw_cfg, "use_fine_split", True))
+    partition_result = partitioner.plan(
+        model=model,
+        eff_specs=eff_specs,
+        alpha=alpha,
+        model_info=model_info,
+        use_fine_split=getattr(hw_cfg, "use_fine_split", True),
+    )
     segments = partition_result["segments"]
     mapping = partition_result["mapping"]
 
@@ -363,7 +369,7 @@ def compute_hw_loss(
         segments,
         eff_specs,
         hw_proxy,
-        layout_positions=wafer_layout.current_pos,
+        layout_positions=wafer_layout.current_pos_continuous(),
         strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
         distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
     )
@@ -522,6 +528,7 @@ def _apply_accuracy_guard(acc1: float, stable_hw_cfg: Dict, state: Dict) -> None
 def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional[str] = None):
     device = get_device(cfg.train.device)
     device_type = device.type
+    seed_everything(int(getattr(cfg.train, "seed", 0)))
     logger = setup_logger()
     log_path = Path("logs/version_c_stats.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -601,6 +608,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.loss, "lambda_hw", 0.0))}
+    run_state: Dict[str, Any] = {"last_model_info": None}
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
@@ -624,6 +632,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
                 else:
                     logits, info = model(x, return_intermediate=True)
+                run_state["last_model_info"] = info
                 L_task = F.cross_entropy(logits, y)
                 L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(
                     model,
@@ -633,6 +642,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     wafer_layout,
                     partitioner,
                     cfg.hw,
+                    model_info=info,
                     stable_hw_cfg=stable_hw_cfg,
                     stable_hw_state=stable_hw_state,
                 )
@@ -650,6 +660,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             part_res = partitioner.plan(
                 model,
                 chiplet_slots(hard=False)["eff_specs"],
+                alpha=chiplet_slots(hard=False)["alpha"],
+                model_info=run_state.get("last_model_info"),
                 use_fine_split=getattr(cfg.hw, "use_fine_split", True),
             )
             last_segments = part_res["segments"]
@@ -692,6 +704,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     wafer_layout,
                     partitioner,
                     cfg.hw,
+                    model_info=run_state.get("last_model_info"),
                     stable_hw_cfg=stable_hw_cfg,
                     stable_hw_state=stable_hw_state,
                 )
@@ -704,7 +717,13 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             for _ in range(cfg.training.inner_steps_layout):
                 slot_out = chiplet_slots(hard=False)
                 eff_specs = slot_out["eff_specs"]
-                part_res = partitioner.plan(model, eff_specs, use_fine_split=getattr(cfg.hw, "use_fine_split", True))
+                part_res = partitioner.plan(
+                    model,
+                    eff_specs,
+                    alpha=slot_out["alpha"],
+                    model_info=run_state.get("last_model_info"),
+                    use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                )
                 segments = part_res["segments"]
                 mapping = part_res["mapping"]
                 L_layout, layout_stats = wafer_layout(
@@ -728,6 +747,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
         part_res = partitioner.plan(
             model,
             eff_specs,
+            alpha=slot_out["alpha"],
+            model_info=run_state.get("last_model_info"),
             use_fine_split=getattr(cfg.hw, "use_fine_split", True),
         )
         canonical_segments = part_res["segments"]
@@ -735,7 +756,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             canonical_segments,
             eff_specs,
             hw_proxy,
-            layout_positions=wafer_layout.current_pos,
+            layout_positions=wafer_layout.current_pos_continuous(),
             strategy=getattr(cfg.hw, "mapping_strategy", "greedy_local"),
             distance_scale_ms=getattr(cfg.hw, "distance_scale_ms", 0.0),
         )

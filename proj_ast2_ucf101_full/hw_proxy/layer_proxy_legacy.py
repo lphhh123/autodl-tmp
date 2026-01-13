@@ -1,3 +1,4 @@
+"""Legacy hardware proxy implementation (do not use for Version-C)."""
 
 import math
 from typing import Dict, Any, Tuple

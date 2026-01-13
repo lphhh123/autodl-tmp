@@ -16,29 +16,35 @@ class MappingSolver:
 
     def build_cost_matrix(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor], proxy: LayerHwProxy) -> Dict[str, torch.Tensor]:
         layers_cfg = []
-        for seg in segments:
-            layers_cfg.append(
-                {
-                    "layer_type": 1,
-                    "flops": seg.flops,
-                    "bytes": seg.bytes,
-                    "embed_dim": seg.embed_dim,
-                    "num_heads": seg.num_heads,
-                    "mlp_ratio": seg.mlp_ratio,
-                    "seq_len": seg.seq_len,
-                    "precision": seg.precision,
-                }
-            )
-        cost_np = proxy.predict_layers_batch(layers_cfg)
-        lat = torch.tensor(cost_np["lat_ms"], dtype=torch.float32)
-        mem = torch.tensor(cost_np["mem_mb"], dtype=torch.float32)
-        power = torch.tensor(cost_np["power_w"], dtype=torch.float32)
-        # expand to slots
         S = eff_specs["peak_flops"].shape[0]
-        lat_ms = lat.unsqueeze(1).repeat(1, S)
-        mem_mb = mem.unsqueeze(1).repeat(1, S)
-        power_w = power.unsqueeze(1).repeat(1, S)
-        return {"lat_ms": lat_ms, "mem_mb": mem_mb, "power_w": power_w}
+        kind_to_type = {"patch_embed": 0, "attn": 1, "mlp": 2}
+        for seg in segments:
+            layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
+            for s in range(S):
+                device_cfg = {
+                    "peak_flops": float(eff_specs["peak_flops"][s].item()),
+                    "peak_bw": float(eff_specs["peak_bw"][s].item()) if "peak_bw" in eff_specs else 0.0,
+                    "mem_gb": float(eff_specs["mem_gb"][s].item()) if "mem_gb" in eff_specs else 0.0,
+                    "tdp_w": float(eff_specs["tdp_w"][s].item()) if "tdp_w" in eff_specs else 0.0,
+                }
+                layers_cfg.append(
+                    {
+                        "layer_type": layer_type,
+                        "flops": seg.flops,
+                        "bytes": seg.bytes,
+                        "embed_dim": seg.embed_dim,
+                        "num_heads": seg.num_heads,
+                        "mlp_ratio": seg.mlp_ratio,
+                        "seq_len": seg.seq_len,
+                        "precision": seg.precision,
+                        "device_cfg": device_cfg,
+                    }
+                )
+        cost_np = proxy.predict_layers_batch(layers_cfg)
+        lat = torch.tensor(cost_np["lat_ms"], dtype=torch.float32).reshape(len(segments), S)
+        mem = torch.tensor(cost_np["mem_mb"], dtype=torch.float32).reshape(len(segments), S)
+        power = torch.tensor(cost_np["power_w"], dtype=torch.float32).reshape(len(segments), S)
+        return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
 
     def estimate_pipeline_latency(self, mapping: List[int], cost_lat: torch.Tensor, mode: str = "balanced") -> float:
         if mode == "serial":
