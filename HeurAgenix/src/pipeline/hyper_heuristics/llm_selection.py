@@ -85,207 +85,162 @@ class LLMSelectionHyperHeuristic:
         return data
 
     def run(self, env: BaseEnv) -> bool:
-        if not self.heuristic_pool:
-            self.heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
+        import os, json, time, random, traceback
 
-        active_engine = "llm_hh"
-        fallback_engine = str(getattr(self, "fallback_on_llm_failure", "random_hh") or "random_hh")
+        # ---------- paths ----------
+        usage_path = None
+        if getattr(self, "output_dir", None):
+            usage_path = os.path.join(self.output_dir, "llm_usage.jsonl")
+
+        def _log(rec: dict):
+            if not usage_path:
+                return
+            with open(usage_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        # ---------- init llm ----------
         llm_ok = True
         llm_client = None
         try:
-            if not self.llm_config_file:
-                raise FileNotFoundError("llm_config_file is None/empty")
             llm_client = get_llm_client(self.llm_config_file)
-            if llm_client is None:
-                raise RuntimeError("get_llm_client returned None")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             llm_ok = False
-            active_engine = fallback_engine
-            self._log_usage(
-                self._with_usage_base(
-                    env,
-                    {
-                        "ok": False,
-                        "reason": "llm_init_failed",
-                        "error": str(e),
-                        "active_engine": active_engine,
-                        "fallback_engine": fallback_engine,
-                        "llm_config_file": self.llm_config_file,
-                    },
-                )
+            _log(
+                {
+                    "ok": False,
+                    "engine_used": "random_hh",
+                    "reason": "llm_client_init_failed",
+                    "error": str(e),
+                }
             )
 
         fail_count = 0
         selection_round = 0
-        llm_disabled = not llm_ok
+        K = max(1, int(getattr(self, "selection_frequency", 1)))
+        max_fail = int(getattr(self, "max_llm_failures", 2))
+        fallback_mode = str(getattr(self, "fallback_on_llm_failure", "random_hh"))  # "random_hh" or "stop"
+        timeout_s = int(getattr(self, "llm_timeout_s", 30))
 
-        max_steps = int(getattr(env, "max_steps", 0) or 0)
-        if max_steps <= 0:
-            ps = int(getattr(env, "problem_size", None) or getattr(env, "S", 1) or 1)
-            max_steps = max(1, int(self.iterations_scale_factor * ps))
-
-        while getattr(env, "continue_run", True) and int(getattr(env, "current_steps", 0)) < max_steps:
-            pool = list(self.heuristic_pool)
-            if not pool:
-                self._log_usage({"ok": False, "reason": "empty_heuristic_pool"})
+        # ---------- run loop ----------
+        while getattr(env, "continue_run", True):
+            heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
+            if not heuristic_pool:
+                _log({"ok": False, "engine_used": "random_hh", "reason": "empty_heuristic_pool"})
                 break
 
-            candidates = (
-                pool if len(pool) <= self.num_candidate_heuristics else self.rng.sample(pool, self.num_candidate_heuristics)
-            )
-            chosen = self.rng.choice(candidates)
-            ok = False
-            err = None
-            t0 = time.time()
-            llm_meta = {}
-
-            if llm_ok and llm_client is not None:
-                try:
-                    prompt = env.summarize_env()
-                    chosen = llm_client.choose_heuristic(prompt, candidates, timeout_s=self.llm_timeout_s)
-                    ok = True
-                    last = getattr(llm_client, "last_usage", None)
-                    if isinstance(last, dict):
-                        llm_meta = {
-                            "provider": last.get("provider"),
-                            "api_type": last.get("api_type"),
-                            "model": last.get("model"),
-                            "deployment": last.get("deployment"),
-                            "prompt_tokens": last.get("prompt_tokens"),
-                            "completion_tokens": last.get("completion_tokens"),
-                            "total_tokens": last.get("total_tokens"),
-                            "duration_ms": last.get("duration_ms"),
-                            "status_code": last.get("status_code"),
-                            "llm_error": last.get("error"),
-                        }
-                except Exception as e:  # noqa: BLE001
-                    fail_count += 1
-                    err = traceback.format_exc()
-                    ok = False
-                    chosen = self.rng.choice(candidates)
-                    last = getattr(llm_client, "last_usage", None)
-                    if isinstance(last, dict):
-                        llm_meta = {
-                            "provider": last.get("provider"),
-                            "api_type": last.get("api_type"),
-                            "model": last.get("model"),
-                            "deployment": last.get("deployment"),
-                            "prompt_tokens": last.get("prompt_tokens"),
-                            "completion_tokens": last.get("completion_tokens"),
-                            "total_tokens": last.get("total_tokens"),
-                            "duration_ms": last.get("duration_ms"),
-                            "status_code": last.get("status_code"),
-                            "llm_error": last.get("error"),
-                        }
-
-                    self._log_usage(
-                        self._with_usage_base(
-                            env,
-                            {
-                            "ok": False,
-                            "reason": "llm_call_failed",
-                            "round": selection_round,
-                            "error": str(e),
-                            "traceback": err,
-                            "fail_count": fail_count,
-                            "fallback_pick": chosen,
-                            "candidates": candidates,
-                            "selection_frequency": self.selection_frequency,
-                            "rollout_budget": self.rollout_budget,
-                            "fallback_used": True,
-                            "active_engine": active_engine,
-                            "fallback_engine": fallback_engine,
-                            "selection_round": selection_round,
-                            "step": int(getattr(env, "current_steps", 0)),
-                            "llm_config_file": self.llm_config_file,
-                            **llm_meta,
-                            },
-                        )
-                    )
-
-                    if fail_count >= self.max_llm_failures:
-                        llm_ok = False
-                        active_engine = fallback_engine
-                        self._log_usage(
-                            self._with_usage_base(
-                                env,
-                                {
-                                    "ok": False,
-                                    "reason": "llm_disabled_after_failures",
-                                    "fail_count": fail_count,
-                                    "active_engine": active_engine,
-                                    "fallback_engine": fallback_engine,
-                                    "llm_config_file": self.llm_config_file,
-                                },
-                            )
-                        )
-                        llm_disabled = True
-            elif not llm_ok and self.fallback_on_llm_failure == "stop":
-                self._log_usage(
-                    self._with_usage_base(
-                        env,
-                        {
-                            "ok": False,
-                            "reason": "llm_disabled_stop",
-                            "fail_count": fail_count,
-                            "active_engine": active_engine,
-                            "fallback_engine": fallback_engine,
-                            "llm_config_file": self.llm_config_file,
-                        },
-                    )
-                )
-                break
-
-            dt_ms = (time.time() - t0) * 1000.0
-            self._log_usage(
-                self._with_usage_base(
-                    env,
-                    {
-                    "ok": ok,
-                    "round": selection_round,
-                    "chosen_heuristic": chosen,
-                    "candidates": candidates,
-                    "time_ms": dt_ms,
-                    "selection_frequency": self.selection_frequency,
-                    "rollout_budget": self.rollout_budget,
-                    "fallback_used": not ok,
-                    "active_engine": active_engine,
-                    "fallback_engine": fallback_engine,
-                    "selection_round": selection_round,
-                    "step": int(getattr(env, "current_steps", 0)),
-                    "llm_config_file": self.llm_config_file,
-                    **(llm_meta if llm_ok and llm_client is not None else {}),
-                    },
-                )
-            )
-
-            heuristic_fn = load_function(chosen, problem=self.problem)
-            algo_data = self._get_algorithm_data(env)
-            for _ in range(self.selection_frequency):
-                if not getattr(env, "continue_run", True):
-                    break
-                if int(getattr(env, "current_steps", 0)) >= max_steps:
-                    break
-                env.run_heuristic(
-                    heuristic_fn,
-                    algorithm_data=algo_data,
-                    record=True,
-                    add_record_item={
-                        "selection": active_engine,
-                        "chosen_heuristic": chosen,
-                        "candidates": candidates,
-                        "selection_round": int(selection_round),
-                        "llm_pick_ok": bool(ok),
-                        "fallback_used": bool(not ok),
-                        "llm_fail_count": int(fail_count),
-                        "active_engine": active_engine,
-                        "fallback_engine": fallback_engine,
-                    },
-                )
+            # candidate set
+            C = int(getattr(self, "num_candidate_heuristics", 1))
+            C = max(1, C)
+            if len(heuristic_pool) <= C:
+                candidates = list(heuristic_pool)
+            else:
+                candidates = random.sample(list(heuristic_pool), C)
 
             selection_round += 1
+            chosen = None
+            engine_used = "random_hh"
+            ok = False
+            reason = "random_pick_default"
+            err = None
 
-        env.dump_result()
+            # --- if llm disabled and policy says stop, stop early ---
+            if (not llm_ok) and fallback_mode == "stop":
+                _log(
+                    {
+                        "ok": False,
+                        "engine_used": "stop",
+                        "reason": "llm_unavailable_and_stop",
+                        "fail_count": fail_count,
+                        "selection_round": selection_round,
+                    }
+                )
+                break
+
+            # --- try llm choose ---
+            if llm_ok and llm_client is not None:
+                try:
+                    state_summary = env.summarize_env()
+                    chosen = llm_client.choose_heuristic(
+                        state_summary,
+                        candidates,
+                        timeout_s=timeout_s,
+                    )
+                    engine_used = "llm_hh"
+                    ok = True
+                    reason = "llm_pick"
+                except Exception as e:
+                    fail_count += 1
+                    err = traceback.format_exc()
+                    chosen = random.choice(candidates)
+                    engine_used = "random_hh"
+                    ok = False
+                    reason = "llm_call_failed_fallback_random"
+                    _log(
+                        {
+                            "ok": False,
+                            "engine_used": engine_used,
+                            "reason": reason,
+                            "error": str(e),
+                            "fail_count": fail_count,
+                            "max_llm_failures": max_fail,
+                            "selection_round": selection_round,
+                            "fallback_pick": chosen,
+                        }
+                    )
+                    if fail_count >= max_fail:
+                        llm_ok = False
+                        _log(
+                            {
+                                "ok": False,
+                                "engine_used": "random_hh",
+                                "reason": "llm_disabled_after_failures",
+                                "fail_count": fail_count,
+                                "selection_round": selection_round,
+                            }
+                        )
+
+            if chosen is None:
+                chosen = random.choice(candidates)
+                engine_used = "random_hh"
+                ok = False
+                reason = "llm_disabled_random_pick"
+
+            # always record one usage line for THIS selection
+            _log(
+                {
+                    "ok": ok,
+                    "engine_used": engine_used,
+                    "reason": reason,
+                    "chosen_heuristic": chosen,
+                    "candidates": candidates,
+                    "selection_round": selection_round,
+                    "selection_frequency": K,
+                    "fail_count": fail_count,
+                    "llm_enabled": bool(llm_ok and llm_client is not None),
+                }
+            )
+
+            heuristic = load_function(chosen, problem=self.problem)
+
+            for _ in range(K):
+                if not getattr(env, "continue_run", True):
+                    break
+                env.run_heuristic(
+                    heuristic,
+                    algorithm_data={"env": env, "rng": getattr(env, "rng", None)},
+                    add_record_item={
+                        # ★关键：让 recordings 的 stage/selection 反映真实 engine
+                        "selection": engine_used,
+                        "chosen_heuristic": chosen,
+                        "candidates": candidates,
+                        "selection_round": selection_round,
+                        "llm_enabled": bool(llm_ok and llm_client is not None),
+                        "llm_fail_count": int(fail_count),
+                        "fallback_mode": fallback_mode,
+                    },
+                )
+
+        # finish
         ok_valid = env.is_valid_solution(env.current_solution) if hasattr(env, "is_valid_solution") else True
         ok_done = (
             env.is_complete_solution()

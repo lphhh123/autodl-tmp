@@ -14,8 +14,6 @@ def get_output_dir() -> Path:
         p = Path(base).resolve()
         if p.name == "output":
             return p
-        if (p / "output").exists():
-            return p / "output"
         return p / "output"
     repo_root = Path(__file__).resolve().parents[2]
     return (repo_root / "output").resolve()
