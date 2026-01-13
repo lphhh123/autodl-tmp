@@ -453,7 +453,16 @@ def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
 
 def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict[str, Any]:
     op = record.get("op", "noop")
-    op_args = record.get("op_args") or record.get("op_args_json") or {}
+    op_args = record.get("op_args", None)
+    if op_args is None:
+        op_args = record.get("op_args_json", None)
+        if isinstance(op_args, str):
+            try:
+                op_args = json.loads(op_args)
+            except Exception:
+                op_args = {}
+    if not isinstance(op_args, dict):
+        op_args = {}
     action = {"op": op, "type": op}
     if op == "swap":
         action.update({"i": int(op_args.get("i", -1)), "j": int(op_args.get("j", -1))})
