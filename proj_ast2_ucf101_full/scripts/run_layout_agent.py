@@ -22,6 +22,7 @@ from layout.sites import build_sites
 from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
+from utils.seed import seed_everything
 
 
 def load_layout_input(path: Path) -> dict:
@@ -230,7 +231,7 @@ def main():
     (out_dir / "llm_usage.jsonl").touch(exist_ok=True)
 
     start_time = time.time()
-    np.random.seed(args.seed)
+    seed_everything(int(args.seed))
 
     wafer_radius = float(layout_input["wafer"]["radius_mm"])
     sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)

@@ -28,14 +28,23 @@ def build_layer_features(layer_cfg: Dict, device_cfg: Dict) -> np.ndarray:
     seq_len = float(layer_cfg.get("seq_len", 0))
     precision = float(layer_cfg.get("precision", 1))
 
-    peak_flops_tflops = float(device_cfg.get("peak_flops_tflops", 1.0))
-    peak_bw_gbps = float(device_cfg.get("peak_bw_gbps", 1.0))
+    peak_flops_tflops = device_cfg.get("peak_flops_tflops", None)
+    if peak_flops_tflops is not None:
+        peak_flops = float(peak_flops_tflops) * 1e12
+    else:
+        peak_flops = float(device_cfg.get("peak_flops", 1.0))
+
+    peak_bw_gbps = device_cfg.get("peak_bw_gbps", None)
+    if peak_bw_gbps is not None:
+        peak_bw = float(peak_bw_gbps) * 1e9
+    else:
+        peak_bw = float(device_cfg.get("peak_bw", 1.0))
 
     vec = [
         math.log10(flops + 1.0),
         math.log10(bytes_ + 1.0),
-        math.log10(peak_flops_tflops * 1e12 + 1.0),
-        math.log10(peak_bw_gbps * 1e9 + 1.0),
+        math.log10(peak_flops + 1.0),
+        math.log10(peak_bw + 1.0),
     ]
     one_hot = [0.0] * 4
     one_hot[layer_type_idx] = 1.0
@@ -75,8 +84,14 @@ class LayerHwProxy:
         return model
 
     def predict_layers_batch(self, layers_cfg: List[Dict]) -> Dict[str, np.ndarray]:
-        device_cfg = self.gpu_cfg.get(self.device_name, {})
-        feats = np.stack([build_layer_features(cfg, device_cfg) for cfg in layers_cfg], axis=0)
+        default_device_cfg = self.gpu_cfg.get(self.device_name, {})
+        feats = np.stack(
+            [
+                build_layer_features(cfg, cfg.get("device_cfg", default_device_cfg))
+                for cfg in layers_cfg
+            ],
+            axis=0,
+        )
         x = torch.tensor(feats, dtype=torch.float32)
         lat = self.lat_model(x).squeeze(-1).detach().cpu().numpy()
         mem = self.mem_model(x).squeeze(-1).detach().cpu().numpy()

@@ -1,9 +1,9 @@
 
 from typing import Dict, List, Any
 
-import math
+import yaml
 
-from .layer_proxy import LayerHwProxy, load_gpu_data
+from .layer_hw_proxy import LayerHwProxy
 
 
 class MultiDeviceHwOracle:
@@ -16,7 +16,13 @@ class MultiDeviceHwOracle:
         self.gpu_yaml = gpu_yaml
         self.chip_types = chip_types
         self.weight_dir = weight_dir
-        self.chip_map, self.defaults = load_gpu_data(gpu_yaml)
+        with open(gpu_yaml, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict) and "chip_types" in data:
+            self.chip_map = {entry["name"]: entry for entry in data["chip_types"]}
+        else:
+            self.chip_map = data or {}
+        self.defaults = {}
 
         self.proxies: Dict[str, LayerHwProxy] = {}
         for dev in chip_types:
@@ -24,12 +30,18 @@ class MultiDeviceHwOracle:
 
     def predict_layer_on_device(self, layer_row: Dict[str, Any], device_name: str) -> Dict[str, float]:
         proxy = self.proxies[device_name]
-        return proxy.predict(layer_row)
+        pred = proxy.predict_layers_batch([layer_row])
+        return {
+            "ms": float(pred["lat_ms"][0]),
+            "mem_mb": float(pred["mem_mb"][0]),
+            "power_w": float(pred["power_w"][0]),
+        }
 
     # Convenience helpers for mapping / layout
 
     def _chip_entry(self, device_name: str):
-        # We assume YAML uses names like '3090_FP16'
+        if device_name in self.chip_map:
+            return self.chip_map.get(device_name, None)
         key = f"{device_name}_FP16"
         return self.chip_map.get(key, None)
 
@@ -49,12 +61,16 @@ class MultiDeviceHwOracle:
         chip = self._chip_entry(device_name)
         if chip is None:
             return 24_000.0
+        if "mem_gb" in chip:
+            return float(chip.get("mem_gb", 24.0)) * 1024.0
         return float(chip.get("mem_size_mb", 24_000.0))
 
     def device_link_bw(self, device_name: str) -> float:
         chip = self._chip_entry(device_name)
         if chip is None:
             return 100e9  # bytes/s
+        if "peak_bw" in chip:
+            return float(chip.get("peak_bw", 100e9))
         return float(chip.get("link_bw", 100e9))
 
 

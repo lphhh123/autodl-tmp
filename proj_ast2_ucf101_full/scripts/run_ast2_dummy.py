@@ -22,7 +22,7 @@ from utils.config import load_config
 from data.dummy_video_dataset import DummyVideoDataset
 from ast2.model_video_vit import VideoViT
 from ast2.entropy_utils import sparsity_regularizer
-from hw_proxy.layer_proxy import LayerHwProxy
+from hw_proxy.layer_hw_proxy import LayerHwProxy
 
 
 def compute_hw_loss(
@@ -34,10 +34,22 @@ def compute_hw_loss(
     if not layer_metas:
         return torch.tensor(0.0, device=next(model.parameters()).device)
 
-    total_ms = 0.0
+    layers_cfg = []
     for row in layer_metas:
-        pred = proxy.predict(row)
-        total_ms += pred["ms"]
+        layers_cfg.append(
+            {
+                "layer_type": row.get("layer_type", 3),
+                "flops": row.get("flops", 0.0),
+                "bytes": row.get("bytes", 0.0),
+                "embed_dim": row.get("embed_dim", 0),
+                "num_heads": row.get("num_heads", 1),
+                "mlp_ratio": row.get("mlp_ratio", 4.0),
+                "seq_len": row.get("seq_len", 0),
+                "precision": row.get("precision", 1),
+            }
+        )
+    pred = proxy.predict_layers_batch(layers_cfg)
+    total_ms = float(pred["lat_ms"].sum()) if len(layers_cfg) > 0 else 0.0
     hw_loss = lambda_hw * (total_ms / 100.0)  # scale a bit
     return torch.tensor(hw_loss, device=next(model.parameters()).device)
 

@@ -26,6 +26,7 @@ from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from scripts.run_layout_agent import _write_pareto_points
 from utils.config import load_config
+from utils.seed import seed_everything
 
 
 TRACE_FIELDS = [
@@ -205,20 +206,6 @@ def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) 
 def _load_layout_input(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def _seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    import importlib.util
-
-    if importlib.util.find_spec("torch") is None:
-        return
-    import torch
-
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
@@ -942,7 +929,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     seed = int(args.seed)
-    _seed_everything(seed)
+    seed_everything(seed)
     seed_assign = _build_seed_assign(layout_input, seed)
     layout_input.setdefault("seed", {})["assign_seed"] = list(seed_assign)
     layout_input.setdefault("seed", {})["seed_id"] = int(seed)
