@@ -136,9 +136,24 @@ class VideoViT(nn.Module):
         if not return_intermediate:
             return logits
         L_ast_val = ast_out.L_AST if ast_out is not None else L_AST
+        token_keep = 1.0
+        head_keep = 1.0
+        ch_keep = 1.0
+        block_keep = 1.0
+        if sparsity:
+            token_keep = 1.0 - float(sparsity.get("token", 0.0))
+            head_keep = 1.0 - float(sparsity.get("head", 0.0))
+            ch_keep = 1.0 - float(sparsity.get("ch", 0.0))
+            block_keep = 1.0 - float(sparsity.get("block", 0.0))
         info = {
             "L_AST": L_ast_val,
             "token_feat": tokens.view(b, t, self.num_tokens, -1),
+            "model_info": {
+                "token_keep": token_keep,
+                "head_keep": head_keep,
+                "ch_keep": ch_keep,
+                "block_keep": block_keep,
+            },
             "gates": {
                 "token_mask": ast_out.token_mask if ast_out is not None else torch.ones(b, t, self.num_tokens, device=x.device),
                 "head_weights": head_w,

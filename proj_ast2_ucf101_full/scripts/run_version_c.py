@@ -1,15 +1,14 @@
 """Entry for Version-C full training."""
 import argparse
 import json
-import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Union
 
-import yaml
-
 from utils.config import load_config
-from utils.config_validate import cfg_to_dict, validate_cfg
+from utils.config_utils import get_nested, set_nested
+from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from trainer.trainer_version_c import train_version_c
 
@@ -53,40 +52,49 @@ def main():
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
+    # ---- resolve out_dir ----
+    out_dir = getattr(args, "out_dir", None)
+    if out_dir is None:
+        out_dir = get_nested(cfg, "train.out_dir", None)
+
+    if out_dir is None:
+        cfg_name = getattr(args, "cfg", "run")
+        stem = Path(cfg_name).stem
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = str(Path("outputs") / f"{stem}_{ts}")
+    set_nested(cfg, "train.out_dir", out_dir)
+
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # ---- validate + fill defaults ----
+    val = validate_and_fill_defaults(cfg)
     cfg_export_layout = bool(getattr(cfg, "export_layout_input", False))
     export_layout_input = args.export_layout_input or args.out_dir is not None or cfg_export_layout
     export_dir = args.export_dir or getattr(cfg, "export_dir", None)
-    if args.out_dir:
-        out_dir = Path(args.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        if hasattr(cfg, "train"):
-            cfg.train.out_dir = str(out_dir)
-        if export_dir is None:
-            export_dir = str(out_dir)
+    if args.out_dir and export_dir is None:
+        export_dir = str(out_dir_path)
     if export_layout_input and export_dir is None:
         export_dir = "outputs/P3/A3"
-    validate_cfg(cfg)
-    out_dir_path = Path(cfg.train.out_dir)
-    out_dir_path.mkdir(parents=True, exist_ok=True)
-    config_path = out_dir_path / "config_resolved.yaml"
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg_to_dict(cfg), f, sort_keys=False)
+
+    # ---- dump resolved config ----
     try:
-        repo_root = Path(__file__).resolve().parents[1]
-        git_hash = (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_root)
-            .decode("utf-8")
-            .strip()
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        git_hash = "unknown"
-    run_meta = {
+        import omegaconf
+
+        with open(out_dir_path / "config_resolved.yaml", "w", encoding="utf-8") as f:
+            f.write(omegaconf.OmegaConf.to_yaml(cfg))
+    except Exception:
+        with open(out_dir_path / "config_resolved.yaml", "w", encoding="utf-8") as f:
+            f.write(str(cfg))
+
+    # ---- run meta ----
+    meta = {
         "argv": sys.argv,
-        "git_hash": git_hash,
-        "python_version": sys.version,
+        "out_dir": str(out_dir_path),
+        "validation": val,
     }
-    with (out_dir_path / "run_meta.json").open("w", encoding="utf-8") as f:
-        json.dump(run_meta, f, indent=2)
+    with open(out_dir_path / "run_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
     train_version_c(cfg, export_layout_input=export_layout_input, export_dir=export_dir)
 
 

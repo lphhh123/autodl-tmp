@@ -13,11 +13,14 @@ import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
+from hw_proxy.hw_loss import compute_hw_loss
+from hw_proxy.layer_hw_proxy import LayerHwProxy
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
+from utils.lambda_hw import resolve_lambda_hw
 
 
 def _as_float(val, name: str) -> float:
@@ -117,6 +120,12 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
+    hw_proxy = None
+    if resolve_lambda_hw(cfg, stable_hw_state=None) > 0:
+        hw_cfg = getattr(cfg, "hw", None)
+        if hw_cfg is None:
+            raise ValueError("cfg.hw is required when hw.lambda_hw > 0")
+        hw_proxy = LayerHwProxy(hw_cfg.device_name, hw_cfg.gpu_yaml, hw_cfg.proxy_weight_dir)
 
     best_acc = 0.0
     last_acc = 0.0
@@ -134,13 +143,36 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 else:
                     logits, info = model(x, return_intermediate=True)
                 loss_task = F.cross_entropy(logits, y)
-                loss = loss_task + cfg.loss.lambda_AST * info["L_AST"]
+                lambda_hw = resolve_lambda_hw(cfg, stable_hw_state=None)
+                hw_loss = 0.0
+                hw_metrics = {}
+                if lambda_hw > 0 and hw_proxy is not None:
+                    model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                    hw_loss, hw_metrics = compute_hw_loss(
+                        cfg,
+                        hw_proxy,
+                        model_info=model_info,
+                        stable_hw_cfg=getattr(cfg, "stable_hw", None),
+                        stable_hw_state=None,
+                    )
+                loss = loss_task + cfg.loss.lambda_AST * info["L_AST"] + float(lambda_hw) * float(hw_loss)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
             if step % 10 == 0:
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
-                log_stats(logger, {"epoch": epoch, "step": step, "loss": loss.item(), "acc1": acc1.item(), "acc5": acc5.item(), "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()})
+                stats = {
+                    "epoch": epoch,
+                    "step": step,
+                    "loss": loss.item(),
+                    "acc1": acc1.item(),
+                    "acc5": acc5.item(),
+                    "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item(),
+                    "lambda_hw": float(lambda_hw),
+                    "hw_loss": float(hw_loss),
+                }
+                stats.update(hw_metrics)
+                log_stats(logger, stats)
         last_acc = validate(model, val_loader, device, logger, epoch, cfg)
         best_acc = max(best_acc, last_acc)
         if metrics_path:
@@ -151,7 +183,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "loss": float(loss.item()),
                 "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
                 "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
+                "lambda_hw": float(lambda_hw),
+                "hw_loss": float(hw_loss),
             }
+            metrics.update({k: float(v) for k, v in hw_metrics.items()})
             with metrics_path.open("w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2)
 
