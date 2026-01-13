@@ -19,6 +19,7 @@ class OpenAICompatibleClient:
         model: str,
         api_key: Optional[str] = None,
         api_type: Optional[str] = None,
+        deployment: Optional[str] = None,
         timeout_sec: int = 90,
         max_retry: int = 1,
         sleep_time: int = 0,
@@ -33,6 +34,7 @@ class OpenAICompatibleClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key or ""
+        self.deployment = deployment
         self.timeout_sec = timeout_sec
         self.max_retry = max_retry
         sleep_val = float(sleep_time) if sleep_base is None else float(sleep_base)
@@ -257,6 +259,10 @@ class OpenAICompatibleClient:
         effective_timeout = self.timeout_sec if timeout_s is None else float(timeout_s)
         self.last_usage.update(
             {
+                "provider": self.provider,
+                "api_type": self.api_type,
+                "model": self.model,
+                "deployment": self.deployment,
                 "temperature": float(self.temperature),
                 "top_p": float(self.top_p),
                 "max_tokens": int(self.max_tokens),
@@ -322,25 +328,52 @@ def get_llm_client(
     max_retry = int(config.get("max_retry", config.get("max_attempts", 5)))
     sleep_base = float(config.get("sleep_base", config.get("sleep_time", config.get("retry_sleep", 1.0))))
 
-    def _resolve_api_key(env_name: str) -> str:
+    def _resolve_api_key(env_names: List[str], allow_empty: bool = False) -> str:
         api_key = config.get("api_key") or config.get("key") or config.get("token")
         if api_key:
             return str(api_key)
-        env_key = os.getenv(env_name)
-        if env_key:
-            return env_key
-        raise ValueError(f"missing api_key ({env_name})")
+        for env_name in env_names:
+            env_key = os.getenv(env_name)
+            if env_key:
+                return env_key
+        if allow_empty:
+            return ""
+        raise ValueError(f"missing api_key ({', '.join(env_names)})")
 
-    if provider in {"azure", "azure_gpt"}:
-        endpoint = (config.get("azure_endpoint") or config.get("api_base") or config.get("endpoint") or "").rstrip("/")
-        api_version = config.get("api_version", "2024-02-15-preview")
-        deployment = config.get("deployment") or model
+    explicit_url = config.get("url")
+    if explicit_url:
+        base_url = str(explicit_url).rstrip("/")
+        api_key = _resolve_api_key(["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"], allow_empty=True)
+        url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+        return _finalize_client(
+            OpenAICompatibleClient(
+                provider=provider,
+                base_url=url,
+                model=str(model or "api-model"),
+                api_key=api_key,
+                api_type=api_type,
+                timeout_sec=timeout_s,
+                max_retry=max_retry,
+                sleep_base=sleep_base,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+        )
+
+    is_azure = api_type == "azure" or provider in {"azure", "azure_gpt"} or bool(config.get("azure_endpoint"))
+    if is_azure:
+        deployment = config.get("deployment", config.get("model"))
+        endpoint = config.get("azure_endpoint", config.get("api_base"))
+        api_version = config.get("api_version")
         if not endpoint:
             raise ValueError("missing azure_endpoint")
         if not deployment:
             raise ValueError("missing deployment")
-        api_key = _resolve_api_key("AZURE_OPENAI_API_KEY")
-        url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+        if not api_version:
+            raise ValueError("missing api_version")
+        api_key = _resolve_api_key(["AZURE_OPENAI_API_KEY", "OPENAI_API_KEY"], allow_empty=False)
+        url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
         return _finalize_client(
             OpenAICompatibleClient(
                 provider="azure_gpt",
@@ -348,6 +381,7 @@ def get_llm_client(
                 model=str(deployment),
                 api_key=api_key,
                 api_type=api_type or "azure",
+                deployment=str(deployment),
                 timeout_sec=timeout_s,
                 max_retry=max_retry,
                 sleep_base=sleep_base,
@@ -382,7 +416,7 @@ def get_llm_client(
         base_url = (config.get("url") or config.get("base_url") or config.get("endpoint") or "").rstrip("/")
         if not base_url:
             raise ValueError("missing url")
-        api_key = _resolve_api_key("OPENAI_API_KEY")
+        api_key = _resolve_api_key(["OPENAI_API_KEY"], allow_empty=False)
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
         return _finalize_client(
             OpenAICompatibleClient(
@@ -403,7 +437,7 @@ def get_llm_client(
     base_url = (config.get("base_url") or config.get("endpoint") or "").rstrip("/")
     if base_url:
         url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
-        api_key = config.get("api_key") or os.getenv("OPENAI_API_KEY", "")
+        api_key = _resolve_api_key(["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"], allow_empty=True)
         return _finalize_client(
             OpenAICompatibleClient(
                 provider=provider,

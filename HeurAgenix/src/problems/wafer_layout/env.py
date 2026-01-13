@@ -3,7 +3,7 @@ import importlib
 import json
 import os
 import time
-import random
+import random as _random
 from typing import Any, Dict
 
 import numpy as np
@@ -58,9 +58,9 @@ class Env(BaseEnv):
         else:
             self._seed_id = int(seed_info.get("seed_id", 0))
         self.seed = int(self._seed_id)
-        random.seed(self.seed)
+        _random.seed(self.seed)
         np.random.seed(self.seed)
-        self.rng = random.Random(self._seed_id)
+        self.rng = _random.Random(self._seed_id)
 
         slots = self.instance_data.get("slots", {})
         sites = self.instance_data.get("sites", {})
@@ -224,12 +224,8 @@ class Env(BaseEnv):
         assign = self._sanitize_assign(assign)
         return WaferLayoutSolution(assign=assign)
 
-    @property
     def is_complete_solution(self) -> bool:
-        ms = getattr(self, "max_steps", None)
-        if ms is None:
-            return False
-        return int(self.current_steps) >= int(ms)
+        return not self.continue_run
 
     def validate_solution(self, solution: WaferLayoutSolution) -> bool:
         if solution is None or not hasattr(solution, "assign"):
@@ -242,9 +238,9 @@ class Env(BaseEnv):
                 return False
         return True
 
-    @property
-    def is_valid_solution(self) -> bool:
-        return bool(self.validate_solution(getattr(self, "current_solution", None)))
+    def is_valid_solution(self, solution=None) -> bool:
+        sol = self.current_solution if solution is None else solution
+        return bool(self.validate_solution(sol))
 
     def compare(self, x, y):
         return y - x
@@ -284,6 +280,8 @@ class Env(BaseEnv):
         super().reset(output_dir=output_dir)
         self._step_id = 0
         self._sa_T = float(self.temp_init)
+        _random.seed(self.seed)
+        np.random.seed(self.seed)
 
         self._rec_path = os.path.join(self.output_dir, "recordings.jsonl")
         self._best_path = os.path.join(self.output_dir, "best_solution.json")
@@ -400,7 +398,7 @@ class Env(BaseEnv):
             "op": str(op_name),
             # ---- for wrapper compatibility ----
             "op_args": op_args,
-            "op_args_json": op_args,
+            "op_args_json": json.dumps(op_args, ensure_ascii=False),
             "assign": list(self.current_solution.assign),
             "seed_id": int(self._seed_id),
             "accepted": 1 if accept else 0,
@@ -457,7 +455,7 @@ class Env(BaseEnv):
                 "op": "error",
                 # ---- for wrapper compatibility ----
                 "op_args": {"error": str(e)},
-                "op_args_json": {"error": str(e)},
+                "op_args_json": json.dumps({"error": str(e)}, ensure_ascii=False),
                 "assign": list(self.current_solution.assign),
                 "seed_id": int(self._seed_id),
                 "accepted": 0,
@@ -496,7 +494,7 @@ class Env(BaseEnv):
                 "op": "invalid_operator",
                 # ---- for wrapper compatibility ----
                 "op_args": {},
-                "op_args_json": {},
+                "op_args_json": json.dumps({}, ensure_ascii=False),
                 "assign": list(self.current_solution.assign),
                 "seed_id": int(self._seed_id),
                 "accepted": 0,

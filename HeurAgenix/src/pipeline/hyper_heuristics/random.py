@@ -269,4 +269,10 @@ class RandomHyperHeuristic:
 
             kcnt += 1
 
-        return bool(getattr(env, "is_complete_solution", True)) and bool(getattr(env, "is_valid_solution", True))
+        ok_valid = env.is_valid_solution(env.current_solution) if hasattr(env, "is_valid_solution") else True
+        ok_done = (
+            env.is_complete_solution()
+            if callable(getattr(env, "is_complete_solution", None))
+            else bool(getattr(env, "is_complete_solution", True))
+        )
+        return bool(ok_done) and bool(ok_valid)
