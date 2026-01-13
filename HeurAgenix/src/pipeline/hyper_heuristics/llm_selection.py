@@ -200,10 +200,10 @@ class LLMSelectionHyperHeuristic:
                         "selection": "llm_hh",
                         "chosen_heuristic": chosen,
                         "candidates": candidates,
-                        "selection_round": selection_round,
-                        "llm_ok": bool(ok),
+                        "selection_round": int(selection_round),
+                        "llm_pick_ok": bool(ok),
+                        "fallback_used": bool(not ok),
                         "llm_fail_count": int(fail_count),
-                        "llm_disabled": bool(llm_disabled),
                     },
                 )
 

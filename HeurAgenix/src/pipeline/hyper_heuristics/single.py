@@ -32,4 +32,10 @@ class SingleHyperHeuristic:
                 add_record_item={"selection": "single"},
             )
 
-        return bool(env.is_valid_solution(env.current_solution))
+        env.dump_result()
+        sol = getattr(env, "current_solution", None)
+        if hasattr(env, "validate_solution"):
+            return bool(env.validate_solution(sol))
+        if hasattr(env, "is_valid_solution"):
+            return bool(env.is_valid_solution(sol))
+        return True

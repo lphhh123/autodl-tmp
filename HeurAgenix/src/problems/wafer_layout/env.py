@@ -199,6 +199,9 @@ class Env(BaseEnv):
                 return False
         return True
 
+    def is_valid_solution(self, sol) -> bool:
+        return bool(self.validate_solution(sol))
+
     def compare(self, x, y):
         return y - x
 
@@ -374,21 +377,17 @@ class Env(BaseEnv):
         t0 = time.time()
         add_record_item = kwargs.get("add_record_item") or {}
         stage = add_record_item.get("selection", self._stage)
-        # ---- build extra_meta: merge add_record_item + add_record_item["meta"] ----
-        extra_meta = {}
+        meta_full = dict(kwargs.get("meta") or {})
         if isinstance(add_record_item, dict):
-            # copy top-level keys (except "meta")
+            nested = add_record_item.get("meta")
+            if isinstance(nested, dict):
+                meta_full.update(nested)
             for k, v in add_record_item.items():
                 if k == "meta":
                     continue
-                extra_meta[k] = v
-            # merge nested meta if present
-            nested = add_record_item.get("meta")
-            if isinstance(nested, dict):
-                for k, v in nested.items():
-                    extra_meta[k] = v
-        if not extra_meta:
-            extra_meta = None
+                meta_full[k] = v
+        if not meta_full:
+            meta_full = None
         try:
             operator, algorithm_data = heuristic(self.problem_state, algorithm_data, **kwargs)
         except Exception as e:  # noqa: BLE001
@@ -402,8 +401,8 @@ class Env(BaseEnv):
             boundary_penalty = float(penalty.get("boundary", 0.0))
             signature = _make_signature(list(self.current_solution.assign))
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
-            if isinstance(extra_meta, dict):
-                meta.update(extra_meta)
+            if isinstance(meta_full, dict):
+                meta.update(meta_full)
             line = {
                 "iter": int(self._step_id),
                 "stage": str(stage),
@@ -440,8 +439,8 @@ class Env(BaseEnv):
             boundary_penalty = float(penalty.get("boundary", 0.0))
             signature = _make_signature(list(self.current_solution.assign))
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
-            if isinstance(extra_meta, dict):
-                meta.update(extra_meta)
+            if isinstance(meta_full, dict):
+                meta.update(meta_full)
             line = {
                 "iter": int(self._step_id),
                 "stage": str(stage),
@@ -468,8 +467,8 @@ class Env(BaseEnv):
             return "[invalid_operator]"
 
         meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
-        if isinstance(extra_meta, dict):
-            meta.update(extra_meta)
+        if isinstance(meta_full, dict):
+            meta.update(meta_full)
         dt = (time.time() - t0) * 1000.0
         return self.run_operator(operator, inplace=True, meta=meta, stage=stage, time_ms=dt)
 

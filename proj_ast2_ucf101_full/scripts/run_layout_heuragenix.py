@@ -163,6 +163,7 @@ def _write_test_data(
     seed_payload = dict(payload.get("seed", {}) or {})
     seed_payload["assign_seed"] = [int(x) for x in seed_assign]
     seed_payload["seed_id"] = int(seed)
+    seed_payload["rng_seed"] = int(seed)
     payload["seed"] = seed_payload
 
     target = test_dir / case_file
