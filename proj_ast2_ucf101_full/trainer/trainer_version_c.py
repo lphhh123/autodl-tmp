@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
 from utils.data_ucf101 import UCF101Dataset
+from hw_proxy.hw_loss import compute_hw_loss
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.sites import build_sites
@@ -26,6 +27,7 @@ from mapping.partitioner import PartitionPlanner
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
+from utils.lambda_hw import resolve_lambda_hw
 from utils.seed import seed_everything
 
 
@@ -336,138 +338,6 @@ def _export_layout_input(
     return out_path
 
 
-def compute_hw_loss(
-    model,
-    chiplet_slots: ChipletSlots,
-    hw_proxy: LayerHwProxy,
-    mapping_solver: MappingSolver,
-    wafer_layout: WaferLayout,
-    partitioner: PartitionPlanner,
-    hw_cfg: Dict,
-    model_info: Dict | None = None,
-    stable_hw_cfg: Dict | None = None,
-    stable_hw_state: Dict | None = None,
-):
-    slot_out = chiplet_slots(hard=False)
-    alpha = slot_out["alpha"]
-    eff_specs = slot_out["eff_specs"]
-    chip_used_prob = 1.0 - alpha[:, -1]
-    L_chip_count = hw_cfg.lambda_chip * chip_used_prob.sum()
-
-    partition_result = partitioner.plan(
-        model=model,
-        eff_specs=eff_specs,
-        alpha=alpha,
-        model_info=model_info,
-        use_fine_split=getattr(hw_cfg, "use_fine_split", True),
-    )
-    segments = partition_result["segments"]
-    mapping = partition_result["mapping"]
-
-    cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
-    mapping_result = mapping_solver.solve_mapping(
-        segments,
-        eff_specs,
-        hw_proxy,
-        layout_positions=wafer_layout.current_pos_continuous(),
-        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
-        distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
-    )
-    mapping = mapping_result["mapping"]
-    total_latency_ms = torch.tensor(mapping_result["total_latency_ms"], device=alpha.device, dtype=torch.float32)
-    comm_ms = torch.tensor(mapping_result["comm_ms"], device=alpha.device, dtype=torch.float32)
-
-    lat_ms = cost["lat_ms"]
-    power_w = cost["power_w"]
-    K = len(segments)
-    total_energy_j = lat_ms.new_tensor(0.0)
-    mem_mb = cost["mem_mb"]
-    S = alpha.shape[0]
-    mem_usage = torch.zeros(S, device=alpha.device)
-    for k in range(K):
-        d = mapping[k]
-        lat_s = lat_ms[k, d] / 1e3
-        p = power_w[k, d]
-        total_energy_j = total_energy_j + lat_s * p
-        mem_usage[d] = torch.maximum(mem_usage[d], mem_mb[k, d])
-    peak_mem_mb = mem_usage.max()
-    total_area_mm2 = (eff_specs["area_mm2"] * chip_used_prob).sum()
-    L_area = hw_cfg.lambda_area * torch.relu(total_area_mm2 - hw_cfg.area_limit_mm2) ** 2
-
-    optimize_layout = bool(getattr(hw_cfg, "optimize_layout", True))
-    if optimize_layout:
-        L_layout, layout_stats = wafer_layout(
-            mapping,
-            segments,
-            eff_specs,
-            lambda_boundary=hw_cfg.lambda_boundary,
-            lambda_overlap=hw_cfg.lambda_overlap,
-            lambda_comm=hw_cfg.lambda_comm_extra,
-            lambda_thermal=hw_cfg.lambda_thermal,
-            distance_scale=1e-9,
-        )
-    else:
-        L_layout = alpha.new_tensor(0.0)
-        layout_stats = {
-            "boundary": alpha.new_tensor(0.0),
-            "overlap": alpha.new_tensor(0.0),
-            "comm": alpha.new_tensor(0.0),
-            "thermal": alpha.new_tensor(0.0),
-        }
-
-    layout_only = bool(getattr(hw_cfg, "layout_only", False))
-    L_hw_norm = hw_cfg.lambda_T * total_latency_ms + hw_cfg.lambda_E * total_energy_j + hw_cfg.lambda_mem * peak_mem_mb
-    norm_terms = {
-        "t_hinge": total_latency_ms.detach(),
-        "e_hinge": total_energy_j.detach(),
-        "m_hinge": peak_mem_mb.detach(),
-    }
-    ref_terms = {"T_ref": total_latency_ms.detach(), "E_ref": total_energy_j.detach(), "M_ref": peak_mem_mb.detach()}
-    if stable_hw_cfg and getattr(stable_hw_cfg, "normalize", None):
-        norm_cfg = stable_hw_cfg.normalize
-        eps = float(getattr(norm_cfg, "eps", 1e-6))
-        target_ratio_T = float(getattr(norm_cfg, "target_ratio_T", 0.9))
-        target_ratio_E = float(getattr(norm_cfg, "target_ratio_E", 0.9))
-        mem_hinge_only = bool(getattr(norm_cfg, "mem_hinge_only", True))
-        clip_term_max = float(getattr(norm_cfg, "clip_term_max", 10.0))
-        ref_T = total_latency_ms.detach()
-        ref_E = total_energy_j.detach()
-        ref_M = peak_mem_mb.detach()
-        if stable_hw_state:
-            ref_T = stable_hw_state.get("ref_T", ref_T)
-            ref_E = stable_hw_state.get("ref_E", ref_E)
-            ref_M = stable_hw_state.get("ref_M", ref_M)
-        t = torch.log((total_latency_ms + eps) / (ref_T + eps))
-        e = torch.log((total_energy_j + eps) / (ref_E + eps))
-        m = torch.log((peak_mem_mb + eps) / (ref_M + eps))
-        t_hinge = F.softplus(t - math.log(target_ratio_T))
-        e_hinge = F.softplus(e - math.log(target_ratio_E))
-        m_hinge = F.softplus(m) if mem_hinge_only else torch.abs(m)
-        t_hinge = torch.clamp(t_hinge, max=clip_term_max)
-        e_hinge = torch.clamp(e_hinge, max=clip_term_max)
-        m_hinge = torch.clamp(m_hinge, max=clip_term_max)
-        L_hw_norm = hw_cfg.lambda_T * t_hinge + hw_cfg.lambda_E * e_hinge + hw_cfg.lambda_mem * m_hinge
-        norm_terms = {"t_hinge": t_hinge.detach(), "e_hinge": e_hinge.detach(), "m_hinge": m_hinge.detach()}
-        ref_terms = {"T_ref": ref_T.detach(), "E_ref": ref_E.detach(), "M_ref": ref_M.detach()}
-
-    if layout_only:
-        L_hw = L_layout
-    else:
-        L_hw = L_hw_norm + L_area + L_chip_count + L_layout
-    hw_stats = {
-        "total_latency_ms": total_latency_ms.detach(),
-        "total_energy_j": total_energy_j.detach(),
-        "peak_mem_mb": peak_mem_mb.detach(),
-        "total_area_mm2": total_area_mm2.detach(),
-        "chip_count": chip_used_prob.sum().detach(),
-        "layout": {k: v.detach() for k, v in layout_stats.items()},
-        "L_layout": L_layout.detach(),
-        "L_hw_norm": L_hw_norm.detach(),
-        "norm_terms": {k: v.detach() for k, v in norm_terms.items()},
-        "ref_terms": {k: v.detach() for k, v in ref_terms.items()},
-        "comm_ms": comm_ms.detach(),
-    }
-    return L_hw, hw_stats, mapping, partition_result.get("rewrite_plan")
 
 
 def _stable_hw_schedule(epoch: int, stable_hw_cfg: Dict, state: Dict) -> Tuple[float, str]:
@@ -523,6 +393,68 @@ def _apply_accuracy_guard(acc1: float, stable_hw_cfg: Dict, state: Dict) -> None
             state["lambda_hw"] = 0.0
     else:
         state["violate_streak"] = 0
+
+
+def _solve_mapping_for_cache(
+    model: torch.nn.Module,
+    chiplet_slots: ChipletSlots,
+    mapping_solver: MappingSolver,
+    hw_proxy: LayerHwProxy,
+    wafer_layout: WaferLayout,
+    partitioner: PartitionPlanner,
+    hw_cfg: Any,
+    model_info: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    slot_out = chiplet_slots(hard=False)
+    eff_specs = slot_out["eff_specs"]
+    part_res = partitioner.plan(
+        model,
+        eff_specs,
+        alpha=slot_out["alpha"],
+        model_info=model_info,
+        use_fine_split=getattr(hw_cfg, "use_fine_split", True),
+    )
+    segments = part_res["segments"]
+    mapping_result = mapping_solver.solve_mapping(
+        segments,
+        eff_specs,
+        hw_proxy,
+        layout_positions=wafer_layout.current_pos_continuous(),
+        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
+        distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
+    )
+    mapping = mapping_result.get("mapping", [])
+    signature = f"seg{len(segments)}_map{hash(tuple(mapping))}"
+    mapping_result["segments"] = segments
+    mapping_result["signature"] = signature
+    return mapping_result
+
+
+def _solve_layout_for_cache(
+    chiplet_slots: ChipletSlots,
+    wafer_layout: WaferLayout,
+    hw_cfg: Any,
+    mapping_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    slot_out = chiplet_slots(hard=False)
+    eff_specs = slot_out["eff_specs"]
+    segments = mapping_result.get("segments", [])
+    mapping = mapping_result.get("mapping", [])
+    if not segments or not mapping:
+        return {"loss": 0.0, "stats": {}, "signature": None}
+    with torch.no_grad():
+        L_layout, layout_stats = wafer_layout(
+            mapping,
+            segments,
+            eff_specs,
+            lambda_boundary=hw_cfg.lambda_boundary,
+            lambda_overlap=hw_cfg.lambda_overlap,
+            lambda_comm=hw_cfg.lambda_comm_extra,
+            lambda_thermal=hw_cfg.lambda_thermal,
+            distance_scale=1e-9,
+        )
+    signature = f"{mapping_result.get('signature')}_layout"
+    return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
 def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional[str] = None):
@@ -607,12 +539,59 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
     last_mapping: List[int] = []
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.loss, "lambda_hw", 0.0))}
+    stable_hw_state: Dict[str, Any] = {"lambda_hw": resolve_lambda_hw(cfg, stable_hw_state=None)}
+    stable_hw_state.setdefault(
+        "discrete_cache",
+        {
+            "mapping": None,
+            "layout": None,
+            "mapping_signature": None,
+            "layout_signature": None,
+        },
+    )
     run_state: Dict[str, Any] = {"last_model_info": None}
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
             _stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+        iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+        map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)
+        lay_every = int(getattr(iso, "layout_update_every_epochs", 1) if iso else 1)
+
+        cache = stable_hw_state["discrete_cache"]
+
+        mapping_updated = False
+        layout_updated = False
+
+        if (outer % map_every) == 0 or cache["mapping"] is None:
+            mapping_res = _solve_mapping_for_cache(
+                model=model,
+                chiplet_slots=chiplet_slots,
+                mapping_solver=mapping_solver,
+                hw_proxy=hw_proxy,
+                wafer_layout=wafer_layout,
+                partitioner=partitioner,
+                hw_cfg=cfg.hw,
+                model_info=run_state.get("last_model_info"),
+            )
+            cache["mapping"] = mapping_res
+            cache["mapping_signature"] = mapping_res.get("signature")
+            mapping_updated = True
+        else:
+            mapping_res = cache["mapping"]
+
+        if (outer % lay_every) == 0 or cache["layout"] is None:
+            layout_res = _solve_layout_for_cache(
+                chiplet_slots=chiplet_slots,
+                wafer_layout=wafer_layout,
+                hw_cfg=cfg.hw,
+                mapping_result=mapping_res,
+            )
+            cache["layout"] = layout_res
+            cache["layout_signature"] = layout_res.get("signature")
+            layout_updated = True
+        else:
+            layout_res = cache["layout"]
         tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
         chiplet_slots.set_tau(tau)
         last_hw_stats = None
@@ -634,21 +613,18 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     logits, info = model(x, return_intermediate=True)
                 run_state["last_model_info"] = info
                 L_task = F.cross_entropy(logits, y)
-                L_hw, hw_stats, mapping, rewrite_plan = compute_hw_loss(
-                    model,
-                    chiplet_slots,
+                model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                hw_loss, hw_stats = compute_hw_loss(
+                    cfg,
                     hw_proxy,
-                    mapping_solver,
-                    wafer_layout,
-                    partitioner,
-                    cfg.hw,
-                    model_info=info,
-                    stable_hw_cfg=stable_hw_cfg,
+                    model_info=model_info,
+                    stable_hw_cfg=stable_hw_cfg if isinstance(stable_hw_cfg, dict) else None,
                     stable_hw_state=stable_hw_state,
                 )
                 last_hw_stats = hw_stats
-                lambda_hw = float(stable_hw_state.get("lambda_hw", getattr(cfg.loss, "lambda_hw", 0.0)))
-                hw_term = lambda_hw * L_hw if not twostage else L_hw.new_tensor(0.0)
+                lambda_hw = resolve_lambda_hw(cfg, stable_hw_state)
+                L_hw = logits.new_tensor(hw_loss)
+                hw_term = float(lambda_hw) * L_hw if not twostage else L_hw.new_tensor(0.0)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
@@ -670,62 +646,87 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 if stable_hw_cfg:
                     _apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_hw_state)
-                log_stats(logger, {"outer": outer, "step": step, "loss": loss.item(), "acc1": acc1.item(), "lat_ms": hw_stats["total_latency_ms"].item()})
+                stats = {
+                    "outer": outer,
+                    "step": step,
+                    "loss": loss.item(),
+                    "acc1": acc1.item(),
+                    "lambda_hw": float(lambda_hw),
+                    "mapping_updated": mapping_updated,
+                    "layout_updated": layout_updated,
+                    "mapping_cache_hit": not mapping_updated,
+                    "layout_cache_hit": not layout_updated,
+                    "mapping_signature": cache["mapping_signature"],
+                    "layout_signature": cache["layout_signature"],
+                }
+                stats.update(hw_stats)
+                log_stats(logger, stats)
                 with log_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "step": int(global_step),
                         "outer": int(outer),
                         "loss": float(loss.item()),
-                        "lat_ms": float(hw_stats["total_latency_ms"].item()),
-                        "energy_j": float(hw_stats["total_energy_j"].item()),
-                        "mem_mb": float(hw_stats["peak_mem_mb"].item()),
-                        "area": float(hw_stats["total_area_mm2"].item()),
-                        "chip_count": float(hw_stats["chip_count"].item()),
-                        "lambda_hw": float(stable_hw_state.get("lambda_hw", 0.0)),
+                        "lat_ms": float(hw_stats.get("hw_latency_ms", 0.0)),
+                        "energy_mj": float(hw_stats.get("hw_energy_mj", 0.0)),
+                        "mem_mb": float(hw_stats.get("hw_mem_mb", 0.0)),
+                        "lambda_hw": float(lambda_hw),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
                         "schedule_phase": stable_hw_state.get("schedule_phase"),
+                        "mapping_updated": mapping_updated,
+                        "layout_updated": layout_updated,
+                        "mapping_cache_hit": (not mapping_updated),
+                        "layout_cache_hit": (not layout_updated),
+                        "mapping_signature": cache["mapping_signature"],
+                        "layout_signature": cache["layout_signature"],
                     }) + "\n")
             global_step += 1
 
         if stable_hw_cfg and last_hw_stats:
             beta = float(getattr(stable_hw_cfg.normalize, "ema_beta", 0.95)) if hasattr(stable_hw_cfg, "normalize") else 0.95
-            stable_hw_state["ref_T"] = beta * stable_hw_state.get("ref_T", last_hw_stats["total_latency_ms"].detach()) + (1 - beta) * last_hw_stats["total_latency_ms"].detach()
-            stable_hw_state["ref_E"] = beta * stable_hw_state.get("ref_E", last_hw_stats["total_energy_j"].detach()) + (1 - beta) * last_hw_stats["total_energy_j"].detach()
-            stable_hw_state["ref_M"] = beta * stable_hw_state.get("ref_M", last_hw_stats["peak_mem_mb"].detach()) + (1 - beta) * last_hw_stats["peak_mem_mb"].detach()
+            lat = float(last_hw_stats.get("hw_latency_ms", 0.0))
+            eng = float(last_hw_stats.get("hw_energy_mj", 0.0))
+            mem = float(last_hw_stats.get("hw_mem_mb", 0.0))
+            stable_hw_state["ref_T"] = beta * float(stable_hw_state.get("ref_T", lat)) + (1 - beta) * lat
+            stable_hw_state["ref_E"] = beta * float(stable_hw_state.get("ref_E", eng)) + (1 - beta) * eng
+            stable_hw_state["ref_M"] = beta * float(stable_hw_state.get("ref_M", mem)) + (1 - beta) * mem
 
         # Step B: alpha refinement
         if update_alpha:
             for _ in range(cfg.training.inner_steps_alpha):
-                L_hw, hw_stats, mapping, _ = compute_hw_loss(
-                    model,
-                    chiplet_slots,
+                model_info = {}
+                last_info = run_state.get("last_model_info")
+                if isinstance(last_info, dict):
+                    model_info = last_info.get("model_info", {})
+                hw_loss, _ = compute_hw_loss(
+                    cfg,
                     hw_proxy,
-                    mapping_solver,
-                    wafer_layout,
-                    partitioner,
-                    cfg.hw,
-                    model_info=run_state.get("last_model_info"),
-                    stable_hw_cfg=stable_hw_cfg,
+                    model_info=model_info,
+                    stable_hw_cfg=stable_hw_cfg if isinstance(stable_hw_cfg, dict) else None,
                     stable_hw_state=stable_hw_state,
                 )
+                L_hw = torch.tensor(hw_loss, device=device, requires_grad=True)
                 optimizer_alpha.zero_grad()
-                L_hw.backward()
-                optimizer_alpha.step()
+                if L_hw.requires_grad:
+                    L_hw.backward()
+                    optimizer_alpha.step()
 
         # Step D: layout refinement
         if update_layout:
             for _ in range(cfg.training.inner_steps_layout):
                 slot_out = chiplet_slots(hard=False)
                 eff_specs = slot_out["eff_specs"]
-                part_res = partitioner.plan(
-                    model,
-                    eff_specs,
-                    alpha=slot_out["alpha"],
-                    model_info=run_state.get("last_model_info"),
-                    use_fine_split=getattr(cfg.hw, "use_fine_split", True),
-                )
-                segments = part_res["segments"]
-                mapping = part_res["mapping"]
+                segments = mapping_res.get("segments", []) if mapping_res else []
+                mapping = mapping_res.get("mapping", []) if mapping_res else []
+                if not segments or not mapping:
+                    part_res = partitioner.plan(
+                        model,
+                        eff_specs,
+                        alpha=slot_out["alpha"],
+                        model_info=run_state.get("last_model_info"),
+                        use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                    )
+                    segments = part_res["segments"]
+                    mapping = part_res["mapping"]
                 L_layout, layout_stats = wafer_layout(
                     mapping,
                     segments,

@@ -97,3 +97,29 @@ class LayerHwProxy:
         mem = self.mem_model(x).squeeze(-1).detach().cpu().numpy()
         power = self.power_model(x).squeeze(-1).detach().cpu().numpy()
         return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+
+    def predict_from_model_info(
+        self,
+        model_info: Dict,
+        token_keep: float = 1.0,
+        head_keep: float = 1.0,
+        ch_keep: float = 1.0,
+        block_keep: float = 1.0,
+    ) -> Dict[str, float]:
+        layers_cfg = model_info.get("layers_cfg") or model_info.get("layer_configs")
+        if layers_cfg:
+            pred = self.predict_layers_batch(layers_cfg)
+            lat_ms = float(np.sum(pred["lat_ms"]))
+            mem_mb = float(np.max(pred["mem_mb"])) if pred["mem_mb"].size > 0 else 0.0
+            energy_mj = float(np.sum(pred["power_w"] * pred["lat_ms"])) / 1000.0 if pred["power_w"].size > 0 else 0.0
+            return {"latency_ms": lat_ms, "mem_mb": mem_mb, "energy_mj": energy_mj}
+
+        base_latency = float(model_info.get("latency_ms_ref", 1.0))
+        base_mem = float(model_info.get("mem_mb_ref", 1.0))
+        base_energy = float(model_info.get("energy_mj_ref", 1.0))
+        scale = max(1e-6, token_keep * head_keep * ch_keep * block_keep)
+        return {
+            "latency_ms": base_latency * scale,
+            "mem_mb": base_mem * max(1e-6, ch_keep),
+            "energy_mj": base_energy * scale,
+        }
