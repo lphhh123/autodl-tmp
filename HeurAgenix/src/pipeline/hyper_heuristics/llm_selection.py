@@ -88,6 +88,8 @@ class LLMSelectionHyperHeuristic:
         if not self.heuristic_pool:
             self.heuristic_pool = get_heuristic_names(self.problem, self.heuristic_dir)
 
+        active_engine = "llm_hh"
+        fallback_engine = str(getattr(self, "fallback_on_llm_failure", "random_hh") or "random_hh")
         llm_ok = True
         llm_client = None
         try:
@@ -98,7 +100,20 @@ class LLMSelectionHyperHeuristic:
                 raise RuntimeError("get_llm_client returned None")
         except Exception as e:  # noqa: BLE001
             llm_ok = False
-            self._log_usage(self._with_usage_base(env, {"ok": False, "reason": "llm_init_failed", "error": str(e)}))
+            active_engine = fallback_engine
+            self._log_usage(
+                self._with_usage_base(
+                    env,
+                    {
+                        "ok": False,
+                        "reason": "llm_init_failed",
+                        "error": str(e),
+                        "active_engine": active_engine,
+                        "fallback_engine": fallback_engine,
+                        "llm_config_file": self.llm_config_file,
+                    },
+                )
+            )
 
         fail_count = 0
         selection_round = 0
@@ -133,7 +148,9 @@ class LLMSelectionHyperHeuristic:
                     if isinstance(last, dict):
                         llm_meta = {
                             "provider": last.get("provider"),
+                            "api_type": last.get("api_type"),
                             "model": last.get("model"),
+                            "deployment": last.get("deployment"),
                             "prompt_tokens": last.get("prompt_tokens"),
                             "completion_tokens": last.get("completion_tokens"),
                             "total_tokens": last.get("total_tokens"),
@@ -150,7 +167,9 @@ class LLMSelectionHyperHeuristic:
                     if isinstance(last, dict):
                         llm_meta = {
                             "provider": last.get("provider"),
+                            "api_type": last.get("api_type"),
                             "model": last.get("model"),
+                            "deployment": last.get("deployment"),
                             "prompt_tokens": last.get("prompt_tokens"),
                             "completion_tokens": last.get("completion_tokens"),
                             "total_tokens": last.get("total_tokens"),
@@ -174,6 +193,11 @@ class LLMSelectionHyperHeuristic:
                             "selection_frequency": self.selection_frequency,
                             "rollout_budget": self.rollout_budget,
                             "fallback_used": True,
+                            "active_engine": active_engine,
+                            "fallback_engine": fallback_engine,
+                            "selection_round": selection_round,
+                            "step": int(getattr(env, "current_steps", 0)),
+                            "llm_config_file": self.llm_config_file,
                             **llm_meta,
                             },
                         )
@@ -181,16 +205,34 @@ class LLMSelectionHyperHeuristic:
 
                     if fail_count >= self.max_llm_failures:
                         llm_ok = False
+                        active_engine = fallback_engine
                         self._log_usage(
                             self._with_usage_base(
                                 env,
-                                {"ok": False, "reason": "llm_disabled_after_failures", "fail_count": fail_count},
+                                {
+                                    "ok": False,
+                                    "reason": "llm_disabled_after_failures",
+                                    "fail_count": fail_count,
+                                    "active_engine": active_engine,
+                                    "fallback_engine": fallback_engine,
+                                    "llm_config_file": self.llm_config_file,
+                                },
                             )
                         )
                         llm_disabled = True
             elif not llm_ok and self.fallback_on_llm_failure == "stop":
                 self._log_usage(
-                    self._with_usage_base(env, {"ok": False, "reason": "llm_disabled_stop", "fail_count": fail_count})
+                    self._with_usage_base(
+                        env,
+                        {
+                            "ok": False,
+                            "reason": "llm_disabled_stop",
+                            "fail_count": fail_count,
+                            "active_engine": active_engine,
+                            "fallback_engine": fallback_engine,
+                            "llm_config_file": self.llm_config_file,
+                        },
+                    )
                 )
                 break
 
@@ -207,6 +249,11 @@ class LLMSelectionHyperHeuristic:
                     "selection_frequency": self.selection_frequency,
                     "rollout_budget": self.rollout_budget,
                     "fallback_used": not ok,
+                    "active_engine": active_engine,
+                    "fallback_engine": fallback_engine,
+                    "selection_round": selection_round,
+                    "step": int(getattr(env, "current_steps", 0)),
+                    "llm_config_file": self.llm_config_file,
                     **(llm_meta if llm_ok and llm_client is not None else {}),
                     },
                 )
@@ -224,13 +271,15 @@ class LLMSelectionHyperHeuristic:
                     algorithm_data=algo_data,
                     record=True,
                     add_record_item={
-                        "selection": "llm_hh",
+                        "selection": active_engine,
                         "chosen_heuristic": chosen,
                         "candidates": candidates,
                         "selection_round": int(selection_round),
                         "llm_pick_ok": bool(ok),
                         "fallback_used": bool(not ok),
                         "llm_fail_count": int(fail_count),
+                        "active_engine": active_engine,
+                        "fallback_engine": fallback_engine,
                     },
                 )
 

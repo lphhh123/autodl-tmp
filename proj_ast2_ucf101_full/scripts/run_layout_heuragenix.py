@@ -949,12 +949,17 @@ def main() -> None:
     rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
     iters_sf = float(baseline_cfg.get("iterations_scale_factor", 2.0))
     max_steps = baseline_cfg.get("max_steps", None)
+    S = infer_problem_size(layout_input)
     if max_steps is not None and int(max_steps) > 0:
         max_steps = int(max_steps)
-        S = infer_problem_size(layout_input)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
     else:
         max_steps = None
+    effective_max_steps = (
+        int(max_steps)
+        if max_steps is not None and int(max_steps) > 0
+        else int(math.ceil(float(iters_sf) * max(1, S)))
+    )
 
     output_root = internal_out / "output"
 
@@ -1175,7 +1180,14 @@ def main() -> None:
             llm_usage_path,
             {"ok": False, "reason": "missing_llm_usage", "engine": method},
         )
-    trace_info, pareto = _write_trace_and_pareto(out_dir, seed, recordings_path, layout_input, cfg, max_steps)
+    trace_info, pareto = _write_trace_and_pareto(
+        out_dir,
+        seed,
+        recordings_path,
+        layout_input,
+        cfg,
+        effective_max_steps,
+    )
     _write_pareto_points(pareto, out_dir / "pareto_points.csv")
 
     best_solution_path = output_dir / "best_solution.json"
@@ -1204,9 +1216,10 @@ def main() -> None:
         "run_mode": str(run_mode),
         "cfg_path": str(args.cfg),
         "budget": {
-            "problem_size": int(infer_problem_size(layout_input)),
+            "problem_size": int(S),
             "iterations_scale_factor": float(iters_sf),
-            "max_steps": int(max_steps or 0),
+            "max_steps_configured": int(max_steps) if max_steps is not None else None,
+            "max_steps_effective": int(effective_max_steps),
         },
         "evaluator": {
             "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),
