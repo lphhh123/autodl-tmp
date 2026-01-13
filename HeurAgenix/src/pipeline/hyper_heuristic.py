@@ -6,6 +6,7 @@ import importlib
 from src.util.util import get_heuristic_names, load_function, load_heuristic_functions
 from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
+from src.pipeline.hyper_heuristics.heuristic_only import HeuristicOnlyHyperHeuristic
 from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeuristic
 
 
@@ -84,7 +85,17 @@ def launch_heuristic_selector(
         env.reset(output_dir=str(out_dir))
         heur_names = get_heuristic_names(problem, heuristic_dir)
         heur_funcs = load_heuristic_functions(problem, heuristic_dir)
-        if engine_name == "random_hh":
+        if engine_name == "heuristic_only":
+            runner = HeuristicOnlyHyperHeuristic(
+                heuristic_pool=heur_names,
+                problem=problem,
+                heuristic_dir=heuristic_dir,
+                iterations_scale_factor=float(iterations_scale_factor),
+                selection_frequency=int(selection_frequency),
+                output_dir=str(out_dir),
+                seed=seed_val,
+            )
+        elif engine_name == "random_hh":
             runner = RandomHyperHeuristic(
                 heuristic_pool=heur_names,
                 problem=problem,
