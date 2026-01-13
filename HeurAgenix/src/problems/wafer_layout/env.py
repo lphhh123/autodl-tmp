@@ -89,37 +89,20 @@ class Env(BaseEnv):
         self._rec_path = None
         self._best_path = None
 
-        self._force_main_evaluator = bool(self.instance_data.get("force_main_evaluator", True))
-        self._allow_fallback_evaluator = bool(self.instance_data.get("allow_fallback_evaluator", False))
         self._require_main_evaluator = bool(self.instance_data.get("require_main_evaluator", True))
+        self._allow_fallback_evaluator = bool(self.instance_data.get("allow_fallback_evaluator", False))
+        if bool(self.instance_data.get("force_main_evaluator", False)):
+            self._require_main_evaluator = True
 
         self._evaluator_source = "main_project"
         self._evaluator_import_error = ""
-        self._LayoutEvaluator, self._LayoutState, import_error = _load_layout_evaluator()
-        if import_error:
-            self._evaluator_import_error = str(import_error)
-            if self._force_main_evaluator or self._require_main_evaluator:
-                raise RuntimeError(
-                    "Failed to import main layout evaluator. "
-                    "Check PYTHONPATH, sibling repo structure, and wrapper settings. "
-                    f"Import error: {import_error}"
-                )
-            if self._allow_fallback_evaluator:
-                self._LayoutEvaluator, self._LayoutState = None, None
-                self._evaluator_source = "fallback_penalty"
-            else:
-                raise RuntimeError(
-                    "Main evaluator import failed and fallback is disabled. "
-                    "Set allow_fallback_evaluator=True only for debug. "
-                    f"Import error: {import_error}"
-                )
+        self._evaluator = None
+        self._layout_state = None
+        self._init_evaluator()
         self._meta_base = {
             "evaluator_source": self._evaluator_source,
             "evaluator_import_error": self._evaluator_import_error,
         }
-        self._evaluator = None
-        self._layout_state = None
-        self._init_evaluator()
 
         self.problem_state = self.get_problem_state()
 
@@ -144,9 +127,19 @@ class Env(BaseEnv):
         return total_scalar, comm_norm, therm_norm
 
     def _init_evaluator(self):
-        if self._LayoutEvaluator is None or self._LayoutState is None:
+        LayoutEvaluator, LayoutState, import_error = _load_layout_evaluator()
+        self._evaluator_import_error = import_error
+
+        if LayoutEvaluator is None or LayoutState is None:
+            if self._require_main_evaluator or (not self._allow_fallback_evaluator):
+                raise RuntimeError(
+                    "Failed to import main LayoutEvaluator (layout.evaluator). "
+                    "Baseline requires main evaluator for comparability. "
+                    f"import_error={import_error}"
+                )
             self._evaluator = None
             self._layout_state = None
+            self._evaluator_source = "fallback_penalty"
             return
 
         slots = self.instance_data.get("slots", {})
@@ -161,21 +154,34 @@ class Env(BaseEnv):
         if traffic.size == 0:
             traffic = np.zeros((self.S, self.S), dtype=np.float32)
 
-        self._layout_state = self._LayoutState(
-            S=int(self.S),
-            Ns=int(self.Ns),
-            wafer_radius_mm=float(wafer.get("radius_mm", 0.0)),
-            sites_xy_mm=sites_xy,
-            assign=np.zeros(self.S, dtype=np.int64),
-            chip_tdp_w=slot_tdp,
-            traffic_bytes=traffic,
-            meta={"margin_mm": float(wafer.get("margin_mm", 0.0))},
-        )
-        self._evaluator = self._LayoutEvaluator(
-            sigma_mm=self.sigma_mm,
-            baseline={"L_comm_baseline": self.base_comm, "L_therm_baseline": self.base_therm},
-            scalar_w={"w_comm": self.w_comm, "w_therm": self.w_therm, "w_penalty": self.w_penalty},
-        )
+        try:
+            self._layout_state = LayoutState(
+                S=int(self.S),
+                Ns=int(self.Ns),
+                wafer_radius_mm=float(wafer.get("radius_mm", 0.0)),
+                sites_xy_mm=sites_xy,
+                assign=np.zeros(self.S, dtype=np.int64),
+                chip_tdp_w=slot_tdp,
+                traffic_bytes=traffic,
+                meta={"margin_mm": float(wafer.get("margin_mm", 0.0))},
+            )
+            self._evaluator = LayoutEvaluator(
+                sigma_mm=self.sigma_mm,
+                baseline={"L_comm_baseline": self.base_comm, "L_therm_baseline": self.base_therm},
+                scalar_w={"w_comm": self.w_comm, "w_therm": self.w_therm, "w_penalty": self.w_penalty},
+            )
+            self._evaluator_source = "main_project"
+        except Exception as exc:  # noqa: BLE001
+            self._evaluator_import_error = f"{import_error}; init_error={repr(exc)}"
+            if self._require_main_evaluator or (not self._allow_fallback_evaluator):
+                raise RuntimeError(
+                    "LayoutEvaluator import succeeded but initialization failed. "
+                    "Baseline requires main evaluator for comparability. "
+                    f"error={self._evaluator_import_error}"
+                ) from exc
+            self._evaluator = None
+            self._layout_state = None
+            self._evaluator_source = "fallback_penalty"
 
     def _sanitize_assign(self, assign: list[int]) -> list[int]:
         assign = list(assign or [])
