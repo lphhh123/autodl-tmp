@@ -5,6 +5,7 @@ import ast
 import json
 import time
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -175,6 +176,18 @@ class OpenAICompatibleClient:
         valid_picks = self._validate_picks(picks_raw, candidate_ids, forbidden_ids, k)
         if valid_picks:
             return valid_picks, None
+        if raw:
+            m = re.search(r"-?\d+", raw)
+            if m:
+                try:
+                    pid = int(m.group(0))
+                except Exception:
+                    pid = None
+                if pid is not None:
+                    allowed = set(int(x) for x in candidate_ids)
+                    forb = set(int(x) for x in forbidden_ids)
+                    if pid in allowed and pid not in forb:
+                        return [pid], None
         return [], "empty_or_invalid_picks"
 
     def propose_pick(self, state_summary: Dict, k: int, timeout_s: int | None = None) -> List[int]:

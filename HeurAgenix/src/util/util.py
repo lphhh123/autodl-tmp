@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -59,7 +60,10 @@ def load_heuristic_functions(problem: str, heuristic_dir: str):
     Return dict[name] = function, searching:
       src/problems/{problem}/heuristics/{heuristic_dir}/*.py
     """
-    base = _REPO_ROOT / "src" / "problems" / problem / "heuristics" / heuristic_dir
+    if Path(heuristic_dir).is_absolute() or os.sep in str(heuristic_dir):
+        base = Path(heuristic_dir)
+    else:
+        base = _REPO_ROOT / "src" / "problems" / problem / "heuristics" / heuristic_dir
     if not base.exists():
         raise FileNotFoundError(f"heuristic_dir not found: {base}")
 
