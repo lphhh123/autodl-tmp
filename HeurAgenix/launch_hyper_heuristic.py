@@ -148,7 +148,7 @@ def main():
                 iterations_scale_factor=float(args.iterations_scale_factor),
                 heuristic_dir=str(heur_dir),
                 selection_frequency=int(args.selection_frequency),
-                seed=int(args.seed),
+                seed=seed_val,
             )
         elif args.heuristic == "llm_hh":
             runner = LLMSelectionHyperHeuristic(
