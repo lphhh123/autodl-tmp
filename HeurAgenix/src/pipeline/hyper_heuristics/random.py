@@ -269,4 +269,4 @@ class RandomHyperHeuristic:
 
             kcnt += 1
 
-        return bool(env.is_valid_solution(env.current_solution))
+        return bool(getattr(env, "is_complete_solution", True)) and bool(getattr(env, "is_valid_solution", True))

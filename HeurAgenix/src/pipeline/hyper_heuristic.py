@@ -86,7 +86,7 @@ def launch_heuristic_selector(
                 heuristic_functions=heur_funcs,
                 iterations_scale_factor=float(iterations_scale_factor),
                 selection_frequency=int(selection_frequency),
-                seed=getattr(env, "seed", 0),
+                seed=int(getattr(env, "seed", getattr(env, "_seed_id", 0))),
                 stage_name="heuragenix_random_hh",
             )
         else:
@@ -100,7 +100,7 @@ def launch_heuristic_selector(
                 num_candidate_heuristics=int(num_candidate_heuristics),
                 rollout_budget=int(rollout_budget),
                 output_dir=str(out_dir),
-                seed=getattr(env, "seed", 0),
+                seed=int(getattr(env, "seed", getattr(env, "_seed_id", 0))),
             )
         runner.run(env)
         env.dump_result()

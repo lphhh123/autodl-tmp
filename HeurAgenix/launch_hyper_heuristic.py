@@ -115,6 +115,8 @@ def main():
 
     Env = _import_env(args.problem)
 
+    heur_name = args.heuristic[:-3] if str(args.heuristic).endswith(".py") else args.heuristic
+
     for data_name in data_name_list:
         data_path = (test_data_dir / data_name).resolve()
         env = Env(str(data_path))
@@ -128,6 +130,7 @@ def main():
         env.llm_timeout_s = int(args.llm_timeout_s)
         env.max_llm_failures = int(args.max_llm_failures)
         env.fallback_on_llm_failure = str(args.fallback_on_llm_failure)
+        seed_val = int(getattr(env, "seed", args.seed))
 
         case_stem = Path(data_name).stem
         out_dir = (output_base / args.problem / case_stem / args.result_dir / engine).resolve()
@@ -158,16 +161,18 @@ def main():
                 num_candidate_heuristics=int(args.num_candidate_heuristics),
                 rollout_budget=int(args.rollout_budget),
                 output_dir=str(out_dir),
+                seed=seed_val,
                 llm_timeout_s=int(args.llm_timeout_s),
                 max_llm_failures=int(args.max_llm_failures),
                 fallback_on_llm_failure=str(args.fallback_on_llm_failure),
             )
         else:
-            fn = load_function(args.heuristic, problem=args.problem)
+            fn = load_function(heur_name, problem=args.problem)
             runner = SingleHyperHeuristic(
                 heuristic=fn,
-                problem=args.problem,
                 iterations_scale_factor=float(args.iterations_scale_factor),
+                output_dir=str(out_dir),
+                seed=seed_val,
             )
 
         runner.run(env)

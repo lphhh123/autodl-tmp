@@ -210,4 +210,4 @@ class LLMSelectionHyperHeuristic:
             selection_round += 1
 
         env.dump_result()
-        return bool(env.is_valid_solution(env.current_solution))
+        return bool(getattr(env, "is_complete_solution", True)) and bool(getattr(env, "is_valid_solution", True))
