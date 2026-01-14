@@ -13,6 +13,75 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
+def _try_load_classind(root: Path) -> Optional[Dict[str, int]]:
+    """
+    Try to load UCF101 classInd.txt (1-based indices).
+    Returns mapping {class_name: idx0_based}.
+    """
+    cand = [
+        root / "classInd.txt",
+        root / "splits" / "classInd.txt",
+        root / "ucfTrainTestlist" / "classInd.txt",
+    ]
+    for p in cand:
+        if p.exists():
+            mapping: Dict[str, int] = {}
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    cls = parts[1]
+                    mapping[cls] = int(parts[0]) - 1
+            if mapping:
+                return mapping
+    return None
+
+
+def _parse_class_names_from_list(list_path: Path) -> List[str]:
+    names: List[str] = []
+    if not list_path.exists():
+        return names
+    with list_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rel = line.split()[0]
+            cls = rel.split("/")[0]
+            names.append(cls)
+    return names
+
+
+def _build_deterministic_label_map(root: Path, split_list: Path) -> Dict[str, int]:
+    """
+    Deterministic mapping for both train/test.
+    Priority:
+      1) classInd.txt
+      2) union(trainlist*, testlist*) in same folder as split_list (if exists)
+      3) union only this split file (fallback) but sorted
+    """
+    classind = _try_load_classind(root)
+    if classind:
+        return classind
+
+    folder = split_list.parent
+    train_lists = sorted(folder.glob("trainlist*.txt"))
+    test_lists = sorted(folder.glob("testlist*.txt"))
+    all_names: List[str] = []
+    if train_lists and test_lists:
+        for p in train_lists + test_lists:
+            all_names.extend(_parse_class_names_from_list(p))
+    else:
+        all_names.extend(_parse_class_names_from_list(split_list))
+
+    uniq = sorted(set(all_names))
+    return {c: i for i, c in enumerate(uniq)}
+
+
 @dataclass
 class ClipItem:
     source_path: Path
@@ -75,7 +144,8 @@ class UCF101Dataset(Dataset):
             f"frames_root={self.root}, splits_root={self.splits_root}, audio_root={self.audio_root}"
         )
 
-        label_to_idx: Dict[str, int] = {}
+        self.label_to_idx = _build_deterministic_label_map(self.root, split_file)
+        self.idx_to_label = {v: k for k, v in self.label_to_idx.items()}
         clips: List[ClipItem] = []
         self._frame_cache: Dict[str, List[Path]] = {}
         with open(split_file, "r", encoding="utf-8") as f:
@@ -85,9 +155,9 @@ class UCF101Dataset(Dataset):
                     continue
                 rel_path = line.split()[0]
                 cls_name = rel_path.split("/")[0]
-                if cls_name not in label_to_idx:
-                    label_to_idx[cls_name] = len(label_to_idx)
-                label = label_to_idx[cls_name]
+                if cls_name not in self.label_to_idx:
+                    continue
+                label = self.label_to_idx[cls_name]
                 video_stem = Path(rel_path).stem
                 source_path = self.root / cls_name / video_stem
                 if not source_path.is_dir():
@@ -101,11 +171,15 @@ class UCF101Dataset(Dataset):
                 stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
                 for cover_len in self.clip_lens:
                     stride = max(1, int(cover_len * stride_ratio))
-                    offset = 0
-                    if self.is_train and getattr(cfg.data, "clip_jitter", False):
-                        offset = random.randint(0, max(0, stride - 1))
-                    max_start = max(total_frames - cover_len + 1, 1)
-                    for start in range(offset, max_start, stride):
+                    if total_frames <= cover_len:
+                        starts = [0]
+                    else:
+                        offset = 0
+                        if self.is_train and getattr(cfg.data, "clip_jitter", False):
+                            offset = random.randint(0, max(0, stride - 1))
+                        max_start = max(total_frames - cover_len + 1, 1)
+                        starts = list(range(offset, max_start, stride))
+                    for start in starts:
                         t_start = start
                         clips.append(
                             ClipItem(

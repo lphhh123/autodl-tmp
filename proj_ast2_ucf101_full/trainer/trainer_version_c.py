@@ -28,6 +28,7 @@ from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
+from utils.stable_hw import update_hw_refs_from_stats
 
 
 def _as_float(val, name: str) -> float:
@@ -559,6 +560,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0))}
+    stable_hw_state.setdefault("ref_C", 0.0)
     stable_hw_state.setdefault(
         "discrete_cache",
         {
@@ -663,15 +665,23 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             if not twostage and update_layout:
                 scaler.step(optimizer_layout)
             scaler.update()
-            part_res = partitioner.plan(
-                model,
-                chiplet_slots(hard=False)["eff_specs"],
-                alpha=chiplet_slots(hard=False)["alpha"],
-                model_info=run_state.get("last_model_info"),
-                use_fine_split=getattr(cfg.hw, "use_fine_split", True),
-            )
-            last_segments = part_res["segments"]
-            last_mapping = part_res.get("mapping", [])
+            # P1-3(A): by default, DO NOT re-plan each inner step (wasteful + breaks discrete isolation).
+            track_live = False
+            if stable_hw_cfg:
+                iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None)
+                if iso_cfg is not None:
+                    track_live = bool(getattr(iso_cfg, "track_live_segments", False))
+
+            if track_live:
+                part_res = partitioner.plan(
+                    model,
+                    chiplet_slots(hard=False)["eff_specs"],
+                    alpha=chiplet_slots(hard=False)["alpha"],
+                    model_info=run_state.get("last_model_info"),
+                    use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                )
+                last_segments = part_res.get("segments", [])
+                last_mapping = part_res.get("mapping", [])
             if step % 10 == 0:
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 if stable_hw_cfg:
@@ -712,13 +722,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             global_step += 1
 
         if stable_hw_cfg and last_hw_stats:
-            beta = float(getattr(stable_hw_cfg.normalize, "ema_beta", 0.95)) if hasattr(stable_hw_cfg, "normalize") else 0.95
-            lat = float(last_hw_stats.get("hw_latency_ms", 0.0))
-            eng = float(last_hw_stats.get("hw_energy_mj", 0.0))
-            mem = float(last_hw_stats.get("hw_mem_mb", 0.0))
-            stable_hw_state["ref_T"] = beta * float(stable_hw_state.get("ref_T", lat)) + (1 - beta) * lat
-            stable_hw_state["ref_E"] = beta * float(stable_hw_state.get("ref_E", eng)) + (1 - beta) * eng
-            stable_hw_state["ref_M"] = beta * float(stable_hw_state.get("ref_M", mem)) + (1 - beta) * mem
+            update_hw_refs_from_stats(stable_hw_state, stable_hw_cfg, last_hw_stats)
 
         # Step B: alpha refinement
         if update_alpha:

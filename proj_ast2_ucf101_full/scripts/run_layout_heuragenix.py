@@ -1077,6 +1077,13 @@ def main() -> None:
             launch_cmd.extend(["--max_steps", str(max_steps)])
         if method == "llm_hh" and llm_config is not None:
             launch_cmd.extend(["-l", str(llm_config)])
+        # keep subprocess behavior consistent with inprocess
+        llm_timeout_s = int(baseline_cfg.get("llm_timeout_s", 30))
+        max_llm_failures = int(baseline_cfg.get("max_llm_failures", 2))
+        fallback_on_llm_failure = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
+        launch_cmd.extend(["--llm_timeout_s", str(llm_timeout_s)])
+        launch_cmd.extend(["--max_llm_failures", str(max_llm_failures)])
+        launch_cmd.extend(["--fallback_on_llm_failure", fallback_on_llm_failure])
         try:
             result = subprocess.run(
                 launch_cmd,
