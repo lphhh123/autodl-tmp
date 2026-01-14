@@ -2,12 +2,11 @@
 import argparse
 import json
 import sys
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Union
 
 from utils.config import load_config
-from utils.config_utils import get_nested, set_nested
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from trainer.trainer_version_c import train_version_c
@@ -52,30 +51,19 @@ def main():
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
-    # ---- resolve out_dir ----
-    out_dir = getattr(args, "out_dir", None)
-    if out_dir is None:
-        out_dir = get_nested(cfg, "train.out_dir", None)
+    cfg, _meta = validate_and_fill_defaults(cfg, mode="version_c")
 
-    if out_dir is None:
-        cfg_name = getattr(args, "cfg", "run")
-        stem = Path(cfg_name).stem
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = str(Path("outputs") / f"{stem}_{ts}")
-    set_nested(cfg, "train.out_dir", out_dir)
+    # out_dir: CLI 优先；否则 cfg.train.out_dir；否则自动生成一个
+    cfg_name = Path(args.cfg).stem
+    auto_out = Path("outputs/version_c") / f"{cfg_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(cfg.train, "out_dir", "") or auto_out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cfg.train.out_dir = str(out_dir)
 
     out_dir_path = Path(out_dir)
-    out_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # ---- validate + fill defaults ----
-    val = validate_and_fill_defaults(cfg)
-    cfg_export_layout = bool(getattr(cfg, "export_layout_input", False))
-    export_layout_input = args.export_layout_input or args.out_dir is not None or cfg_export_layout
-    export_dir = args.export_dir or getattr(cfg, "export_dir", None)
-    if args.out_dir and export_dir is None:
-        export_dir = str(out_dir_path)
-    if export_layout_input and export_dir is None:
-        export_dir = "outputs/P3/A3"
+    export_layout_input = bool(args.export_layout_input)
+    export_dir = args.export_dir or str(out_dir / "export_layout_input")
 
     # ---- dump resolved config ----
     try:
@@ -91,7 +79,7 @@ def main():
     meta = {
         "argv": sys.argv,
         "out_dir": str(out_dir_path),
-        "validation": val,
+        "validation": _meta,
     }
     with open(out_dir_path / "run_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)

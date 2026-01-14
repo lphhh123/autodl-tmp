@@ -1,6 +1,4 @@
-"""Deprecated phase 3 entry point (do not use)."""
-
+# proj_ast2_ucf101_full/scripts/run_version_c_phase3.py
 raise RuntimeError(
-    "DEPRECATED: scripts/run_version_c_phase3.py is deprecated. "
-    "Use scripts/run_version_c.py instead."
+    "run_version_c_phase3.py 已废弃（会调用旧 trainers/version_c）。请使用：scripts/run_version_c.py"
 )

@@ -6,7 +6,6 @@ import math
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import random
 
 import numpy as np
 
@@ -17,17 +16,17 @@ from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
 from utils.data_ucf101 import UCF101Dataset
-from hw_proxy.hw_loss import compute_hw_loss
+from hw_proxy.hw_loss import compute_hw_loss_generic
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.sites import build_sites
 from layout.wafer_layout import WaferLayout
 from mapping.mapping_solver import MappingSolver
 from mapping.partitioner import PartitionPlanner
+from mapping.segments import build_segments_from_model
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
-from utils.lambda_hw import resolve_lambda_hw
 from utils.seed import seed_everything
 
 
@@ -220,12 +219,16 @@ def _export_layout_input(
         raise ValueError(
             f"[export_layout_input] traffic must be (S,S)=({S},{S}), got {traffic.shape}"
         )
-    sigma_mm = float(getattr(cfg.layout_seed, "sigma_mm", 20.0)) if hasattr(cfg, "layout_seed") else 20.0
+    sigma_mm = float(getattr(getattr(cfg, "layout", None), "sigma_mm", 20.0))
+    sw = getattr(getattr(cfg, "layout", None), "scalar_weights", None)
+    w_comm = float(getattr(sw, "w_comm", 0.7)) if sw is not None else 0.7
+    w_therm = float(getattr(sw, "w_therm", 0.3)) if sw is not None else 0.3
+    w_penalty = float(getattr(sw, "w_penalty", 1000.0)) if sw is not None else 1000.0
     rng = np.random.default_rng(seed)
     baseline_eval = LayoutEvaluator(
         sigma_mm=sigma_mm,
         baseline={"L_comm_baseline": 1.0, "L_therm_baseline": 1.0},
-        scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+        scalar_w={"w_comm": w_comm, "w_therm": w_therm, "w_penalty": w_penalty},
     )
     layout_state = LayoutState(
         S=S,
@@ -241,7 +244,7 @@ def _export_layout_input(
     baseline_eval = LayoutEvaluator(
         sigma_mm=sigma_mm,
         baseline={"L_comm_baseline": base_res["L_comm"], "L_therm_baseline": base_res["L_therm"]},
-        scalar_w={"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+        scalar_w={"w_comm": w_comm, "w_therm": w_therm, "w_penalty": w_penalty},
     )
     seed_cfg = getattr(cfg, "layout_seed", None)
     method = getattr(seed_cfg, "method", "grid") if seed_cfg is not None else "grid"
@@ -327,7 +330,7 @@ def _export_layout_input(
         "seed": {"assign_seed": assign_seed.tolist(), "micro_place_stats": micro_stats},
         "objective_cfg": {
             "sigma_mm": sigma_mm,
-            "scalar_weights": {"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+            "scalar_weights": {"w_comm": w_comm, "w_therm": w_therm, "w_penalty": w_penalty},
         },
     }
 
@@ -457,6 +460,74 @@ def _solve_layout_for_cache(
     return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
+def compute_hw_loss(
+    cfg,
+    model: torch.nn.Module,
+    chiplet_slots: ChipletSlots,
+    mapping_solver: MappingSolver,
+    hw_proxy: LayerHwProxy,
+    wafer_layout: WaferLayout,
+    model_info: Optional[Dict[str, Any]] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    slot_out = chiplet_slots(hard=False)
+    eff_specs = slot_out["eff_specs"]
+    alpha = slot_out["alpha"]
+    partition_cfg = getattr(cfg, "partition", None)
+    segments = build_segments_from_model(
+        model,
+        partition_cfg,
+        model_info=model_info,
+        precision=int(getattr(cfg.hw, "precision", 1)),
+    )
+
+    L_hw_norm, hw_basic_stats, mapping = compute_hw_loss_generic(
+        segments=segments,
+        eff_specs=eff_specs,
+        hw_proxy=hw_proxy,
+        mapping_solver=mapping_solver,
+        hw_cfg=cfg.hw,
+        layout_positions=wafer_layout.current_pos_continuous(),
+    )
+    total_latency_ms = hw_basic_stats["total_latency_ms"].to(alpha.device)
+    total_energy_j = hw_basic_stats["total_energy_j"].to(alpha.device)
+    peak_mem_mb = hw_basic_stats["peak_mem_mb"].to(alpha.device)
+    comm_ms = hw_basic_stats["comm_ms"].to(alpha.device)
+
+    chip_used_prob = 1.0 - alpha[:, -1]
+    L_chip = float(getattr(cfg.hw, "lambda_chip", 0.0)) * chip_used_prob.sum()
+
+    total_area_mm2 = eff_specs.get("area_mm2", torch.tensor(0.0, device=alpha.device)).sum()
+    area_limit = float(getattr(cfg.hw, "area_limit_mm2", 1e12))
+    L_area = float(getattr(cfg.hw, "lambda_area", 0.0)) * torch.relu(total_area_mm2 - area_limit)
+
+    L_layout = total_latency_ms.new_tensor(0.0)
+    if bool(getattr(cfg.hw, "optimize_layout", False)) and mapping:
+        L_layout, layout_stats = wafer_layout(
+            mapping,
+            segments,
+            eff_specs,
+            lambda_boundary=cfg.hw.lambda_boundary,
+            lambda_overlap=cfg.hw.lambda_overlap,
+            lambda_comm=cfg.hw.lambda_comm_extra,
+            lambda_thermal=cfg.hw.lambda_thermal,
+            distance_scale=1e-9,
+        )
+    else:
+        layout_stats = {}
+
+    L_hw = L_hw_norm + L_chip + L_area + L_layout
+    hw_stats = {
+        "hw_latency_ms": float(total_latency_ms),
+        "hw_energy_mj": float(total_energy_j * 1e3),
+        "hw_mem_mb": float(peak_mem_mb),
+        "hw_comm_ms": float(comm_ms),
+        "hw_chip_count": float(chip_used_prob.sum().item()),
+        "hw_area_mm2": float(total_area_mm2),
+    }
+    hw_stats.update({f"layout_{k}": float(v) for k, v in layout_stats.items()})
+    return L_hw, hw_stats
+
+
 def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional[str] = None):
     device = get_device(cfg.train.device)
     device_type = device.type
@@ -539,7 +610,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
     last_mapping: List[int] = []
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    stable_hw_state: Dict[str, Any] = {"lambda_hw": resolve_lambda_hw(cfg, stable_hw_state=None)}
+    stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0))}
     stable_hw_state.setdefault(
         "discrete_cache",
         {
@@ -616,13 +687,15 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
                 hw_loss, hw_stats = compute_hw_loss(
                     cfg,
-                    hw_proxy,
+                    model=model,
+                    chiplet_slots=chiplet_slots,
+                    mapping_solver=mapping_solver,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
                     model_info=model_info,
-                    stable_hw_cfg=stable_hw_cfg if isinstance(stable_hw_cfg, dict) else None,
-                    stable_hw_state=stable_hw_state,
                 )
                 last_hw_stats = hw_stats
-                lambda_hw = resolve_lambda_hw(cfg, stable_hw_state)
+                lambda_hw = float(stable_hw_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
                 L_hw = logits.new_tensor(hw_loss)
                 hw_term = float(lambda_hw) * L_hw if not twostage else L_hw.new_tensor(0.0)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
@@ -699,10 +772,12 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     model_info = last_info.get("model_info", {})
                 hw_loss, _ = compute_hw_loss(
                     cfg,
-                    hw_proxy,
+                    model=model,
+                    chiplet_slots=chiplet_slots,
+                    mapping_solver=mapping_solver,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
                     model_info=model_info,
-                    stable_hw_cfg=stable_hw_cfg if isinstance(stable_hw_cfg, dict) else None,
-                    stable_hw_state=stable_hw_state,
                 )
                 L_hw = torch.tensor(hw_loss, device=device, requires_grad=True)
                 optimizer_alpha.zero_grad()

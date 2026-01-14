@@ -56,36 +56,51 @@ class MappingSolver:
             device_time[d] = device_time.get(d, 0.0) + cost_lat[k, d].item()
         return max(device_time.values()) if device_time else 0.0
 
-    def solve_mapping(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor], proxy: LayerHwProxy, layout_positions: Optional[torch.Tensor] = None, strategy: str = "greedy_local", distance_scale_ms: float = 0.0) -> Dict:
-        cost = self.build_cost_matrix(segments, eff_specs, proxy)
+    def solve_mapping_from_cost(
+        self,
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        cost: Dict[str, torch.Tensor],
+        layout_positions: Optional[torch.Tensor] = None,
+        strategy: str = "greedy_local",
+        distance_scale_ms: float = 0.0,
+        mem_limit_factor: Optional[float] = None,
+    ) -> Dict:
         lat_ms = cost["lat_ms"]
         mem_mb = cost["mem_mb"]
         K, S = lat_ms.shape
         mapping = [k % S for k in range(K)]
         current_latency = self.estimate_pipeline_latency(mapping, lat_ms)
         improved = True
-        while improved:
-            improved = False
-            for k in range(K):
-                curr_d = mapping[k]
-                best_d = curr_d
-                best_latency = current_latency
-                for d in range(S):
-                    if d == curr_d:
-                        continue
-                    if self._violates_mem(mapping, k, d, mem_mb, eff_specs):
-                        continue
-                    old_d = mapping[k]
-                    mapping[k] = d
-                    new_latency = self.estimate_pipeline_latency(mapping, lat_ms)
-                    if new_latency + 1e-6 < best_latency:
-                        best_latency = new_latency
-                        best_d = d
-                    mapping[k] = old_d
-                if best_d != curr_d:
-                    mapping[k] = best_d
-                    current_latency = best_latency
-                    improved = True
+        limit_factor = float(mem_limit_factor) if mem_limit_factor is not None else float(self.mem_limit_factor)
+        old_factor = self.mem_limit_factor
+        self.mem_limit_factor = limit_factor
+        try:
+            while improved:
+                improved = False
+                for k in range(K):
+                    curr_d = mapping[k]
+                    best_d = curr_d
+                    best_latency = current_latency
+                    for d in range(S):
+                        if d == curr_d:
+                            continue
+                        if self._violates_mem(mapping, k, d, mem_mb, eff_specs):
+                            continue
+                        old_d = mapping[k]
+                        mapping[k] = d
+                        new_latency = self.estimate_pipeline_latency(mapping, lat_ms)
+                        if new_latency + 1e-6 < best_latency:
+                            best_latency = new_latency
+                            best_d = d
+                        mapping[k] = old_d
+                    if best_d != curr_d:
+                        mapping[k] = best_d
+                        current_latency = best_latency
+                        improved = True
+        finally:
+            self.mem_limit_factor = old_factor
+
         device_time = {s: 0.0 for s in range(S)}
         for k, d in enumerate(mapping):
             device_time[d] += lat_ms[k, d].item()
@@ -96,11 +111,27 @@ class MappingSolver:
                 if d1 == d2:
                     continue
                 dist = torch.norm(layout_positions[d1] - layout_positions[d2]).item()
-                traffic = segments[k].traffic_out_bytes
+                traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
                 eff_bw = min(eff_specs["peak_bw"][d1].item(), eff_specs["peak_bw"][d2].item()) if "peak_bw" in eff_specs else 1.0
                 base_time = traffic / (eff_bw + 1e-9) * 1e3
-                comm_ms += base_time + dist * distance_scale_ms
-        return {"mapping": mapping, "per_slot_time_ms": device_time, "total_latency_ms": current_latency, "comm_ms": comm_ms}
+                comm_ms += base_time + dist * float(distance_scale_ms)
+        return {
+            "mapping": mapping,
+            "per_slot_time_ms": device_time,
+            "total_latency_ms": lat_ms.new_tensor(current_latency),
+            "comm_ms": lat_ms.new_tensor(comm_ms),
+        }
+
+    def solve_mapping(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor], proxy: LayerHwProxy, layout_positions: Optional[torch.Tensor] = None, strategy: str = "greedy_local", distance_scale_ms: float = 0.0) -> Dict:
+        cost = self.build_cost_matrix(segments, eff_specs, proxy)
+        return self.solve_mapping_from_cost(
+            segments=segments,
+            eff_specs=eff_specs,
+            cost=cost,
+            layout_positions=layout_positions,
+            strategy=strategy,
+            distance_scale_ms=distance_scale_ms,
+        )
 
     def build_traffic_matrix(
         self,

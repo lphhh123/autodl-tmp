@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HEURAGENIX_ROOT = ROOT / "HeurAgenix"
+HEURAGENIX_ROOT = ROOT.parent / "HeurAgenix"
 sys.path.insert(0, str(HEURAGENIX_ROOT))
 sys.path.insert(0, str(HEURAGENIX_ROOT / "src"))
 
-from core import BaseEnv, BaseOperator, BaseSolution  # noqa: E402
+from src.core import BaseEnv, BaseOperator, BaseSolution  # noqa: E402
 from pipeline.hyper_heuristics import RandomHyperHeuristic  # noqa: E402
 
 
