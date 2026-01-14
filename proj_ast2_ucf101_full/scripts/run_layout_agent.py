@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -216,22 +217,18 @@ def _parse_segments(raw_segments) -> list[Segment]:
     return segments
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--layout_input", type=str, required=True)
-    parser.add_argument("--cfg", type=str, required=True)
-    parser.add_argument("--out_dir", type=str, required=True)
-    parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args()
-
-    layout_input = load_layout_input(Path(args.layout_input))
-    cfg = load_config(args.cfg)
-    out_dir = Path(args.out_dir)
+def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Path | None = None) -> None:
+    if layout_input_path is None:
+        layout_input_path = getattr(cfg, "layout_input", None)
+    if not layout_input_path:
+        raise RuntimeError("Missing layout_input: please set cfg.layout_input or pass layout_input_path")
+    layout_input = load_layout_input(Path(layout_input_path))
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "llm_usage.jsonl").touch(exist_ok=True)
 
     start_time = time.time()
-    seed_everything(int(args.seed))
+    seed_everything(int(seed))
 
     wafer_radius = float(layout_input["wafer"]["radius_mm"])
     sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
@@ -365,7 +362,7 @@ def main():
             pareto=pareto,
             cfg=detailed_cfg,
             trace_path=out_dir / "trace.csv",
-            seed_id=int(args.seed),
+            seed_id=int(seed),
             chip_tdp=chip_tdp,
             llm_usage_path=out_dir / "llm_usage.jsonl",
         )
@@ -453,6 +450,46 @@ def main():
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cfg", type=str, default="./configs/layout_agent/layout_L0_heuristic.yaml")
+    parser.add_argument("--out_dir", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+
+    cfg = load_config(args.cfg)
+    seed_everything(int(args.seed))
+
+    # auto out_dir if not provided
+    cfg_stem = Path(args.cfg).stem
+    auto_out = Path("outputs/layout_agent") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # sync cfg.train.out_dir
+    if hasattr(cfg, "train"):
+        cfg.train.out_dir = str(out_dir)
+
+    # dump config_used
+    try:
+        (out_dir / "config_used.yaml").write_text(Path(args.cfg).read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+
+    # dump resolved config
+    try:
+        import omegaconf
+        (out_dir / "config_resolved.yaml").write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
+    except Exception:
+        (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
+
+    # run meta
+    meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
+    (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    run_layout_agent(cfg, out_dir=out_dir, seed=int(args.seed))
 
 
 if __name__ == "__main__":

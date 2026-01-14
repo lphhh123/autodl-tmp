@@ -918,15 +918,34 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--layout_input", type=str, required=True)
     parser.add_argument("--cfg", type=str, required=True)
-    parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
+    cfg_stem = Path(args.cfg).stem
+    auto_out = Path("outputs/layout_heuragenix") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if hasattr(cfg, "train"):
+        cfg.train.out_dir = str(out_dir)
+
+    # dump config_used
+    try:
+        (out_dir / "config_used.yaml").write_text(Path(args.cfg).read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+    # dump resolved config
+    try:
+        import omegaconf
+        (out_dir / "config_resolved.yaml").write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
+    except Exception:
+        (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
+    meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
+    (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
     layout_input_path = Path(args.layout_input)
     layout_input = _load_layout_input(layout_input_path)
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     seed = int(args.seed)
     seed_everything(seed)

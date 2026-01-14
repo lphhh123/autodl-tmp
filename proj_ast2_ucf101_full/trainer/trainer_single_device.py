@@ -21,6 +21,7 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.config_utils import get_nested
+from utils.stable_hw import stable_hw_schedule, apply_accuracy_guard, init_or_update_hw_refs_from_stats
 
 
 def _as_float(val, name: str) -> float:
@@ -35,60 +36,6 @@ def _seed_worker(worker_id: int, base_seed: int) -> None:
     seed = base_seed + worker_id
     random.seed(seed)
     np.random.seed(seed)
-
-
-def stable_hw_schedule(epoch: int, stable_hw_cfg, state) -> None:
-    sched = get_nested(stable_hw_cfg, "lambda_hw_schedule", None)
-    if sched is None or not bool(get_nested(sched, "enabled", True)):
-        state["lambda_hw"] = 0.0
-        state["schedule_phase"] = "disabled"
-        return
-    warmup = int(get_nested(sched, "warmup_epochs", 0))
-    ramp = int(get_nested(sched, "ramp_epochs", 0))
-    lam_max = float(get_nested(sched, "lambda_hw_max", 0.0))
-    if epoch < warmup:
-        lam = 0.0
-        phase = "warmup"
-    elif epoch < warmup + ramp:
-        prog = (epoch - warmup + 1) / max(1, ramp)
-        lam = lam_max * prog
-        phase = "ramp"
-    else:
-        lam = lam_max
-        phase = "stabilize"
-    state["lambda_hw"] = float(lam)
-    state["schedule_phase"] = phase
-
-
-def apply_accuracy_guard(acc1: float, stable_hw_cfg, state) -> None:
-    guard = get_nested(stable_hw_cfg, "accuracy_guard", None)
-    if guard is None or not bool(get_nested(guard, "enabled", True)):
-        return
-    baseline = state.get("acc_baseline")
-    if baseline is None:
-        state["acc_baseline"] = float(acc1)
-        baseline = state["acc_baseline"]
-    use_ema = bool(get_nested(guard, "use_ema", True))
-    if use_ema:
-        beta = float(get_nested(guard, "ema_beta", 0.8))
-        prev = state.get("acc_ema", float(acc1))
-        state["acc_ema"] = float(beta * prev + (1 - beta) * acc1)
-        current = state["acc_ema"]
-    else:
-        current = float(acc1)
-    drop = float(baseline - current)
-    state["acc_drop"] = drop
-    eps = float(get_nested(guard, "epsilon_drop", 0.01))
-    if drop > eps:
-        onv = get_nested(guard, "on_violate", None)
-        scale = float(get_nested(onv, "scale_lambda_hw", 0.5) if onv else 0.5)
-        state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
-        state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
-        maxc = int(get_nested(onv, "max_consecutive", 3) if onv else 3)
-        if state["violate_streak"] >= maxc:
-            state["lambda_hw"] = 0.0
-    else:
-        state["violate_streak"] = 0
 
 
 def build_dataloaders(cfg):
@@ -176,7 +123,14 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     scaler = GradScaler(enabled=cfg.train.amp)
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    stable_state = {"lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0))}
+    stable_state = {
+        "lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0)),
+        "refs_inited": False,
+        "ref_T": 1.0,
+        "ref_E": 1.0,
+        "ref_M": 1.0,
+        "ref_C": 1.0,
+    }
 
     best_acc = 0.0
     last_acc = 0.0
@@ -205,8 +159,14 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     stable_hw_cfg=stable_hw_cfg,
                     stable_hw_state=stable_state,
                 )
+                if stable_hw_cfg:
+                    init_or_update_hw_refs_from_stats(
+                        stable_hw_cfg,
+                        stable_state,
+                        {k: float(v) for k, v in hw_stats.items()},
+                    )
 
-                lambda_hw = float(stable_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
+                lambda_hw = float(stable_state.get("lambda_hw", 0.0))
                 L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
 
                 loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw * L_hw
