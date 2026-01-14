@@ -161,19 +161,70 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     stable_hw.setdefault("normalize", {})
     norm = stable_hw["normalize"]
+    missing_targets = [
+        name
+        for name in ("target_ratio_T", "target_ratio_E", "target_ratio_M", "target_ratio_C")
+        if name not in norm
+    ]
     norm.setdefault("mode", "hinge_log_ratio")
     norm.setdefault("ema_beta", 0.95)
     norm.setdefault("eps", 1e-9)
     norm.setdefault("clip_term_max", 10.0)
     norm.setdefault("mem_hinge_only", True)
-    norm.setdefault("wT", 1.0)
-    norm.setdefault("wE", 0.0)
-    norm.setdefault("wM", 0.0)
-    norm.setdefault("wC", 0.0)
-    norm.setdefault("target_ratio_T", 1.0)
-    norm.setdefault("target_ratio_E", 1.0)
-    norm.setdefault("target_ratio_M", 1.0)
-    norm.setdefault("target_ratio_C", 1.0)
+    norm.setdefault("wT", 0.2)
+    norm.setdefault("wE", 0.2)
+    norm.setdefault("wM", 0.4)
+    norm.setdefault("wC", 0.2)
+    norm.setdefault("target_ratio_T", 0.9)
+    norm.setdefault("target_ratio_E", 0.9)
+    norm.setdefault("target_ratio_M", 0.9)
+    norm.setdefault("target_ratio_C", 0.9)
+
+    if stable_hw.get("enabled") and missing_targets:
+        print(
+            "[WARN] stable_hw.enabled=True but missing normalize target ratios "
+            f"{missing_targets}; using spec defaults (0.9)."
+        )
+
+    if stable_hw.get("enabled"):
+        target_ratios = [
+            ("target_ratio_T", norm.get("target_ratio_T")),
+            ("target_ratio_E", norm.get("target_ratio_E")),
+            ("target_ratio_M", norm.get("target_ratio_M")),
+            ("target_ratio_C", norm.get("target_ratio_C")),
+        ]
+        for name, value in target_ratios:
+            try:
+                ratio = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"stable_hw.normalize.{name} must be a float in (0, 1].") from exc
+            if ratio <= 0.0 or ratio > 1.0:
+                raise ValueError(f"stable_hw.normalize.{name} must be in (0, 1].")
+
+        weights = [
+            ("wT", norm.get("wT")),
+            ("wE", norm.get("wE")),
+            ("wM", norm.get("wM")),
+            ("wC", norm.get("wC")),
+        ]
+        weight_sum = 0.0
+        for name, value in weights:
+            try:
+                weight = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"stable_hw.normalize.{name} must be a non-negative float.") from exc
+            if weight < 0.0:
+                raise ValueError(f"stable_hw.normalize.{name} must be non-negative.")
+            weight_sum += weight
+        if weight_sum <= 0.0:
+            raise ValueError("stable_hw.normalize weights must sum to a positive value.")
+
+        mode_value = str(norm.get("mode", ""))
+        allowed_modes = {"ratio", "log_ratio", "hinge_log_ratio"}
+        if mode_value not in allowed_modes:
+            raise ValueError(
+                f"stable_hw.normalize.mode must be one of {sorted(allowed_modes)}; got {mode_value!r}."
+            )
 
     stable_hw.setdefault("discrete_isolation", {})
     iso = stable_hw["discrete_isolation"]

@@ -491,7 +491,12 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0))}
-    stable_hw_state.setdefault("ref_C", 0.0)
+
+    # refs MUST start as None, and be initialized from first measured hw_stats via update_hw_refs_from_stats()
+    stable_hw_state.setdefault("ref_T", None)
+    stable_hw_state.setdefault("ref_E", None)
+    stable_hw_state.setdefault("ref_M", None)
+    stable_hw_state.setdefault("ref_C", None)
     stable_hw_state.setdefault(
         "discrete_cache",
         {
@@ -682,8 +687,9 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     mapping_solver=mapping_solver,
                 )
 
+                lambda_hw = float(stable_hw_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
                 optimizer_alpha.zero_grad()
-                L_hw.backward()
+                (loss_alpha := (float(lambda_hw) * L_hw)).backward()
                 optimizer_alpha.step()
 
         # Step D: layout refinement

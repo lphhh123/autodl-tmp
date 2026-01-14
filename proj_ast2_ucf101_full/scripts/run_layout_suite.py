@@ -28,10 +28,15 @@ def run_layout_suite(inputs: List[str], cfgs: List[str], seeds: List[int], out_r
 
         start = time.perf_counter()
         try:
+            cfg_path_str = str(cfg).lower()
+            if "heuragenix" in cfg_path_str:
+                script = Path(__file__).parent / "run_layout_heuragenix.py"
+            else:
+                script = Path(__file__).parent / "run_layout_agent.py"
             subprocess.run(
                 [
                     "python",
-                    str(Path(__file__).parent / "run_layout_agent.py"),
+                    str(script),
                     "--layout_input",
                     str(layout_input),
                     "--cfg",
