@@ -130,21 +130,48 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             },
         )
 
-    # ---- stable_hw defaults (MUST be complete to avoid AttributeError) ----
-    stable_hw = cfg.get("stable_hw", {}) or {}
-    sched = stable_hw.get("lambda_hw_schedule", {}) or {}
+    # ---- stable_hw defaults ----
+    if "stable_hw" not in cfg:
+        cfg["stable_hw"] = {}
 
-    # keep existing if provided
-    stable_hw.setdefault("enabled", True)
-    stable_hw.setdefault("loss_type", "log1p")
-    stable_hw.setdefault("lambda_hw_schedule", sched)
+    stable_hw = cfg["stable_hw"]
+    hw = cfg.get("hw", {})
 
+    if "enabled" not in stable_hw:
+        stable_hw["enabled"] = bool(
+            float(hw.get("lambda_hw_max", hw.get("lambda_hw", 0.0))) > 0.0
+        )
+
+    stable_hw.setdefault("lambda_hw_schedule", {})
+    sched = stable_hw["lambda_hw_schedule"]
     sched.setdefault("enabled", True)
     sched.setdefault("warmup_epochs", 0)
-    sched.setdefault("ramp_epochs", 0)
-    sched.setdefault("lambda_hw_max", 0.0)
-    sched.setdefault("clamp_min", 0.0)
-    sched.setdefault("clamp_max", 1.0)
+    sched.setdefault("ramp_epochs", 5)
+    sched.setdefault("phase_name", "warmup_ramp")
+
+    stable_hw.setdefault("normalize", {})
+    norm = stable_hw["normalize"]
+    norm.setdefault("mode", "hinge_log_ratio")
+    norm.setdefault("ema_beta", 0.95)
+    norm.setdefault("eps", 1e-9)
+    norm.setdefault("clip_term_max", 10.0)
+    norm.setdefault("mem_hinge_only", True)
+    norm.setdefault("wT", 1.0)
+    norm.setdefault("wE", 0.0)
+    norm.setdefault("wM", 0.0)
+    norm.setdefault("wC", 0.0)
+    norm.setdefault("target_ratio_T", 1.0)
+    norm.setdefault("target_ratio_E", 1.0)
+    norm.setdefault("target_ratio_M", 1.0)
+    norm.setdefault("target_ratio_C", 1.0)
+
+    stable_hw.setdefault("discrete_isolation", {})
+    iso = stable_hw["discrete_isolation"]
+    iso.setdefault("use_cached_mapping_for_inner_steps", True)
+    iso.setdefault("use_cached_layout_for_inner_steps", True)
+    iso.setdefault("mapping_update_every_epochs", 1)
+    iso.setdefault("layout_update_every_epochs", 1)
+    iso.setdefault("track_live_segments", False)
 
     # accuracy_guard defaults (Version-C trainer uses attribute access)
     guard = stable_hw.get("accuracy_guard", {}) or {}

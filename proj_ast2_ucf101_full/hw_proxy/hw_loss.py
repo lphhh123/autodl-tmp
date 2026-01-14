@@ -19,22 +19,16 @@ def _safe_ref(x: float) -> float:
     return float(max(1e-6, x))
 
 
-def _normalize_metric(x: torch.Tensor, ref: float, mode: str, hinge_eps: float = 0.0) -> torch.Tensor:
-    """
-    ratio: x/ref
-    hinge_log_ratio: max(0, log(x/ref) - hinge_eps)
-      - hinge_eps 可以用于允许轻微超标而不罚
-      - 保证数值稳定：x/ref >= 1e-12
-    """
-    refv = _safe_ref(ref)
-    if mode == "ratio":
-        return x / refv
-    # default hinge_log_ratio
-    r = torch.clamp(x / refv, min=1e-12)
-    v = torch.log(r)
-    if hinge_eps > 0:
-        v = v - float(hinge_eps)
-    return torch.clamp(v, min=0.0)
+def _hinge_log_ratio(
+    x: float, ref: float, target_ratio: float, eps: float, clip_term_max: float
+) -> float:
+    import math
+
+    r = float(x) / max(float(ref) + float(eps), float(eps))
+    t = max(0.0, math.log(max(r, eps)) - math.log(max(float(target_ratio), eps)))
+    if clip_term_max is not None and clip_term_max > 0:
+        t = min(t, float(clip_term_max))
+    return t
 
 
 def compute_hw_loss(
@@ -66,13 +60,14 @@ def compute_hw_loss(
     wC = float(get_nested(norm_cfg, "wC", 0.0)) if norm_cfg is not None else 0.0
 
     mode = str(get_nested(norm_cfg, "mode", "hinge_log_ratio")) if norm_cfg is not None else "hinge_log_ratio"
-    hinge_eps = float(get_nested(norm_cfg, "hinge_eps", 0.0)) if norm_cfg is not None else 0.0
+    eps = float(get_nested(norm_cfg, "eps", 1e-9)) if norm_cfg is not None else 1e-9
+    clip_term_max = float(get_nested(norm_cfg, "clip_term_max", 10.0)) if norm_cfg is not None else 10.0
+    mem_hinge_only = bool(get_nested(norm_cfg, "mem_hinge_only", True)) if norm_cfg is not None else True
 
-    state = stable_hw_state or {}
-    ref_T = float(state.get("ref_T", 1.0))
-    ref_E = float(state.get("ref_E", 1.0))
-    ref_M = float(state.get("ref_M", 1.0))
-    ref_C = float(state.get("ref_C", 1.0))
+    tT = float(get_nested(norm_cfg, "target_ratio_T", 1.0)) if norm_cfg is not None else 1.0
+    tE = float(get_nested(norm_cfg, "target_ratio_E", 1.0)) if norm_cfg is not None else 1.0
+    tM = float(get_nested(norm_cfg, "target_ratio_M", 1.0)) if norm_cfg is not None else 1.0
+    tC = float(get_nested(norm_cfg, "target_ratio_C", 1.0)) if norm_cfg is not None else 1.0
 
     # ---- base metrics ----
     hw_latency_ms = _as_t(0.0, device)
@@ -145,28 +140,53 @@ def compute_hw_loss(
         hw_mem_mb = _as_t(pred.get("mem_mb", 0.0), device)
         hw_energy_mj = _as_t(pred.get("energy_mj", 0.0), device)
 
-    # normalized objective (SPEC: hinge-log-ratio default)
-    Tn = _normalize_metric(hw_latency_ms, ref_T, mode=mode, hinge_eps=hinge_eps)
-    En = _normalize_metric(hw_energy_mj, ref_E, mode=mode, hinge_eps=hinge_eps)
-    Mn = _normalize_metric(hw_mem_mb, ref_M, mode=mode, hinge_eps=hinge_eps)
-    Cn = _normalize_metric(hw_comm_ms, ref_C, mode=mode, hinge_eps=hinge_eps)
+    state = stable_hw_state or {}
+    ref_T = float(state.get("ref_T", max(1e-6, float(hw_latency_ms.detach().cpu().item()))))
+    ref_E = float(state.get("ref_E", max(1e-6, float(hw_energy_mj.detach().cpu().item()))))
+    ref_M = float(state.get("ref_M", max(1e-6, float(hw_mem_mb.detach().cpu().item()))))
+    ref_C = float(state.get("ref_C", max(1e-6, float(hw_comm_ms.detach().cpu().item()))))
 
-    L_hw = _as_t(wT, device) * Tn + _as_t(wE, device) * En + _as_t(wM, device) * Mn + _as_t(wC, device) * Cn
+    if mode != "hinge_log_ratio":
+        mode = "hinge_log_ratio"
+
+    term_T = _hinge_log_ratio(
+        float(hw_latency_ms.detach().cpu().item()), ref_T, tT, eps, clip_term_max
+    )
+    term_E = _hinge_log_ratio(
+        float(hw_energy_mj.detach().cpu().item()), ref_E, tE, eps, clip_term_max
+    )
+    term_M = _hinge_log_ratio(
+        float(hw_mem_mb.detach().cpu().item()), ref_M, tM, eps, clip_term_max
+    )
+    term_C = _hinge_log_ratio(
+        float(hw_comm_ms.detach().cpu().item()), ref_C, tC, eps, clip_term_max
+    )
+
+    if mem_hinge_only:
+        term_M = term_M
+
+    L_hw_norm = wT * term_T + wE * term_E + wM * term_M + wC * term_C
+    L_hw = _as_t(L_hw_norm, device)
 
     stats = {
         "hw_latency_ms": float(hw_latency_ms.detach().cpu().item()),
         "hw_energy_mj": float(hw_energy_mj.detach().cpu().item()),
         "hw_mem_mb": float(hw_mem_mb.detach().cpu().item()),
         "hw_comm_ms": float(hw_comm_ms.detach().cpu().item()),
-        "hw_norm_T": float(Tn.detach().cpu().item()),
-        "hw_norm_E": float(En.detach().cpu().item()),
-        "hw_norm_M": float(Mn.detach().cpu().item()),
-        "hw_norm_C": float(Cn.detach().cpu().item()),
+        "ref_T": float(ref_T),
+        "ref_E": float(ref_E),
+        "ref_M": float(ref_M),
+        "ref_C": float(ref_C),
+        "term_T": float(term_T),
+        "term_E": float(term_E),
+        "term_M": float(term_M),
+        "term_C": float(term_C),
         "hw_wT": float(wT),
         "hw_wE": float(wE),
         "hw_wM": float(wM),
         "hw_wC": float(wC),
         "hw_norm_mode": str(mode),
-        "hw_hinge_eps": float(hinge_eps),
+        "hw_clip_term_max": float(clip_term_max),
+        "hw_mem_hinge_only": bool(mem_hinge_only),
     }
     return L_hw, stats

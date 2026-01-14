@@ -110,3 +110,24 @@ def init_or_update_hw_refs_from_stats(
     state["ref_E"] = beta * float(state.get("ref_E", eng if eng > 0 else 1.0)) + (1 - beta) * (eng if eng > 0 else 1.0)
     state["ref_M"] = beta * float(state.get("ref_M", mem if mem > 0 else 1.0)) + (1 - beta) * (mem if mem > 0 else 1.0)
     state["ref_C"] = beta * float(state.get("ref_C", comm if comm > 0 else 1.0)) + (1 - beta) * (comm if comm > 0 else 1.0)
+
+
+def update_hw_refs_from_stats(stable_hw_state: dict, stable_hw_cfg: Any, hw_stats: dict) -> None:
+    """
+    Update refs (ref_T/ref_E/ref_M/ref_C) by EMA using cfg.stable_hw.normalize.ema_beta.
+    """
+    if not stable_hw_cfg or not getattr(stable_hw_cfg, "enabled", False):
+        return
+    norm = getattr(stable_hw_cfg, "normalize", None)
+    beta = float(getattr(norm, "ema_beta", 0.95)) if norm else 0.95
+
+    def _ema(key: str, x: float) -> None:
+        if x <= 0:
+            return
+        old = float(stable_hw_state.get(key, x))
+        stable_hw_state[key] = beta * old + (1.0 - beta) * float(x)
+
+    _ema("ref_T", float(hw_stats.get("hw_latency_ms", 0.0)))
+    _ema("ref_E", float(hw_stats.get("hw_energy_mj", 0.0)))
+    _ema("ref_M", float(hw_stats.get("hw_mem_mb", 0.0)))
+    _ema("ref_C", float(hw_stats.get("hw_comm_ms", 0.0)))
