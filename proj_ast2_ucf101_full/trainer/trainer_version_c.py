@@ -413,7 +413,9 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
     device_type = device.type
     seed_everything(int(getattr(cfg.train, "seed", 0)))
     logger = setup_logger()
-    log_path = Path("logs/version_c_stats.jsonl")
+    out_dir = Path(export_dir) if export_dir else Path("outputs/version_c")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "logs" / "version_c_stats.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     loader = build_dataloader(cfg)
@@ -490,13 +492,11 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
     last_mapping: List[int] = []
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    stable_hw_state: Dict[str, Any] = {"lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0))}
-
-    # refs MUST start as None, and be initialized from first measured hw_stats via update_hw_refs_from_stats()
-    stable_hw_state.setdefault("ref_T", None)
-    stable_hw_state.setdefault("ref_E", None)
-    stable_hw_state.setdefault("ref_M", None)
-    stable_hw_state.setdefault("ref_C", None)
+    stable_hw_state: Dict[str, Any] = {
+        "lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0)),
+        "refs_inited": False,
+        "ref_source": "unset",
+    }
     stable_hw_state.setdefault(
         "discrete_cache",
         {
@@ -507,6 +507,9 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
         },
     )
     run_state: Dict[str, Any] = {"last_model_info": None}
+    last_acc1: Optional[float] = None
+    best_acc1: Optional[float] = None
+    last_hw_stats = None
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
@@ -572,6 +575,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 L_task = F.cross_entropy(logits, y)
                 model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
                 slot_out = chiplet_slots(hard=False)
+                alpha = slot_out["alpha"]
                 eff_specs = slot_out["eff_specs"]
                 layout_positions = wafer_layout.current_pos_continuous()
 
@@ -589,6 +593,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
                     mapping_solver=mapping_solver,
+                    wafer_layout=wafer_layout,
+                    alpha=alpha,
                 )
                 last_hw_stats = hw_stats
                 lambda_hw = float(stable_hw_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
@@ -622,6 +628,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 if stable_hw_cfg:
                     apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_hw_state)
+                last_acc1 = float(acc1.item())
+                best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
                 stats = {
                     "outer": outer,
                     "step": step,
@@ -642,9 +650,9 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                         "step": int(global_step),
                         "outer": int(outer),
                         "loss": float(loss.item()),
-                        "lat_ms": float(hw_stats.get("hw_latency_ms", 0.0)),
-                        "energy_mj": float(hw_stats.get("hw_energy_mj", 0.0)),
-                        "mem_mb": float(hw_stats.get("hw_mem_mb", 0.0)),
+                        "lat_ms": float(hw_stats.get("latency_ms", 0.0)),
+                        "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
+                        "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
                         "lambda_hw": float(lambda_hw),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
                         "schedule_phase": stable_hw_state.get("schedule_phase"),
@@ -657,8 +665,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     }) + "\n")
             global_step += 1
 
-        if stable_hw_cfg and last_hw_stats:
-            update_hw_refs_from_stats(stable_hw_state, stable_hw_cfg, last_hw_stats)
+        if stable_hw_cfg and last_hw_stats is not None:
+            update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats)
 
         # Step B: alpha refinement
         if update_alpha:
@@ -668,6 +676,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 if isinstance(last_info, dict):
                     model_info = last_info.get("model_info", {})
                 slot_out = chiplet_slots(hard=False)
+                alpha = slot_out["alpha"]
                 eff_specs = slot_out["eff_specs"]
                 layout_positions = wafer_layout.current_pos_continuous()
 
@@ -685,6 +694,8 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
                     mapping_solver=mapping_solver,
+                    wafer_layout=wafer_layout,
+                    alpha=alpha,
                 )
 
                 lambda_hw = float(stable_hw_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
@@ -728,6 +739,20 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    metrics = {
+        "stable_hw_disabled": False if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)) else True,
+        "stable_hw_lambda_hw": float(stable_hw_state.get("lambda_hw", 0.0)),
+        "stable_hw_refs_inited": bool(stable_hw_state.get("refs_inited", False)),
+        "stable_hw_ref_source": str(stable_hw_state.get("ref_source", "unset")),
+        "best_acc1": float(best_acc1) if best_acc1 is not None else 0.0,
+        "last_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
+        "last_hw_stats": last_hw_stats if last_hw_stats is not None else {},
+        "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
+        "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
+    }
+    with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     if export_layout_input:
         export_dir_path = Path(export_dir or "outputs/P3")
