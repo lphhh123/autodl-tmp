@@ -8,6 +8,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 
 from .layer_proxy_model import LayerProxyModel
@@ -61,6 +62,53 @@ def build_layer_features(layer_cfg: Dict, device_cfg: Dict) -> np.ndarray:
     return np.array(vec, dtype=np.float32)
 
 
+def _to_t(x, device=None, dtype=torch.float32) -> torch.Tensor:
+    if isinstance(x, torch.Tensor):
+        return x.to(device=device, dtype=dtype)
+    return torch.tensor(float(x), device=device, dtype=dtype)
+
+
+def build_layer_features_torch(layer_cfg: Dict, device_cfg: Dict, device=None) -> torch.Tensor:
+    layer_type_idx = int(layer_cfg.get("layer_type", 3))
+    flops = _to_t(layer_cfg.get("flops", 0.0), device=device)
+    bytes_ = _to_t(layer_cfg.get("bytes", 0.0), device=device)
+    embed_dim = _to_t(layer_cfg.get("embed_dim", 0.0), device=device)
+    num_heads = _to_t(layer_cfg.get("num_heads", 1.0), device=device)
+    mlp_ratio = _to_t(layer_cfg.get("mlp_ratio", 4.0), device=device)
+    seq_len = _to_t(layer_cfg.get("seq_len", 0.0), device=device)
+    precision = _to_t(layer_cfg.get("precision", 1.0), device=device)
+
+    if device_cfg.get("peak_flops_tflops", None) is not None:
+        peak_flops = _to_t(device_cfg["peak_flops_tflops"], device=device) * 1e12
+    else:
+        peak_flops = _to_t(device_cfg.get("peak_flops", 1.0), device=device)
+
+    if device_cfg.get("peak_bw_gbps", None) is not None:
+        peak_bw = _to_t(device_cfg["peak_bw_gbps"], device=device) * 1e9
+    else:
+        peak_bw = _to_t(device_cfg.get("peak_bw", 1.0), device=device)
+
+    v0 = torch.log10(flops + 1.0)
+    v1 = torch.log10(bytes_ + 1.0)
+    v2 = torch.log10(peak_flops + 1.0)
+    v3 = torch.log10(peak_bw + 1.0)
+
+    one_hot = F.one_hot(torch.tensor(layer_type_idx, device=device), num_classes=4).to(torch.float32)
+
+    tail = torch.stack(
+        [
+            embed_dim / 1024.0,
+            num_heads / 16.0,
+            mlp_ratio / 4.0,
+            seq_len / 1024.0,
+            precision,
+        ],
+        dim=0,
+    )
+
+    return torch.cat([torch.stack([v0, v1, v2, v3], dim=0), one_hot, tail], dim=0)
+
+
 class LayerHwProxy:
     def __init__(self, device_name: str, gpu_yaml: str, weight_dir: str):
         with open(gpu_yaml, "r", encoding="utf-8") as f:
@@ -96,6 +144,30 @@ class LayerHwProxy:
         lat = self.lat_model(x).squeeze(-1).detach().cpu().numpy()
         mem = self.mem_model(x).squeeze(-1).detach().cpu().numpy()
         power = self.power_model(x).squeeze(-1).detach().cpu().numpy()
+        return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+
+    def predict_layers_batch_torch(
+        self,
+        layers_cfg: List[Dict],
+        device: torch.device | None = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Differentiable torch path without detaching to numpy."""
+        default_device_cfg = self.gpu_cfg.get(self.device_name, {})
+        dev = device if device is not None else torch.device("cpu")
+
+        feats = []
+        for cfg in layers_cfg:
+            dc = cfg.get("device_cfg", default_device_cfg)
+            feats.append(build_layer_features_torch(cfg, dc, device=dev))
+        x = torch.stack(feats, dim=0).to(torch.float32)
+
+        self.lat_model = self.lat_model.to(dev)
+        self.mem_model = self.mem_model.to(dev)
+        self.power_model = self.power_model.to(dev)
+
+        lat = self.lat_model(x).squeeze(-1)
+        mem = self.mem_model(x).squeeze(-1)
+        power = self.power_model(x).squeeze(-1)
         return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
 
     def predict_from_model_info(

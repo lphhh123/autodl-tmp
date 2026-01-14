@@ -32,7 +32,7 @@ def compute_hw_loss(
 ) -> torch.Tensor:
     layer_metas = model.get_layer_metas()
     if not layer_metas:
-        return torch.tensor(0.0, device=next(model.parameters()).device)
+        return torch.as_tensor(0.0, device=next(model.parameters()).device)
 
     layers_cfg = []
     for row in layer_metas:
@@ -51,7 +51,7 @@ def compute_hw_loss(
     pred = proxy.predict_layers_batch(layers_cfg)
     total_ms = float(pred["lat_ms"].sum()) if len(layers_cfg) > 0 else 0.0
     hw_loss = lambda_hw * (total_ms / 100.0)  # scale a bit
-    return torch.tensor(hw_loss, device=next(model.parameters()).device)
+    return torch.as_tensor(hw_loss, device=next(model.parameters()).device)
 
 
 def main():

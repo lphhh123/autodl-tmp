@@ -45,13 +45,15 @@ def main():
     )
     parser.add_argument("--export_dir", type=str, default=None, help="Directory to write layout artifacts")
     args = parser.parse_args()
+    if args.export_dir is None and args.out_dir is not None:
+        args.export_dir = str(Path(args.out_dir) / "exports" / "layout_input")
     cfg = load_config(args.cfg)
     seed_everything(int(args.seed))
     if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
-    cfg, _meta = validate_and_fill_defaults(cfg, mode="version_c")
+    cfg = validate_and_fill_defaults(cfg, mode="version_c")
 
     # out_dir: CLI 优先；否则 cfg.train.out_dir；否则自动生成一个
     cfg_name = Path(args.cfg).stem
@@ -63,7 +65,7 @@ def main():
     out_dir_path = Path(out_dir)
 
     export_layout_input = bool(args.export_layout_input)
-    export_dir = args.export_dir or str(out_dir / "export_layout_input")
+    export_dir = args.export_dir or str(out_dir / "exports" / "layout_input")
 
     # ---- dump resolved config ----
     try:
@@ -79,7 +81,7 @@ def main():
     meta = {
         "argv": sys.argv,
         "out_dir": str(out_dir_path),
-        "validation": _meta,
+        "validation": {},
     }
     with open(out_dir_path / "run_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)

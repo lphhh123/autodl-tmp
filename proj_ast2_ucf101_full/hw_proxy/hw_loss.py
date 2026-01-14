@@ -1,155 +1,148 @@
-# proj_ast2_ucf101_full/hw_proxy/hw_loss.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from hw_proxy.layer_hw_proxy import LayerHwProxy
+from utils.config_utils import get_nested
 from mapping.mapping_solver import MappingSolver
-from mapping.segments import Segment
+from hw_proxy.layer_hw_proxy import LayerHwProxy
 
 
-def _as_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float(default)
+def _as_t(x, device):
+    if isinstance(x, torch.Tensor):
+        return x.to(device)
+    return torch.tensor(float(x), device=device, dtype=torch.float32)
 
 
-def _make_fallback_segment(model_info: Optional[Dict[str, Any]] = None) -> List[Segment]:
-    # 如果没有细分 segments，则用一个“整体段”兜底
-    # 注意：Segment 定义在 mapping/segments.py，字段不足也可容忍（用 getattr）
-    if model_info and isinstance(model_info.get("segments"), list) and model_info["segments"]:
-        return model_info["segments"]
-    seg = Segment(
-        id=0,
-        layer_ids=[0],
-        kind="other",
-        flops=_as_float(model_info.get("flops", 0.0) if model_info else 0.0),
-        bytes=_as_float(model_info.get("bytes", 0.0) if model_info else 0.0),
-        seq_len=int(model_info.get("seq_len", 0) if model_info else 0),
-        embed_dim=int(model_info.get("embed_dim", 0) if model_info else 0),
-        num_heads=int(model_info.get("num_heads", 0) if model_info else 0),
-        mlp_ratio=_as_float(model_info.get("mlp_ratio", 0.0) if model_info else 0.0),
-        precision=_as_float(model_info.get("precision", 1.0) if model_info else 1.0),
-        traffic_in_bytes=_as_float(model_info.get("traffic_in_bytes", 0.0) if model_info else 0.0),
-        traffic_out_bytes=_as_float(model_info.get("traffic_out_bytes", 0.0) if model_info else 0.0),
-    )
-    return [seg]
-
-
-def compute_hw_loss_generic(
-    *,
-    segments: List[Segment],
-    eff_specs: Dict[str, torch.Tensor],
+def compute_hw_loss(
+    cfg: Any,
     hw_proxy: LayerHwProxy,
-    mapping_solver: MappingSolver,
-    hw_cfg: Any,
+    model_info: Dict,
+    stable_hw_cfg: Optional[Any] = None,
+    stable_hw_state: Optional[Dict] = None,
+    # -------- Version-C extras (optional) --------
+    segments: Optional[list] = None,
+    mapping: Optional[list] = None,
+    eff_specs: Optional[Dict[str, torch.Tensor]] = None,
     layout_positions: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], List[int]]:
+    mapping_solver: Optional[MappingSolver] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    通用 HW loss（single + version_c 可共用）
-    - segments: K 段
-    - eff_specs: (S,) 的 slot specs
-    - 返回：L_hw, hw_stats, mapping
+    Returns:
+      L_hw: torch scalar with gradient (if eff_specs/layout_positions are tensors with grad path)
+      stats: python floats for logging
     """
-    device = eff_specs["peak_flops"].device
-    # 只算一次 cost，避免 solve_mapping 内重复
-    cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
-    mapping_res = mapping_solver.solve_mapping_from_cost(
-        segments=segments,
-        eff_specs=eff_specs,
-        cost=cost,
-        layout_positions=layout_positions,
-        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
-        distance_scale_ms=_as_float(getattr(hw_cfg, "distance_scale_ms", 0.0)),
-        mem_limit_factor=_as_float(getattr(hw_cfg, "mem_limit_factor", getattr(mapping_solver, "mem_limit_factor", 0.9))),
-    )
-    mapping = mapping_res["mapping"]
-    total_latency_ms = mapping_res["total_latency_ms"].to(device)
-    comm_ms = mapping_res["comm_ms"].to(device)
 
-    lat_ms = cost["lat_ms"].to(device)
-    mem_mb = cost["mem_mb"].to(device)
-    power_w = cost["power_w"].to(device)
+    device = None
+    if eff_specs is not None and "peak_flops" in eff_specs:
+        device = eff_specs["peak_flops"].device
+    elif layout_positions is not None:
+        device = layout_positions.device
+    else:
+        device = torch.device("cpu")
 
-    K = len(segments)
-    S = eff_specs["peak_flops"].shape[0]
+    # ---- weights / normalization refs ----
+    wT = float(get_nested(stable_hw_cfg, "normalize.wT", 1.0)) if stable_hw_cfg is not None else 1.0
+    wE = float(get_nested(stable_hw_cfg, "normalize.wE", 0.0)) if stable_hw_cfg is not None else 0.0
+    wM = float(get_nested(stable_hw_cfg, "normalize.wM", 0.0)) if stable_hw_cfg is not None else 0.0
+    wC = float(get_nested(stable_hw_cfg, "normalize.wC", 0.0)) if stable_hw_cfg is not None else 0.0
 
-    total_energy_j = lat_ms.new_tensor(0.0)
-    mem_usage = torch.zeros(S, device=device)
-    for k in range(K):
-        d = int(mapping[k])
-        total_energy_j = total_energy_j + (lat_ms[k, d] / 1e3) * power_w[k, d]
-        mem_usage[d] = torch.maximum(mem_usage[d], mem_mb[k, d])
-    peak_mem_mb = mem_usage.max()
+    ref_T = float((stable_hw_state or {}).get("ref_T", 1.0))
+    ref_E = float((stable_hw_state or {}).get("ref_E", 1.0))
+    ref_M = float((stable_hw_state or {}).get("ref_M", 1.0))
+    ref_C = float((stable_hw_state or {}).get("ref_C", 1.0))
 
-    # 基本标量项
-    lambda_T = _as_float(getattr(hw_cfg, "lambda_T", 1.0), 1.0)
-    lambda_E = _as_float(getattr(hw_cfg, "lambda_E", 0.0), 0.0)
-    lambda_mem = _as_float(getattr(hw_cfg, "lambda_mem", 0.0), 0.0)
+    # ---- base: if mapping/eff_specs provided, compute from segments->cost matrix ----
+    hw_latency_ms = _as_t(0.0, device)
+    hw_energy_mj = _as_t(0.0, device)
+    hw_mem_mb = _as_t(0.0, device)
+    hw_comm_ms = _as_t(0.0, device)
 
-    L_hw = lambda_T * total_latency_ms + lambda_E * total_energy_j + lambda_mem * peak_mem_mb
+    if segments is not None and mapping is not None and eff_specs is not None and mapping_solver is not None:
+        # Differentiable: cost matrix uses eff_specs tensors, proxy torch path
+        cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
+        lat_ms = cost["lat_ms"]  # [K,S]
+        mem_mb = cost["mem_mb"]
+        power_w = cost["power_w"]
 
-    hw_stats = {
-        "total_latency_ms": total_latency_ms.detach(),
-        "total_energy_j": total_energy_j.detach(),
-        "peak_mem_mb": peak_mem_mb.detach(),
-        "comm_ms": comm_ms.detach(),
+        K, S = lat_ms.shape
+        map_idx = torch.tensor([int(x) for x in mapping[:K]], device=device, dtype=torch.long)
+
+        # gather per-seg metrics
+        idx = torch.arange(K, device=device)
+        seg_lat = lat_ms[idx, map_idx]
+        seg_mem = mem_mb[idx, map_idx]
+        seg_pow = power_w[idx, map_idx]
+
+        # pipeline latency: "balanced" = max slot load
+        slot_load = torch.zeros((S,), device=device, dtype=torch.float32)
+        slot_load = slot_load.scatter_add(0, map_idx, seg_lat)
+        hw_latency_ms = torch.max(slot_load)
+
+        # memory: peak per slot (approx via scatter_max emulation)
+        slot_mem = torch.zeros((S,), device=device, dtype=torch.float32)
+        # scatter_max not available on all builds; emulate by loop (S small, acceptable)
+        for s in range(S):
+            m = seg_mem[map_idx == s]
+            if m.numel() > 0:
+                slot_mem[s] = torch.max(m)
+        hw_mem_mb = torch.max(slot_mem)
+
+        # energy: sum(power * time)/1000
+        hw_energy_mj = torch.sum(seg_pow * seg_lat) / 1000.0
+
+        # comm: if layout_positions given, add distance-based comm
+        if layout_positions is not None and "peak_bw" in eff_specs:
+            distance_scale_ms = float(get_nested(cfg, "hw.distance_scale_ms", 0.0))
+            comm = _as_t(0.0, device)
+            for k in range(K - 1):
+                d1 = int(map_idx[k].item())
+                d2 = int(map_idx[k + 1].item())
+                if d1 == d2:
+                    continue
+                p1 = layout_positions[d1]
+                p2 = layout_positions[d2]
+                dist = torch.norm(p1 - p2)
+                traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
+                bw = torch.minimum(eff_specs["peak_bw"][d1], eff_specs["peak_bw"][d2])
+                base = _as_t(traffic, device) / (bw + 1e-9) * 1e3
+                comm = comm + base + dist * _as_t(distance_scale_ms, device)
+            hw_comm_ms = comm
+
+    else:
+        # fallback: use model_info (non-differentiable keep ratios are ok; still return torch)
+        pred = hw_proxy.predict_from_model_info(
+            model_info,
+            token_keep=float(model_info.get("token_keep", 1.0)),
+            head_keep=float(model_info.get("head_keep", 1.0)),
+            ch_keep=float(model_info.get("ch_keep", 1.0)),
+            block_keep=float(model_info.get("block_keep", 1.0)),
+        )
+        hw_latency_ms = _as_t(pred.get("latency_ms", 0.0), device)
+        hw_mem_mb = _as_t(pred.get("mem_mb", 0.0), device)
+        hw_energy_mj = _as_t(pred.get("energy_mj", 0.0), device)
+
+    # normalized objective
+    Tn = hw_latency_ms / max(ref_T, 1e-6)
+    En = hw_energy_mj / max(ref_E, 1e-6)
+    Mn = hw_mem_mb / max(ref_M, 1e-6)
+    Cn = hw_comm_ms / max(ref_C, 1e-6)
+
+    L_hw = _as_t(wT, device) * Tn + _as_t(wE, device) * En + _as_t(wM, device) * Mn + _as_t(wC, device) * Cn
+
+    stats = {
+        "hw_latency_ms": float(hw_latency_ms.detach().cpu().item()),
+        "hw_energy_mj": float(hw_energy_mj.detach().cpu().item()),
+        "hw_mem_mb": float(hw_mem_mb.detach().cpu().item()),
+        "hw_comm_ms": float(hw_comm_ms.detach().cpu().item()),
+        "hw_norm_T": float(Tn.detach().cpu().item()),
+        "hw_norm_E": float(En.detach().cpu().item()),
+        "hw_norm_M": float(Mn.detach().cpu().item()),
+        "hw_norm_C": float(Cn.detach().cpu().item()),
+        "hw_wT": float(wT),
+        "hw_wE": float(wE),
+        "hw_wM": float(wM),
+        "hw_wC": float(wC),
     }
-    return L_hw, hw_stats, mapping
-
-
-def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict[str, Any]) -> None:
-    sched = getattr(stable_hw_cfg, "lambda_hw_schedule", None)
-    if sched is None or not bool(getattr(sched, "enabled", True)):
-        state["lambda_hw"] = 0.0
-        state["schedule_phase"] = "disabled"
-        return
-    warmup = int(getattr(sched, "warmup_epochs", 0))
-    ramp = int(getattr(sched, "ramp_epochs", 0))
-    lam_max = _as_float(getattr(sched, "lambda_hw_max", 0.0), 0.0)
-    if epoch < warmup:
-        lam = 0.0
-        phase = "warmup"
-    elif epoch < warmup + ramp:
-        prog = (epoch - warmup + 1) / max(1, ramp)
-        lam = lam_max * prog
-        phase = "ramp"
-    else:
-        lam = lam_max
-        phase = "stabilize"
-    state["lambda_hw"] = float(lam)
-    state["schedule_phase"] = phase
-
-
-def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict[str, Any]) -> None:
-    guard = getattr(stable_hw_cfg, "accuracy_guard", None)
-    if guard is None or not bool(getattr(guard, "enabled", True)):
-        return
-    baseline = state.get("acc_baseline")
-    if baseline is None:
-        state["acc_baseline"] = float(acc1)
-        baseline = state["acc_baseline"]
-    use_ema = bool(getattr(guard, "use_ema", True))
-    if use_ema:
-        beta = _as_float(getattr(guard, "ema_beta", 0.8), 0.8)
-        prev = state.get("acc_ema", float(acc1))
-        state["acc_ema"] = float(beta * prev + (1 - beta) * acc1)
-        current = state["acc_ema"]
-    else:
-        current = float(acc1)
-    drop = float(baseline - current)
-    state["acc_drop"] = drop
-    eps = _as_float(getattr(guard, "epsilon_drop", 0.01), 0.01)
-    if drop > eps:
-        onv = getattr(guard, "on_violate", None)
-        scale = _as_float(getattr(onv, "scale_lambda_hw", 0.5) if onv else 0.5, 0.5)
-        state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
-        state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
-        maxc = int(getattr(onv, "max_consecutive", 3) if onv else 3)
-        if state["violate_streak"] >= maxc:
-            state["lambda_hw"] = 0.0
-    else:
-        state["violate_streak"] = 0
+    return L_hw, stats
