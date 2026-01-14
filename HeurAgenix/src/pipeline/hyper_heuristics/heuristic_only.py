@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from src.problems.base.env import BaseEnv
 from src.util.util import get_heuristic_names, load_function
 
+from ._compat import env_continue_run, env_is_complete, env_is_valid
 
 class HeuristicOnlyHyperHeuristic:
     """
@@ -50,7 +51,7 @@ class HeuristicOnlyHyperHeuristic:
         K = max(1, int(self.selection_frequency))
         idx = 0
 
-        while getattr(env, "continue_run", True):
+        while env_continue_run(env):
             heuristic_pool = self.heuristic_pool or get_heuristic_names(self.problem, self.heuristic_dir)
             if not heuristic_pool:
                 self._log_usage({"ok": False, "engine_used": "heuristic_only", "reason": "empty_heuristic_pool"})
@@ -74,7 +75,7 @@ class HeuristicOnlyHyperHeuristic:
 
             heuristic = load_function(chosen, problem=self.problem)
             for _ in range(K):
-                if not getattr(env, "continue_run", True):
+                if not env_continue_run(env):
                     break
                 env.run_heuristic(
                     heuristic,
@@ -88,10 +89,6 @@ class HeuristicOnlyHyperHeuristic:
                     },
                 )
 
-        ok_valid = env.is_valid_solution(env.current_solution) if hasattr(env, "is_valid_solution") else True
-        ok_done = (
-            env.is_complete_solution()
-            if callable(getattr(env, "is_complete_solution", None))
-            else bool(getattr(env, "is_complete_solution", True))
-        )
+        ok_valid = env_is_valid(env)
+        ok_done = env_is_complete(env)
         return bool(ok_done) and bool(ok_valid)

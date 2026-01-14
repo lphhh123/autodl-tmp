@@ -11,6 +11,7 @@ from src.problems.base.env import BaseEnv
 from src.util.llm_client.get_llm_client import get_llm_client
 from src.util.util import get_heuristic_names, load_function
 
+from ._compat import env_continue_run, env_is_complete, env_is_valid
 
 class LLMSelectionHyperHeuristic:
     """
@@ -149,7 +150,7 @@ class LLMSelectionHyperHeuristic:
         timeout_s = int(getattr(self, "llm_timeout_s", 30))
 
         # ---------- run loop ----------
-        while getattr(env, "continue_run", True):
+        while env_continue_run(env):
             heuristic_pool = (
                 list(self.heuristic_pool)
                 if self.heuristic_pool
@@ -279,7 +280,7 @@ class LLMSelectionHyperHeuristic:
             heuristic = load_function(chosen, problem=self.problem)
 
             for _ in range(K):
-                if not getattr(env, "continue_run", True):
+                if not env_continue_run(env):
                     break
                 env.run_heuristic(
                     heuristic,
@@ -300,10 +301,6 @@ class LLMSelectionHyperHeuristic:
                 )
 
         # finish
-        ok_valid = env.is_valid_solution(env.current_solution) if hasattr(env, "is_valid_solution") else True
-        ok_done = (
-            env.is_complete_solution()
-            if callable(getattr(env, "is_complete_solution", None))
-            else bool(getattr(env, "is_complete_solution", True))
-        )
+        ok_valid = env_is_valid(env)
+        ok_done = env_is_complete(env)
         return bool(ok_done) and bool(ok_valid)

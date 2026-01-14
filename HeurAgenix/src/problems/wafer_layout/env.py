@@ -223,7 +223,7 @@ class Env(BaseEnv):
         return WaferLayoutSolution(assign=assign)
 
     def is_complete_solution(self) -> bool:
-        return not self.continue_run
+        return True
 
     def validate_solution(self, solution: WaferLayoutSolution) -> bool:
         if solution is None or not hasattr(solution, "assign"):

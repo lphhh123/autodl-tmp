@@ -72,6 +72,7 @@ class BaseEnv:
         if getattr(self, "construction_steps", None) is None:
             self.construction_steps = 0
         self.construction_steps += 1
+        self.current_steps += 1
         return True
 
     def run_heuristic(self, heuristic, algorithm_data: Optional[Dict[str, Any]] = None, record: bool = True, **kwargs) -> bool:
@@ -123,3 +124,22 @@ class BaseEnv:
             return bool(self.validate_solution())
         except Exception:
             return True
+
+    @property
+    def continue_run(self) -> bool:
+        ms = getattr(self, "max_steps", None)
+        if ms is not None:
+            try:
+                if int(self.current_steps) >= int(ms):
+                    return False
+            except Exception:
+                pass
+        comp = getattr(self, "is_complete_solution", None)
+        if comp is not None:
+            try:
+                done = comp() if callable(comp) else bool(comp)
+                if done:
+                    return False
+            except Exception:
+                pass
+        return True

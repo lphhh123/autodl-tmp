@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from utils.config_utils import get_nested
 from mapping.mapping_solver import MappingSolver
@@ -19,16 +20,14 @@ def _safe_ref(x: float) -> float:
     return float(max(1e-6, x))
 
 
-def _hinge_log_ratio(
-    x: float, ref: float, target_ratio: float, eps: float, clip_term_max: float
-) -> float:
-    import math
-
-    r = float(x) / max(float(ref) + float(eps), float(eps))
-    t = max(0.0, math.log(max(r, eps)) - math.log(max(float(target_ratio), eps)))
-    if clip_term_max is not None and clip_term_max > 0:
-        t = min(t, float(clip_term_max))
-    return t
+def _torch_hinge_log_ratio(
+    x: torch.Tensor, ref: float, target: float, eps: float = 1e-9
+) -> torch.Tensor:
+    """Differentiable hinge on log-ratio: relu(log(x/ref) - log(target))."""
+    ref_t = x.new_tensor(float(ref))
+    target_t = x.new_tensor(float(target))
+    ratio = x / (ref_t + eps)
+    return F.relu(torch.log(ratio + eps) - torch.log(target_t + eps))
 
 
 def compute_hw_loss(
@@ -141,46 +140,49 @@ def compute_hw_loss(
         hw_energy_mj = _as_t(pred.get("energy_mj", 0.0), device)
 
     state = stable_hw_state or {}
-    ref_T = float(state.get("ref_T", max(1e-6, float(hw_latency_ms.detach().cpu().item()))))
-    ref_E = float(state.get("ref_E", max(1e-6, float(hw_energy_mj.detach().cpu().item()))))
-    ref_M = float(state.get("ref_M", max(1e-6, float(hw_mem_mb.detach().cpu().item()))))
-    ref_C = float(state.get("ref_C", max(1e-6, float(hw_comm_ms.detach().cpu().item()))))
+    refs_inited = bool(state.get("refs_inited", False))
 
-    if mode != "hinge_log_ratio":
-        mode = "hinge_log_ratio"
+    ref_T = float(state.get("ref_T", float(hw_latency_ms.detach().item())))
+    ref_E = float(state.get("ref_E", float(hw_energy_mj.detach().item())))
+    ref_M = float(state.get("ref_M", float(hw_mem_mb.detach().item())))
+    ref_C = float(state.get("ref_C", float(hw_comm_ms.detach().item())))
 
-    term_T = _hinge_log_ratio(
-        float(hw_latency_ms.detach().cpu().item()), ref_T, tT, eps, clip_term_max
-    )
-    term_E = _hinge_log_ratio(
-        float(hw_energy_mj.detach().cpu().item()), ref_E, tE, eps, clip_term_max
-    )
-    term_M = _hinge_log_ratio(
-        float(hw_mem_mb.detach().cpu().item()), ref_M, tM, eps, clip_term_max
-    )
-    term_C = _hinge_log_ratio(
-        float(hw_comm_ms.detach().cpu().item()), ref_C, tC, eps, clip_term_max
-    )
+    target_T = float(getattr(stable_hw_cfg, "target_latency_ratio", 1.30)) if stable_hw_cfg else 1.30
+    target_E = float(getattr(stable_hw_cfg, "target_energy_ratio", 1.30)) if stable_hw_cfg else 1.30
+    target_M = float(getattr(stable_hw_cfg, "target_mem_ratio", 1.20)) if stable_hw_cfg else 1.20
+    target_C = float(getattr(stable_hw_cfg, "target_comm_ratio", 1.50)) if stable_hw_cfg else 1.50
+
+    term_T = _torch_hinge_log_ratio(hw_latency_ms, ref_T, target_T, eps=eps)
+    term_E = _torch_hinge_log_ratio(hw_energy_mj, ref_E, target_E, eps=eps)
+    term_M = _torch_hinge_log_ratio(hw_mem_mb, ref_M, target_M, eps=eps)
+    term_C = _torch_hinge_log_ratio(hw_comm_ms, ref_C, target_C, eps=eps)
 
     if mem_hinge_only:
         term_M = term_M
 
-    L_hw_norm = wT * term_T + wE * term_E + wM * term_M + wC * term_C
-    L_hw = _as_t(L_hw_norm, device)
+    L_hw = wT * term_T + wE * term_E + wM * term_M + wC * term_C
+
+    clamp_max = getattr(stable_hw_cfg, "clamp_hw_term", None) if stable_hw_cfg else None
+    if clamp_max is not None:
+        L_hw = torch.clamp(L_hw, max=float(clamp_max))
 
     stats = {
-        "hw_latency_ms": float(hw_latency_ms.detach().cpu().item()),
-        "hw_energy_mj": float(hw_energy_mj.detach().cpu().item()),
-        "hw_mem_mb": float(hw_mem_mb.detach().cpu().item()),
-        "hw_comm_ms": float(hw_comm_ms.detach().cpu().item()),
+        "hw_latency_ms": float(hw_latency_ms.detach().item()),
+        "hw_energy_mj": float(hw_energy_mj.detach().item()),
+        "hw_mem_mb": float(hw_mem_mb.detach().item()),
+        "hw_comm_ms": float(hw_comm_ms.detach().item()),
         "ref_T": float(ref_T),
         "ref_E": float(ref_E),
         "ref_M": float(ref_M),
         "ref_C": float(ref_C),
-        "term_T": float(term_T),
-        "term_E": float(term_E),
-        "term_M": float(term_M),
-        "term_C": float(term_C),
+        "term_T": float(term_T.detach().item()),
+        "term_E": float(term_E.detach().item()),
+        "term_M": float(term_M.detach().item()),
+        "term_C": float(term_C.detach().item()),
+        "target_T": float(target_T),
+        "target_E": float(target_E),
+        "target_M": float(target_M),
+        "target_C": float(target_C),
         "hw_wT": float(wT),
         "hw_wE": float(wE),
         "hw_wM": float(wM),
@@ -188,5 +190,6 @@ def compute_hw_loss(
         "hw_norm_mode": str(mode),
         "hw_clip_term_max": float(clip_term_max),
         "hw_mem_hinge_only": bool(mem_hinge_only),
+        "refs_inited": bool(refs_inited),
     }
     return L_hw, stats

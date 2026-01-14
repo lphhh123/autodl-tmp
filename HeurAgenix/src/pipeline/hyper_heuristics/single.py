@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Tuple
 
+from ._compat import env_continue_run, env_is_complete, env_is_valid
+
 
 class SingleHyperHeuristic:
     def __init__(
@@ -25,7 +27,7 @@ class SingleHyperHeuristic:
             "env": env,
         }
 
-        while env.continue_run:
+        while env_continue_run(env):
             env.run_heuristic(
                 self.heuristic,
                 algorithm_data=algorithm_data,
@@ -33,10 +35,6 @@ class SingleHyperHeuristic:
             )
 
         env.dump_result()
-        ok_valid = env.is_valid_solution(env.current_solution) if hasattr(env, "is_valid_solution") else True
-        ok_done = (
-            env.is_complete_solution()
-            if callable(getattr(env, "is_complete_solution", None))
-            else bool(getattr(env, "is_complete_solution", True))
-        )
+        ok_valid = env_is_valid(env)
+        ok_done = env_is_complete(env)
         return bool(ok_done) and bool(ok_valid)
