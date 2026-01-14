@@ -52,9 +52,18 @@ class BaseEnv:
     def run_operator(
         self,
         operator,
+        inplace: bool = True,
+        meta: Optional[Dict[str, Any]] = None,
+        stage: str = "heuragenix",
+        time_ms: Optional[float] = None,
+        heuristic_name: Optional[str] = None,
+        add_record_item: Optional[Dict[str, Any]] = None,
+        new_solution=None,
     ) -> bool:
         """Apply operator to current_solution and advance one construction step."""
         from ..base.operators import BaseOperator
+
+        _ = (inplace, meta, stage, time_ms, heuristic_name, add_record_item, new_solution)
 
         if not isinstance(operator, BaseOperator):
             return False
@@ -65,15 +74,16 @@ class BaseEnv:
         self.construction_steps += 1
         return True
 
-    def run_heuristic(self, heuristic) -> bool:
+    def run_heuristic(self, heuristic, algorithm_data: Optional[Dict[str, Any]] = None, record: bool = True, **kwargs) -> bool:
         problem_state = {"instance_data": getattr(self, "instance_data", {}), "current_solution": self.solution}
         if hasattr(self, "get_problem_state"):
             try:
                 problem_state = dict(self.get_problem_state())
             except Exception:  # noqa: BLE001
                 problem_state = {"instance_data": getattr(self, "instance_data", {}), "current_solution": self.solution}
-        algorithm_data = {"env": self, "rng": getattr(self, "rng", None)}
-        operator, meta = heuristic(problem_state, algorithm_data=algorithm_data)
+        if algorithm_data is None:
+            algorithm_data = {"env": self, "rng": getattr(self, "rng", None)}
+        operator, meta = heuristic(problem_state, algorithm_data=algorithm_data, **kwargs)
         if operator is None:
             return False
         if hasattr(self, "run_operator"):

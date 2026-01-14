@@ -92,11 +92,21 @@ class LLMSelectionHyperHeuristic:
         if getattr(self, "output_dir", None):
             usage_path = os.path.join(self.output_dir, "llm_usage.jsonl")
 
-        def _log(rec: dict):
-            if not usage_path:
-                return
-            with open(usage_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        def _usage_base():
+            return {
+                "engine": "llm_hh",
+                "case": str(getattr(env, "data_name", getattr(env, "case", ""))),
+                "seed_id": int(getattr(env, "_seed_id", getattr(env, "seed", 0)) or 0),
+                "max_steps": int(getattr(env, "max_steps", 0) or 0),
+                "step": int(getattr(env, "current_steps", 0) or 0),
+            }
+
+        def _log_usage(rec: dict):
+            if usage_path:
+                base = _usage_base()
+                base.update(rec or {})
+                with open(usage_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(base, ensure_ascii=False) + "\n")
 
         # ---------- init llm ----------
         llm_ok = True
@@ -109,7 +119,7 @@ class LLMSelectionHyperHeuristic:
             )
             if llm_client is None:
                 llm_ok = False
-                _log(
+                _log_usage(
                     {
                         "ok": False,
                         "method": "llm_hh",
@@ -121,7 +131,7 @@ class LLMSelectionHyperHeuristic:
                 )
         except Exception as e:
             llm_ok = False
-            _log(
+            _log_usage(
                 {
                     "ok": False,
                     "method": "llm_hh",
@@ -147,7 +157,7 @@ class LLMSelectionHyperHeuristic:
             )
             heuristic_pool = sorted([h for h in heuristic_pool if h and not str(h).startswith("_")])
             if not heuristic_pool:
-                _log(
+                _log_usage(
                     {
                         "ok": False,
                         "method": "llm_hh",
@@ -176,7 +186,7 @@ class LLMSelectionHyperHeuristic:
 
             # --- if llm disabled and policy says stop, stop early ---
             if (not llm_ok) and fallback_mode == "stop":
-                _log(
+                _log_usage(
                     {
                         "ok": False,
                         "method": "llm_hh",
@@ -212,7 +222,7 @@ class LLMSelectionHyperHeuristic:
                     stage_name = "random_hh"
                     ok = False
                     reason = "llm_call_failed_fallback_random"
-                    _log(
+                    _log_usage(
                         {
                             "ok": False,
                             "method": "llm_hh",
@@ -229,7 +239,7 @@ class LLMSelectionHyperHeuristic:
                     )
                     if fail_count >= max_fail:
                         llm_ok = False
-                        _log(
+                        _log_usage(
                             {
                                 "ok": False,
                                 "method": "llm_hh",
@@ -249,7 +259,7 @@ class LLMSelectionHyperHeuristic:
 
             # always record one usage line for THIS selection
             fallback_used = bool(stage_name != "llm_hh")
-            _log(
+            _log_usage(
                 {
                     "ok": ok,
                     "method": "llm_hh",

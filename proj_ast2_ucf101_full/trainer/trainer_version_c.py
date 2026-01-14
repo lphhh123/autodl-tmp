@@ -343,16 +343,25 @@ def _export_layout_input(
 
 
 
+def _safe_getattr(obj, name: str, default):
+    """Like getattr, but also supports dict."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
 def _stable_hw_schedule(epoch: int, stable_hw_cfg: Dict, state: Dict) -> Tuple[float, str]:
-    sched = stable_hw_cfg.lambda_hw_schedule
-    if not bool(getattr(sched, "enabled", True)):
+    sched = _safe_getattr(stable_hw_cfg, "lambda_hw_schedule", None)
+    if not bool(_safe_getattr(sched, "enabled", True)):
         state["lambda_hw"] = 0.0
         return 0.0, "disabled"
-    warmup = int(getattr(sched, "warmup_epochs", 0))
-    ramp = int(getattr(sched, "ramp_epochs", 0))
-    lambda_hw_max = float(getattr(sched, "lambda_hw_max", 0.0))
-    clamp_min = float(getattr(sched, "clamp_min", 0.0))
-    clamp_max = float(getattr(sched, "clamp_max", 1.0))
+    warmup = int(_safe_getattr(sched, "warmup_epochs", 0))
+    ramp = int(_safe_getattr(sched, "ramp_epochs", 0))
+    lambda_hw_max = float(_safe_getattr(sched, "lambda_hw_max", 0.0))
+    clamp_min = float(_safe_getattr(sched, "clamp_min", 0.0))
+    clamp_max = float(_safe_getattr(sched, "clamp_max", 1.0))
     if epoch < warmup:
         value = 0.0
         phase = "warmup"
@@ -370,28 +379,35 @@ def _stable_hw_schedule(epoch: int, stable_hw_cfg: Dict, state: Dict) -> Tuple[f
 
 
 def _apply_accuracy_guard(acc1: float, stable_hw_cfg: Dict, state: Dict) -> None:
-    guard = stable_hw_cfg.accuracy_guard
-    if not bool(getattr(guard, "enabled", True)):
+    guard = _safe_getattr(stable_hw_cfg, "accuracy_guard", None)
+    if not bool(_safe_getattr(guard, "enabled", False)):
         return
+
     baseline = state.get("acc_baseline")
     if baseline is None:
         state["acc_baseline"] = float(acc1)
         baseline = state["acc_baseline"]
-    if bool(getattr(guard, "use_ema", True)):
-        beta = float(getattr(guard, "ema_beta", 0.8))
-        prev = state.get("acc_ema", float(acc1))
-        state["acc_ema"] = float(beta * prev + (1 - beta) * acc1)
-        current = state["acc_ema"]
+
+    use_ema = bool(_safe_getattr(guard, "use_ema", True))
+    if use_ema:
+        beta = float(_safe_getattr(guard, "ema_beta", 0.8))
+        prev = float(state.get("acc_ema", float(acc1)))
+        state["acc_ema"] = float(beta * prev + (1.0 - beta) * float(acc1))
+        current = float(state["acc_ema"])
     else:
         current = float(acc1)
+
     drop = float(baseline - current)
     state["acc_drop"] = drop
-    epsilon = float(getattr(guard, "epsilon_drop", 0.01))
+
+    epsilon = float(_safe_getattr(guard, "epsilon_drop", 0.01))
     if drop > epsilon:
-        scale = float(getattr(getattr(guard, "on_violate", {}), "scale_lambda_hw", 0.5))
+        on_violate = _safe_getattr(guard, "on_violate", None)
+        scale = float(_safe_getattr(on_violate, "scale_lambda_hw", 0.5))
         state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
         state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
-        max_consecutive = int(getattr(getattr(guard, "on_violate", {}), "max_consecutive", 3))
+
+        max_consecutive = int(_safe_getattr(on_violate, "max_consecutive", 3))
         if state["violate_streak"] >= max_consecutive:
             state["lambda_hw"] = 0.0
     else:
