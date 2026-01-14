@@ -14,18 +14,13 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from hw_proxy.layer_hw_proxy import LayerHwProxy
-from hw_proxy.hw_loss import (
-    _make_fallback_segment,
-    apply_accuracy_guard,
-    compute_hw_loss_generic,
-    stable_hw_schedule,
-)
-from mapping.mapping_solver import MappingSolver
+from hw_proxy.hw_loss import compute_hw_loss
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
+from utils.config_utils import get_nested
 
 
 def _as_float(val, name: str) -> float:
@@ -40,6 +35,60 @@ def _seed_worker(worker_id: int, base_seed: int) -> None:
     seed = base_seed + worker_id
     random.seed(seed)
     np.random.seed(seed)
+
+
+def stable_hw_schedule(epoch: int, stable_hw_cfg, state) -> None:
+    sched = get_nested(stable_hw_cfg, "lambda_hw_schedule", None)
+    if sched is None or not bool(get_nested(sched, "enabled", True)):
+        state["lambda_hw"] = 0.0
+        state["schedule_phase"] = "disabled"
+        return
+    warmup = int(get_nested(sched, "warmup_epochs", 0))
+    ramp = int(get_nested(sched, "ramp_epochs", 0))
+    lam_max = float(get_nested(sched, "lambda_hw_max", 0.0))
+    if epoch < warmup:
+        lam = 0.0
+        phase = "warmup"
+    elif epoch < warmup + ramp:
+        prog = (epoch - warmup + 1) / max(1, ramp)
+        lam = lam_max * prog
+        phase = "ramp"
+    else:
+        lam = lam_max
+        phase = "stabilize"
+    state["lambda_hw"] = float(lam)
+    state["schedule_phase"] = phase
+
+
+def apply_accuracy_guard(acc1: float, stable_hw_cfg, state) -> None:
+    guard = get_nested(stable_hw_cfg, "accuracy_guard", None)
+    if guard is None or not bool(get_nested(guard, "enabled", True)):
+        return
+    baseline = state.get("acc_baseline")
+    if baseline is None:
+        state["acc_baseline"] = float(acc1)
+        baseline = state["acc_baseline"]
+    use_ema = bool(get_nested(guard, "use_ema", True))
+    if use_ema:
+        beta = float(get_nested(guard, "ema_beta", 0.8))
+        prev = state.get("acc_ema", float(acc1))
+        state["acc_ema"] = float(beta * prev + (1 - beta) * acc1)
+        current = state["acc_ema"]
+    else:
+        current = float(acc1)
+    drop = float(baseline - current)
+    state["acc_drop"] = drop
+    eps = float(get_nested(guard, "epsilon_drop", 0.01))
+    if drop > eps:
+        onv = get_nested(guard, "on_violate", None)
+        scale = float(get_nested(onv, "scale_lambda_hw", 0.5) if onv else 0.5)
+        state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
+        state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
+        maxc = int(get_nested(onv, "max_consecutive", 3) if onv else 3)
+        if state["violate_streak"] >= maxc:
+            state["lambda_hw"] = 0.0
+    else:
+        state["violate_streak"] = 0
 
 
 def build_dataloaders(cfg):
@@ -126,7 +175,6 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
-    mapping_solver = MappingSolver(strategy="greedy_local", mem_limit_factor=float(getattr(cfg.hw, "mem_limit_factor", 0.9)))
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_state = {"lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0))}
 
@@ -149,26 +197,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     logits, info = model(x, return_intermediate=True)
                 L_task = F.cross_entropy(logits, y)
 
-                # ---- HW loss (P1-3 A) ----
-                segments = _make_fallback_segment(model_info=info if isinstance(info, dict) else None)
-
-                # single_device: 只有一个“设备槽位”，用当前 device_name 对应 specs 组一个 eff_specs(S=1)
-                # 简化：从 hw_proxy.gpu_cfg 里取该 device 的峰值/带宽/显存/tdp；shape 做成 (1,)
-                dev_cfg = hw_proxy.gpu_cfg.get(cfg.hw.device_name, {})
-                eff_specs = {
-                    "peak_flops": torch.tensor([float(dev_cfg.get("peak_flops", 1.0))], device=logits.device),
-                    "peak_bw": torch.tensor([float(dev_cfg.get("peak_bw", 1.0))], device=logits.device),
-                    "mem_gb": torch.tensor([float(dev_cfg.get("mem_gb", 24.0))], device=logits.device),
-                    "tdp_w": torch.tensor([float(dev_cfg.get("tdp_w", 300.0))], device=logits.device),
-                    "area_mm2": torch.tensor([float(dev_cfg.get("area_mm2", 1.0))], device=logits.device),
-                }
-                L_hw, hw_stats, _mapping = compute_hw_loss_generic(
-                    segments=segments,
-                    eff_specs=eff_specs,
-                    hw_proxy=hw_proxy,
-                    mapping_solver=mapping_solver,
-                    hw_cfg=cfg.hw,
-                    layout_positions=None,
+                model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                L_hw, hw_stats = compute_hw_loss(
+                    cfg,
+                    hw_proxy,
+                    model_info=model_info,
+                    stable_hw_cfg=stable_hw_cfg,
+                    stable_hw_state=stable_state,
                 )
 
                 lambda_hw = float(stable_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
@@ -194,9 +229,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 }
                 stats.update(
                     {
-                        "total_latency_ms": float(hw_stats["total_latency_ms"]),
-                        "peak_mem_mb": float(hw_stats["peak_mem_mb"]),
-                        "comm_ms": float(hw_stats["comm_ms"]),
+                        "total_latency_ms": float(hw_stats.get("hw_latency_ms", 0.0)),
+                        "peak_mem_mb": float(hw_stats.get("hw_mem_mb", 0.0)),
+                        "comm_ms": float(hw_stats.get("hw_comm_ms", 0.0)),
                     }
                 )
                 log_stats(logger, stats)

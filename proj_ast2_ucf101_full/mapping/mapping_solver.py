@@ -22,10 +22,10 @@ class MappingSolver:
             layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
             for s in range(S):
                 device_cfg = {
-                    "peak_flops": float(eff_specs["peak_flops"][s].item()),
-                    "peak_bw": float(eff_specs["peak_bw"][s].item()) if "peak_bw" in eff_specs else 0.0,
-                    "mem_gb": float(eff_specs["mem_gb"][s].item()) if "mem_gb" in eff_specs else 0.0,
-                    "tdp_w": float(eff_specs["tdp_w"][s].item()) if "tdp_w" in eff_specs else 0.0,
+                    "peak_flops": float(eff_specs["peak_flops"][s]),
+                    "peak_bw": float(eff_specs["peak_bw"][s]) if "peak_bw" in eff_specs else 0.0,
+                    "mem_gb": float(eff_specs["mem_gb"][s]) if "mem_gb" in eff_specs else 0.0,
+                    "tdp_w": float(eff_specs["tdp_w"][s]) if "tdp_w" in eff_specs else 0.0,
                 }
                 layers_cfg.append(
                     {
@@ -44,6 +44,47 @@ class MappingSolver:
         lat = torch.tensor(cost_np["lat_ms"], dtype=torch.float32).reshape(len(segments), S)
         mem = torch.tensor(cost_np["mem_mb"], dtype=torch.float32).reshape(len(segments), S)
         power = torch.tensor(cost_np["power_w"], dtype=torch.float32).reshape(len(segments), S)
+        return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+
+    def build_cost_matrix_torch(
+        self,
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        proxy: LayerHwProxy,
+        device: torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        """Differentiable cost matrix (eff_specs stay as tensors)."""
+        layers_cfg = []
+        S = int(eff_specs["peak_flops"].shape[0])
+        kind_to_type = {"patch_embed": 0, "attn": 1, "mlp": 2}
+
+        for seg in segments:
+            layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
+            for s in range(S):
+                device_cfg = {
+                    "peak_flops": eff_specs["peak_flops"][s],
+                    "peak_bw": eff_specs["peak_bw"][s] if "peak_bw" in eff_specs else torch.tensor(0.0, device=device),
+                    "mem_gb": eff_specs["mem_gb"][s] if "mem_gb" in eff_specs else torch.tensor(0.0, device=device),
+                    "tdp_w": eff_specs["tdp_w"][s] if "tdp_w" in eff_specs else torch.tensor(0.0, device=device),
+                }
+                layers_cfg.append(
+                    {
+                        "layer_type": layer_type,
+                        "flops": float(seg.flops),
+                        "bytes": float(seg.bytes),
+                        "embed_dim": float(seg.embed_dim),
+                        "num_heads": float(seg.num_heads),
+                        "mlp_ratio": float(seg.mlp_ratio),
+                        "seq_len": float(seg.seq_len),
+                        "precision": float(seg.precision),
+                        "device_cfg": device_cfg,
+                    }
+                )
+
+        pred = proxy.predict_layers_batch_torch(layers_cfg, device=device)
+        lat = pred["lat_ms"].reshape(len(segments), S)
+        mem = pred["mem_mb"].reshape(len(segments), S)
+        power = pred["power_w"].reshape(len(segments), S)
         return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
 
     def estimate_pipeline_latency(self, mapping: List[int], cost_lat: torch.Tensor, mode: str = "balanced") -> float:
@@ -103,16 +144,20 @@ class MappingSolver:
 
         device_time = {s: 0.0 for s in range(S)}
         for k, d in enumerate(mapping):
-            device_time[d] += lat_ms[k, d].item()
+            device_time[d] += float(lat_ms[k, d])
         comm_ms = 0.0
         if layout_positions is not None:
             for k in range(len(segments) - 1):
                 d1, d2 = mapping[k], mapping[k + 1]
                 if d1 == d2:
                     continue
-                dist = torch.norm(layout_positions[d1] - layout_positions[d2]).item()
+                dist = float(torch.norm(layout_positions[d1] - layout_positions[d2]))
                 traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
-                eff_bw = min(eff_specs["peak_bw"][d1].item(), eff_specs["peak_bw"][d2].item()) if "peak_bw" in eff_specs else 1.0
+                eff_bw = (
+                    min(float(eff_specs["peak_bw"][d1]), float(eff_specs["peak_bw"][d2]))
+                    if "peak_bw" in eff_specs
+                    else 1.0
+                )
                 base_time = traffic / (eff_bw + 1e-9) * 1e3
                 comm_ms += base_time + dist * float(distance_scale_ms)
         return {
@@ -226,9 +271,9 @@ class MappingSolver:
         S = eff_specs["mem_gb"].shape[0]
         usage = [0.0 for _ in range(S)]
         for k, d in enumerate(tmp_map):
-            usage[d] = max(usage[d], mem_mb[k, d].item())
+            usage[d] = max(usage[d], float(mem_mb[k, d]))
         for s in range(S):
-            limit = eff_specs["mem_gb"][s].item() * 1024 * self.mem_limit_factor
+            limit = float(eff_specs["mem_gb"][s]) * 1024 * self.mem_limit_factor
             if usage[s] > limit:
                 return True
         return False
