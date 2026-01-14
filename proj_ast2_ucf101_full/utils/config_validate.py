@@ -144,10 +144,20 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     stable_hw.setdefault("lambda_hw_schedule", {})
     sched = stable_hw["lambda_hw_schedule"]
+    if "lambda_hw_max" not in sched or sched["lambda_hw_max"] is None:
+        base_lam = hw.get("lambda_hw_max", None)
+        if base_lam is None:
+            base_lam = hw.get("lambda_hw", 0.0)
+        try:
+            sched["lambda_hw_max"] = float(base_lam)
+        except Exception:
+            sched["lambda_hw_max"] = 0.0
     sched.setdefault("enabled", True)
     sched.setdefault("warmup_epochs", 0)
     sched.setdefault("ramp_epochs", 5)
     sched.setdefault("phase_name", "warmup_ramp")
+    if stable_hw.get("enabled") and float(sched.get("lambda_hw_max", 0.0)) <= 0.0:
+        print("[WARN] stable_hw.enabled=True but lambda_hw_max<=0; HW loss will be disabled.")
 
     stable_hw.setdefault("normalize", {})
     norm = stable_hw["normalize"]

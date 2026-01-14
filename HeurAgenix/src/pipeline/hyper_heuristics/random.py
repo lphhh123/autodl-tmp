@@ -11,6 +11,8 @@ from typing import Any, Callable, Dict, List, Tuple
 from src.util.get_heuristic import get_heuristic
 from src.util.util import load_function
 
+from ._compat import env_continue_run, env_is_complete, env_is_valid
+
 
 def _is_env_like(value: Any) -> bool:
     return hasattr(value, "get_key_value") and hasattr(value, "solution")
@@ -250,7 +252,7 @@ class RandomHyperHeuristic:
         kcnt = 0
         selection_round = 0
 
-        while getattr(env, "continue_run", True):
+        while env_continue_run(env):
             if (chosen_name is None) or (kcnt % K == 0):
                 chosen_name = rng.choice(self.heuristic_pool)
                 selection_round += 1
@@ -269,10 +271,6 @@ class RandomHyperHeuristic:
 
             kcnt += 1
 
-        ok_valid = env.is_valid_solution(env.current_solution) if hasattr(env, "is_valid_solution") else True
-        ok_done = (
-            env.is_complete_solution()
-            if callable(getattr(env, "is_complete_solution", None))
-            else bool(getattr(env, "is_complete_solution", True))
-        )
+        ok_valid = env_is_valid(env)
+        ok_done = env_is_complete(env)
         return bool(ok_done) and bool(ok_valid)

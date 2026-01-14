@@ -28,7 +28,7 @@ from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
-from utils.stable_hw import update_hw_refs_from_stats
+from utils.stable_hw import apply_accuracy_guard, stable_hw_schedule, update_hw_refs_from_stats
 
 
 def _as_float(val, name: str) -> float:
@@ -344,75 +344,6 @@ def _export_layout_input(
 
 
 
-def _safe_getattr(obj, name: str, default):
-    """Like getattr, but also supports dict."""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _stable_hw_schedule(epoch: int, stable_hw_cfg: Dict, state: Dict) -> Tuple[float, str]:
-    sched = _safe_getattr(stable_hw_cfg, "lambda_hw_schedule", None)
-    if not bool(_safe_getattr(sched, "enabled", True)):
-        state["lambda_hw"] = 0.0
-        return 0.0, "disabled"
-    warmup = int(_safe_getattr(sched, "warmup_epochs", 0))
-    ramp = int(_safe_getattr(sched, "ramp_epochs", 0))
-    lambda_hw_max = float(_safe_getattr(sched, "lambda_hw_max", 0.0))
-    clamp_min = float(_safe_getattr(sched, "clamp_min", 0.0))
-    clamp_max = float(_safe_getattr(sched, "clamp_max", 1.0))
-    if epoch < warmup:
-        value = 0.0
-        phase = "warmup"
-    elif epoch < warmup + ramp:
-        progress = (epoch - warmup + 1) / max(1, ramp)
-        value = lambda_hw_max * progress
-        phase = "ramp"
-    else:
-        value = lambda_hw_max
-        phase = "stabilize"
-    value = max(clamp_min, min(clamp_max, value))
-    state["lambda_hw"] = float(value)
-    state["schedule_phase"] = phase
-    return state["lambda_hw"], phase
-
-
-def _apply_accuracy_guard(acc1: float, stable_hw_cfg: Dict, state: Dict) -> None:
-    guard = _safe_getattr(stable_hw_cfg, "accuracy_guard", None)
-    if not bool(_safe_getattr(guard, "enabled", False)):
-        return
-
-    baseline = state.get("acc_baseline")
-    if baseline is None:
-        state["acc_baseline"] = float(acc1)
-        baseline = state["acc_baseline"]
-
-    use_ema = bool(_safe_getattr(guard, "use_ema", True))
-    if use_ema:
-        beta = float(_safe_getattr(guard, "ema_beta", 0.8))
-        prev = float(state.get("acc_ema", float(acc1)))
-        state["acc_ema"] = float(beta * prev + (1.0 - beta) * float(acc1))
-        current = float(state["acc_ema"])
-    else:
-        current = float(acc1)
-
-    drop = float(baseline - current)
-    state["acc_drop"] = drop
-
-    epsilon = float(_safe_getattr(guard, "epsilon_drop", 0.01))
-    if drop > epsilon:
-        on_violate = _safe_getattr(guard, "on_violate", None)
-        scale = float(_safe_getattr(on_violate, "scale_lambda_hw", 0.5))
-        state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
-        state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
-
-        max_consecutive = int(_safe_getattr(on_violate, "max_consecutive", 3))
-        if state["violate_streak"] >= max_consecutive:
-            state["lambda_hw"] = 0.0
-    else:
-        state["violate_streak"] = 0
 
 
 def _solve_mapping_for_cache(
@@ -574,7 +505,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
-            _stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+            stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
         iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
         map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)
         lay_every = int(getattr(iso, "layout_update_every_epochs", 1) if iso else 1)
@@ -685,7 +616,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             if step % 10 == 0:
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 if stable_hw_cfg:
-                    _apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_hw_state)
+                    apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_hw_state)
                 stats = {
                     "outer": outer,
                     "step": step,
@@ -785,6 +716,12 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                 optimizer_layout.zero_grad()
                 L_layout.backward()
                 optimizer_layout.step()
+
+        stable_state_path = log_path.parent / "stable_hw_state.json"
+        stable_state_path.write_text(
+            json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     if export_layout_input:
         export_dir_path = Path(export_dir or "outputs/P3")
