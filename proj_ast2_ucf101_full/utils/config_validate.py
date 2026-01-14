@@ -130,4 +130,35 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             },
         )
 
+    # ---- stable_hw defaults (MUST be complete to avoid AttributeError) ----
+    stable_hw = cfg.get("stable_hw", {}) or {}
+    sched = stable_hw.get("lambda_hw_schedule", {}) or {}
+
+    # keep existing if provided
+    stable_hw.setdefault("enabled", True)
+    stable_hw.setdefault("loss_type", "log1p")
+    stable_hw.setdefault("lambda_hw_schedule", sched)
+
+    sched.setdefault("enabled", True)
+    sched.setdefault("warmup_epochs", 0)
+    sched.setdefault("ramp_epochs", 0)
+    sched.setdefault("lambda_hw_max", 0.0)
+    sched.setdefault("clamp_min", 0.0)
+    sched.setdefault("clamp_max", 1.0)
+
+    # accuracy_guard defaults (Version-C trainer uses attribute access)
+    guard = stable_hw.get("accuracy_guard", {}) or {}
+    stable_hw["accuracy_guard"] = guard
+    guard.setdefault("enabled", False)
+    guard.setdefault("use_ema", True)
+    guard.setdefault("ema_beta", 0.8)
+    guard.setdefault("epsilon_drop", 0.01)
+
+    on_violate = guard.get("on_violate", {}) or {}
+    guard["on_violate"] = on_violate
+    on_violate.setdefault("scale_lambda_hw", 0.5)
+    on_violate.setdefault("max_consecutive", 3)
+
+    cfg["stable_hw"] = stable_hw
+
     return cfg

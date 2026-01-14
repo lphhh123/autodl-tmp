@@ -9,6 +9,24 @@ from hw_proxy.layer_hw_proxy import LayerHwProxy
 from mapping.segments import Segment
 
 
+def _to_pyfloat(x):
+    """Robust scalar conversion for float/int/np scalar/torch scalar (cpu or cuda)."""
+    try:
+        import torch
+        if isinstance(x, torch.Tensor):
+            # detach -> cpu -> item
+            return float(x.detach().cpu().item())
+    except Exception:
+        pass
+    try:
+        import numpy as np
+        if isinstance(x, (np.generic,)):
+            return float(x)
+    except Exception:
+        pass
+    return float(x)
+
+
 class MappingSolver:
     def __init__(self, strategy: str, mem_limit_factor: float):
         self.strategy = strategy
@@ -22,10 +40,10 @@ class MappingSolver:
             layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
             for s in range(S):
                 device_cfg = {
-                    "peak_flops": float(eff_specs["peak_flops"][s]),
-                    "peak_bw": float(eff_specs["peak_bw"][s]) if "peak_bw" in eff_specs else 0.0,
-                    "mem_gb": float(eff_specs["mem_gb"][s]) if "mem_gb" in eff_specs else 0.0,
-                    "tdp_w": float(eff_specs["tdp_w"][s]) if "tdp_w" in eff_specs else 0.0,
+                    "peak_flops": _to_pyfloat(eff_specs["peak_flops"][s]),
+                    "peak_bw": _to_pyfloat(eff_specs["peak_bw"][s]) if "peak_bw" in eff_specs else 0.0,
+                    "mem_gb": _to_pyfloat(eff_specs["mem_gb"][s]) if "mem_gb" in eff_specs else 0.0,
+                    "tdp_w": _to_pyfloat(eff_specs["tdp_w"][s]) if "tdp_w" in eff_specs else 0.0,
                 }
                 layers_cfg.append(
                     {
@@ -154,7 +172,7 @@ class MappingSolver:
                 dist = float(torch.norm(layout_positions[d1] - layout_positions[d2]))
                 traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
                 eff_bw = (
-                    min(float(eff_specs["peak_bw"][d1]), float(eff_specs["peak_bw"][d2]))
+                    min(_to_pyfloat(eff_specs["peak_bw"][d1]), _to_pyfloat(eff_specs["peak_bw"][d2]))
                     if "peak_bw" in eff_specs
                     else 1.0
                 )
@@ -273,7 +291,7 @@ class MappingSolver:
         for k, d in enumerate(tmp_map):
             usage[d] = max(usage[d], float(mem_mb[k, d]))
         for s in range(S):
-            limit = float(eff_specs["mem_gb"][s]) * 1024 * self.mem_limit_factor
+            limit = _to_pyfloat(eff_specs["mem_gb"][s]) * 1024 * self.mem_limit_factor
             if usage[s] > limit:
                 return True
         return False
