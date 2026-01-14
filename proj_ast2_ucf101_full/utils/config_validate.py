@@ -153,11 +153,21 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         except Exception:
             sched["lambda_hw_max"] = 0.0
     sched.setdefault("enabled", True)
-    sched.setdefault("warmup_epochs", 0)
-    sched.setdefault("ramp_epochs", 5)
+    sched.setdefault("warmup_epochs", 5)
+    sched.setdefault("ramp_epochs", 10)
     sched.setdefault("phase_name", "warmup_ramp")
+    sched.setdefault("clamp_min", 0.0)
+    sched.setdefault("clamp_max", float(sched.get("lambda_hw_max", 0.0)))
     if stable_hw.get("enabled") and float(sched.get("lambda_hw_max", 0.0)) <= 0.0:
-        print("[WARN] stable_hw.enabled=True but lambda_hw_max<=0; HW loss will be disabled.")
+        print(
+            "[WARN] stable_hw.enabled=True but lambda_hw_max<=0; using cfg.hw.lambda_hw as fallback."
+        )
+        try:
+            sched["lambda_hw_max"] = float(hw.get("lambda_hw", 0.0))
+        except Exception:
+            sched["lambda_hw_max"] = 0.0
+    if sched.get("clamp_max") is None or float(sched.get("clamp_max", 0.0)) <= 0.0:
+        sched["clamp_max"] = float(sched.get("lambda_hw_max", 0.0))
 
     stable_hw.setdefault("normalize", {})
     norm = stable_hw["normalize"]
@@ -167,10 +177,10 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if name not in norm
     ]
     norm.setdefault("mode", "hinge_log_ratio")
-    norm.setdefault("ema_beta", 0.95)
-    norm.setdefault("eps", 1e-9)
+    norm.setdefault("eps", 1e-6)
     norm.setdefault("clip_term_max", 10.0)
     norm.setdefault("mem_hinge_only", True)
+    norm.setdefault("abs_ratio", False)
     norm.setdefault("wT", 0.2)
     norm.setdefault("wE", 0.2)
     norm.setdefault("wM", 0.4)
@@ -179,6 +189,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     norm.setdefault("target_ratio_E", 0.9)
     norm.setdefault("target_ratio_M", 0.9)
     norm.setdefault("target_ratio_C", 0.9)
+    norm.setdefault("ref_source", "ema")
+    norm.setdefault("baseline_stats_path", None)
 
     if stable_hw.get("enabled") and missing_targets:
         print(
@@ -237,7 +249,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     # accuracy_guard defaults (Version-C trainer uses attribute access)
     guard = stable_hw.get("accuracy_guard", {}) or {}
     stable_hw["accuracy_guard"] = guard
-    guard.setdefault("enabled", False)
+    guard.setdefault("enabled", True)
     guard.setdefault("use_ema", True)
     guard.setdefault("ema_beta", 0.8)
     guard.setdefault("epsilon_drop", 0.01)
@@ -247,6 +259,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     on_violate.setdefault("scale_lambda_hw", 0.5)
     on_violate.setdefault("max_consecutive", 3)
 
+    stable_hw.setdefault("ema_beta", 0.9)
     cfg["stable_hw"] = stable_hw
 
     return cfg

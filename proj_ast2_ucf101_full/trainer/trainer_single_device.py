@@ -20,8 +20,7 @@ from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
-from utils.config_utils import get_nested
-from utils.stable_hw import stable_hw_schedule, apply_accuracy_guard, init_or_update_hw_refs_from_stats
+from utils.stable_hw import stable_hw_schedule, apply_accuracy_guard, update_hw_refs_from_stats
 
 
 def _as_float(val, name: str) -> float:
@@ -126,10 +125,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     stable_state = {
         "lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0)),
         "refs_inited": False,
-        "ref_T": 1.0,
-        "ref_E": 1.0,
-        "ref_M": 1.0,
-        "ref_C": 1.0,
+        "ref_source": "unset",
     }
 
     best_acc = 0.0
@@ -160,7 +156,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     stable_hw_state=stable_state,
                 )
                 if stable_hw_cfg:
-                    init_or_update_hw_refs_from_stats(
+                    update_hw_refs_from_stats(
                         stable_hw_cfg,
                         stable_state,
                         {k: float(v) for k, v in hw_stats.items()},
@@ -189,9 +185,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 }
                 stats.update(
                     {
-                        "total_latency_ms": float(hw_stats.get("hw_latency_ms", 0.0)),
-                        "peak_mem_mb": float(hw_stats.get("hw_mem_mb", 0.0)),
-                        "comm_ms": float(hw_stats.get("hw_comm_ms", 0.0)),
+                        "total_latency_ms": float(hw_stats.get("latency_ms", 0.0)),
+                        "peak_mem_mb": float(hw_stats.get("mem_mb", 0.0)),
+                        "comm_ms": float(hw_stats.get("comm_ms", 0.0)),
                     }
                 )
                 log_stats(logger, stats)
@@ -207,6 +203,12 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
                 "lambda_hw": float(lambda_hw),
                 "hw_loss": float(L_hw),
+                "stable_hw_disabled": not bool(getattr(cfg.stable_hw, "enabled", False))
+                if getattr(cfg, "stable_hw", None)
+                else True,
+                "stable_hw_lambda_hw": float(stable_state.get("lambda_hw", 0.0)),
+                "stable_hw_refs_inited": bool(stable_state.get("refs_inited", False)),
+                "stable_hw_ref_source": str(stable_state.get("ref_source", "unset")),
             }
             metrics.update({k: float(v) for k, v in hw_stats.items()})
             with metrics_path.open("w", encoding="utf-8") as f:

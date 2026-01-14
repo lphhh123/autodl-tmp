@@ -31,6 +31,13 @@ def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> Tuple[flo
         lam = lam_max
         phase = "stabilize"
 
+    clamp_min = float(get_nested(sched, "clamp_min", 0.0))
+    clamp_max = get_nested(sched, "clamp_max", lam)
+    if clamp_max is None:
+        clamp_max = lam
+    clamp_max = float(clamp_max)
+    lam = max(clamp_min, min(clamp_max, lam))
+
     state["lambda_hw"] = float(lam)
     state["schedule_phase"] = phase
     return float(lam), phase
@@ -77,57 +84,47 @@ def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict) -> None:
         state["violate_streak"] = 0
 
 
-def init_or_update_hw_refs_from_stats(
-    stable_hw_cfg: Any,
-    state: Dict,
-    hw_stats: Dict[str, float],
-) -> None:
+def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: Dict) -> None:
     """
-    Initialize ref_T/E/M/C from first observation, then EMA update each epoch/step.
+    Unified ref update:
+      - If refs not inited: set ref_* from current stats (dense baseline or first obs)
+      - Else: EMA update with beta=stable_hw_cfg.ema_beta
     """
-    if hw_stats is None:
+    if stable_hw_state is None:
         return
 
-    lat = float(hw_stats.get("hw_latency_ms", 0.0))
-    eng = float(hw_stats.get("hw_energy_mj", 0.0))
-    mem = float(hw_stats.get("hw_mem_mb", 0.0))
-    comm = float(hw_stats.get("hw_comm_ms", 0.0))
+    norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg else None
+    eps = float(getattr(norm_cfg, "eps", 1e-6)) if norm_cfg else 1e-6
+    beta = float(getattr(stable_hw_cfg, "ema_beta", 0.9)) if stable_hw_cfg else 0.9
 
-    # first init
-    if not bool(state.get("refs_inited", False)):
-        state["ref_T"] = max(1e-6, lat)
-        state["ref_E"] = max(1e-6, eng if eng > 0 else 1.0)
-        state["ref_M"] = max(1e-6, mem if mem > 0 else 1.0)
-        state["ref_C"] = max(1e-6, comm if comm > 0 else 1.0)
-        state["refs_inited"] = True
+    refs_inited = bool(stable_hw_state.get("refs_inited", False))
+
+    def _f(key: str, default: float = 0.0) -> float:
+        v = stats.get(key, default)
+        try:
+            import torch
+
+            if isinstance(v, torch.Tensor):
+                return float(v.detach().cpu().item())
+        except Exception:
+            pass
+        return float(v)
+
+    cur_T = _f("latency_ms", 0.0)
+    cur_E = _f("energy_mj", 0.0)
+    cur_M = _f("mem_mb", 0.0)
+    cur_C = _f("comm_ms", 0.0)
+
+    if not refs_inited:
+        stable_hw_state["ref_T"] = max(eps, cur_T)
+        stable_hw_state["ref_E"] = max(eps, cur_E)
+        stable_hw_state["ref_M"] = max(eps, cur_M)
+        stable_hw_state["ref_C"] = max(0.0, cur_C)
+        stable_hw_state["refs_inited"] = True
+        stable_hw_state.setdefault("ref_source", "ema_init")
         return
 
-    # EMA update
-    norm = get_nested(stable_hw_cfg, "normalize", None)
-    beta = float(get_nested(norm, "ema_beta", 0.95)) if norm is not None else 0.95
-
-    state["ref_T"] = beta * float(state.get("ref_T", lat)) + (1 - beta) * lat
-    state["ref_E"] = beta * float(state.get("ref_E", eng if eng > 0 else 1.0)) + (1 - beta) * (eng if eng > 0 else 1.0)
-    state["ref_M"] = beta * float(state.get("ref_M", mem if mem > 0 else 1.0)) + (1 - beta) * (mem if mem > 0 else 1.0)
-    state["ref_C"] = beta * float(state.get("ref_C", comm if comm > 0 else 1.0)) + (1 - beta) * (comm if comm > 0 else 1.0)
-
-
-def update_hw_refs_from_stats(stable_hw_state: dict, stable_hw_cfg: Any, hw_stats: dict) -> None:
-    """
-    Update refs (ref_T/ref_E/ref_M/ref_C) by EMA using cfg.stable_hw.normalize.ema_beta.
-    """
-    if not stable_hw_cfg or not getattr(stable_hw_cfg, "enabled", False):
-        return
-    norm = getattr(stable_hw_cfg, "normalize", None)
-    beta = float(getattr(norm, "ema_beta", 0.95)) if norm else 0.95
-
-    def _ema(key: str, x: float) -> None:
-        if x <= 0:
-            return
-        old = float(stable_hw_state.get(key, x))
-        stable_hw_state[key] = beta * old + (1.0 - beta) * float(x)
-
-    _ema("ref_T", float(hw_stats.get("hw_latency_ms", 0.0)))
-    _ema("ref_E", float(hw_stats.get("hw_energy_mj", 0.0)))
-    _ema("ref_M", float(hw_stats.get("hw_mem_mb", 0.0)))
-    _ema("ref_C", float(hw_stats.get("hw_comm_ms", 0.0)))
+    stable_hw_state["ref_T"] = beta * float(stable_hw_state.get("ref_T", cur_T)) + (1 - beta) * cur_T
+    stable_hw_state["ref_E"] = beta * float(stable_hw_state.get("ref_E", cur_E)) + (1 - beta) * cur_E
+    stable_hw_state["ref_M"] = beta * float(stable_hw_state.get("ref_M", cur_M)) + (1 - beta) * cur_M
+    stable_hw_state["ref_C"] = beta * float(stable_hw_state.get("ref_C", cur_C)) + (1 - beta) * cur_C

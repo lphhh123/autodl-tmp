@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Dict, Any
@@ -17,6 +18,21 @@ def _load_suite(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def _pick_runner(cfg_path: Path) -> str:
+    with cfg_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    baseline = cfg.get("baseline", {}) or {}
+    method = str(baseline.get("method", "") or "").strip()
+    name = str(baseline.get("name", "") or "").strip().lower()
+
+    heuragenix_methods = {"llm_hh", "random_hh", "or_solver"}
+    if method in heuragenix_methods:
+        return "run_layout_heuragenix.py"
+    if name.startswith("heuragenix"):
+        return "run_layout_heuragenix.py"
+    return "run_layout_agent.py"
+
+
 def run_layout_suite(inputs: List[str], cfgs: List[str], seeds: List[int], out_root: Path, backtrack_window: int = 10) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -28,19 +44,17 @@ def run_layout_suite(inputs: List[str], cfgs: List[str], seeds: List[int], out_r
 
         start = time.perf_counter()
         try:
-            cfg_path_str = str(cfg).lower()
-            if "heuragenix" in cfg_path_str:
-                script = Path(__file__).parent / "run_layout_heuragenix.py"
-            else:
-                script = Path(__file__).parent / "run_layout_agent.py"
+            cfg_path = Path(cfg)
+            runner = _pick_runner(cfg_path)
+            script = Path(__file__).parent / runner
             subprocess.run(
                 [
-                    "python",
+                    sys.executable,
                     str(script),
                     "--layout_input",
                     str(layout_input),
                     "--cfg",
-                    str(cfg),
+                    str(cfg_path),
                     "--out_dir",
                     str(run_dir),
                     "--seed",
