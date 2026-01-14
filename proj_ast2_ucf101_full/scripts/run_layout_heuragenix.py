@@ -18,8 +18,15 @@ import numpy as np
 # === HeurAgenix import fix ===
 project_root = Path(__file__).resolve().parents[1]
 heuragenix_root = project_root.parent / "HeurAgenix"
-if str(heuragenix_root) not in sys.path:
-    sys.path.insert(0, str(heuragenix_root))
+heuragenix_src = heuragenix_root / "src"
+
+# Support both import styles:
+# 1) import src.xxx  (needs heuragenix_root)
+# 2) import pipeline.xxx (needs heuragenix_src)
+for p in (heuragenix_root, heuragenix_src):
+    sp = str(p)
+    if sp not in sys.path:
+        sys.path.insert(0, sp)
 # =============================
 
 from layout.evaluator import LayoutEvaluator, LayoutState
