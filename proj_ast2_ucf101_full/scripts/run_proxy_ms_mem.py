@@ -1,7 +1,16 @@
+# --- bootstrap sys.path for both invocation styles ---
+import sys
+from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+# -----------------------------------------------------
+
 import argparse
 import json
 import time
-from pathlib import Path
 
 from utils.config import load_config
 from hw_proxy.proxy_train import train_layer_proxies_from_csv

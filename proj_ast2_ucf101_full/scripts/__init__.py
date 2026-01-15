@@ -1,1 +1,1 @@
-# Make scripts a regular Python package for stable `python -m scripts.xxx`.
+# Intentionally empty: allow `python -m ...scripts.xxx` to work reliably.
