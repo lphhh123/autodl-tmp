@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 class BaseEnv:
     def __init__(self, data_path: str, problem: Optional[str] = None):
         self.data_path = data_path
+        self.data_name = data_path
         self.problem = problem or ""
         self.instance_data = self.load_data(data_path)
         self.current_solution = self.init_solution()
@@ -91,7 +92,7 @@ class BaseEnv:
         new_solution=None,
     ) -> bool:
         """Apply operator to current_solution and advance one construction step."""
-        from ..base.operators import BaseOperator
+        from .components import BaseOperator
 
         _ = (inplace, meta, stage, time_ms, heuristic_name, add_record_item, new_solution)
 

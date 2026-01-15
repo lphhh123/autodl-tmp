@@ -20,7 +20,8 @@ from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
-from utils.stable_hw import stable_hw_schedule, apply_accuracy_guard, update_hw_refs_from_stats
+from utils.eval_utils import eval_acc1
+from utils.stable_hw import apply_accuracy_guard, stable_hw_schedule, update_hw_refs_from_stats
 
 
 def _as_float(val, name: str) -> float:
@@ -214,9 +215,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 log_stats(logger, stats)
         last_acc = validate(model, val_loader, device, logger, epoch, cfg)
         best_acc = max(best_acc, last_acc)
-        guard_info = None
         if stable_hw_cfg:
-            guard_info = apply_accuracy_guard(float(last_acc), stable_hw_cfg, stable_state, epoch=epoch)
+            stable_state["epoch"] = int(epoch)
+            val_acc1 = float(last_acc)
+            apply_accuracy_guard(val_acc1, stable_hw_cfg, stable_state)
             if last_hw_stats:
                 stable_state = update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats)
         if metrics_path:
@@ -236,11 +238,33 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "stable_hw_refs_inited": bool(stable_state.get("refs_inited", False)),
                 "stable_hw_ref_source": str(stable_state.get("ref_source", "unset")),
             }
-            if guard_info:
-                metrics["stable_hw_guard"] = guard_info
+            metrics.update(
+                {
+                    "stable_hw_lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0)),
+                    "stable_hw_lambda_hw_scale": float(stable_state.get("lambda_hw_scale", 1.0)),
+                    "stable_hw_lambda_hw_after_guard": float(
+                        stable_state.get("lambda_hw_after_guard", stable_state.get("lambda_hw", 0.0))
+                    ),
+                    "stable_hw_schedule_phase": str(stable_state.get("schedule_phase", "unknown")),
+                    "stable_hw_baseline_acc": float(stable_state.get("baseline_acc", 0.0)),
+                    "stable_hw_current_acc": float(stable_state.get("current_acc", 0.0)),
+                    "stable_hw_current_acc_ema": float(
+                        stable_state.get("current_acc_ema", stable_state.get("current_acc_ema", 0.0))
+                    ),
+                    "stable_hw_acc_drop": float(stable_state.get("acc_drop", 0.0)),
+                    "stable_hw_epsilon_drop": float(stable_state.get("epsilon_drop", 0.0)),
+                    "stable_hw_violate_streak": int(stable_state.get("violate_streak", 0)),
+                    "stable_hw_guard_triggered": bool(stable_state.get("guard_triggered", False)),
+                    "stable_hw_hw_disabled": bool(stable_state.get("hw_disabled", False)),
+                    "stable_hw_rho_frozen_until_epoch": int(stable_state.get("rho_frozen_until_epoch", 0)),
+                }
+            )
             metrics.update({k: float(v) for k, v in hw_stats.items()})
             with metrics_path.open("w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2)
+        if out_dir is not None and stable_hw_cfg:
+            with (out_dir / "stable_hw_state.json").open("w", encoding="utf-8") as f:
+                json.dump(stable_state, f, indent=2)
 
 
 def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:

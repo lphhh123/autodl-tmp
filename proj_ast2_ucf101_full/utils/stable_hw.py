@@ -1,8 +1,48 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 from utils.config_utils import get_nested
+
+
+def _load_baseline_stats(path: str):
+    import json
+    import os
+
+    if not path:
+        return None
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _get_baseline_acc_from_stats(stats: dict):
+    for k in ("val_acc1", "val_acc", "acc1", "acc"):
+        if k in stats:
+            try:
+                return float(stats[k])
+            except Exception:
+                pass
+    return None
+
+
+def _get_refs_from_stats(stats: dict):
+    def _pick(*keys, default=None):
+        for k in keys:
+            if k in stats:
+                try:
+                    return float(stats[k])
+                except Exception:
+                    pass
+        return default
+
+    return {
+        "ref_T": _pick("latency_ms", "T_ms", "ref_T"),
+        "ref_E": _pick("energy_mj", "E_mj", "ref_E"),
+        "ref_M": _pick("mem_mb", "M_mb", "ref_M"),
+        "ref_C": _pick("comm_ms", "C_ms", "ref_C"),
+    }
 
 
 def _stable_hw_enabled(stable_hw_cfg) -> bool:
@@ -76,164 +116,116 @@ def init_hw_refs_from_baseline(
     return stable_hw_state
 
 
-def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> Tuple[float, str]:
-    """
-    SPEC: warmup -> ramp -> stabilize
-    Also store scheduled lambda in state['lambda_hw_schedule'] for guard to override.
-    """
-    if not _stable_hw_enabled(stable_hw_cfg):
-        state["lambda_hw_schedule"] = 0.0
+def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> None:
+    if not bool(getattr(stable_hw_cfg, "enabled", False)):
+        state["lambda_hw_base"] = 0.0
         state["lambda_hw"] = 0.0
-        state["schedule_phase"] = "disabled"
-        return 0.0, "disabled"
+        return
 
-    sched = get_nested(stable_hw_cfg, "lambda_hw_schedule", None)
-    if sched is None or not bool(get_nested(sched, "enabled", True)):
-        state["lambda_hw_schedule"] = 0.0
-        state["lambda_hw"] = 0.0
-        state["schedule_phase"] = "schedule_disabled"
-        return 0.0, "schedule_disabled"
+    sched = getattr(stable_hw_cfg, "lambda_hw_schedule", None)
+    lam_max = (
+        float(getattr(sched, "lambda_hw_max", 0.0))
+        if sched
+        else float(state.get("lambda_hw", 0.0))
+    )
+    warmup_epochs = int(getattr(sched, "warmup_epochs", 0)) if sched else 0
+    ramp_epochs = int(getattr(sched, "ramp_epochs", 0)) if sched else 0
 
-    warmup = int(get_nested(sched, "warmup_epochs", 0))
-    ramp = int(get_nested(sched, "ramp_epochs", 0))
-    lam_max = float(get_nested(sched, "lambda_hw_max", 0.0))
-
-    if epoch < warmup:
-        lam = 0.0
+    if warmup_epochs > 0 and epoch < warmup_epochs:
+        lam_base = 0.0
         phase = "warmup"
-    elif epoch < warmup + ramp:
-        prog = (epoch - warmup + 1) / max(1, ramp)
-        lam = lam_max * prog
-        phase = "ramp"
     else:
-        lam = lam_max
-        phase = "stabilize"
+        t = max(0, epoch - warmup_epochs)
+        if ramp_epochs <= 0:
+            lam_base = lam_max
+            phase = "steady"
+        else:
+            frac = min(1.0, float(t) / float(ramp_epochs))
+            lam_base = lam_max * frac
+            phase = "ramp" if frac < 1.0 else "steady"
 
-    clamp_min = float(get_nested(sched, "clamp_min", 0.0))
-    clamp_max = float(get_nested(sched, "clamp_max", lam))
-    lam = max(clamp_min, min(clamp_max, lam))
+    state["lambda_hw_base"] = float(lam_base)
+    state["schedule_phase"] = str(phase)
 
-    state["lambda_hw_schedule"] = float(lam)
-    state["schedule_phase"] = phase
-
-    # default lambda_hw follows schedule unless guard forces disable
-    if bool(state.get("guard_force_disable_hw", False)):
+    scale = float(state.get("lambda_hw_scale", 1.0))
+    if bool(state.get("hw_disabled", False)):
         state["lambda_hw"] = 0.0
     else:
-        state["lambda_hw"] = float(lam)
-
-    return float(state["lambda_hw"]), phase
+        state["lambda_hw"] = float(lam_base) * scale
 
 
-def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict, epoch: int) -> Dict:
-    """
-    SPEC intent:
-      - baseline_acc: from baseline_stats if provided else during warmup keep best acc
-      - current acc: optionally EMA
-      - if drop > epsilon_drop: scale lambda_hw; streak; force disable when streak>=max_consecutive
-      - optionally freeze rho/pruning updates for K epochs (rho_frozen_until_epoch)
-      - force-disable clears automatically when recovered (drop <= epsilon)
-    Returns guard_info dict for logging.
-    """
-    info = {
-        "guard_active": False,
-        "baseline_acc": None,
-        "current_acc": None,
-        "acc_drop": None,
-        "epsilon_drop": None,
-        "violate_streak": int(state.get("violate_streak", 0) or 0),
-        "guard_triggered": False,
-        "guard_force_disable_hw": bool(state.get("guard_force_disable_hw", False)),
-        "rho_frozen_until_epoch": int(state.get("rho_frozen_until_epoch", -1) or -1),
-    }
+def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict) -> None:
+    guard = getattr(stable_hw_cfg, "accuracy_guard", None)
+    if not guard or not bool(getattr(guard, "enabled", True)):
+        return
 
-    if not _stable_hw_enabled(stable_hw_cfg):
-        return info
+    eps_drop = float(getattr(guard, "epsilon_drop", 0.0))
+    max_consecutive = int(getattr(guard, "max_consecutive_violations", 2))
+    scale_down = float(getattr(guard, "lambda_scale_down", 0.5))
+    freeze_epochs = int(getattr(guard, "freeze_rho_epochs", 0))
 
-    guard = get_nested(stable_hw_cfg, "accuracy_guard", None)
-    if guard is None or not bool(get_nested(guard, "enabled", True)):
-        state["guard_active"] = False
-        return info
-
-    state["guard_active"] = True
-    info["guard_active"] = True
-
-    eps = float(get_nested(guard, "epsilon_drop", 0.01))
-    info["epsilon_drop"] = eps
-
-    # ---- baseline acc init/update ----
-    # Prefer baseline_acc from state if already set (may be loaded externally).
     baseline = state.get("baseline_acc", None)
+    if baseline is None:
+        base_cfg = getattr(stable_hw_cfg, "dense_baseline", None)
+        base_path = str(getattr(base_cfg, "baseline_stats_path", "")) if base_cfg else ""
+        bs = _load_baseline_stats(base_path)
+        if isinstance(bs, dict):
+            bacc = _get_baseline_acc_from_stats(bs)
+            if bacc is not None:
+                baseline = float(bacc)
 
-    # During warmup, keep best acc as baseline if not fixed yet
-    phase = str(state.get("schedule_phase", ""))
     if baseline is None:
         baseline = float(acc1)
-        state["baseline_acc"] = float(baseline)
-        state["baseline_source"] = state.get("baseline_source", "first_seen")
 
-    if phase == "warmup":
-        # keep best
-        if float(acc1) > float(state.get("baseline_acc", baseline)):
-            state["baseline_acc"] = float(acc1)
-            baseline = float(acc1)
+    beta = float(getattr(guard, "acc_ema_beta", 0.9))
+    acc_ema = float(state.get("current_acc_ema", baseline))
+    acc_ema = beta * acc_ema + (1.0 - beta) * float(acc1)
 
-    baseline = float(state.get("baseline_acc", baseline))
-    info["baseline_acc"] = baseline
+    acc_drop = max(0.0, float(baseline) - float(acc_ema))
 
-    # ---- current acc (EMA optional) ----
-    use_ema = bool(get_nested(guard, "use_ema", True))
-    if use_ema:
-        beta = float(get_nested(guard, "ema_beta", 0.8))
-        prev = float(state.get("acc1_ema", acc1))
-        cur = beta * prev + (1.0 - beta) * float(acc1)
-        state["acc1_ema"] = float(cur)
-        current = float(cur)
+    state["baseline_acc"] = float(baseline)
+    state["current_acc"] = float(acc1)
+    state["current_acc_ema"] = float(acc_ema)
+    state["acc_drop"] = float(acc_drop)
+    state["epsilon_drop"] = float(eps_drop)
+
+    violated = acc_drop > eps_drop
+    streak = int(state.get("violate_streak", 0))
+
+    if violated:
+        streak += 1
+        scale = float(state.get("lambda_hw_scale", 1.0))
+        scale = max(0.0, scale * float(scale_down))
+        state["lambda_hw_scale"] = float(scale)
+        state["guard_triggered"] = True
+
+        if freeze_epochs > 0:
+            cur_epoch = int(state.get("epoch", 0))
+            state["rho_frozen_until_epoch"] = max(
+                int(state.get("rho_frozen_until_epoch", 0)), cur_epoch + freeze_epochs
+            )
+
+        if streak >= max_consecutive:
+            state["hw_disabled"] = True
+            state["lambda_hw_scale"] = 0.0
+
     else:
-        current = float(acc1)
+        streak = 0
+        if bool(state.get("hw_disabled", False)):
+            recover = bool(getattr(guard, "recover_enable_hw", True))
+            if recover:
+                state["hw_disabled"] = False
+                state["lambda_hw_scale"] = float(getattr(guard, "recover_lambda_scale", 0.25))
 
-    info["current_acc"] = current
+    state["violate_streak"] = int(streak)
 
-    drop = float(baseline - current)
-    state["acc_drop"] = float(drop)
-    info["acc_drop"] = float(drop)
-
-    onv = get_nested(guard, "on_violate", None)
-    scale = float(get_nested(onv, "scale_lambda_hw", 0.5) if onv else 0.5)
-    maxc = int(get_nested(onv, "max_consecutive", 3) if onv else 3)
-    freeze_k = int(get_nested(guard, "freeze_rho_epochs", 0) or 0)
-
-    # ---- recovered: clear force disable & streak ----
-    if drop <= eps:
-        state["violate_streak"] = 0
-        info["violate_streak"] = 0
-        if bool(state.get("guard_force_disable_hw", False)):
-            state["guard_force_disable_hw"] = False
-        # restore lambda_hw to schedule
-        state["lambda_hw"] = float(state.get("lambda_hw_schedule", state.get("lambda_hw", 0.0)))
-        info["guard_force_disable_hw"] = bool(state.get("guard_force_disable_hw", False))
-        return info
-
-    # ---- violated ----
-    info["guard_triggered"] = True
-    state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
-    info["violate_streak"] = int(state["violate_streak"])
-
-    # scale lambda
-    state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
-
-    # freeze rho/pruning updates
-    if freeze_k > 0:
-        state["rho_frozen_until_epoch"] = max(int(state.get("rho_frozen_until_epoch", -1)), int(epoch + freeze_k))
-        info["rho_frozen_until_epoch"] = int(state["rho_frozen_until_epoch"])
-
-    # force disable hw after consecutive violations
-    if state["violate_streak"] >= maxc:
-        state["guard_force_disable_hw"] = True
+    lam_base = float(state.get("lambda_hw_base", state.get("lambda_hw", 0.0)))
+    if bool(state.get("hw_disabled", False)):
         state["lambda_hw"] = 0.0
-        info["guard_force_disable_hw"] = True
+    else:
+        state["lambda_hw"] = lam_base * float(state.get("lambda_hw_scale", 1.0))
 
-    return info
+    state["lambda_hw_after_guard"] = float(state.get("lambda_hw", 0.0))
 
 
 def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: Dict) -> Dict:
@@ -247,6 +239,20 @@ def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: 
         return stable_hw_state
     if not _stable_hw_enabled(stable_hw_cfg):
         return stable_hw_state
+
+    if not bool(stable_hw_state.get("refs_inited", False)):
+        ref_mode = str(getattr(stable_hw_cfg, "ref_mode", "ema")).lower()
+        if ref_mode == "dense_baseline":
+            base_cfg = getattr(stable_hw_cfg, "dense_baseline", None)
+            base_path = str(getattr(base_cfg, "baseline_stats_path", "")) if base_cfg else ""
+            bs = _load_baseline_stats(base_path)
+            if isinstance(bs, dict):
+                refs = _get_refs_from_stats(bs)
+                for k, v in refs.items():
+                    if v is not None:
+                        stable_hw_state[k] = float(v)
+                stable_hw_state["refs_inited"] = True
+                stable_hw_state["ref_source"] = f"dense_baseline:{base_path}"
 
     ref_up = get_nested(stable_hw_cfg, "hw_refs_update", None)
     ref_source = str(get_nested(ref_up, "ref_source", "ema")) if ref_up else "ema"
