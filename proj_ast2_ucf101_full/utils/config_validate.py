@@ -203,6 +203,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     sched.setdefault("enabled", stable_hw_enabled)
     sched.setdefault("warmup_epochs", 5)
     sched.setdefault("ramp_epochs", 10)
+    sched.setdefault("stabilize_epochs", 0)
+    sched.setdefault("lambda_hw_min", 0.0)
     sched.setdefault("clamp_min", 0.0)
 
     # IMPORTANT: DO NOT silently bind lambda_hw_max to hw.lambda_hw unless allow_legacy=true
@@ -267,6 +269,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     # ---------- discrete_isolation ----------
     iso = stable_hw.get("discrete_isolation", {}) or {}
+    if "track_live_in_inner_steps" in iso and "track_live_segments" not in iso:
+        iso["track_live_segments"] = bool(iso.get("track_live_in_inner_steps"))
+        print(
+            "[WARN] stable_hw.discrete_isolation.track_live_in_inner_steps is deprecated; "
+            "use track_live_segments instead."
+        )
     stable_hw["discrete_isolation"] = iso
     iso.setdefault("use_cached_mapping_for_inner_steps", True)
     iso.setdefault("use_cached_layout_for_inner_steps", True)
@@ -286,16 +294,23 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     guard = stable_hw.get("accuracy_guard", {}) or {}
     stable_hw["accuracy_guard"] = guard
     guard.setdefault("enabled", stable_hw_enabled)
+    guard.setdefault("metric", "acc1")
     guard.setdefault("use_ema", True)
-    guard.setdefault("ema_beta", 0.8)
-    guard.setdefault("epsilon_drop", 0.01)
-    guard.setdefault("freeze_rho_epochs", 0)
+    guard.setdefault("ema_beta", 0.98)
+    guard.setdefault("epsilon_drop", 0.02)
+    guard.setdefault("max_consecutive", int(guard.get("max_consecutive", 3) or 3))
     guard.setdefault("guard_val_batches", int(guard.get("guard_val_batches", 0) or 0))  # 0=use full val
 
     onv = guard.get("on_violate", {}) or {}
     guard["on_violate"] = onv
     onv.setdefault("scale_lambda_hw", 0.5)
-    onv.setdefault("max_consecutive", 3)
+    onv.setdefault("freeze_rho_epochs", int(guard.get("freeze_rho_epochs", 1) or 1))
+    onv.setdefault("disable_hw_after_max_violations", False)
+    recover = onv.get("recover", {}) or {}
+    onv["recover"] = recover
+    recover.setdefault("enable", True)
+    recover.setdefault("patience_epochs", 1)
+    recover.setdefault("restore_lambda_hw", True)
 
     cfg["stable_hw"] = stable_hw
 

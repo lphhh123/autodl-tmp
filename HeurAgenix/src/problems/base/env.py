@@ -181,19 +181,22 @@ class BaseEnv:
 
     @property
     def continue_run(self) -> bool:
+        """
+        Budget-first stopping rule:
+        - If max_steps is set: stop ONLY by current_steps >= max_steps (SPEC budget semantics).
+        - If max_steps is None: allow early stop by is_complete_solution.
+        """
         ms = getattr(self, "max_steps", None)
         if ms is not None:
             try:
-                if int(self.current_steps) >= int(ms):
-                    return False
+                return int(self.current_steps) < int(ms)
             except Exception:
-                pass
+                return True
+
         comp = getattr(self, "is_complete_solution", None)
-        if comp is not None:
-            try:
-                done = comp() if callable(comp) else bool(comp)
-                if done:
-                    return False
-            except Exception:
-                pass
-        return True
+        if comp is None:
+            return True
+        try:
+            return not bool(comp() if callable(comp) else comp)
+        except Exception:
+            return True
