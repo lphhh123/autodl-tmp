@@ -5,16 +5,92 @@ from typing import Any, Dict, Tuple
 from utils.config_utils import get_nested
 
 
+def _stable_hw_enabled(stable_hw_cfg) -> bool:
+    try:
+        return bool(getattr(stable_hw_cfg, "enabled", False))
+    except Exception:
+        try:
+            return bool(stable_hw_cfg.get("enabled", False))
+        except Exception:
+            return False
+
+
+def _extract_baseline_refs(baseline_dict: dict) -> tuple[float, float, float]:
+    """
+    Return (ref_latency_ms, ref_mem_mb, ref_comm_ms) from a baseline_stats.json-like dict.
+    Accept multiple key aliases to be robust.
+    """
+
+    def pick(keys):
+        for k in keys:
+            if k in baseline_dict and baseline_dict[k] is not None:
+                return float(baseline_dict[k])
+        return None
+
+    ref_latency = pick(["ref_latency_ms", "latency_ms", "avg_latency_ms", "mean_latency_ms", "total_latency_ms"])
+    ref_mem = pick(["ref_mem_mb", "mem_mb", "avg_mem_mb", "mean_mem_mb", "peak_mem_mb"])
+    ref_comm = pick(["ref_comm_ms", "comm_ms", "avg_comm_ms", "mean_comm_ms"])
+
+    if ref_latency is None or ref_mem is None or ref_comm is None:
+        raise ValueError(
+            f"baseline_stats missing required keys. got keys={sorted(list(baseline_dict.keys()))}. "
+            f"need latency({['latency_ms','avg_latency_ms',...]}), mem({['mem_mb','avg_mem_mb',...]}), "
+            f"comm({['comm_ms','avg_comm_ms',...]})"
+        )
+    return ref_latency, ref_mem, ref_comm
+
+
+def init_hw_refs_from_baseline(
+    stable_hw_state: dict,
+    stable_hw_cfg,
+    baseline_stats_path: str,
+) -> dict:
+    """
+    Initialize stable_hw_state refs from baseline_stats.json.
+    No-op if already refs_inited=True.
+    """
+    if stable_hw_state.get("refs_inited", False):
+        return stable_hw_state
+    if not _stable_hw_enabled(stable_hw_cfg):
+        return stable_hw_state
+
+    import json
+    from pathlib import Path
+
+    p = Path(baseline_stats_path)
+    if not p.exists():
+        raise FileNotFoundError(f"[StableHW] baseline_stats_path not found: {p}")
+
+    d = json.loads(p.read_text(encoding="utf-8"))
+    ref_latency, ref_mem, ref_comm = _extract_baseline_refs(d)
+
+    stable_hw_state["ref_latency_ms"] = float(ref_latency)
+    stable_hw_state["ref_mem_mb"] = float(ref_mem)
+    stable_hw_state["ref_comm_ms"] = float(ref_comm)
+    stable_hw_state.setdefault("ref_T", float(ref_latency))
+    stable_hw_state.setdefault("ref_M", float(ref_mem))
+    stable_hw_state.setdefault("ref_C", float(ref_comm))
+    stable_hw_state["refs_inited"] = True
+    stable_hw_state["ref_source"] = "baseline_stats"
+    stable_hw_state["ref_path"] = str(p)
+    return stable_hw_state
+
+
 def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> Tuple[float, str]:
     """
     Returns (lambda_hw, phase) following SPEC:
       warmup -> ramp -> stabilize
     """
-    sched = get_nested(stable_hw_cfg, "lambda_hw_schedule", None)
-    if sched is None or not bool(get_nested(sched, "enabled", True)):
+    if not _stable_hw_enabled(stable_hw_cfg):
         state["lambda_hw"] = 0.0
         state["schedule_phase"] = "disabled"
         return 0.0, "disabled"
+
+    sched = get_nested(stable_hw_cfg, "lambda_hw_schedule", None)
+    if sched is None or not bool(get_nested(sched, "enabled", True)):
+        state["lambda_hw"] = 0.0
+        state["schedule_phase"] = "schedule_disabled"
+        return 0.0, "schedule_disabled"
 
     warmup = int(get_nested(sched, "warmup_epochs", 0))
     ramp = int(get_nested(sched, "ramp_epochs", 0))
@@ -50,9 +126,14 @@ def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict) -> None:
       - optionally use EMA for current acc
       - if drop > epsilon: scale lambda_hw; if consecutive >= max_consecutive -> lambda_hw = 0
     """
+    if not _stable_hw_enabled(stable_hw_cfg):
+        return
+
     guard = get_nested(stable_hw_cfg, "accuracy_guard", None)
     if guard is None or not bool(get_nested(guard, "enabled", True)):
+        state["guard_active"] = False
         return
+    state["guard_active"] = True
 
     if state.get("acc_baseline") is None:
         state["acc_baseline"] = float(acc1)
@@ -91,6 +172,8 @@ def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: 
       - Else: EMA update with beta=stable_hw_cfg.ema_beta
     """
     if stable_hw_state is None:
+        return
+    if not _stable_hw_enabled(stable_hw_cfg):
         return
 
     norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg else None

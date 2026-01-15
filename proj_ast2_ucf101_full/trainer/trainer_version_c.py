@@ -531,6 +531,35 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             "hw_mats": {},
         },
     )
+    # ---- StableHW refs init: baseline_stats ----
+    if stable_hw_cfg is not None and bool(getattr(stable_hw_cfg, "enabled", False)):
+        try:
+            ref_up = getattr(stable_hw_cfg, "hw_refs_update", None)
+            ref_source = str(getattr(ref_up, "ref_source", "bootstrap")) if ref_up is not None else "bootstrap"
+            baseline_path = str(getattr(ref_up, "baseline_stats_path", "") or "")
+            if (not baseline_path) and hasattr(cfg, "paths"):
+                baseline_path = str(getattr(cfg.paths, "baseline_stats_path", "") or "")
+
+            if ref_source == "baseline_stats":
+                from utils.stable_hw import init_hw_refs_from_baseline
+
+                stable_hw_state = init_hw_refs_from_baseline(stable_hw_state, stable_hw_cfg, baseline_path)
+
+                # 额外：把 baseline_stats_used.json 落到本次 out_dir，保证复现闭环
+                try:
+                    from pathlib import Path
+
+                    p = Path(stable_hw_state.get("ref_path", ""))
+                    if p.exists():
+                        (out_dir / "baseline_stats_used.json").write_text(
+                            p.read_text(encoding="utf-8"),
+                            encoding="utf-8",
+                        )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            raise RuntimeError(f"[StableHW] failed to init refs from baseline_stats: {e}")
     run_state: Dict[str, Any] = {"last_model_info": None}
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None

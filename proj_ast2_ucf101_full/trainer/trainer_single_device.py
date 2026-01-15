@@ -127,6 +127,32 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         "refs_inited": False,
         "ref_source": "unset",
     }
+    if stable_hw_cfg is not None and bool(getattr(stable_hw_cfg, "enabled", False)):
+        try:
+            ref_up = getattr(stable_hw_cfg, "hw_refs_update", None)
+            ref_source = str(getattr(ref_up, "ref_source", "bootstrap")) if ref_up is not None else "bootstrap"
+            baseline_path = str(getattr(ref_up, "baseline_stats_path", "") or "")
+            if (not baseline_path) and hasattr(cfg, "paths"):
+                baseline_path = str(getattr(cfg.paths, "baseline_stats_path", "") or "")
+
+            if ref_source == "baseline_stats":
+                from utils.stable_hw import init_hw_refs_from_baseline
+
+                stable_state = init_hw_refs_from_baseline(stable_state, stable_hw_cfg, baseline_path)
+
+                try:
+                    from pathlib import Path
+
+                    p = Path(stable_state.get("ref_path", ""))
+                    if p.exists() and out_dir is not None:
+                        (out_dir / "baseline_stats_used.json").write_text(
+                            p.read_text(encoding="utf-8"),
+                            encoding="utf-8",
+                        )
+                except Exception:
+                    pass
+        except Exception as e:
+            raise RuntimeError(f"[StableHW] failed to init refs from baseline_stats: {e}")
 
     best_acc = 0.0
     last_acc = 0.0
