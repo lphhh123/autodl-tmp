@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from utils.stable_hash import stable_hash
 
 
 def compute_hw_loss(
@@ -16,6 +17,7 @@ def compute_hw_loss(
     stable_hw_state: Optional[Dict[str, Any]] = None,
     segments=None,
     mapping=None,
+    mapping_sig: Optional[str] = None,
     eff_specs: Optional[Dict[str, torch.Tensor]] = None,
     layout_positions: Optional[torch.Tensor] = None,
     mapping_solver=None,
@@ -42,10 +44,41 @@ def compute_hw_loss(
     comm_ms = None
 
     if segments and mapping is not None and eff_specs is not None and mapping_solver is not None:
-        cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
-        lat_ms_mat = cost["lat_ms"]
-        mem_mb_mat = cost["mem_mb"]
-        power_w_mat = cost["power_w"]
+        cache = None
+        if stable_hw_state is not None and mapping_sig is not None:
+            cache = stable_hw_state.setdefault("discrete_cache", {}).setdefault("hw_mats", {})
+        eff_sig = {}
+        if eff_specs is not None:
+            eff_sig = {
+                k: float(v.detach().mean().cpu())
+                for k, v in eff_specs.items()
+                if hasattr(v, "detach")
+            }
+        key = None
+        if cache is not None:
+            key = stable_hash(
+                {
+                    "mapping_sig": mapping_sig,
+                    "eff": eff_sig,
+                    "distance_scale": float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
+                    "mem_limit_factor": float(getattr(mapping_solver, "mem_limit_factor", 0.9)),
+                }
+            )
+        if cache is not None and key in cache:
+            lat_ms_mat = cache[key]["cost_ms"]
+            mem_mb_mat = cache[key]["mem_mb"]
+            power_w_mat = cache[key]["power_w"]
+        else:
+            cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
+            lat_ms_mat = cost["lat_ms"]
+            mem_mb_mat = cost["mem_mb"]
+            power_w_mat = cost["power_w"]
+            if cache is not None and key is not None:
+                cache[key] = {
+                    "cost_ms": lat_ms_mat.detach(),
+                    "mem_mb": mem_mb_mat.detach(),
+                    "power_w": power_w_mat.detach(),
+                }
         K, S = lat_ms_mat.shape
 
         map_idx = torch.tensor([int(x) for x in mapping[:K]], device=device, dtype=torch.long)

@@ -28,6 +28,7 @@ from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
+from utils.stable_hash import stable_hash
 from utils.stable_hw import apply_accuracy_guard, stable_hw_schedule, update_hw_refs_from_stats
 
 
@@ -375,7 +376,25 @@ def _solve_mapping_for_cache(
         distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
     )
     mapping = mapping_result.get("mapping", [])
-    signature = f"seg{len(segments)}_map{hash(tuple(mapping))}"
+    S = int(eff_specs["peak_flops"].shape[0]) if "peak_flops" in eff_specs else int(len(mapping))
+    seg_sig_payload = [
+        {
+            "k": int(i),
+            "flops": float(getattr(seg, "flops", 0.0)),
+            "bytes": float(getattr(seg, "bytes", 0.0)),
+            "traffic": float(getattr(seg, "traffic_out_bytes", 0.0)),
+            "mem": float(getattr(seg, "mem_mb", 0.0)),
+        }
+        for i, seg in enumerate(segments)
+    ]
+    mapping_sig = stable_hash(
+        {
+            "S": int(S),
+            "mapping": [int(x) for x in mapping],
+            "segments": seg_sig_payload,
+        }
+    )
+    signature = f"seg{len(segments)}_{mapping_sig}"
     mapping_result["segments"] = segments
     mapping_result["signature"] = signature
     return mapping_result
@@ -408,13 +427,18 @@ def _solve_layout_for_cache(
     return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
-def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional[str] = None):
+def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: Optional[str] = None):
     device = get_device(cfg.train.device)
     device_type = device.type
     seed_everything(int(getattr(cfg.train, "seed", 0)))
     logger = setup_logger()
-    out_dir = Path(export_dir) if export_dir else Path("outputs/version_c")
+    # out_dir: training outputs root
+    out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
+    # layout_export_dir: ONLY for exporting layout_input.json (optional)
+    layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
+    if layout_export_dir is not None:
+        layout_export_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "logs" / "version_c_stats.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -504,6 +528,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
             "layout": None,
             "mapping_signature": None,
             "layout_signature": None,
+            "hw_mats": {},
         },
     )
     run_state: Dict[str, Any] = {"last_model_info": None}
@@ -590,6 +615,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     stable_hw_state=stable_hw_state,
                     segments=segments_cached,
                     mapping=mapping_cached,
+                    mapping_sig=mapping_res.get("signature") if mapping_res else None,
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
                     mapping_solver=mapping_solver,
@@ -691,6 +717,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
                     stable_hw_state=stable_hw_state,
                     segments=segments_cached,
                     mapping=mapping_cached,
+                    mapping_sig=mapping_res.get("signature") if mapping_res else None,
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
                     mapping_solver=mapping_solver,
@@ -755,7 +782,7 @@ def train_version_c(cfg, export_layout_input: bool = False, export_dir: Optional
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     if export_layout_input:
-        export_dir_path = Path(export_dir or "outputs/P3")
+        export_dir_path = Path(layout_export_dir or "outputs/P3")
         slot_out = chiplet_slots(hard=False)
         eff_specs = slot_out["eff_specs"]
         part_res = partitioner.plan(

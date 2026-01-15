@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -45,7 +45,10 @@ def assign_clusters_to_regions(
     lambda_ring: float,
     lambda_cap: float,
     refine_cfg: Dict,
+    py_rng: Optional[random.Random] = None,
 ) -> Tuple[List[int], float]:
+    if py_rng is None:
+        py_rng = random.Random(0)
     # greedy init by tdp descending
     cluster_order = sorted(range(len(clusters)), key=lambda i: clusters[i].tdp_sum, reverse=True)
     cluster_to_region = [-1 for _ in clusters]
@@ -68,11 +71,11 @@ def assign_clusters_to_regions(
         alpha = float(refine_cfg.get("sa_alpha", 0.99))
         current_cost = _placement_cost(cluster_to_region, clusters, regions, W, lambda_graph, lambda_ring, lambda_cap)
         for _ in range(steps):
-            a, b = random.sample(range(len(clusters)), 2)
+            a, b = py_rng.sample(range(len(clusters)), 2)
             cluster_to_region[a], cluster_to_region[b] = cluster_to_region[b], cluster_to_region[a]
             new_cost = _placement_cost(cluster_to_region, clusters, regions, W, lambda_graph, lambda_ring, lambda_cap)
             delta = new_cost - current_cost
-            if delta < 0 or math.exp(-delta / max(T, 1e-6)) > random.random():
+            if delta < 0 or math.exp(-delta / max(T, 1e-6)) > py_rng.random():
                 current_cost = new_cost
             else:
                 cluster_to_region[a], cluster_to_region[b] = cluster_to_region[b], cluster_to_region[a]
