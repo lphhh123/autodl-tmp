@@ -8,5 +8,4 @@ training:
 hw:
   mode: version_c_full
   use_fine_split: true
-layout:
   optimize_layout: false

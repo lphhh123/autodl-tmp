@@ -1,6 +1,0 @@
-"""Deprecated Phase 3 mapping baseline trainer (do not use)."""
-
-raise RuntimeError(
-    "DEPRECATED: trainers/version_c_phase3_trainer.py is deprecated. "
-    "Use proj_ast2_ucf101_full/trainer/ trainers instead."
-)

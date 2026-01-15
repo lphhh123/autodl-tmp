@@ -10,7 +10,6 @@ hw:
   mode: version_c_full
   use_fine_split: true
   num_slots: 4
-layout:
   optimize_layout: false
 export_layout_input: true
 export_dir: outputs/P3/A3

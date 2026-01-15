@@ -2,7 +2,7 @@ _base_: ../vc_phase3_full_ucf101.yaml
 
 training:
   inner_steps_layout: 1
-layout:
+hw:
   optimize_layout: true
 layout_seed:
   method: traffic_aware

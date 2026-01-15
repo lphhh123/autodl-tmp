@@ -8,5 +8,36 @@ training:
 hw:
   mode: version_c_full
   use_fine_split: true
-layout:
   optimize_layout: true
+stable_hw:
+  enabled: true
+  lambda_hw_schedule:
+    enabled: true
+    warmup_epochs: 0
+    ramp_epochs: 1
+    lambda_hw_max: 0.2
+    clamp_min: 0.0
+    clamp_max: 0.2
+  normalize:
+    mode: hinge_log_ratio
+    eps: 1.0e-6
+    target_ratio_T: 0.9
+    target_ratio_E: 0.9
+    mem_hinge_only: true
+    clip_term_max: 10.0
+  accuracy_guard:
+    enabled: true
+    metric: acc1
+    epsilon_drop: 0.01
+    use_ema: true
+    ema_beta: 0.8
+    on_violate:
+      scale_lambda_hw: 0.5
+      freeze_rho_epochs: 1
+      max_consecutive: 3
+  discrete_isolation:
+    mapping_update_every_epochs: 1
+    layout_update_every_epochs: 1
+    use_cached_mapping_for_inner_steps: true
+    use_cached_layout_for_inner_steps: true
+    track_live_in_inner_steps: false
