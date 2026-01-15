@@ -1,18 +1,39 @@
+from __future__ import annotations
+
 from pathlib import Path
 import os
 
 
+def _repo_root() -> Path:
+    # this file: HeurAgenix/src/util/data_path.py
+    # parents[0]=util, [1]=src, [2]=HeurAgenix
+    # NOTE: Path.parents is 1-based in meaning; here:
+    #   data_path.py -> util -> src -> HeurAgenix
+    return Path(__file__).resolve().parents[3]
+
+
 def get_data_path() -> Path:
     """
-    Resolve data path for all tasks:
-      1. If AMLT_DATA_DIR is set, use it.
-      2. Else search ../../data relative to this file.
+    Official HeurAgenix expects data under:
+      <repo_root>/data/{problem}/(train_data, validation_data, test_data, smoke_data)
+
+    Allow overriding by env var AMLT_DATA_DIR (set by wrapper).
     """
     base = os.environ.get("AMLT_DATA_DIR")
     if base:
-        return Path(base).resolve()
-    repo_root = Path(__file__).resolve().parents[2]
-    data_path = repo_root / "data"
-    if not data_path.exists():
-        data_path = Path.cwd() / "data"
-    return data_path.resolve()
+        return Path(base).expanduser().resolve()
+
+    repo_root = _repo_root()
+    cand = repo_root / "data"
+    if cand.exists():
+        return cand.resolve()
+
+    # Fallback: search upward from CWD
+    cwd = Path.cwd().resolve()
+    for p in [cwd] + list(cwd.parents):
+        d = p / "data"
+        if d.exists():
+            return d.resolve()
+
+    # Last resort: return the canonical path even if not created yet
+    return cand.resolve()

@@ -1,6 +1,9 @@
 """Base environment for HeurAgenix problems."""
 from __future__ import annotations
 
+import json
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 
@@ -18,6 +21,8 @@ class BaseEnv:
         self.current_steps = 0
         self.max_steps = None
         self.seed = 0
+        self._rec_fp = None
+        self._rec_path = None
 
     def load_data(self, path: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -48,6 +53,31 @@ class BaseEnv:
         self.current_steps = 0
         self.algorithm_data = {}
         self.output_dir = output_dir
+        if self._rec_fp is not None:
+            try:
+                self._rec_fp.close()
+            except Exception:
+                pass
+        self._rec_fp = None
+        self._rec_path = None
+        self._ensure_rec_fp()
+
+    def _ensure_rec_fp(self):
+        if not self.output_dir:
+            return None
+        if self._rec_fp is not None:
+            return self._rec_fp
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._rec_path = os.path.join(self.output_dir, "recordings.jsonl")
+        self._rec_fp = open(self._rec_path, "a", encoding="utf-8")
+        return self._rec_fp
+
+    def _write_record(self, line: Dict[str, Any]) -> None:
+        fp = self._ensure_rec_fp()
+        if fp is None:
+            return
+        fp.write(json.dumps(line, ensure_ascii=False) + "\n")
+        fp.flush()
 
     def run_operator(
         self,
@@ -73,6 +103,23 @@ class BaseEnv:
             self.construction_steps = 0
         self.construction_steps += 1
         self.current_steps += 1
+        record = {
+            "iter": int(self.current_steps),
+            "stage": stage,
+            "op": getattr(operator, "name", operator.__class__.__name__),
+            "heuristic_name": heuristic_name,
+            "time_ms": float(time_ms) if time_ms is not None else None,
+            "meta": meta or {},
+        }
+        if add_record_item:
+            record.update(add_record_item)
+        if not record.get("_skip_record"):
+            try:
+                record["key_value"] = float(self.get_key_value(self.current_solution))
+            except Exception:
+                record["key_value"] = None
+            record["timestamp"] = float(time.time())
+            self._write_record(record)
         return True
 
     def run_heuristic(self, heuristic, algorithm_data: Optional[Dict[str, Any]] = None, record: bool = True, **kwargs) -> bool:
@@ -89,7 +136,13 @@ class BaseEnv:
             return False
         if hasattr(self, "run_operator"):
             try:
-                self.run_operator(operator, heuristic_name=getattr(heuristic, "__name__", "heuristic"), meta=meta)
+                add_record_item = None if record else {"_skip_record": True}
+                self.run_operator(
+                    operator,
+                    heuristic_name=getattr(heuristic, "__name__", "heuristic"),
+                    meta=meta,
+                    add_record_item=add_record_item,
+                )
             except TypeError:
                 self.run_operator(operator)
             return True

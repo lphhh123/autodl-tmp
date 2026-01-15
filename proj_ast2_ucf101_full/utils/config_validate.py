@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from .config_utils import get_nested, set_nested
+from .config import AttrDict
 
 # 仅对“必需”字段做强制默认，避免过度约束
 REQ_VERSION_C_HW_DEFAULTS = {
@@ -104,6 +105,51 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         _apply_defaults(cfg, REQ_VERSION_C_HW_DEFAULTS)
         _apply_defaults(cfg, REQ_VERSION_C_TRAINING_DEFAULTS)
         _apply_defaults(cfg, REQ_CHIPLET_DEFAULTS)
+    elif mode == "ast2":
+        # minimal defaults for reproducibility
+        if not hasattr(cfg, "train"):
+            cfg.train = AttrDict({})
+        if getattr(cfg.train, "seed", None) is None:
+            cfg.train.seed = 2024
+        return cfg
+    elif mode == "layout":
+        _apply_defaults(
+            cfg,
+            {
+                "hw.num_slots": 64,
+                "hw.wafer_radius_mm": 150.0,
+                "hw.site_margin_mm": 5.0,
+                "hw.lambda_boundary": 1.0,
+                "hw.lambda_overlap": 1.0,
+                "hw.lambda_comm_extra": 1.0,
+                "hw.lambda_thermal": 1.0,
+            },
+        )
+
+        if not hasattr(cfg, "objective"):
+            cfg.objective = AttrDict({})
+        if getattr(cfg.objective, "sigma_mm", None) is None:
+            cfg.objective.sigma_mm = 2.0
+
+        if not hasattr(cfg.objective, "scalar_weights"):
+            cfg.objective.scalar_weights = AttrDict({})
+        sw = cfg.objective.scalar_weights
+        if getattr(sw, "w_comm", None) is None:
+            sw.w_comm = 1.0
+        if getattr(sw, "w_therm", None) is None:
+            sw.w_therm = 1.0
+        if getattr(sw, "w_penalty", None) is None:
+            sw.w_penalty = 1.0
+
+        # optional oscillation metric defaults
+        if not hasattr(cfg, "oscillation"):
+            cfg.oscillation = AttrDict({})
+        if getattr(cfg.oscillation, "window", None) is None:
+            cfg.oscillation.window = 10
+        if getattr(cfg.oscillation, "eps_flat", None) is None:
+            cfg.oscillation.eps_flat = 1e-6
+
+        return cfg
     elif mode == "single":
         # single-device baseline: only need hw.device_name/gpu_yaml/proxy_weight_dir/lambda_hw
         _apply_defaults(

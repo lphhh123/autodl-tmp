@@ -30,6 +30,7 @@ from layout.pareto import ParetoSet
 from layout.pareto_io import write_pareto_points_csv
 from layout.trace_metrics import compute_trace_metrics_from_csv
 from utils.config import load_config
+from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 
 
@@ -789,6 +790,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
+    cfg = validate_and_fill_defaults(cfg, mode="layout")
     cfg_stem = Path(args.cfg).stem
     auto_out = Path("outputs/layout_heuragenix") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
