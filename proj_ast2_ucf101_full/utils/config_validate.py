@@ -134,16 +134,37 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     if "stable_hw" not in cfg:
         cfg["stable_hw"] = {}
 
-    stable_hw = cfg.get("stable_hw", {}) or {}
-    sched = stable_hw.get("lambda_hw_schedule", {}) or {}
+    stable_hw = get_nested(cfg, "stable_hw", {})
+    stable_hw_enabled = bool(stable_hw.get("enabled", False))
+    stable_hw.setdefault("enabled", stable_hw_enabled)
 
-    enabled = bool(stable_hw.get("enabled", False))
-    sched_enabled = bool(sched.get("enabled", True))
+    # --- lambda schedule ---
+    sched = stable_hw.setdefault("lambda_hw_schedule", {})
+    sched.setdefault("enabled", stable_hw_enabled)
+    sched.setdefault("start_epoch", 0)
+    sched.setdefault("warmup_epochs", 0)
+    sched.setdefault("ramp_epochs", 0)
+    sched.setdefault("lambda_hw_max", float(get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0))
 
-    stable_hw["lambda_hw_schedule"] = sched
-    cfg["stable_hw"] = stable_hw
+    # --- accuracy guard ---
+    guard = stable_hw.setdefault("accuracy_guard", {})
+    guard.setdefault("enabled", stable_hw_enabled)
+    guard.setdefault("acc_drop_tol", float(guard.get("acc_drop_tol", 0.01) or 0.01))
+    guard.setdefault("lambda_floor", float(guard.get("lambda_floor", 0.0) or 0.0))
+    guard.setdefault("ema_beta", float(guard.get("ema_beta", 0.9) or 0.9))
 
-    if enabled and sched_enabled:
+    # --- refs update ---
+    ref_up = stable_hw.setdefault("hw_refs_update", {})
+    ref_up.setdefault("enabled", stable_hw_enabled)
+    ref_up.setdefault("ref_source", str(ref_up.get("ref_source", "bootstrap")))
+    ref_up.setdefault("update_only_when_better", bool(ref_up.get("update_only_when_better", True)))
+    ref_up.setdefault("min_delta_ratio", float(ref_up.get("min_delta_ratio", 0.01) or 0.01))
+    ref_up.setdefault(
+        "baseline_stats_path",
+        str(ref_up.get("baseline_stats_path", "")) or str(get_nested(cfg, "paths.baseline_stats_path", "")),
+    )
+
+    if stable_hw_enabled and bool(sched.get("enabled", stable_hw_enabled)):
         lam_max = sched.get("lambda_hw_max", None)
         try:
             lam_max_f = float(lam_max) if lam_max is not None else None
@@ -168,7 +189,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                     "If you really want to reuse legacy hw.lambda_hw, set: stable_hw.allow_legacy_lambda_hw: true"
                 )
 
-    sched.setdefault("enabled", True)
+    sched.setdefault("enabled", stable_hw_enabled)
+    sched.setdefault("start_epoch", 0)
     sched.setdefault("warmup_epochs", 5)
     sched.setdefault("ramp_epochs", 10)
     sched.setdefault("phase_name", "warmup_ramp")
@@ -257,7 +279,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     # accuracy_guard defaults (Version-C trainer uses attribute access)
     guard = stable_hw.get("accuracy_guard", {}) or {}
     stable_hw["accuracy_guard"] = guard
-    guard.setdefault("enabled", True)
+    guard.setdefault("enabled", stable_hw_enabled)
     guard.setdefault("use_ema", True)
     guard.setdefault("ema_beta", 0.8)
     guard.setdefault("epsilon_drop", 0.01)
@@ -269,5 +291,15 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     stable_hw.setdefault("ema_beta", 0.9)
     cfg["stable_hw"] = stable_hw
+
+    if stable_hw_enabled:
+        ref_src = str(ref_up.get("ref_source", "bootstrap"))
+        if ref_src == "baseline_stats":
+            p = str(ref_up.get("baseline_stats_path", "") or "")
+            if not p:
+                print(
+                    "[StableHW] ref_source=baseline_stats but baseline_stats_path is empty. "
+                    "Please set stable_hw.hw_refs_update.baseline_stats_path or paths.baseline_stats_path."
+                )
 
     return cfg
