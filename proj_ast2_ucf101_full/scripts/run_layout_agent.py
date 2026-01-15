@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import argparse
 import csv
 import json
+import random
 import time
 
 import numpy as np
@@ -169,6 +170,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         lambda_ring=float(cfg.global_place_region.lambda_ring),
         lambda_cap=float(cfg.global_place_region.lambda_cap),
         refine_cfg=cfg.global_place_region.get("refine", {}),
+        py_rng=random.Random(int(seed)),
     )
 
     # Stage3: expand

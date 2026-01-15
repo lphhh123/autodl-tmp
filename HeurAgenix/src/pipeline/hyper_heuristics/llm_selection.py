@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import time
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -86,29 +85,6 @@ class LLMSelectionHyperHeuristic:
         return data
 
     def run(self, env: BaseEnv) -> bool:
-        import os, json, time, traceback
-
-        # ---------- paths ----------
-        usage_path = None
-        if getattr(self, "output_dir", None):
-            usage_path = os.path.join(self.output_dir, "llm_usage.jsonl")
-
-        def _usage_base():
-            return {
-                "engine": "llm_hh",
-                "case": str(getattr(env, "data_name", getattr(env, "case", ""))),
-                "seed_id": int(getattr(env, "_seed_id", getattr(env, "seed", 0)) or 0),
-                "max_steps": int(getattr(env, "max_steps", 0) or 0),
-                "step": int(getattr(env, "current_steps", 0) or 0),
-            }
-
-        def _log_usage(rec: dict):
-            if usage_path:
-                base = _usage_base()
-                base.update(rec or {})
-                with open(usage_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(base, ensure_ascii=False) + "\n")
-
         # ---------- init llm ----------
         llm_ok = True
         llm_client = None
@@ -120,26 +96,32 @@ class LLMSelectionHyperHeuristic:
             )
             if llm_client is None:
                 llm_ok = False
-                _log_usage(
-                    {
-                        "ok": False,
-                        "method": "llm_hh",
-                        "reason": "missing_llm_config_or_client_none",
-                        "engine_used": "random_hh",
-                        "fallback_used": True,
-                        "llm_config_file": self.llm_config_file,
-                    }
+                self._log_usage(
+                    self._with_usage_base(
+                        env,
+                        {
+                            "ok": False,
+                            "method": "llm_hh",
+                            "reason": "missing_llm_config_or_client_none",
+                            "engine_used": "random_hh",
+                            "fallback_used": True,
+                            "llm_config_file": self.llm_config_file,
+                        },
+                    )
                 )
         except Exception as e:
             llm_ok = False
-            _log_usage(
-                {
-                    "ok": False,
-                    "method": "llm_hh",
-                    "engine_used": "random_hh",
-                    "reason": "llm_client_init_failed",
-                    "error": str(e),
-                }
+            self._log_usage(
+                self._with_usage_base(
+                    env,
+                    {
+                        "ok": False,
+                        "method": "llm_hh",
+                        "engine_used": "random_hh",
+                        "reason": "llm_client_init_failed",
+                        "error": str(e),
+                    },
+                )
             )
 
         fail_count = 0
@@ -158,15 +140,18 @@ class LLMSelectionHyperHeuristic:
             )
             heuristic_pool = sorted([h for h in heuristic_pool if h and not str(h).startswith("_")])
             if not heuristic_pool:
-                _log_usage(
-                    {
-                        "ok": False,
-                        "method": "llm_hh",
-                        "engine_used": "random_hh",
-                        "reason": "empty_heuristic_pool",
-                        "fallback_used": True,
-                        "fallback_reason": "empty_heuristic_pool",
-                    }
+                self._log_usage(
+                    self._with_usage_base(
+                        env,
+                        {
+                            "ok": False,
+                            "method": "llm_hh",
+                            "engine_used": "random_hh",
+                            "reason": "empty_heuristic_pool",
+                            "fallback_used": True,
+                            "fallback_reason": "empty_heuristic_pool",
+                        },
+                    )
                 )
                 break
 
@@ -187,15 +172,18 @@ class LLMSelectionHyperHeuristic:
 
             # --- if llm disabled and policy says stop, stop early ---
             if (not llm_ok) and fallback_mode == "stop":
-                _log_usage(
-                    {
-                        "ok": False,
-                        "method": "llm_hh",
-                        "engine_used": "stop",
-                        "reason": "llm_unavailable_and_stop",
-                        "fail_count": fail_count,
-                        "selection_round": selection_round,
-                    }
+                self._log_usage(
+                    self._with_usage_base(
+                        env,
+                        {
+                            "ok": False,
+                            "method": "llm_hh",
+                            "engine_used": "stop",
+                            "reason": "llm_unavailable_and_stop",
+                            "fail_count": fail_count,
+                            "selection_round": selection_round,
+                        },
+                    )
                 )
                 break
 
@@ -223,33 +211,40 @@ class LLMSelectionHyperHeuristic:
                     stage_name = "random_hh"
                     ok = False
                     reason = "llm_call_failed_fallback_random"
-                    _log_usage(
-                        {
-                            "ok": False,
-                            "method": "llm_hh",
-                            "engine_used": stage_name,
-                            "reason": reason,
-                            "error": str(e),
-                            "fail_count": fail_count,
-                            "max_llm_failures": max_fail,
-                            "selection_round": selection_round,
-                            "fallback_pick": chosen,
-                            "fallback_used": True,
-                            "fallback_reason": reason,
-                        }
-                    )
-                    if fail_count >= max_fail:
-                        llm_ok = False
-                        _log_usage(
+                    self._log_usage(
+                        self._with_usage_base(
+                            env,
                             {
                                 "ok": False,
                                 "method": "llm_hh",
-                                "reason": "llm_disabled_after_failures",
+                                "engine_used": stage_name,
+                                "reason": reason,
+                                "error": str(e),
                                 "fail_count": fail_count,
-                                "engine_used": "random_hh",
+                                "max_llm_failures": max_fail,
+                                "selection_round": selection_round,
+                                "fallback_pick": chosen,
                                 "fallback_used": True,
-                                "fallback_reason": "llm_disabled_after_failures",
-                            }
+                                "fallback_reason": reason,
+                                "traceback": err,
+                            },
+                        )
+                    )
+                    if fail_count >= max_fail:
+                        llm_ok = False
+                        self._log_usage(
+                            self._with_usage_base(
+                                env,
+                                {
+                                    "ok": False,
+                                    "method": "llm_hh",
+                                    "reason": "llm_disabled_after_failures",
+                                    "fail_count": fail_count,
+                                    "engine_used": "random_hh",
+                                    "fallback_used": True,
+                                    "fallback_reason": "llm_disabled_after_failures",
+                                },
+                            )
                         )
 
             if chosen is None:
@@ -260,21 +255,24 @@ class LLMSelectionHyperHeuristic:
 
             # always record one usage line for THIS selection
             fallback_used = bool(stage_name != "llm_hh")
-            _log_usage(
-                {
-                    "ok": ok,
-                    "method": "llm_hh",
-                    "engine_used": stage_name,
-                    "reason": reason,
-                    "chosen_heuristic": chosen,
-                    "candidates": candidates,
-                    "selection_round": selection_round,
-                    "selection_frequency": K,
-                    "fail_count": fail_count,
-                    "llm_enabled": bool(llm_ok and llm_client is not None),
-                    "fallback_used": fallback_used,
-                    "fallback_reason": reason if fallback_used else None,
-                }
+            self._log_usage(
+                self._with_usage_base(
+                    env,
+                    {
+                        "ok": ok,
+                        "method": "llm_hh",
+                        "engine_used": stage_name,
+                        "reason": reason,
+                        "chosen_heuristic": chosen,
+                        "candidates": candidates,
+                        "selection_round": selection_round,
+                        "selection_frequency": K,
+                        "fail_count": fail_count,
+                        "llm_enabled": bool(llm_ok and llm_client is not None),
+                        "fallback_used": fallback_used,
+                        "fallback_reason": reason if fallback_used else None,
+                    },
+                )
             )
 
             heuristic = load_function(chosen, problem=self.problem)

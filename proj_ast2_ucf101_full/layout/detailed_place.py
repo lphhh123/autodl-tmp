@@ -107,20 +107,21 @@ def _sample_action(
     sites_xy: np.ndarray,
     chip_tdp: Optional[np.ndarray],
     cluster_to_region: List[int],
+    py_rng: random.Random,
 ) -> Dict:
     probs = _cfg_get(cfg, "action_probs", {}) or {}
 
     # 1) swap: prioritize hot pairs
-    if random.random() < float(probs.get("swap", 0.5)):
+    if py_rng.random() < float(probs.get("swap", 0.5)):
         hot_cfg = _cfg_get(cfg, "hot_sampling", {}) or {}
         top_k = int(hot_cfg.get("top_pairs_k", 10))
         top_pairs = _compute_top_pairs(traffic_sym, top_k)
         if top_pairs:
-            i, j, _ = random.choice(top_pairs)
+            i, j, _ = py_rng.choice(top_pairs)
             return {"op": "swap", "i": int(i), "j": int(j)}
 
     # 2) relocate: prefer empty sites within same region
-    if random.random() < float(probs.get("relocate", 0.3)):
+    if py_rng.random() < float(probs.get("relocate", 0.3)):
         reloc_cfg = _cfg_get(cfg, "relocate", {}) or {}
         same_region_prob = float(reloc_cfg.get("same_region_prob", 0.8))
         neighbor_k = int(reloc_cfg.get("neighbor_k", 30))
@@ -129,7 +130,7 @@ def _sample_action(
         if chip_tdp is not None and len(chip_tdp) == slot_scores.shape[0]:
             slot_scores = slot_scores + chip_tdp
 
-        slot = int(np.argmax(slot_scores)) if float(slot_scores.sum()) > 0 else random.randrange(traffic_sym.shape[0])
+        slot = int(np.argmax(slot_scores)) if float(slot_scores.sum()) > 0 else py_rng.randrange(traffic_sym.shape[0])
 
         # NOTE: assign[slot] must be valid to index site_to_region
         cur_site = int(assign[slot])
@@ -143,14 +144,14 @@ def _sample_action(
             return {"op": "none"}
 
         candidates = [s for s in empty_sites if int(site_to_region[s]) == current_region]
-        if (not candidates) or (random.random() > same_region_prob):
+        if (not candidates) or (py_rng.random() > same_region_prob):
             candidates = empty_sites
 
         # choose nearest candidate sites
         dists = [(sid, float(np.linalg.norm(sites_xy[cur_site] - sites_xy[sid]))) for sid in candidates]
         dists.sort(key=lambda x: x[1])
         chosen = dists[: max(1, min(neighbor_k, len(dists)))]
-        site_id = int(random.choice(chosen)[0])
+        site_id = int(py_rng.choice(chosen)[0])
         return {"op": "relocate", "i": int(slot), "site_id": int(site_id)}
 
     # 3) cluster_move: move a heavy cluster to a different region
@@ -162,7 +163,7 @@ def _sample_action(
             cur_region = int(cluster_to_region[c.cluster_id]) if c.cluster_id < len(cluster_to_region) else -1
             region_options = [r for r in regions if int(r.region_id) != cur_region]
             if region_options:
-                target_region = random.choice(region_options)
+                target_region = py_rng.choice(region_options)
         if target_region is not None:
             return {"op": "cluster_move", "cluster_id": int(c.cluster_id), "region_id": int(target_region.region_id)}
 
@@ -189,7 +190,7 @@ def run_detailed_place(
     # ---- deterministic seeds ----
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
     rng = np.random.default_rng(base_seed)
-    random.seed(base_seed)
+    py_rng = random.Random(base_seed)
 
     # ---- llm logging safety ----
     raw_text: str = ""
@@ -455,7 +456,16 @@ def run_detailed_place(
                     action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
                 else:
                     action_payload = _sample_action(
-                        cfg, traffic_sym, site_to_region, regions, clusters, assign, sites_xy, chip_tdp, cluster_to_region
+                        cfg,
+                        traffic_sym,
+                        site_to_region,
+                        regions,
+                        clusters,
+                        assign,
+                        sites_xy,
+                        chip_tdp,
+                        cluster_to_region,
+                        py_rng,
                     )
 
                 action = copy.deepcopy(action_payload) if action_payload else {"op": "none"}
