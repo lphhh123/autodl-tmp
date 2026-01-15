@@ -14,7 +14,7 @@ def write_pareto_points_csv(pareto: "ParetoSet", path: Path) -> None:
         w = csv.writer(f)
         w.writerow(["comm_norm", "therm_norm", "total_scalar", "stage", "iter", "seed"])
         for p in pareto.points:
-            meta = p.meta or {}
+            meta = p.payload or {}
             w.writerow(
                 [
                     float(p.comm_norm),

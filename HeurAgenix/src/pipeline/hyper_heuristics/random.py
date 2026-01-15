@@ -212,18 +212,21 @@ class RandomHyperHeuristic:
                 current_solution = new_solution
                 current_score = new_score
                 self.env.solution = current_solution
-            self.env.recordings.append(
-                {
-                    "step": step,
-                    "stage": self.stage_name,
-                    "operator": operator,
-                    "meta": meta,
-                    "accepted": accept,
-                    "score": current_score,
-                    "time_ms": int((time.perf_counter() - step_start) * 1000),
-                    "assign": list(current_solution.assign),
-                }
-            )
+            rec = {
+                "step": step,
+                "stage": self.stage_name,
+                "operator": operator,
+                "meta": meta,
+                "accepted": accept,
+                "score": current_score,
+                "time_ms": int((time.perf_counter() - step_start) * 1000),
+            }
+            if hasattr(current_solution, "assign"):
+                try:
+                    rec["assign"] = list(getattr(current_solution, "assign"))
+                except Exception:
+                    pass
+            self.env.recordings.append(rec)
             temperature *= self.sa_alpha
 
     def run(self, env: Any, max_steps: int | None = None) -> bool:
