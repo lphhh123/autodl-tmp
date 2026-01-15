@@ -93,7 +93,7 @@ def main():
     }
     with open(out_dir_path / "run_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    train_version_c(cfg, export_layout_input=export_layout_input, export_dir=export_dir)
+    train_version_c(cfg, export_layout_input=export_layout_input, layout_export_dir=export_dir)
 
 
 if __name__ == "__main__":
