@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,6 +28,7 @@ from mapping.partitioner import PartitionPlanner
 from mapping.segments import build_segments_from_model
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
+from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
@@ -506,7 +508,27 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     loader = build_dataloader(cfg)
-    val_loader = build_val_loader(cfg)
+    # ---- build val/test loader for stable_hw accuracy_guard ----
+    val_ds = UCF101Dataset(cfg, split="val")
+    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    generator = torch.Generator()
+    generator.manual_seed(base_seed)
+
+    def _seed_worker(worker_id: int):
+        s = base_seed + worker_id
+        random.seed(s)
+        np.random.seed(s)
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=int(getattr(cfg.data, "batch_size", cfg.train.batch_size)),
+        shuffle=False,
+        num_workers=int(getattr(cfg.data, "num_workers", 4)),
+        worker_init_fn=_seed_worker,
+        generator=generator,
+    )
+
+    max_eval_batches = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
     data_iter = iter(loader)
 
     mapping_only = bool(getattr(cfg.training, "mapping_only", False))
@@ -628,7 +650,6 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None
     last_hw_stats = None
-    guard_info = None
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
@@ -804,7 +825,6 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     }) + "\n")
             global_step += 1
 
-        guard_info = None
         if stable_hw_cfg and hw_stats_count > 0:
             epoch_hw_stats = {
                 "latency_ms": sum_latency / hw_stats_count,
@@ -881,24 +901,26 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 L_layout.backward()
                 optimizer_layout.step()
 
-        val_batches = 0
-        if stable_hw_cfg is not None:
-            guard_cfg = getattr(stable_hw_cfg, "accuracy_guard", None)
-            if guard_cfg is not None:
-                val_batches = int(getattr(guard_cfg, "guard_val_batches", 0) or 0)
-        val_acc1 = validate_one_epoch(
-            model,
-            val_loader,
-            device,
-            amp=cfg.train.amp,
-            max_batches=val_batches,
-            model_type=model_type,
-        )
+        if stable_hw_cfg:
+            stable_hw_state["epoch"] = int(outer)
+            val_acc1 = eval_acc1(
+                model,
+                val_loader,
+                device,
+                model_type=str(getattr(cfg.training, "model_type", "video")),
+                max_batches=max_eval_batches,
+            )
+            apply_accuracy_guard(float(val_acc1), stable_hw_cfg, stable_hw_state)
+        else:
+            val_acc1 = eval_acc1(
+                model,
+                val_loader,
+                device,
+                model_type=str(getattr(cfg.training, "model_type", "video")),
+                max_batches=max_eval_batches,
+            )
         last_acc1 = float(val_acc1)
         best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
-
-        if stable_hw_cfg:
-            guard_info = apply_accuracy_guard(val_acc1, stable_hw_cfg, stable_hw_state, epoch=outer)
 
         stable_state_path = log_path.parent / "stable_hw_state.json"
         stable_state_path.write_text(
@@ -913,12 +935,32 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         "stable_hw_ref_source": str(stable_hw_state.get("ref_source", "unset")),
         "best_acc1": float(best_acc1) if best_acc1 is not None else 0.0,
         "last_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
+        "val_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
         "last_hw_stats": last_hw_stats if last_hw_stats is not None else {},
         "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
         "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
     }
-    if guard_info:
-        metrics["stable_hw_guard"] = guard_info
+    metrics.update(
+        {
+            "stable_hw_lambda_hw_base": float(stable_hw_state.get("lambda_hw_base", 0.0)),
+            "stable_hw_lambda_hw_scale": float(stable_hw_state.get("lambda_hw_scale", 1.0)),
+            "stable_hw_lambda_hw_after_guard": float(
+                stable_hw_state.get("lambda_hw_after_guard", stable_hw_state.get("lambda_hw", 0.0))
+            ),
+            "stable_hw_schedule_phase": str(stable_hw_state.get("schedule_phase", "unknown")),
+            "stable_hw_baseline_acc": float(stable_hw_state.get("baseline_acc", 0.0)),
+            "stable_hw_current_acc": float(stable_hw_state.get("current_acc", 0.0)),
+            "stable_hw_current_acc_ema": float(
+                stable_hw_state.get("current_acc_ema", stable_hw_state.get("current_acc_ema", 0.0))
+            ),
+            "stable_hw_acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
+            "stable_hw_epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0)),
+            "stable_hw_violate_streak": int(stable_hw_state.get("violate_streak", 0)),
+            "stable_hw_guard_triggered": bool(stable_hw_state.get("guard_triggered", False)),
+            "stable_hw_hw_disabled": bool(stable_hw_state.get("hw_disabled", False)),
+            "stable_hw_rho_frozen_until_epoch": int(stable_hw_state.get("rho_frozen_until_epoch", 0)),
+        }
+    )
     with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 

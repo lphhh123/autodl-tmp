@@ -113,6 +113,9 @@ class UCF101Dataset(Dataset):
         self.root = frames_root
         self.splits_root = splits_root
 
+        split = str(split).lower()
+        if split in ("val", "valid", "validation"):
+            split = "test"
         self.split = split
         clip_lens = getattr(cfg.data, "clip_lens", None)
         clip_len = getattr(cfg.data, "clip_len", None)
@@ -131,9 +134,9 @@ class UCF101Dataset(Dataset):
         self.audio_root = Path(audio_root) if audio_root is not None else (self.root / "audio")
         self.audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
         self._audio_missing_warned = False
-        self.is_train = split == "train"
+        self.is_train = self.split == "train"
         self.img_size = cfg.data.img_size
-        split_name = "trainlist01.txt" if split == "train" else "testlist01.txt"
+        split_name = "trainlist01.txt" if self.split == "train" else "testlist01.txt"
         split_file = self.splits_root / split_name
         if not split_file.is_file():
             raise FileNotFoundError(
