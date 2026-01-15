@@ -134,38 +134,46 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     if "stable_hw" not in cfg:
         cfg["stable_hw"] = {}
 
-    stable_hw = cfg["stable_hw"]
-    hw = cfg.get("hw", {})
+    stable_hw = cfg.get("stable_hw", {}) or {}
+    sched = stable_hw.get("lambda_hw_schedule", {}) or {}
 
-    if "enabled" not in stable_hw:
-        stable_hw["enabled"] = bool(
-            float(hw.get("lambda_hw_max", hw.get("lambda_hw", 0.0))) > 0.0
-        )
+    enabled = bool(stable_hw.get("enabled", False))
+    sched_enabled = bool(sched.get("enabled", True))
 
-    stable_hw.setdefault("lambda_hw_schedule", {})
-    sched = stable_hw["lambda_hw_schedule"]
-    if "lambda_hw_max" not in sched or sched["lambda_hw_max"] is None:
-        base_lam = hw.get("lambda_hw_max", None)
-        if base_lam is None:
-            base_lam = hw.get("lambda_hw", 0.0)
+    stable_hw["lambda_hw_schedule"] = sched
+    cfg["stable_hw"] = stable_hw
+
+    if enabled and sched_enabled:
+        lam_max = sched.get("lambda_hw_max", None)
         try:
-            sched["lambda_hw_max"] = float(base_lam)
+            lam_max_f = float(lam_max) if lam_max is not None else None
         except Exception:
-            sched["lambda_hw_max"] = 0.0
+            lam_max_f = None
+
+        if lam_max_f is None or lam_max_f <= 0.0:
+            allow_legacy = bool(stable_hw.get("allow_legacy_lambda_hw", False))
+            hw = cfg.get("hw", {}) or {}
+            legacy = float(hw.get("lambda_hw", 0.0))
+
+            if allow_legacy and legacy > 0.0:
+                print(
+                    "[WARN] stable_hw is enabled but stable_hw.lambda_hw_schedule.lambda_hw_max is missing/<=0. "
+                    f"Using legacy hw.lambda_hw={legacy} because stable_hw.allow_legacy_lambda_hw=true."
+                )
+                sched["lambda_hw_max"] = float(legacy)
+            else:
+                raise ValueError(
+                    "stable_hw is enabled, but stable_hw.lambda_hw_schedule.lambda_hw_max is missing/<=0.\n"
+                    "Please set: stable_hw.lambda_hw_schedule.lambda_hw_max: <positive float>\n"
+                    "If you really want to reuse legacy hw.lambda_hw, set: stable_hw.allow_legacy_lambda_hw: true"
+                )
+
     sched.setdefault("enabled", True)
     sched.setdefault("warmup_epochs", 5)
     sched.setdefault("ramp_epochs", 10)
     sched.setdefault("phase_name", "warmup_ramp")
     sched.setdefault("clamp_min", 0.0)
     sched.setdefault("clamp_max", float(sched.get("lambda_hw_max", 0.0)))
-    if stable_hw.get("enabled") and float(sched.get("lambda_hw_max", 0.0)) <= 0.0:
-        print(
-            "[WARN] stable_hw.enabled=True but lambda_hw_max<=0; using cfg.hw.lambda_hw as fallback."
-        )
-        try:
-            sched["lambda_hw_max"] = float(hw.get("lambda_hw", 0.0))
-        except Exception:
-            sched["lambda_hw_max"] = 0.0
     if sched.get("clamp_max") is None or float(sched.get("clamp_max", 0.0)) <= 0.0:
         sched["clamp_max"] = float(sched.get("lambda_hw_max", 0.0))
 
