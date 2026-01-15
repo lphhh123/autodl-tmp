@@ -12,6 +12,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 # -----------------------------------------------------
 
 import argparse
+import csv
 import json
 import time
 
@@ -24,6 +25,7 @@ from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.expand import expand_clusters
 from layout.global_place_region import assign_clusters_to_regions
 from layout.legalize import legalize_assign
+from layout.pareto import ParetoSet
 from layout.pareto_io import write_pareto_points_csv
 from layout.regions import build_regions
 from layout.sites import build_sites
@@ -74,7 +76,12 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     layout_input = load_layout_input(Path(layout_input_path))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "llm_usage.jsonl").touch(exist_ok=True)
+    llm_usage_path = out_dir / "llm_usage.jsonl"
+    llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
+    if not llm_usage_path.exists():
+        llm_usage_path.write_text("", encoding="utf-8")
+    with llm_usage_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ok": True, "reason": "layout_agent_no_llm"}, ensure_ascii=False) + "\n")
 
     start_time = time.time()
     seed_everything(int(seed))
@@ -124,14 +131,14 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     # Stage0: baseline evaluations
     layout_state.assign = assign_grid
     base_eval = evaluator.evaluate(layout_state)
-    pareto.add(
+    base_added = pareto.add(
         base_eval["comm_norm"],
         base_eval["therm_norm"],
         {"assign": assign_grid.copy(), "total_scalar": base_eval["total_scalar"], "stage": "baseline", "iter": 0, "seed": -1},
     )
     layout_state.assign = assign_seed
     seed_eval = evaluator.evaluate(layout_state)
-    pareto.add(
+    seed_added = pareto.add(
         seed_eval["comm_norm"],
         seed_eval["therm_norm"],
         {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
@@ -232,7 +239,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
             layout_state=layout_state,
             pareto=pareto,
             cfg=cfg.alt_opt,
-            trace_path=out_dir,
+            trace_path=out_dir / "trace.csv",
             chip_tdp=chip_tdp,
         )
 
@@ -306,6 +313,7 @@ def main():
     parser.add_argument("--cfg", type=str, default="./configs/layout_agent/layout_L0_heuristic.yaml")
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--layout_input", type=str, default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
@@ -338,7 +346,7 @@ def main():
     meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    run_layout_agent(cfg, out_dir=out_dir, seed=int(args.seed))
+    run_layout_agent(cfg, out_dir=out_dir, seed=int(args.seed), layout_input_path=args.layout_input)
 
 
 if __name__ == "__main__":
