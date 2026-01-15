@@ -160,6 +160,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         if stable_hw_cfg:
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
         model.train()
+        last_hw_stats = None
         for step, batch in enumerate(train_loader):
             x = batch["video"].to(device)
             y = batch["label"].to(device)
@@ -182,11 +183,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     stable_hw_state=stable_state,
                 )
                 if stable_hw_cfg:
-                    update_hw_refs_from_stats(
-                        stable_hw_cfg,
-                        stable_state,
-                        {k: float(v) for k, v in hw_stats.items()},
-                    )
+                    last_hw_stats = {k: float(v) for k, v in hw_stats.items()}
 
                 lambda_hw = float(stable_state.get("lambda_hw", 0.0))
                 L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
@@ -197,8 +194,6 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             scaler.update()
             if step % 10 == 0:
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
-                if stable_hw_cfg:
-                    apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_state)
                 stats = {
                     "epoch": epoch,
                     "step": step,
@@ -219,6 +214,11 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 log_stats(logger, stats)
         last_acc = validate(model, val_loader, device, logger, epoch, cfg)
         best_acc = max(best_acc, last_acc)
+        guard_info = None
+        if stable_hw_cfg:
+            guard_info = apply_accuracy_guard(float(last_acc), stable_hw_cfg, stable_state, epoch=epoch)
+            if last_hw_stats:
+                stable_state = update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats)
         if metrics_path:
             metrics = {
                 "epoch": int(epoch),
@@ -236,6 +236,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "stable_hw_refs_inited": bool(stable_state.get("refs_inited", False)),
                 "stable_hw_ref_source": str(stable_state.get("ref_source", "unset")),
             }
+            if guard_info:
+                metrics["stable_hw_guard"] = guard_info
             metrics.update({k: float(v) for k, v in hw_stats.items()})
             with metrics_path.open("w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2)

@@ -144,8 +144,11 @@ def compute_hw_loss(
     mem_hinge_only = bool(getattr(norm_cfg, "mem_hinge_only", True)) if norm_cfg else True
     abs_ratio = bool(getattr(norm_cfg, "abs_ratio", False)) if norm_cfg else False
 
-    def _log_ratio(x, r):
-        return torch.log((x + eps) / (torch.tensor(r, device=device) + eps))
+    def _log_ratio(x: torch.Tensor, ref: float) -> torch.Tensor:
+        r = x / x.new_tensor(ref)
+        if abs_ratio:
+            r = torch.abs(r)
+        return torch.log(r + eps)
 
     t = _log_ratio(latency_ms, ref_T)
     e = _log_ratio(energy_mj, ref_E)
