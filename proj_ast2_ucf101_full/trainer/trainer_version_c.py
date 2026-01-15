@@ -62,6 +62,39 @@ def build_dataloader(cfg):
     )
 
 
+def build_val_loader(cfg) -> DataLoader:
+    ds = UCF101Dataset(cfg, split="val")
+    batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=cfg.data.num_workers,
+    )
+
+
+def validate_one_epoch(model: torch.nn.Module, val_loader: DataLoader, device: torch.device, amp: bool,
+                       max_batches: int = 0, model_type: str = "video") -> float:
+    model.eval()
+    total = 0
+    correct = 0
+    with torch.no_grad():
+        for idx, batch in enumerate(val_loader):
+            if max_batches and idx >= max_batches:
+                break
+            x = batch["video"].to(device)
+            y = batch["label"].to(device)
+            with autocast(device.type, enabled=amp):
+                if model_type == "video_audio":
+                    logits = model(x, batch["audio"].to(device))
+                else:
+                    logits = model(x)
+            pred = logits.argmax(dim=1)
+            total += y.size(0)
+            correct += (pred == y).sum().item()
+    return float(correct) / max(1, total)
+
+
 def _traffic_aware_seed(sites_xy: np.ndarray, traffic: np.ndarray, S: int, rng: np.random.Generator) -> np.ndarray:
     """Greedy placement of hot traffic pairs onto nearest site pairs (SPEC §7.1)."""
 
@@ -443,6 +476,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     loader = build_dataloader(cfg)
+    val_loader = build_val_loader(cfg)
     data_iter = iter(loader)
 
     mapping_only = bool(getattr(cfg.training, "mapping_only", False))
@@ -454,7 +488,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     if layout_only:
         setattr(cfg.hw, "layout_only", True)
 
-    update_alpha = not layout_only
+    base_update_alpha = not layout_only
     update_layout = bool(getattr(cfg.hw, "optimize_layout", True))
 
     model_type = getattr(cfg.training, "model_type", "video")
@@ -564,10 +598,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None
     last_hw_stats = None
+    guard_info = None
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
             stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+        update_alpha = base_update_alpha
+        frozen_until = int(stable_hw_state.get("rho_frozen_until_epoch", -1) or -1)
+        if frozen_until >= 0 and outer < frozen_until:
+            update_alpha = False
         iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
         map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)
         lay_every = int(getattr(iso, "layout_update_every_epochs", 1) if iso else 1)
@@ -609,6 +648,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
         chiplet_slots.set_tau(tau)
         last_hw_stats = None
+        sum_latency = 0.0
+        sum_energy = 0.0
+        sum_mem = 0.0
+        sum_comm = 0.0
+        hw_stats_count = 0
         for step in range(cfg.training.inner_steps_ast):
             try:
                 batch = next(data_iter)
@@ -636,14 +680,38 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 segments_cached = mapping_res.get("segments", []) if mapping_res else []
                 mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
 
+                track_live = False
+                iso_cfg = None
+                if stable_hw_cfg:
+                    iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None)
+                    if iso_cfg is not None:
+                        track_live = bool(getattr(iso_cfg, "track_live_segments", False))
+
+                segments_for_hw = segments_cached
+                mapping_for_hw = mapping_cached
+                if track_live and iso_cfg is not None:
+                    track_every = int(getattr(iso_cfg, "track_live_every_steps", 1) or 1)
+                    if (step % track_every) == 0:
+                        part_res = partitioner.plan(
+                            model,
+                            chiplet_slots(hard=False)["eff_specs"],
+                            alpha=chiplet_slots(hard=False)["alpha"],
+                            model_info=run_state.get("last_model_info"),
+                            use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                        )
+                        segments_for_hw = part_res.get("segments", [])
+                        mapping_for_hw = part_res.get("mapping", [])
+                        last_segments = segments_for_hw
+                        last_mapping = mapping_for_hw
+
                 L_hw, hw_stats = compute_hw_loss(
                     cfg,
                     hw_proxy,
                     model_info=model_info,
                     stable_hw_cfg=stable_hw_cfg,
                     stable_hw_state=stable_hw_state,
-                    segments=segments_cached,
-                    mapping=mapping_cached,
+                    segments=segments_for_hw,
+                    mapping=mapping_for_hw,
                     mapping_sig=mapping_res.get("signature") if mapping_res else None,
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
@@ -652,6 +720,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     alpha=alpha,
                 )
                 last_hw_stats = hw_stats
+                sum_latency += float(hw_stats.get("latency_ms", 0.0))
+                sum_energy += float(hw_stats.get("energy_mj", 0.0))
+                sum_mem += float(hw_stats.get("mem_mb", 0.0))
+                sum_comm += float(hw_stats.get("comm_ms", 0.0))
+                hw_stats_count += 1
                 lambda_hw = float(stable_hw_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0))))
                 hw_term = float(lambda_hw) * L_hw if not twostage else (L_hw * 0.0)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
@@ -662,27 +735,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             if not twostage and update_layout:
                 scaler.step(optimizer_layout)
             scaler.update()
-            # P1-3(A): by default, DO NOT re-plan each inner step (wasteful + breaks discrete isolation).
-            track_live = False
-            if stable_hw_cfg:
-                iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None)
-                if iso_cfg is not None:
-                    track_live = bool(getattr(iso_cfg, "track_live_segments", False))
-
-            if track_live:
-                part_res = partitioner.plan(
-                    model,
-                    chiplet_slots(hard=False)["eff_specs"],
-                    alpha=chiplet_slots(hard=False)["alpha"],
-                    model_info=run_state.get("last_model_info"),
-                    use_fine_split=getattr(cfg.hw, "use_fine_split", True),
-                )
-                last_segments = part_res.get("segments", [])
-                last_mapping = part_res.get("mapping", [])
             if step % 10 == 0:
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
-                if stable_hw_cfg:
-                    apply_accuracy_guard(float(acc1.item()), stable_hw_cfg, stable_hw_state)
                 last_acc1 = float(acc1.item())
                 best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
                 stats = {
@@ -720,8 +774,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     }) + "\n")
             global_step += 1
 
-        if stable_hw_cfg and last_hw_stats is not None:
-            update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats)
+        guard_info = None
+        if stable_hw_cfg and hw_stats_count > 0:
+            epoch_hw_stats = {
+                "latency_ms": sum_latency / hw_stats_count,
+                "energy_mj": sum_energy / hw_stats_count,
+                "mem_mb": sum_mem / hw_stats_count,
+                "comm_ms": sum_comm / hw_stats_count,
+            }
+            stable_hw_state = update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, epoch_hw_stats)
 
         # Step B: alpha refinement
         if update_alpha:
@@ -790,6 +851,25 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 L_layout.backward()
                 optimizer_layout.step()
 
+        val_batches = 0
+        if stable_hw_cfg is not None:
+            guard_cfg = getattr(stable_hw_cfg, "accuracy_guard", None)
+            if guard_cfg is not None:
+                val_batches = int(getattr(guard_cfg, "guard_val_batches", 0) or 0)
+        val_acc1 = validate_one_epoch(
+            model,
+            val_loader,
+            device,
+            amp=cfg.train.amp,
+            max_batches=val_batches,
+            model_type=model_type,
+        )
+        last_acc1 = float(val_acc1)
+        best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
+
+        if stable_hw_cfg:
+            guard_info = apply_accuracy_guard(val_acc1, stable_hw_cfg, stable_hw_state, epoch=outer)
+
         stable_state_path = log_path.parent / "stable_hw_state.json"
         stable_state_path.write_text(
             json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
@@ -807,6 +887,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
         "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
     }
+    if guard_info:
+        metrics["stable_hw_guard"] = guard_info
     with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 

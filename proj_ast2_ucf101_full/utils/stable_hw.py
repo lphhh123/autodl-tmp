@@ -78,16 +78,18 @@ def init_hw_refs_from_baseline(
 
 def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> Tuple[float, str]:
     """
-    Returns (lambda_hw, phase) following SPEC:
-      warmup -> ramp -> stabilize
+    SPEC: warmup -> ramp -> stabilize
+    Also store scheduled lambda in state['lambda_hw_schedule'] for guard to override.
     """
     if not _stable_hw_enabled(stable_hw_cfg):
+        state["lambda_hw_schedule"] = 0.0
         state["lambda_hw"] = 0.0
         state["schedule_phase"] = "disabled"
         return 0.0, "disabled"
 
     sched = get_nested(stable_hw_cfg, "lambda_hw_schedule", None)
     if sched is None or not bool(get_nested(sched, "enabled", True)):
+        state["lambda_hw_schedule"] = 0.0
         state["lambda_hw"] = 0.0
         state["schedule_phase"] = "schedule_disabled"
         return 0.0, "schedule_disabled"
@@ -108,106 +110,179 @@ def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> Tuple[flo
         phase = "stabilize"
 
     clamp_min = float(get_nested(sched, "clamp_min", 0.0))
-    clamp_max = get_nested(sched, "clamp_max", lam)
-    if clamp_max is None:
-        clamp_max = lam
-    clamp_max = float(clamp_max)
+    clamp_max = float(get_nested(sched, "clamp_max", lam))
     lam = max(clamp_min, min(clamp_max, lam))
 
-    state["lambda_hw"] = float(lam)
+    state["lambda_hw_schedule"] = float(lam)
     state["schedule_phase"] = phase
-    return float(lam), phase
+
+    # default lambda_hw follows schedule unless guard forces disable
+    if bool(state.get("guard_force_disable_hw", False)):
+        state["lambda_hw"] = 0.0
+    else:
+        state["lambda_hw"] = float(lam)
+
+    return float(state["lambda_hw"]), phase
 
 
-def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict) -> None:
+def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict, epoch: int) -> Dict:
     """
-    SPEC behavior:
-      - baseline = first acc
-      - optionally use EMA for current acc
-      - if drop > epsilon: scale lambda_hw; if consecutive >= max_consecutive -> lambda_hw = 0
+    SPEC intent:
+      - baseline_acc: from baseline_stats if provided else during warmup keep best acc
+      - current acc: optionally EMA
+      - if drop > epsilon_drop: scale lambda_hw; streak; force disable when streak>=max_consecutive
+      - optionally freeze rho/pruning updates for K epochs (rho_frozen_until_epoch)
+      - force-disable clears automatically when recovered (drop <= epsilon)
+    Returns guard_info dict for logging.
     """
+    info = {
+        "guard_active": False,
+        "baseline_acc": None,
+        "current_acc": None,
+        "acc_drop": None,
+        "epsilon_drop": None,
+        "violate_streak": int(state.get("violate_streak", 0) or 0),
+        "guard_triggered": False,
+        "guard_force_disable_hw": bool(state.get("guard_force_disable_hw", False)),
+        "rho_frozen_until_epoch": int(state.get("rho_frozen_until_epoch", -1) or -1),
+    }
+
     if not _stable_hw_enabled(stable_hw_cfg):
-        return
+        return info
 
     guard = get_nested(stable_hw_cfg, "accuracy_guard", None)
     if guard is None or not bool(get_nested(guard, "enabled", True)):
         state["guard_active"] = False
-        return
+        return info
+
     state["guard_active"] = True
+    info["guard_active"] = True
 
-    if state.get("acc_baseline") is None:
-        state["acc_baseline"] = float(acc1)
+    eps = float(get_nested(guard, "epsilon_drop", 0.01))
+    info["epsilon_drop"] = eps
 
-    baseline = float(state["acc_baseline"])
+    # ---- baseline acc init/update ----
+    # Prefer baseline_acc from state if already set (may be loaded externally).
+    baseline = state.get("baseline_acc", None)
+
+    # During warmup, keep best acc as baseline if not fixed yet
+    phase = str(state.get("schedule_phase", ""))
+    if baseline is None:
+        baseline = float(acc1)
+        state["baseline_acc"] = float(baseline)
+        state["baseline_source"] = state.get("baseline_source", "first_seen")
+
+    if phase == "warmup":
+        # keep best
+        if float(acc1) > float(state.get("baseline_acc", baseline)):
+            state["baseline_acc"] = float(acc1)
+            baseline = float(acc1)
+
+    baseline = float(state.get("baseline_acc", baseline))
+    info["baseline_acc"] = baseline
+
+    # ---- current acc (EMA optional) ----
     use_ema = bool(get_nested(guard, "use_ema", True))
     if use_ema:
         beta = float(get_nested(guard, "ema_beta", 0.8))
-        prev = float(state.get("acc_ema", acc1))
-        cur = beta * prev + (1 - beta) * float(acc1)
-        state["acc_ema"] = float(cur)
+        prev = float(state.get("acc1_ema", acc1))
+        cur = beta * prev + (1.0 - beta) * float(acc1)
+        state["acc1_ema"] = float(cur)
         current = float(cur)
     else:
         current = float(acc1)
 
+    info["current_acc"] = current
+
     drop = float(baseline - current)
     state["acc_drop"] = float(drop)
+    info["acc_drop"] = float(drop)
 
-    eps = float(get_nested(guard, "epsilon_drop", 0.01))
-    if drop > eps:
-        onv = get_nested(guard, "on_violate", None)
-        scale = float(get_nested(onv, "scale_lambda_hw", 0.5) if onv else 0.5)
-        state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
-        state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
-        maxc = int(get_nested(onv, "max_consecutive", 3) if onv else 3)
-        if state["violate_streak"] >= maxc:
-            state["lambda_hw"] = 0.0
-    else:
+    onv = get_nested(guard, "on_violate", None)
+    scale = float(get_nested(onv, "scale_lambda_hw", 0.5) if onv else 0.5)
+    maxc = int(get_nested(onv, "max_consecutive", 3) if onv else 3)
+    freeze_k = int(get_nested(guard, "freeze_rho_epochs", 0) or 0)
+
+    # ---- recovered: clear force disable & streak ----
+    if drop <= eps:
         state["violate_streak"] = 0
+        info["violate_streak"] = 0
+        if bool(state.get("guard_force_disable_hw", False)):
+            state["guard_force_disable_hw"] = False
+        # restore lambda_hw to schedule
+        state["lambda_hw"] = float(state.get("lambda_hw_schedule", state.get("lambda_hw", 0.0)))
+        info["guard_force_disable_hw"] = bool(state.get("guard_force_disable_hw", False))
+        return info
+
+    # ---- violated ----
+    info["guard_triggered"] = True
+    state["violate_streak"] = int(state.get("violate_streak", 0) + 1)
+    info["violate_streak"] = int(state["violate_streak"])
+
+    # scale lambda
+    state["lambda_hw"] = float(state.get("lambda_hw", 0.0) * scale)
+
+    # freeze rho/pruning updates
+    if freeze_k > 0:
+        state["rho_frozen_until_epoch"] = max(int(state.get("rho_frozen_until_epoch", -1)), int(epoch + freeze_k))
+        info["rho_frozen_until_epoch"] = int(state["rho_frozen_until_epoch"])
+
+    # force disable hw after consecutive violations
+    if state["violate_streak"] >= maxc:
+        state["guard_force_disable_hw"] = True
+        state["lambda_hw"] = 0.0
+        info["guard_force_disable_hw"] = True
+
+    return info
 
 
-def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: Dict) -> None:
+def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: Dict) -> Dict:
     """
-    Unified ref update:
-      - If refs not inited: set ref_* from current stats (dense baseline or first obs)
-      - Else: EMA update with beta=stable_hw_cfg.ema_beta
+    Epoch-end ref update.
+    - If ref_source == baseline_stats: never EMA-update.
+    - If ref_source == ema: EMA-update with beta=stable_hw.hw_refs_update.ema_beta.
+    - Bootstrap if not refs_inited.
     """
     if stable_hw_state is None:
-        return
+        return stable_hw_state
     if not _stable_hw_enabled(stable_hw_cfg):
-        return
+        return stable_hw_state
 
-    norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg else None
-    eps = float(getattr(norm_cfg, "eps", 1e-6)) if norm_cfg else 1e-6
-    beta = float(getattr(stable_hw_cfg, "ema_beta", 0.9)) if stable_hw_cfg else 0.9
+    ref_up = get_nested(stable_hw_cfg, "hw_refs_update", None)
+    ref_source = str(get_nested(ref_up, "ref_source", "ema")) if ref_up else "ema"
+    beta = float(get_nested(ref_up, "ema_beta", 0.95)) if ref_up else 0.95
 
-    refs_inited = bool(stable_hw_state.get("refs_inited", False))
+    # baseline_stats source => do not update here
+    if ref_source == "baseline_stats" and bool(stable_hw_state.get("refs_inited", False)):
+        return stable_hw_state
 
     def _f(key: str, default: float = 0.0) -> float:
         v = stats.get(key, default)
         try:
             import torch
-
             if isinstance(v, torch.Tensor):
                 return float(v.detach().cpu().item())
         except Exception:
             pass
         return float(v)
 
-    cur_T = _f("latency_ms", 0.0)
-    cur_E = _f("energy_mj", 0.0)
-    cur_M = _f("mem_mb", 0.0)
-    cur_C = _f("comm_ms", 0.0)
+    eps = float(get_nested(getattr(stable_hw_cfg, "normalize", None), "eps", 1e-6) or 1e-6)
+    cur_T = max(eps, _f("latency_ms", 0.0))
+    cur_E = max(eps, _f("energy_mj", 0.0))
+    cur_M = max(eps, _f("mem_mb", 0.0))
+    cur_C = max(0.0, _f("comm_ms", 0.0))
 
-    if not refs_inited:
-        stable_hw_state["ref_T"] = max(eps, cur_T)
-        stable_hw_state["ref_E"] = max(eps, cur_E)
-        stable_hw_state["ref_M"] = max(eps, cur_M)
-        stable_hw_state["ref_C"] = max(0.0, cur_C)
+    if not bool(stable_hw_state.get("refs_inited", False)):
+        stable_hw_state["ref_T"] = cur_T
+        stable_hw_state["ref_E"] = cur_E
+        stable_hw_state["ref_M"] = cur_M
+        stable_hw_state["ref_C"] = cur_C
         stable_hw_state["refs_inited"] = True
-        stable_hw_state.setdefault("ref_source", "ema_init")
-        return
+        stable_hw_state["ref_source"] = stable_hw_state.get("ref_source", "bootstrap_first_obs")
+        return stable_hw_state
 
     stable_hw_state["ref_T"] = beta * float(stable_hw_state.get("ref_T", cur_T)) + (1 - beta) * cur_T
     stable_hw_state["ref_E"] = beta * float(stable_hw_state.get("ref_E", cur_E)) + (1 - beta) * cur_E
     stable_hw_state["ref_M"] = beta * float(stable_hw_state.get("ref_M", cur_M)) + (1 - beta) * cur_M
     stable_hw_state["ref_C"] = beta * float(stable_hw_state.get("ref_C", cur_C)) + (1 - beta) * cur_C
+    return stable_hw_state
