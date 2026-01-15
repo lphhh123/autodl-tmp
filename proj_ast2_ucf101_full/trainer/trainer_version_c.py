@@ -653,7 +653,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
-            stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+            stable_hw_schedule(stable_hw_cfg, stable_hw_state, outer)
         update_alpha = base_update_alpha
         frozen_until = int(stable_hw_state.get("rho_frozen_until_epoch", -1) or -1)
         if frozen_until >= 0 and outer < frozen_until:
@@ -732,28 +732,63 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
 
                 track_live = False
+                use_cached_mapping = True
+                use_cached_layout = True
                 iso_cfg = None
                 if stable_hw_cfg:
                     iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None)
                     if iso_cfg is not None:
                         track_live = bool(getattr(iso_cfg, "track_live_segments", False))
+                        use_cached_mapping = bool(getattr(iso_cfg, "use_cached_mapping_for_inner_steps", True))
+                        use_cached_layout = bool(getattr(iso_cfg, "use_cached_layout_for_inner_steps", True))
 
                 segments_for_hw = segments_cached
                 mapping_for_hw = mapping_cached
+                step_mapping_updated = mapping_updated
+                step_layout_updated = layout_updated
                 if track_live and iso_cfg is not None:
                     track_every = int(getattr(iso_cfg, "track_live_every_steps", 1) or 1)
                     if (step % track_every) == 0:
-                        part_res = partitioner.plan(
-                            model,
-                            eff_specs,
-                            alpha=alpha,
-                            model_info=run_state.get("last_model_info"),
-                            use_fine_split=getattr(cfg.hw, "use_fine_split", True),
-                        )
-                        segments_for_hw = part_res.get("segments", [])
-                        mapping_for_hw = part_res.get("mapping", [])
-                        last_segments = segments_for_hw
-                        last_mapping = mapping_for_hw
+                        if not use_cached_mapping:
+                            part_res = partitioner.plan(
+                                model,
+                                eff_specs,
+                                alpha=alpha,
+                                model_info=run_state.get("last_model_info"),
+                                use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                            )
+                            segments_for_hw = part_res.get("segments", [])
+                            mapping_for_hw = part_res.get("mapping", [])
+                            last_segments = segments_for_hw
+                            last_mapping = mapping_for_hw
+                            step_mapping_updated = True
+                        if not use_cached_layout:
+                            layout_res = _solve_layout_for_cache(
+                                chiplet_slots=chiplet_slots,
+                                wafer_layout=wafer_layout,
+                                hw_cfg=cfg.hw,
+                                mapping_result={
+                                    "segments": segments_for_hw,
+                                    "mapping": mapping_for_hw,
+                                },
+                            )
+                            cache["layout"] = layout_res
+                            cache["layout_signature"] = layout_res.get("signature")
+                            step_layout_updated = True
+
+                segments_sig = None
+                try:
+                    segments_sig = stable_hash(
+                        [getattr(s, "signature", None) or repr(s) for s in (segments_for_hw or [])]
+                    )
+                except Exception:
+                    segments_sig = None
+
+                mapping_sig_for_hw = None
+                if (segments_for_hw is segments_cached) or (segments_for_hw == segments_cached):
+                    mapping_sig_for_hw = mapping_res.get("signature") if mapping_res else None
+                else:
+                    mapping_sig_for_hw = None
 
                 L_hw, hw_stats = compute_hw_loss(
                     cfg,
@@ -763,7 +798,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     stable_hw_state=stable_hw_state,
                     segments=segments_for_hw,
                     mapping=mapping_for_hw,
-                    mapping_sig=mapping_res.get("signature") if mapping_res else None,
+                    mapping_sig=mapping_sig_for_hw,
+                    segments_sig=segments_sig,
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
                     mapping_solver=mapping_solver,
@@ -796,10 +832,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     "loss": loss.item(),
                     "acc1": acc1.item(),
                     "lambda_hw": float(lambda_hw),
-                    "mapping_updated": mapping_updated,
-                    "layout_updated": layout_updated,
-                    "mapping_cache_hit": not mapping_updated,
-                    "layout_cache_hit": not layout_updated,
+                    "mapping_updated": step_mapping_updated,
+                    "layout_updated": step_layout_updated,
+                    "mapping_cache_hit": not step_mapping_updated,
+                    "layout_cache_hit": not step_layout_updated,
                     "mapping_signature": cache["mapping_signature"],
                     "layout_signature": cache["layout_signature"],
                 }
@@ -816,10 +852,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         "lambda_hw": float(lambda_hw),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
                         "schedule_phase": stable_hw_state.get("schedule_phase"),
-                        "mapping_updated": mapping_updated,
-                        "layout_updated": layout_updated,
-                        "mapping_cache_hit": (not mapping_updated),
-                        "layout_cache_hit": (not layout_updated),
+                        "mapping_updated": step_mapping_updated,
+                        "layout_updated": step_layout_updated,
+                        "mapping_cache_hit": (not step_mapping_updated),
+                        "layout_cache_hit": (not step_layout_updated),
                         "mapping_signature": cache["mapping_signature"],
                         "layout_signature": cache["layout_signature"],
                     }) + "\n")
@@ -849,6 +885,14 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 segments_cached = mapping_res.get("segments", []) if mapping_res else []
                 mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
 
+                segments_sig = None
+                try:
+                    segments_sig = stable_hash(
+                        [getattr(s, "signature", None) or repr(s) for s in (segments_cached or [])]
+                    )
+                except Exception:
+                    segments_sig = None
+
                 L_hw, _ = compute_hw_loss(
                     cfg,
                     hw_proxy,
@@ -858,6 +902,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     segments=segments_cached,
                     mapping=mapping_cached,
                     mapping_sig=mapping_res.get("signature") if mapping_res else None,
+                    segments_sig=segments_sig,
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
                     mapping_solver=mapping_solver,
@@ -910,7 +955,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 model_type=str(getattr(cfg.training, "model_type", "video")),
                 max_batches=max_eval_batches,
             )
-            apply_accuracy_guard(float(val_acc1), stable_hw_cfg, stable_hw_state)
+            apply_accuracy_guard(stable_hw_cfg, stable_hw_state, float(val_acc1), logger=logger)
         else:
             val_acc1 = eval_acc1(
                 model,

@@ -116,116 +116,161 @@ def init_hw_refs_from_baseline(
     return stable_hw_state
 
 
-def stable_hw_schedule(epoch: int, stable_hw_cfg: Any, state: Dict) -> None:
-    if not bool(getattr(stable_hw_cfg, "enabled", False)):
-        state["lambda_hw_base"] = 0.0
-        state["lambda_hw"] = 0.0
-        return
+def stable_hw_schedule(
+    stable_hw_cfg: Any,
+    state: Dict,
+    epoch: int,
+    step_in_epoch: int = 0,
+    steps_per_epoch: int = 1,
+) -> Dict:
+    """
+    Apply warmup->ramp->stabilize schedule and clamp.
+    Reads:
+      stable_hw.lambda_hw_schedule:
+        enabled, warmup_epochs, ramp_epochs, stabilize_epochs,
+        lambda_hw_max, lambda_hw_min,
+        clamp_min, clamp_max
+    """
+    if stable_hw_cfg is None:
+        return state
 
     sched = getattr(stable_hw_cfg, "lambda_hw_schedule", None)
-    lam_max = (
-        float(getattr(sched, "lambda_hw_max", 0.0))
-        if sched
-        else float(state.get("lambda_hw", 0.0))
-    )
-    warmup_epochs = int(getattr(sched, "warmup_epochs", 0)) if sched else 0
-    ramp_epochs = int(getattr(sched, "ramp_epochs", 0)) if sched else 0
+    if sched is None or not bool(getattr(sched, "enabled", True)):
+        return state
 
-    if warmup_epochs > 0 and epoch < warmup_epochs:
-        lam_base = 0.0
+    warm = int(getattr(sched, "warmup_epochs", 0) or 0)
+    ramp = int(getattr(sched, "ramp_epochs", 0) or 0)
+    stab = int(getattr(sched, "stabilize_epochs", 0) or 0)
+    _ = (step_in_epoch, steps_per_epoch, stab)
+
+    lam_max = float(getattr(sched, "lambda_hw_max", 0.0) or 0.0)
+    lam_min = float(getattr(sched, "lambda_hw_min", 0.0) or 0.0)
+
+    clamp_min = float(getattr(sched, "clamp_min", lam_min) or lam_min)
+    clamp_max = float(getattr(sched, "clamp_max", lam_max) or lam_max)
+
+    e = int(epoch)
+
+    if e < warm:
         phase = "warmup"
+        lam = 0.0
+    elif e < warm + ramp:
+        phase = "ramp"
+        t = (e - warm) / max(1, ramp)
+        lam = lam_min + (lam_max - lam_min) * float(t)
     else:
-        t = max(0, epoch - warmup_epochs)
-        if ramp_epochs <= 0:
-            lam_base = lam_max
-            phase = "steady"
-        else:
-            frac = min(1.0, float(t) / float(ramp_epochs))
-            lam_base = lam_max * frac
-            phase = "ramp" if frac < 1.0 else "steady"
+        phase = "stabilize"
+        lam = lam_max
 
-    state["lambda_hw_base"] = float(lam_base)
-    state["schedule_phase"] = str(phase)
+    lam = max(float(clamp_min), min(float(clamp_max), float(lam)))
 
-    scale = float(state.get("lambda_hw_scale", 1.0))
-    if bool(state.get("hw_disabled", False)):
-        state["lambda_hw"] = 0.0
-    else:
-        state["lambda_hw"] = float(lam_base) * scale
+    state["lambda_hw"] = float(lam)
+    state["schedule_phase"] = phase
+    state["schedule_epoch"] = e
+    return state
 
 
-def apply_accuracy_guard(acc1: float, stable_hw_cfg: Any, state: Dict) -> None:
+def apply_accuracy_guard(stable_hw_cfg, state: dict, acc_now: float, logger=None) -> dict:
+    """
+    SPEC/Config-aligned accuracy guard.
+    Reads keys exactly from:
+      stable_hw.accuracy_guard:
+        metric: "acc1"
+        use_ema: true/false
+        ema_beta: 0.98
+        epsilon_drop: 0.02
+        max_consecutive: 3
+        on_violate:
+          scale_lambda_hw: 0.5
+          freeze_rho_epochs: 1
+          disable_hw_after_max_violations: false
+          recover:
+            enable: true
+            patience_epochs: 1
+            restore_lambda_hw: true
+    """
+    if stable_hw_cfg is None:
+        return state
+
     guard = getattr(stable_hw_cfg, "accuracy_guard", None)
-    if not guard or not bool(getattr(guard, "enabled", True)):
-        return
+    if guard is None:
+        return state
 
-    eps_drop = float(getattr(guard, "epsilon_drop", 0.0))
-    max_consecutive = int(getattr(guard, "max_consecutive_violations", 2))
-    scale_down = float(getattr(guard, "lambda_scale_down", 0.5))
-    freeze_epochs = int(getattr(guard, "freeze_rho_epochs", 0))
+    use_ema = bool(getattr(guard, "use_ema", True))
+    ema_beta = float(getattr(guard, "ema_beta", 0.98) or 0.98)
+    epsilon_drop = float(getattr(guard, "epsilon_drop", 0.02) or 0.02)
+    max_consecutive = int(getattr(guard, "max_consecutive", 3) or 3)
 
-    baseline = state.get("baseline_acc", None)
-    if baseline is None:
-        base_cfg = getattr(stable_hw_cfg, "dense_baseline", None)
-        base_path = str(getattr(base_cfg, "baseline_stats_path", "")) if base_cfg else ""
-        bs = _load_baseline_stats(base_path)
-        if isinstance(bs, dict):
-            bacc = _get_baseline_acc_from_stats(bs)
-            if bacc is not None:
-                baseline = float(bacc)
+    onv = getattr(guard, "on_violate", None)
+    scale_lambda_hw = float(getattr(onv, "scale_lambda_hw", 0.5) or 0.5) if onv else 0.5
+    freeze_rho_epochs = int(getattr(onv, "freeze_rho_epochs", 1) or 1) if onv else 1
+    disable_hw_after = bool(getattr(onv, "disable_hw_after_max_violations", False)) if onv else False
 
-    if baseline is None:
-        baseline = float(acc1)
+    recover = getattr(onv, "recover", None) if onv else None
+    recover_enable = bool(getattr(recover, "enable", True)) if recover else True
+    recover_patience = int(getattr(recover, "patience_epochs", 1) or 1) if recover else 1
+    recover_restore_lambda = bool(getattr(recover, "restore_lambda_hw", True)) if recover else True
 
-    beta = float(getattr(guard, "acc_ema_beta", 0.9))
-    acc_ema = float(state.get("current_acc_ema", baseline))
-    acc_ema = beta * acc_ema + (1.0 - beta) * float(acc1)
+    acc_best = state.get("acc_best", None)
+    if acc_best is None:
+        state["acc_best"] = float(acc_now)
+        state["acc_ema"] = float(acc_now)
+        state["acc_drop"] = 0.0
+        state["acc_violations"] = 0
+        state["rho_freeze_epochs_left"] = 0
+        state["hw_disabled"] = False
+        state["recover_wait"] = 0
+        state["lambda_hw_pre_guard"] = float(state.get("lambda_hw", 0.0))
+        return state
 
-    acc_drop = max(0.0, float(baseline) - float(acc_ema))
-
-    state["baseline_acc"] = float(baseline)
-    state["current_acc"] = float(acc1)
-    state["current_acc_ema"] = float(acc_ema)
-    state["acc_drop"] = float(acc_drop)
-    state["epsilon_drop"] = float(eps_drop)
-
-    violated = acc_drop > eps_drop
-    streak = int(state.get("violate_streak", 0))
-
-    if violated:
-        streak += 1
-        scale = float(state.get("lambda_hw_scale", 1.0))
-        scale = max(0.0, scale * float(scale_down))
-        state["lambda_hw_scale"] = float(scale)
-        state["guard_triggered"] = True
-
-        if freeze_epochs > 0:
-            cur_epoch = int(state.get("epoch", 0))
-            state["rho_frozen_until_epoch"] = max(
-                int(state.get("rho_frozen_until_epoch", 0)), cur_epoch + freeze_epochs
-            )
-
-        if streak >= max_consecutive:
-            state["hw_disabled"] = True
-            state["lambda_hw_scale"] = 0.0
-
+    if use_ema:
+        state["acc_ema"] = float(ema_beta) * float(state.get("acc_ema", acc_now)) + (1.0 - float(ema_beta)) * float(acc_now)
+        acc_ref = float(state["acc_ema"])
     else:
-        streak = 0
-        if bool(state.get("hw_disabled", False)):
-            recover = bool(getattr(guard, "recover_enable_hw", True))
-            if recover:
-                state["hw_disabled"] = False
-                state["lambda_hw_scale"] = float(getattr(guard, "recover_lambda_scale", 0.25))
+        acc_ref = float(acc_now)
 
-    state["violate_streak"] = int(streak)
+    state["acc_best"] = max(float(state["acc_best"]), float(acc_now))
+    best = float(state["acc_best"])
 
-    lam_base = float(state.get("lambda_hw_base", state.get("lambda_hw", 0.0)))
-    if bool(state.get("hw_disabled", False)):
+    drop = max(0.0, best - acc_ref)
+    state["acc_drop"] = float(drop)
+
+    violated = drop > float(epsilon_drop)
+
+    if not violated:
+        state["acc_violations"] = 0
+        if recover_enable:
+            state["recover_wait"] = int(state.get("recover_wait", 0)) + 1
+            if int(state["recover_wait"]) >= int(recover_patience):
+                if recover_restore_lambda and ("lambda_hw_pre_guard" in state):
+                    state["lambda_hw"] = float(state["lambda_hw_pre_guard"])
+                state["recover_wait"] = 0
+        return state
+
+    state["recover_wait"] = 0
+    state["acc_violations"] = int(state.get("acc_violations", 0)) + 1
+
+    if "lambda_hw_pre_guard" not in state:
+        state["lambda_hw_pre_guard"] = float(state.get("lambda_hw", 0.0))
+
+    cur = float(state.get("lambda_hw", 0.0))
+    newv = max(0.0, cur * float(scale_lambda_hw))
+    state["lambda_hw"] = float(newv)
+
+    state["rho_freeze_epochs_left"] = max(int(state.get("rho_freeze_epochs_left", 0)), int(freeze_rho_epochs))
+
+    if disable_hw_after and int(state["acc_violations"]) >= int(max_consecutive):
+        state["hw_disabled"] = True
         state["lambda_hw"] = 0.0
-    else:
-        state["lambda_hw"] = lam_base * float(state.get("lambda_hw_scale", 1.0))
 
-    state["lambda_hw_after_guard"] = float(state.get("lambda_hw", 0.0))
+    if logger is not None:
+        logger.info(
+            f"[ACC_GUARD] violated drop={drop:.4f} > eps={epsilon_drop:.4f} | "
+            f"lambda_hw {cur:.4g}->{state['lambda_hw']:.4g} | "
+            f"viol={state['acc_violations']}/{max_consecutive} | "
+            f"rho_freeze_left={state['rho_freeze_epochs_left']} | hw_disabled={state.get('hw_disabled', False)}"
+        )
+    return state
 
 
 def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict, stats: Dict) -> Dict:

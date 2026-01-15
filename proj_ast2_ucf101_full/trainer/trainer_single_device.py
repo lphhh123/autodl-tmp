@@ -159,7 +159,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     last_acc = 0.0
     for epoch in range(cfg.train.epochs):
         if stable_hw_cfg:
-            stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+            stable_hw_schedule(stable_hw_cfg, stable_state, epoch)
         model.train()
         last_hw_stats = None
         for step, batch in enumerate(train_loader):
@@ -218,7 +218,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         if stable_hw_cfg:
             stable_state["epoch"] = int(epoch)
             val_acc1 = float(last_acc)
-            apply_accuracy_guard(val_acc1, stable_hw_cfg, stable_state)
+            apply_accuracy_guard(stable_hw_cfg, stable_state, val_acc1, logger=logger)
             if last_hw_stats:
                 stable_state = update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats)
         if metrics_path:

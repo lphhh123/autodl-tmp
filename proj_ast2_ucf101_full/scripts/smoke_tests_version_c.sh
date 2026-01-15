@@ -10,6 +10,12 @@ python -m scripts.run_proxy_ms_mem --cfg configs/proxy_ms_mem.yaml
 echo "[SMOKE] Proxy power"
 python -m scripts.run_proxy_power --cfg configs/proxy_power.yaml
 
+echo "[SMOKE] StableHW schema check"
+python -m scripts.smoke_check_stable_hw_schema --cfg configs/smoke_version_c_ucf101.yaml
+
+echo "[SMOKE] StableHW gradient check"
+python -m scripts.smoke_check_hw_grad --cfg configs/smoke_version_c_ucf101.yaml
+
 echo "[SMOKE] AST single-device"
 python -m scripts.run_ast2_ucf101 --cfg configs/smoke_ast_ucf101.yaml
 
