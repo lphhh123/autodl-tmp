@@ -175,20 +175,22 @@ class PartitionPlanner:
             return {
                 "segments": segments_base,
                 "mapping": mapping_base.get("mapping", []),
-                "rewrite_plan": None,
+                "graph_rewrite_plan": {"splits": []},
+                "rewire_meta": {},
                 "objective": objective_base,
                 "hw_stats": {},
             }
 
         segments_fine = build_segments_from_model(model, self.cfg, model_info=model_info)
         objective_final, cost_final, mapping_final = self._evaluate(segments_fine, eff_specs)
-        rewrite_plan = GraphRewritePlan(
-            splits=[{"block_idx": idx, "segments": ["attn", "mlp"]} for idx in range(model.cfg.depth)]
-        )
+        graph_rewrite_plan = {
+            "splits": [{"block_idx": idx, "segments": ["attn", "mlp"]} for idx in range(model.cfg.depth)]
+        }
         return {
             "segments": segments_fine,
             "mapping": mapping_final.get("mapping", []),
-            "rewrite_plan": rewrite_plan,
+            "graph_rewrite_plan": graph_rewrite_plan,
+            "rewire_meta": {},
             "objective": objective_final,
             "hw_stats": {},
         }
