@@ -484,7 +484,9 @@ def _solve_layout_for_cache(
             lambda_thermal=hw_cfg.lambda_thermal,
             distance_scale=1e-9,
         )
-    signature = f"{mapping_result.get('signature')}_layout"
+    pos = wafer_layout.current_pos_continuous().detach().cpu().tolist()
+    pos_round = [[round(float(x), 6) for x in row] for row in pos]
+    signature = stable_hash({"pos": pos_round})
     return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
@@ -722,8 +724,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     if (step % track_every) == 0:
                         part_res = partitioner.plan(
                             model,
-                            chiplet_slots(hard=False)["eff_specs"],
-                            alpha=chiplet_slots(hard=False)["alpha"],
+                            eff_specs,
+                            alpha=alpha,
                             model_info=run_state.get("last_model_info"),
                             use_fine_split=getattr(cfg.hw, "use_fine_split", True),
                         )

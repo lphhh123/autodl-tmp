@@ -79,6 +79,10 @@ def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: Opti
         assign[int(slot)] = int(site)
 
 
+def signature_for_assign(assign: np.ndarray) -> str:
+    return "assign:" + ",".join(map(str, assign.tolist()))
+
+
 def _select_cluster_target_sites(
     assign: np.ndarray,
     cluster: Cluster,
@@ -442,7 +446,7 @@ def run_detailed_place(
             action = {"op": "none"}
             tabu_hit = inverse_hit = cooldown_hit = 0
             est_total_new = None
-            signature = "none"
+            op_signature = "none"
             inverse_sig = "none"
             max_attempts = max(5, len(action_queue) + len(fallback_candidates) + 3)
 
@@ -484,7 +488,7 @@ def run_detailed_place(
                             )
                 if "signature" not in action:
                     action["signature"] = _signature_for_action(action, assign)
-                signature = str(action.get("signature", "none"))
+                op_signature = str(action.get("signature", "none"))
                 inverse_sig = inverse_signature(action, assign)
                 est_total_new = None
                 cand_ref = None
@@ -497,8 +501,8 @@ def run_detailed_place(
                     action.setdefault("signature", cand_ref.signature)
 
                 aspiration = est_total_new is not None and est_total_new < best_total_seen - aspiration_delta
-                tabu_hit = 1 if signature in tabu_signatures else 0
-                inverse_hit = 1 if signature in inverse_signatures else 0
+                tabu_hit = 1 if op_signature in tabu_signatures else 0
+                inverse_hit = 1 if op_signature in inverse_signatures else 0
                 cooldown_hit = 0
                 for slot in _touched_slots(action):
                     if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
@@ -548,7 +552,7 @@ def run_detailed_place(
                         "seed": seed_id,
                     },
                 )
-                tabu_signatures.append(signature)
+                tabu_signatures.append(op_signature)
                 inverse_signatures.append(inverse_sig)
                 for slot in _touched_slots(action):
                     last_move_step_per_slot[int(slot)] = step
@@ -573,6 +577,7 @@ def run_detailed_place(
 
             T *= alpha
 
+            assign_signature = signature_for_assign(assign)
             time_ms = int((time.perf_counter() - step_start) * 1000)
             writer.writerow(
                 [
@@ -589,7 +594,7 @@ def run_detailed_place(
                     eval_out["penalty"]["boundary"],
                     seed_id,
                     time_ms,
-                    signature,
+                    assign_signature,
                     delta,
                     delta_comm,
                     delta_therm,

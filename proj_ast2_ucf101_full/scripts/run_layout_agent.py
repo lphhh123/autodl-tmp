@@ -191,41 +191,24 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
 
     # Stage5: detailed place
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-    detailed_steps = int(detailed_cfg.get("steps", 0))
-    if detailed_steps <= 0:
-        layout_state.assign = assign_leg
-        legalize_eval = evaluator.evaluate(layout_state)
-        pareto.add(
-            legalize_eval["comm_norm"],
-            legalize_eval["therm_norm"],
-            {
-                "assign": assign_leg.copy(),
-                "total_scalar": legalize_eval["total_scalar"],
-                "stage": "legalize",
-                "iter": 0,
-                "seed": 0,
-            },
-        )
-        assign_final = assign_leg
-    else:
-        result = run_detailed_place(
-            sites_xy=sites_xy,
-            assign_seed=assign_leg,
-            evaluator=evaluator,
-            layout_state=layout_state,
-            traffic_sym=traffic_sym,
-            site_to_region=site_to_region,
-            regions=regions,
-            clusters=clusters,
-            cluster_to_region=cluster_to_region,
-            pareto=pareto,
-            cfg=detailed_cfg,
-            trace_path=out_dir / "trace.csv",
-            seed_id=int(seed),
-            chip_tdp=chip_tdp,
-            llm_usage_path=out_dir / "llm_usage.jsonl",
-        )
-        assign_final = result.assign
+    result = run_detailed_place(
+        sites_xy=sites_xy,
+        assign_seed=assign_leg,
+        evaluator=evaluator,
+        layout_state=layout_state,
+        traffic_sym=traffic_sym,
+        site_to_region=site_to_region,
+        regions=regions,
+        clusters=clusters,
+        cluster_to_region=cluster_to_region,
+        pareto=pareto,
+        cfg=detailed_cfg,
+        trace_path=out_dir / "trace.csv",
+        seed_id=int(seed),
+        chip_tdp=chip_tdp,
+        llm_usage_path=out_dir / "llm_usage.jsonl",
+    )
+    assign_final = result.assign
 
     # Stage6: alt-opt (optional)
     mapping_final = layout_input["mapping"].get("mapping") if "mapping" in layout_input else None

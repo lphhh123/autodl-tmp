@@ -335,7 +335,7 @@ def get_llm_client(
         or ""
     )
     temperature = float(config.get("temperature", 0.7))
-    top_p = float(config.get("top_p", config.get("top-p", 1.0)))
+    top_p = float(config.get("top_p", config.get("top-p", 0.7)))
     max_tokens = int(config.get("max_tokens", 1024))
     timeout_s = float(config.get("timeout_s", config.get("timeout", config.get("request_timeout", 60.0))))
     max_retry = int(config.get("max_retry", config.get("max_attempts", 5)))
