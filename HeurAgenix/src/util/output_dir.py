@@ -1,19 +1,26 @@
+from __future__ import annotations
+
 from pathlib import Path
 import os
 
 
+def _repo_root() -> Path:
+    # this file: HeurAgenix/src/util/output_dir.py
+    # output_dir.py -> util -> src -> HeurAgenix
+    return Path(__file__).resolve().parents[3]
+
+
 def get_output_dir() -> Path:
     """
-    Resolve output path:
-      1. Prefer AMLT_OUTPUT_DIR (used by wrapper)
-      2. Fallback to ../../output
-      3. Auto deduplicate 'output/output'
+    Official HeurAgenix outputs under:
+      <output_base>/output/{problem}/{test_data}/{result_dir}/{engine}/...
+
+    Wrapper will set AMLT_OUTPUT_DIR=<some_dir>. We append /output unless it already ends with /output.
     """
     base = os.environ.get("AMLT_OUTPUT_DIR")
     if base:
-        p = Path(base).resolve()
-        if p.name == "output":
-            return p
-        return p / "output"
-    repo_root = Path(__file__).resolve().parents[2]
+        p = Path(base).expanduser().resolve()
+        return p if p.name == "output" else (p / "output")
+
+    repo_root = _repo_root()
     return (repo_root / "output").resolve()

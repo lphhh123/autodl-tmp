@@ -34,6 +34,7 @@ from layout.trace_metrics import compute_trace_metrics_from_csv
 from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
+from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 
 
@@ -319,6 +320,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
+    cfg = validate_and_fill_defaults(cfg, mode="layout")
     seed_everything(int(args.seed))
 
     # auto out_dir if not provided
