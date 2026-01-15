@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+# --- bootstrap sys.path for both invocation styles ---
+import sys
+from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+# -----------------------------------------------------
+
 import argparse
 import itertools
 import subprocess
-import sys
 import time
-from pathlib import Path
 from typing import List, Dict, Any
 
 import yaml

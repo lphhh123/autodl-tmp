@@ -1,12 +1,19 @@
 """Offline EDA-Agent driver (SPEC v4.3.2)."""
 from __future__ import annotations
 
-import argparse
-import csv
-import json
+# --- bootstrap sys.path for both invocation styles ---
 import sys
-import time
 from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+# -----------------------------------------------------
+
+import argparse
+import json
+import time
 
 import numpy as np
 
@@ -17,9 +24,10 @@ from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.expand import expand_clusters
 from layout.global_place_region import assign_clusters_to_regions
 from layout.legalize import legalize_assign
-from layout.pareto import ParetoSet
+from layout.pareto_io import write_pareto_points_csv
 from layout.regions import build_regions
 from layout.sites import build_sites
+from layout.trace_metrics import compute_trace_metrics_from_csv
 from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
@@ -31,167 +39,8 @@ def load_layout_input(path: Path) -> dict:
         return json.load(f)
 
 
-def _write_pareto_points(pareto: ParetoSet, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        f.write("solution_id,comm_norm,therm_norm,total_scalar,stage,iter,seed_id,assign_hash\n")
-        for idx, p in enumerate(pareto.points):
-            assign_hash = hash(tuple(p.payload.get("assign", [])))
-            total = p.payload.get("total_scalar", p.comm_norm + p.therm_norm)
-            stage = p.payload.get("stage", "detailed")
-            iter_id = p.payload.get("iter", 0)
-            seed_id = p.payload.get("seed", 0)
-            f.write(f"{idx},{p.comm_norm},{p.therm_norm},{total},{stage},{iter_id},{seed_id},{assign_hash}\n")
-
-
-def _is_undo_action(prev_action: dict, curr_action: dict, prev_sig: str, curr_sig: str) -> bool:
-    if not prev_action or not curr_action:
-        return False
-    if curr_sig and prev_sig and curr_sig == prev_sig and curr_sig.startswith("swap:"):
-        return True
-    if prev_action.get("op") == "relocate" and curr_action.get("op") == "relocate":
-        if int(prev_action.get("i", -1)) != int(curr_action.get("i", -1)):
-            return False
-        prev_from = prev_action.get("from_site")
-        prev_to = prev_action.get("site_id")
-        curr_from = curr_action.get("from_site")
-        curr_to = curr_action.get("site_id")
-        if None in (prev_from, prev_to, curr_from, curr_to):
-            return False
-        return int(curr_to) == int(prev_from) and int(curr_from) == int(prev_to)
-    if prev_action.get("op") == "cluster_move" and curr_action.get("op") == "cluster_move":
-        if int(prev_action.get("cluster_id", -1)) != int(curr_action.get("cluster_id", -1)):
-            return False
-        prev_region = prev_action.get("from_region")
-        curr_region = curr_action.get("region_id")
-        if prev_region is None or curr_region is None:
-            return False
-        return int(curr_region) == int(prev_region)
-    return False
-
-
-def _compute_trace_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
-    if not trace_path.exists():
-        return {}
-    rows = []
-    with trace_path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    if not rows:
-        return {}
-
-    totals = [float(r.get("total_scalar", 0.0)) for r in rows]
-    comm_vals = [float(r.get("comm_norm", 0.0)) for r in rows]
-    therm_vals = [float(r.get("therm_norm", 0.0)) for r in rows]
-    signatures = [r.get("signature", "") or "" for r in rows]
-    accepted = [int(r.get("accepted", 0)) for r in rows]
-    d_total = [float(r.get("d_total", 0.0)) for r in rows]
-    d_comm = [float(r.get("d_comm", 0.0)) for r in rows]
-    d_therm = [float(r.get("d_therm", 0.0)) for r in rows]
-
-    start = max(0, len(rows) - window)
-    window_indices = list(range(start, len(rows)))
-    window_len = len(window_indices)
-
-    seen = set()
-    repeat = 0
-    for idx in window_indices:
-        sig = signatures[idx]
-        if not sig:
-            continue
-        if sig in seen:
-            repeat += 1
-        else:
-            seen.add(sig)
-    repeat_signature_rate = repeat / max(1, window_len)
-
-    seen_all = set()
-    repeat_all = 0
-    for sig in signatures:
-        if not sig:
-            continue
-        if sig in seen_all:
-            repeat_all += 1
-        else:
-            seen_all.add(sig)
-    repeat_signature_rate_overall = repeat_all / max(1, len(rows))
-
-    actions = []
-    for row in rows:
-        try:
-            actions.append(json.loads(row.get("op_args_json", "{}")))
-        except json.JSONDecodeError:
-            actions.append({})
-
-    undo = 0
-    for idx in window_indices[1:]:
-        if _is_undo_action(actions[idx - 1], actions[idx], signatures[idx - 1], signatures[idx]):
-            undo += 1
-    undo_rate = undo / max(1, window_len - 1)
-
-    undo_all = 0
-    for idx in range(1, len(rows)):
-        if _is_undo_action(actions[idx - 1], actions[idx], signatures[idx - 1], signatures[idx]):
-            undo_all += 1
-    undo_rate_overall = undo_all / max(1, len(rows) - 1)
-
-    obj_arr = np.array(totals, dtype=np.float64)
-    objective_variance = float(np.var(obj_arr)) if obj_arr.size else 0.0
-    obj_last = obj_arr[start:] if obj_arr.size else obj_arr
-    objective_variance_lastN = float(np.var(obj_last)) if obj_last.size else 0.0
-    objective_std_lastN = float(np.std(obj_last)) if obj_last.size else 0.0
-    best_total_lastN = float(np.min(obj_last)) if obj_last.size else 0.0
-    mean_lastN = float(np.mean(obj_last)) if obj_last.size else 0.0
-    v_norm = min(1.0, objective_std_lastN / (abs(best_total_lastN) + 1e-9)) if obj_last.size else 0.0
-
-    oscillation_rate = 0.4 * undo_rate + 0.4 * repeat_signature_rate + 0.2 * v_norm
-
-    accept_rate_overall = sum(accepted) / max(1, len(accepted))
-    accept_rate_lastN = sum(accepted[start:]) / max(1, window_len)
-
-    improve_steps = 0
-    flat_steps = 0
-    for idx in window_indices:
-        if accepted[idx] and d_total[idx] < 0:
-            improve_steps += 1
-        if (
-            abs(d_total[idx]) < eps_flat
-            and abs(d_comm[idx]) < eps_flat
-            and abs(d_therm[idx]) < eps_flat
-        ):
-            flat_steps += 1
-
-    improve_step_ratio = improve_steps / max(1, window_len)
-    flat_step_ratio = flat_steps / max(1, window_len)
-
-    return {
-        "accept_rate_overall": accept_rate_overall,
-        "accept_rate_lastN": accept_rate_lastN,
-        "repeat_signature_rate": repeat_signature_rate,
-        "repeat_signature_rate_overall": repeat_signature_rate_overall,
-        "undo_rate": undo_rate,
-        "undo_rate_overall": undo_rate_overall,
-        "objective_variance": objective_variance,
-        "objective_variance_lastN": objective_variance_lastN,
-        "objective_std_lastN": objective_std_lastN,
-        "best_total_lastN": best_total_lastN,
-        "mean_lastN": mean_lastN,
-        "v_norm": v_norm,
-        "oscillation_rate": oscillation_rate,
-        "improve_step_ratio": improve_step_ratio,
-        "flat_step_ratio": flat_step_ratio,
-        "last_total": float(totals[-1]) if totals else 0.0,
-        "last_comm": float(comm_vals[-1]) if comm_vals else 0.0,
-        "last_therm": float(therm_vals[-1]) if therm_vals else 0.0,
-        "best_total": float(np.min(obj_arr)) if obj_arr.size else 0.0,
-        "best_comm": float(np.min(comm_vals)) if comm_vals else 0.0,
-        "best_therm": float(np.min(therm_vals)) if therm_vals else 0.0,
-    }
-
-
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
-    return _compute_trace_metrics(trace_path, window, eps_flat)
+    return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
 
 
 def _parse_segments(raw_segments) -> list[Segment]:
@@ -388,7 +237,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         )
 
     # Outputs
-    _write_pareto_points(pareto, out_dir / "pareto_points.csv")
+    write_pareto_points_csv(pareto, out_dir / "pareto_points.csv")
     best_comm, best_therm, best_payload = pareto.knee_point()
     best_assign = best_payload.get("assign", assign_final)
     layout_state.assign = np.array(best_assign, dtype=int)
@@ -431,7 +280,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
     eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-    trace_metrics = _compute_trace_metrics(out_dir / "trace.csv", metrics_window, eps_flat)
+    trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
 
     report = {
         "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},

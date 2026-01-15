@@ -278,8 +278,19 @@ class Env(BaseEnv):
         super().reset(output_dir=output_dir)
         self._step_id = 0
         self._sa_T = float(self.temp_init)
-        _random.seed(self.seed)
-        np.random.seed(self.seed)
+        seed = int(getattr(self, "_seed_id", None) or getattr(self, "seed", 0) or 0)
+        self.seed = seed
+        try:
+            self._seed_id = seed
+        except Exception:
+            pass
+
+        _random.seed(seed)
+        np.random.seed(seed)
+        try:
+            self.rng = random.Random(seed)
+        except Exception:
+            pass
 
         self._rec_path = os.path.join(self.output_dir, "recordings.jsonl")
         self._best_path = os.path.join(self.output_dir, "best_solution.json")
