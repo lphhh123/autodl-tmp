@@ -11,6 +11,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
@@ -30,6 +31,27 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.stable_hw import apply_accuracy_guard, stable_hw_schedule, update_hw_refs_from_stats
+
+
+def _get_objective_cfg(cfg) -> dict:
+    """
+    Unify objective config access across training/export/layout scripts.
+    Preferred: cfg.objective (used by layout_agent / heuragenix configs)
+    Fallback : cfg.layout (legacy)
+    """
+    obj = {}
+    try:
+        if hasattr(cfg, "objective") and cfg.objective is not None:
+            obj = OmegaConf.to_container(cfg.objective, resolve=True) or {}
+    except Exception:
+        obj = {}
+    if not obj:
+        try:
+            if hasattr(cfg, "layout") and cfg.layout is not None:
+                obj = OmegaConf.to_container(cfg.layout, resolve=True) or {}
+        except Exception:
+            obj = {}
+    return obj or {}
 
 
 def _as_float(val, name: str) -> float:
@@ -254,15 +276,21 @@ def _export_layout_input(
         raise ValueError(
             f"[export_layout_input] traffic must be (S,S)=({S},{S}), got {traffic.shape}"
         )
-    sigma_mm = float(getattr(getattr(cfg, "layout", None), "sigma_mm", 20.0))
-    sw = getattr(getattr(cfg, "layout", None), "scalar_weights", None)
-    w_comm = float(getattr(sw, "w_comm", 0.7)) if sw is not None else 0.7
-    w_therm = float(getattr(sw, "w_therm", 0.3)) if sw is not None else 0.3
-    w_penalty = float(getattr(sw, "w_penalty", 1000.0)) if sw is not None else 1000.0
+    obj = _get_objective_cfg(cfg)
+
+    sigma_mm = float(obj.get("sigma_mm", 3.0))
+    baseline = obj.get("baseline", {"L_comm_baseline": 1.0, "L_therm_baseline": 1.0})
+    scalar_weights = obj.get(
+        "scalar_weights",
+        {"w_comm": 1.0, "w_therm": 1.0, "w_penalty": 1000.0},
+    )
+    w_comm = float(scalar_weights.get("w_comm", 1.0))
+    w_therm = float(scalar_weights.get("w_therm", 1.0))
+    w_penalty = float(scalar_weights.get("w_penalty", 1000.0))
     rng = np.random.default_rng(seed)
     baseline_eval = LayoutEvaluator(
         sigma_mm=sigma_mm,
-        baseline={"L_comm_baseline": 1.0, "L_therm_baseline": 1.0},
+        baseline=baseline,
         scalar_w={"w_comm": w_comm, "w_therm": w_therm, "w_penalty": w_penalty},
     )
     layout_state = LayoutState(

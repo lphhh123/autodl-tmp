@@ -100,6 +100,19 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     # compat: layout.* -> hw.*
     _sync_layout_to_hw(cfg)
+    # ---- legacy compat: layout.optimize_layout -> hw.optimize_layout ----
+    try:
+        layout_opt = get_nested(cfg, "layout.optimize_layout", None)
+        hw_opt = get_nested(cfg, "hw.optimize_layout", None)
+        if hw_opt is None and layout_opt is not None:
+            set_nested(cfg, "hw.optimize_layout", bool(layout_opt))
+            print(
+                "[WARN] Detected legacy config key layout.optimize_layout. "
+                "Please move it to hw.optimize_layout (SPEC). "
+                f"Auto-synced hw.optimize_layout={bool(layout_opt)} for this run."
+            )
+    except Exception:
+        pass
 
     if mode == "version_c":
         _apply_defaults(cfg, REQ_VERSION_C_HW_DEFAULTS)
@@ -285,5 +298,28 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     onv.setdefault("max_consecutive", 3)
 
     cfg["stable_hw"] = stable_hw
+
+    # ---- guardrail: HW loss enabled but lambda is effectively zero ----
+    try:
+        use_hw_loss = bool(get_nested(cfg, "hw.use_hw_loss", True))
+        stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
+        lam_hw = float(get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
+        lam_max = float(get_nested(cfg, "stable_hw.lambda_hw_schedule.lambda_hw_max", 0.0) or 0.0)
+        sched_en = bool(get_nested(cfg, "stable_hw.lambda_hw_schedule.enabled", False))
+
+        if use_hw_loss:
+            if stable_en and sched_en and lam_max <= 0.0:
+                print(
+                    "[WARN] stable_hw is enabled but stable_hw.lambda_hw_schedule.lambda_hw_max <= 0. "
+                    "HW loss may have no effect. Please set a positive lambda_hw_max."
+                )
+            if (not stable_en) and lam_hw <= 0.0:
+                print(
+                    "[WARN] hw.use_hw_loss=true but stable_hw.enabled=false and hw.lambda_hw<=0. "
+                    "HW loss weight is zero; HW term will be ineffective. "
+                    "Enable stable_hw or set hw.lambda_hw>0."
+                )
+    except Exception:
+        pass
 
     return cfg
