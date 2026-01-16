@@ -229,6 +229,9 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                     "Please set stable_hw.lambda_hw_schedule.lambda_hw_max: <positive float>\n"
                     "Or set stable_hw.allow_legacy_lambda_hw=true to reuse hw.lambda_hw."
                 )
+    sch = cfg["stable_hw"]["lambda_hw_schedule"]
+    if float(sch.get("lambda_hw_max", 0.0) or 0.0) <= 0.0:
+        print("[WARN][stable_hw] lambda_hw_schedule.lambda_hw_max is 0. HW schedule will be ineffective.")
 
     sched.setdefault("clamp_max", float(sched.get("lambda_hw_max", 0.0) or 0.0))
 
@@ -304,7 +307,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     onv = guard.get("on_violate", {}) or {}
     guard["on_violate"] = onv
     onv.setdefault("scale_lambda_hw", 0.5)
-    onv.setdefault("freeze_rho_epochs", int(guard.get("freeze_rho_epochs", 1) or 1))
+    onv.setdefault("freeze_rho_epochs", int(onv.get("freeze_rho_epochs", 1) or 1))
+    onv.setdefault("max_violations", int(onv.get("max_violations", guard.get("max_consecutive", 3)) or 3))
     onv.setdefault("disable_hw_after_max_violations", False)
     recover = onv.get("recover", {}) or {}
     onv["recover"] = recover

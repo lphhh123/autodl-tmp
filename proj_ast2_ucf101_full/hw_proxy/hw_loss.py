@@ -46,97 +46,119 @@ def compute_hw_loss(
 
     if segments and mapping is not None and eff_specs is not None and mapping_solver is not None:
         iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+        force_use_cached_mapping = False
+        if iso_cfg is not None:
+            if isinstance(iso_cfg, dict):
+                force_use_cached_mapping = bool(iso_cfg.get("force_use_cached_mapping", False))
+            else:
+                force_use_cached_mapping = bool(getattr(iso_cfg, "force_use_cached_mapping", False))
 
-        # ---- cache policy: ONLY for no-grad paths ----
-        use_cached = bool(getattr(iso_cfg, "use_cached_hw_mats", True))
-        want_grad = False
-        try:
-            for v in (eff_specs or {}).values():
-                if hasattr(v, "requires_grad") and bool(v.requires_grad):
-                    want_grad = True
-                    break
-            if torch.is_grad_enabled():
-                want_grad = True
-        except Exception:
-            want_grad = True
-
-        if want_grad:
-            use_cached = False
-
-        cache = None
-        if use_cached and (stable_hw_state is not None) and (mapping_sig is not None):
-            cache = stable_hw_state.setdefault("discrete_cache", {}).setdefault("hw_mats", {})
-
-        eff_sig = {}
-        if eff_specs is not None:
-            eff_sig = {
-                k: float(v.detach().mean().cpu())
-                for k, v in eff_specs.items()
-                if isinstance(v, torch.Tensor)
-            }
-
-        key = None
-        if cache is not None:
-            key = stable_hash(
-                {
-                    "mapping_sig": mapping_sig,
-                    "segments_sig": segments_sig,
-                    "eff": eff_sig,
-                    "distance_scale": float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
-                    "mem_limit_factor": float(getattr(mapping_solver, "mem_limit_factor", 0.9)),
-                }
+        if force_use_cached_mapping and mapping is not None:
+            cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
+            fixed = mapping_solver.evaluate_fixed_mapping(
+                mapping=mapping,
+                segments=segments,
+                cost=cost,
+                eff_specs=eff_specs,
+                layout_positions=layout_positions,
+                distance_scale_ms=float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
             )
-
-        if cache is not None and key in cache:
-            lat_ms_mat = cache[key]["cost_ms"].to(device=device)
-            mem_mb_mat = cache[key]["mem_mb"].to(device=device)
-            power_w_mat = cache[key]["power_w"].to(device=device)
+            latency_ms = torch.tensor(float(fixed.get("total_latency_ms", 0.0)), device=device)
+            mem_mb = torch.tensor(float(fixed.get("mem_mb", 0.0)), device=device)
+            energy_mj = torch.tensor(float(fixed.get("energy_mj", 0.0)), device=device)
+            comm_ms = torch.tensor(float(fixed.get("comm_ms", 0.0)), device=device)
         else:
-            cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
-            lat_ms_mat = cost["lat_ms"]
-            mem_mb_mat = cost["mem_mb"]
-            power_w_mat = cost["power_w"]
 
-            if use_cached and (cache is not None) and (key is not None) and (not want_grad):
-                cache[key] = {
-                    "cost_ms": lat_ms_mat.detach().cpu(),
-                    "mem_mb": mem_mb_mat.detach().cpu(),
-                    "power_w": power_w_mat.detach().cpu(),
+            # ---- cache policy: ONLY for no-grad paths ----
+            use_cached = bool(getattr(iso_cfg, "use_cached_hw_mats", True))
+            want_grad = False
+            try:
+                for v in (eff_specs or {}).values():
+                    if hasattr(v, "requires_grad") and bool(v.requires_grad):
+                        want_grad = True
+                        break
+                if torch.is_grad_enabled():
+                    want_grad = True
+            except Exception:
+                want_grad = True
+
+            if want_grad:
+                use_cached = False
+
+            cache = None
+            if use_cached and (stable_hw_state is not None) and (mapping_sig is not None):
+                cache = stable_hw_state.setdefault("discrete_cache", {}).setdefault("hw_mats", {})
+
+            eff_sig = {}
+            if eff_specs is not None:
+                eff_sig = {
+                    k: float(v.detach().mean().cpu())
+                    for k, v in eff_specs.items()
+                    if isinstance(v, torch.Tensor)
                 }
-        K, S = lat_ms_mat.shape
 
-        map_idx = torch.tensor([int(x) for x in mapping[:K]], device=device, dtype=torch.long)
-        seg_idx = torch.arange(K, device=device, dtype=torch.long)
+            key = None
+            if cache is not None:
+                key = stable_hash(
+                    {
+                        "mapping_sig": mapping_sig,
+                        "segments_sig": segments_sig,
+                        "eff": eff_sig,
+                        "distance_scale": float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
+                        "mem_limit_factor": float(getattr(mapping_solver, "mem_limit_factor", 0.9)),
+                    }
+                )
 
-        chosen_lat = lat_ms_mat[seg_idx, map_idx]
-        chosen_mem = mem_mb_mat[seg_idx, map_idx]
-        chosen_power = power_w_mat[seg_idx, map_idx]
+            if cache is not None and key in cache:
+                lat_ms_mat = cache[key]["cost_ms"].to(device=device)
+                mem_mb_mat = cache[key]["mem_mb"].to(device=device)
+                power_w_mat = cache[key]["power_w"].to(device=device)
+            else:
+                cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
+                lat_ms_mat = cost["lat_ms"]
+                mem_mb_mat = cost["mem_mb"]
+                power_w_mat = cost["power_w"]
 
-        per_slot_time = torch.zeros((S,), device=device, dtype=torch.float32)
-        per_slot_time.scatter_add_(0, map_idx, chosen_lat)
-        latency_ms = torch.max(per_slot_time)
+                if use_cached and (cache is not None) and (key is not None) and (not want_grad):
+                    cache[key] = {
+                        "cost_ms": lat_ms_mat.detach().cpu(),
+                        "mem_mb": mem_mb_mat.detach().cpu(),
+                        "power_w": power_w_mat.detach().cpu(),
+                    }
+            K, S = lat_ms_mat.shape
 
-        per_slot_mem = torch.zeros((S,), device=device, dtype=torch.float32)
-        per_slot_mem.scatter_add_(0, map_idx, chosen_mem)
-        mem_mb = torch.max(per_slot_mem)
+            map_idx = torch.tensor([int(x) for x in mapping[:K]], device=device, dtype=torch.long)
+            seg_idx = torch.arange(K, device=device, dtype=torch.long)
 
-        energy_mj = torch.sum(chosen_power * chosen_lat) / 1000.0
+            chosen_lat = lat_ms_mat[seg_idx, map_idx]
+            chosen_mem = mem_mb_mat[seg_idx, map_idx]
+            chosen_power = power_w_mat[seg_idx, map_idx]
 
-        comm_ms = torch.zeros((), device=device, dtype=torch.float32)
-        if layout_positions is not None and "peak_bw" in eff_specs:
-            distance_scale_ms = float(getattr(cfg.hw, "distance_scale_ms", 0.0))
-            for k in range(min(K - 1, len(segments) - 1)):
-                d1 = int(map_idx[k].item())
-                d2 = int(map_idx[k + 1].item())
-                if d1 == d2:
-                    continue
-                dist = torch.norm(layout_positions[d1] - layout_positions[d2])
-                traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
-                bw = torch.minimum(eff_specs["peak_bw"][d1], eff_specs["peak_bw"][d2])
-                base = (traffic / (bw + 1e-9)) * 1e3
-                comm_ms = comm_ms + base + dist * float(distance_scale_ms)
-        else:
+            per_slot_time = torch.zeros((S,), device=device, dtype=torch.float32)
+            per_slot_time.scatter_add_(0, map_idx, chosen_lat)
+            latency_ms = torch.max(per_slot_time)
+
+            per_slot_mem = torch.zeros((S,), device=device, dtype=torch.float32)
+            per_slot_mem.scatter_add_(0, map_idx, chosen_mem)
+            mem_mb = torch.max(per_slot_mem)
+
+            energy_mj = torch.sum(chosen_power * chosen_lat) / 1000.0
+
             comm_ms = torch.zeros((), device=device, dtype=torch.float32)
+            if layout_positions is not None and "peak_bw" in eff_specs:
+                distance_scale_ms = float(getattr(cfg.hw, "distance_scale_ms", 0.0))
+                for k in range(min(K - 1, len(segments) - 1)):
+                    d1 = int(map_idx[k].item())
+                    d2 = int(map_idx[k + 1].item())
+                    if d1 == d2:
+                        continue
+                    dist = torch.norm(layout_positions[d1] - layout_positions[d2])
+                    traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
+                    bw = torch.minimum(eff_specs["peak_bw"][d1], eff_specs["peak_bw"][d2])
+                    base = (traffic / (bw + 1e-9)) * 1e3
+                    comm_ms = comm_ms + base + dist * float(distance_scale_ms)
+            else:
+                comm_ms = torch.zeros((), device=device, dtype=torch.float32)
     else:
         pred = hw_proxy.predict_from_model_info(model_info)
         latency_ms = torch.tensor(float(pred.get("latency_ms", 0.0)), device=device)
