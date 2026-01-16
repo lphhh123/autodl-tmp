@@ -112,6 +112,9 @@ class BaseEnv:
             "time_ms": float(time_ms) if time_ms is not None else None,
             "meta": meta or {},
         }
+        action = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
+        record["op_args"] = action
+        record["op_args_json"] = json.dumps(action, ensure_ascii=False)
         if add_record_item:
             record.update(add_record_item)
         if not record.get("_skip_record"):
@@ -123,31 +126,42 @@ class BaseEnv:
             self._write_record(record)
         return True
 
-    def run_heuristic(self, heuristic, algorithm_data: Optional[Dict[str, Any]] = None, record: bool = True, **kwargs) -> bool:
-        problem_state = {"instance_data": getattr(self, "instance_data", {}), "current_solution": self.solution}
-        if hasattr(self, "get_problem_state"):
-            try:
-                problem_state = dict(self.get_problem_state())
-            except Exception:  # noqa: BLE001
-                problem_state = {"instance_data": getattr(self, "instance_data", {}), "current_solution": self.solution}
+    def run_heuristic(self, heuristic, algorithm_data: dict = {}, record: bool = True, **kwargs):
+        """
+        IMPORTANT:
+          - selection/add_record_item/meta are INTERNAL control params; do NOT pass into heuristic().
+          - add_record_item must be merged into recordings by run_operator.
+        """
+        selection = kwargs.pop("selection", None)
+        add_record_item = kwargs.pop("add_record_item", None)
+        meta = kwargs.pop("meta", None)
+
+        problem_state = self.problem_state
         if algorithm_data is None:
-            algorithm_data = {"env": self, "rng": getattr(self, "rng", None)}
-        operator, meta = heuristic(problem_state, algorithm_data=algorithm_data, **kwargs)
-        if operator is None:
-            return False
-        if hasattr(self, "run_operator"):
-            try:
-                add_record_item = None if record else {"_skip_record": True}
-                self.run_operator(
-                    operator,
-                    heuristic_name=getattr(heuristic, "__name__", "heuristic"),
-                    meta=meta,
-                    add_record_item=add_record_item,
-                )
-            except TypeError:
-                self.run_operator(operator)
-            return True
-        return False
+            algorithm_data = {}
+
+        operator, algorithm_data = heuristic(problem_state, algorithm_data=algorithm_data, **kwargs)
+
+        if not record:
+            add_record_item = {"_skip_record": True}
+        else:
+            merged = {}
+            if isinstance(add_record_item, dict):
+                merged.update(add_record_item)
+            if selection is not None:
+                merged.setdefault("selection", selection)
+            if meta is not None:
+                merged.setdefault("meta", {})
+                if isinstance(merged["meta"], dict) and isinstance(meta, dict):
+                    merged["meta"].update(meta)
+            add_record_item = merged if merged else None
+
+        try:
+            self.run_operator(operator, add_record_item=add_record_item)
+        except TypeError:
+            self.run_operator(operator)
+
+        return operator, algorithm_data
 
     def dump_result(self) -> None:
         return None
@@ -186,17 +200,10 @@ class BaseEnv:
         - If max_steps is set: stop ONLY by current_steps >= max_steps (SPEC budget semantics).
         - If max_steps is None: allow early stop by is_complete_solution.
         """
-        ms = getattr(self, "max_steps", None)
-        if ms is not None:
-            try:
-                return int(self.current_steps) < int(ms)
-            except Exception:
-                return True
+        if self.max_steps is not None:
+            return int(self.current_steps) < int(self.max_steps)
 
-        comp = getattr(self, "is_complete_solution", None)
-        if comp is None:
+        done = getattr(self, "is_complete_solution", None)
+        if done is None:
             return True
-        try:
-            return not bool(comp() if callable(comp) else comp)
-        except Exception:
-            return True
+        return not bool(done() if callable(done) else done)

@@ -651,9 +651,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     best_acc1: Optional[float] = None
     last_hw_stats = None
 
+    if stable_hw_state is not None:
+        stable_hw_state["total_epochs"] = int(cfg.training.outer_epochs)
+
     for outer in range(cfg.training.outer_epochs):
         if stable_hw_cfg:
-            stable_hw_schedule(stable_hw_cfg, stable_hw_state, outer)
+            stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
         update_alpha = base_update_alpha
         frozen_until = int(stable_hw_state.get("rho_frozen_until_epoch", -1) or -1)
         if frozen_until >= 0 and outer < frozen_until:
@@ -863,6 +866,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
         if stable_hw_cfg and hw_stats_count > 0:
             epoch_hw_stats = {
+                "epoch": int(outer),
                 "latency_ms": sum_latency / hw_stats_count,
                 "energy_mj": sum_energy / hw_stats_count,
                 "mem_mb": sum_mem / hw_stats_count,
@@ -955,7 +959,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 model_type=str(getattr(cfg.training, "model_type", "video")),
                 max_batches=max_eval_batches,
             )
-            apply_accuracy_guard(stable_hw_cfg, stable_hw_state, float(val_acc1), logger=logger)
+            apply_accuracy_guard(stable_hw_cfg, stable_hw_state, float(val_acc1), outer)
         else:
             val_acc1 = eval_acc1(
                 model,
