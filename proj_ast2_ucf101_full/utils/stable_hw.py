@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Dict
 
 
@@ -112,6 +111,9 @@ def init_hw_refs_from_baseline(
     stable_hw_state["refs_inited"] = True
     stable_hw_state["ref_source"] = "baseline_stats"
     stable_hw_state["ref_path"] = str(p)
+    base_acc = _get_baseline_acc_from_stats(d)
+    if base_acc is not None:
+        stable_hw_state["baseline_acc"] = float(base_acc)
     return stable_hw_state
 
 
@@ -132,169 +134,117 @@ def _get_path(obj: Any, path: str, default=None):
     return cur
 
 
-def stable_hw_schedule(epoch: int, stable_hw_cfg, stable_hw_state: Dict[str, Any], total_epochs: int | None = None):
+def stable_hw_schedule(epoch: int, cfg: dict, state: dict) -> float:
     """
-    Schema-aligned schedule:
-      stable_hw.lambda_hw (base)
-      stable_hw.lambda_hw_schedule.{enabled, lambda_hw_max, lambda_hw_min,
-                                   warmup_ratio, ramp_ratio, hold_ratio,
-                                   cosine_decay, clamp_min, clamp_max}
+    Epoch-based schedule (SPEC):
+      warmup_epochs: 0 -> lambda_hw_min
+      ramp_epochs  : linear lambda_hw_min -> lambda_hw_max
+      stabilize_epochs: hold at lambda_hw_max
+      decay_epochs : linear lambda_hw_max -> lambda_hw_min
     """
-    if stable_hw_state is None:
-        return
+    sch = (cfg or {}).get("lambda_hw_schedule", {}) or {}
+    lam_min = float(sch.get("lambda_hw_min", 0.0) or 0.0)
+    lam_max = float(sch.get("lambda_hw_max", 0.0) or 0.0)
 
-    base_lam = float(_get(stable_hw_cfg, "lambda_hw", 0.0) or 0.0)
-    sched = _get(stable_hw_cfg, "lambda_hw_schedule", None)
-
-    enabled = bool(_get(sched, "enabled", False)) if sched is not None else False
-    if not enabled:
-        stable_hw_state["lambda_hw"] = base_lam
-        stable_hw_state["schedule_phase"] = "disabled"
-        return
-
-    if total_epochs is None:
-        total_epochs = int(stable_hw_state.get("total_epochs", 0) or 0)
-    if total_epochs <= 0:
-        total_epochs = int(_get(sched, "total_epochs", 0) or 0)
-    if total_epochs <= 0:
-        total_epochs = 1
-
-    lam_min = float(_get(sched, "lambda_hw_min", 0.0) or 0.0)
-    lam_max = float(_get(sched, "lambda_hw_max", base_lam) or base_lam)
-    lam_max = max(lam_max, lam_min)
-
-    warmup_ratio = float(_get(sched, "warmup_ratio", 0.0) or 0.0)
-    ramp_ratio = float(_get(sched, "ramp_ratio", 0.0) or 0.0)
-    hold_ratio = float(_get(sched, "hold_ratio", 0.0) or 0.0)
-    cosine_decay = bool(_get(sched, "cosine_decay", False))
-
-    clamp_min = _get(sched, "clamp_min", None)
-    clamp_max = _get(sched, "clamp_max", None)
-    if clamp_min is not None:
-        lam_min = max(lam_min, float(clamp_min))
-    if clamp_max is not None:
-        lam_max = min(lam_max, float(clamp_max))
-        lam_max = max(lam_max, lam_min)
+    warm = int(sch.get("warmup_epochs", 0) or 0)
+    ramp = int(sch.get("ramp_epochs", 0) or 0)
+    stab = int(sch.get("stabilize_epochs", 0) or 0)
+    deca = int(sch.get("decay_epochs", 0) or 0)
 
     e = int(epoch)
-    e = max(0, min(e, total_epochs - 1))
-
-    w = int(round(total_epochs * warmup_ratio))
-    r = int(round(total_epochs * ramp_ratio))
-    h = int(round(total_epochs * hold_ratio))
-    w = max(0, w)
-    r = max(0, r)
-    h = max(0, h)
-
-    if w + r + h > total_epochs:
-        overflow = (w + r + h) - total_epochs
-        cut_h = min(h, overflow)
-        h -= cut_h
-        overflow -= cut_h
-        cut_r = min(r, overflow)
-        r -= cut_r
-        overflow -= cut_r
-        cut_w = min(w, overflow)
-        w -= cut_w
-        overflow -= cut_w
-
-    warm_end = w
-    ramp_end = w + r
-    hold_end = w + r + h
-
-    if e < warm_end:
-        t = (e + 1) / max(1, warm_end)
-        lam = lam_min * t
-        phase = "warmup"
-    elif e < ramp_end:
-        t = (e - warm_end + 1) / max(1, (ramp_end - warm_end))
-        lam = lam_min + (lam_max - lam_min) * t
-        phase = "ramp"
-    elif e < hold_end:
-        lam = lam_max
-        phase = "hold"
+    if warm > 0 and e < warm:
+        lam = lam_min
     else:
-        if cosine_decay and (total_epochs - hold_end) > 0:
-            t = (e - hold_end) / max(1, (total_epochs - hold_end - 1))
-            lam = lam_min + 0.5 * (lam_max - lam_min) * (1.0 + math.cos(math.pi * t))
-            phase = "cosine_decay"
+        e2 = e - warm
+        if ramp > 0 and e2 < ramp:
+            t = float(e2) / float(max(1, ramp))
+            lam = lam_min + t * (lam_max - lam_min)
         else:
-            lam = lam_max
-            phase = "post_hold"
+            e3 = e2 - ramp
+            if stab > 0 and e3 < stab:
+                lam = lam_max
+            else:
+                e4 = e3 - stab
+                if deca > 0 and e4 < deca:
+                    t = float(e4) / float(max(1, deca))
+                    lam = lam_max + t * (lam_min - lam_max)
+                else:
+                    lam = lam_min
 
-    stable_hw_state["lambda_hw"] = float(max(lam_min, min(lam, lam_max)))
-    stable_hw_state["schedule_phase"] = phase
-
-
-def apply_accuracy_guard(
-    stable_hw_cfg,
-    stable_hw_state: Dict[str, Any],
-    acc1: float,
-    epoch: int,
-):
-    """
-    Schema-aligned:
-      stable_hw.accuracy_guard.enabled
-      stable_hw.accuracy_guard.target_acc1
-      stable_hw.accuracy_guard.margin
-      stable_hw.accuracy_guard.use_ema
-      stable_hw.accuracy_guard.ema_beta
-      stable_hw.accuracy_guard.on_violate.max_consecutive
-      stable_hw.accuracy_guard.on_violate.scale_lambda_hw
-      stable_hw.accuracy_guard.on_violate.freeze_rho_epochs
-    Effects:
-      - updates stable_hw_state["acc_ema"]
-      - tracks stable_hw_state["consecutive_violations"]
-      - scales stable_hw_state["lambda_hw"]
-      - sets stable_hw_state["rho_frozen_until_epoch"]
-    """
-    guard = _get(stable_hw_cfg, "accuracy_guard", None)
-    if not guard or not bool(_get(guard, "enabled", False)):
-        stable_hw_state["acc_drop"] = 0.0
-        return stable_hw_state
-
-    target = float(_get(guard, "target_acc1", 1.0) or 1.0)
-    margin = float(_get(guard, "margin", 0.0) or 0.0)
-    use_ema = bool(_get(guard, "use_ema", True))
-    beta = float(_get(guard, "ema_beta", 0.9) or 0.9)
-
-    onv = _get(guard, "on_violate", None)
-    max_consec = int(_get(onv, "max_consecutive", 2) or 2)
-    scale_lam = float(_get(onv, "scale_lambda_hw", 0.5) or 0.5)
-    freeze_rho = int(_get(onv, "freeze_rho_epochs", 0) or 0)
-
-    acc = float(acc1)
-    if use_ema:
-        prev = float(stable_hw_state.get("acc_ema", acc))
-        ema = beta * prev + (1.0 - beta) * acc
-        stable_hw_state["acc_ema"] = float(ema)
-        acc_eff = float(ema)
+    # apply guard scaling / disable
+    scale = float(state.get("lambda_hw_scale", 1.0) or 1.0)
+    if bool(state.get("hw_disabled", False)):
+        lam = 0.0
     else:
-        stable_hw_state["acc_ema"] = float(acc)
-        acc_eff = float(acc)
+        lam = lam * max(0.0, scale)
 
-    violate = acc_eff < (target - margin)
-    stable_hw_state["acc_drop"] = float((target - margin) - acc_eff) if violate else 0.0
+    state["lambda_hw_base"] = float(lam_min if lam_max == 0 else lam)
+    state["lambda_hw_after_schedule"] = float(lam)
+    return float(lam)
 
-    consec = int(stable_hw_state.get("consecutive_violations", 0) or 0)
-    consec = consec + 1 if violate else 0
-    stable_hw_state["consecutive_violations"] = int(consec)
 
-    if violate and consec >= max_consec:
-        lam = float(stable_hw_state.get("lambda_hw", float(_get(stable_hw_cfg, "lambda_hw", 0.0) or 0.0)))
-        lam = lam * max(0.0, min(1.0, scale_lam))
-        sched = _get(stable_hw_cfg, "lambda_hw_schedule", None)
-        lam_min = float(_get(sched, "lambda_hw_min", 0.0) or 0.0) if sched else 0.0
-        lam_max = float(_get(sched, "lambda_hw_max", lam) or lam) if sched else lam
-        lam = max(lam_min, min(lam, max(lam_min, lam_max)))
-        stable_hw_state["lambda_hw"] = float(lam)
+def apply_accuracy_guard(epoch: int, stable_hw_cfg: dict, state: dict, current_metric: float) -> dict:
+    """
+    SPEC accuracy_guard:
+      - metric: (we pass current_metric in)
+      - epsilon_drop: violation if (ref_metric < baseline_metric - epsilon_drop)
+      - optional EMA
+      - on_violate: scale_lambda_hw, freeze_rho_epochs, max_violations, disable_hw_after_max_violations
+    Must populate state keys for trainer logging:
+      baseline_acc, current_acc, current_acc_ema, epsilon_drop,
+      violate_streak, guard_triggered, lambda_hw_scale, hw_disabled, rho_frozen_until_epoch
+    """
+    guard = (stable_hw_cfg or {}).get("accuracy_guard", {}) or {}
+    eps = float(guard.get("epsilon_drop", 0.0) or 0.0)
+    use_ema = bool(guard.get("use_ema", True))
+    ema_beta = float(guard.get("ema_beta", 0.9) or 0.9)
 
-        if freeze_rho > 0:
-            until = int(epoch) + int(freeze_rho)
-            prev_until = int(stable_hw_state.get("rho_frozen_until_epoch", -1) or -1)
-            stable_hw_state["rho_frozen_until_epoch"] = int(max(prev_until, until))
+    onv = (guard.get("on_violate", {}) or {})
+    scale_mul = float(onv.get("scale_lambda_hw", 1.5) or 1.5)
+    freeze_epochs = int(onv.get("freeze_rho_epochs", 1) or 1)
+    max_viol = int(onv.get("max_violations", 2) or 2)
+    disable_after = bool(onv.get("disable_hw_after_max_violations", False))
 
-    return stable_hw_state
+    cur = float(current_metric)
+    state["current_acc"] = cur
+    state["epsilon_drop"] = eps
+
+    base = state.get("baseline_acc", None)
+    if base is None:
+        state["baseline_acc"] = cur
+        base = cur
+
+    if use_ema:
+        prev = state.get("current_acc_ema", None)
+        ema = cur if prev is None else (ema_beta * float(prev) + (1.0 - ema_beta) * cur)
+        state["current_acc_ema"] = float(ema)
+        ref = float(ema)
+    else:
+        state["current_acc_ema"] = None
+        ref = float(cur)
+
+    violate = (ref < float(base) - eps)
+    state["acc_drop"] = float((float(base) - eps) - ref) if violate else 0.0
+    if violate:
+        streak = int(state.get("violate_streak", 0) or 0) + 1
+        state["violate_streak"] = streak
+        state["guard_triggered"] = True
+
+        prev_scale = float(state.get("lambda_hw_scale", 1.0) or 1.0)
+        state["lambda_hw_scale"] = float(prev_scale * max(1.0, scale_mul))
+
+        state["rho_frozen_until_epoch"] = int(epoch + max(1, freeze_epochs))
+
+        if disable_after and streak >= max_viol:
+            state["hw_disabled"] = True
+    else:
+        state["violate_streak"] = 0
+        state["guard_triggered"] = False
+
+    state["hw_disabled"] = bool(state.get("hw_disabled", False))
+    state["lambda_hw_scale"] = float(state.get("lambda_hw_scale", 1.0) or 1.0)
+
+    return state
 
 
 def update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state: Dict[str, Any], epoch_hw_stats: Dict[str, float]):

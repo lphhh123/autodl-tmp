@@ -196,6 +196,81 @@ class MappingSolver:
             distance_scale_ms=distance_scale_ms,
         )
 
+    def _estimate_device_time(self, mapping: List[int], segments: List[Segment], cost: Dict[str, torch.Tensor]) -> Dict[int, float]:
+        lat_ms = cost["lat_ms"]
+        K, S = lat_ms.shape
+        device_time = {s: 0.0 for s in range(S)}
+        for k in range(min(K, len(mapping), len(segments))):
+            d = int(mapping[k])
+            device_time[d] += float(lat_ms[k, d])
+        return device_time
+
+    def _estimate_pipeline_latency(self, per_slot_time: Dict[int, float]) -> float:
+        if not per_slot_time:
+            return 0.0
+        return max(per_slot_time.values())
+
+    def _estimate_comm_ms(
+        self,
+        mapping: List[int],
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        layout_positions: Optional[torch.Tensor] = None,
+        distance_scale_ms: float = 0.0,
+    ) -> float:
+        comm_ms = 0.0
+        if layout_positions is None:
+            return comm_ms
+        for k in range(min(len(segments) - 1, len(mapping) - 1)):
+            d1, d2 = int(mapping[k]), int(mapping[k + 1])
+            if d1 == d2:
+                continue
+            dist = float(torch.norm(layout_positions[d1] - layout_positions[d2]))
+            traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
+            eff_bw = (
+                min(_to_pyfloat(eff_specs["peak_bw"][d1]), _to_pyfloat(eff_specs["peak_bw"][d2]))
+                if "peak_bw" in eff_specs
+                else 1.0
+            )
+            base_time = traffic / (eff_bw + 1e-9) * 1e3
+            comm_ms += base_time + dist * float(distance_scale_ms)
+        return float(comm_ms)
+
+    def evaluate_fixed_mapping(
+        self,
+        mapping: List[int],
+        segments: List[Segment],
+        cost: Dict[str, torch.Tensor],
+        eff_specs: Optional[Dict[str, torch.Tensor]] = None,
+        layout_positions: Optional[torch.Tensor] = None,
+        distance_scale_ms: float = 0.0,
+    ) -> Dict:
+        per_slot_time = self._estimate_device_time(mapping, segments, cost)
+        total_lat = self._estimate_pipeline_latency(per_slot_time)
+        comm_ms = 0.0
+        if eff_specs is not None and layout_positions is not None and float(distance_scale_ms) > 0:
+            comm_ms = float(self._estimate_comm_ms(mapping, segments, eff_specs, layout_positions, distance_scale_ms))
+        mem_mb = 0.0
+        energy_mj = 0.0
+        if "mem_mb" in cost and "power_w" in cost:
+            mem_mat = cost["mem_mb"]
+            power_mat = cost["power_w"]
+            K, S = mem_mat.shape
+            per_slot_mem = {s: 0.0 for s in range(S)}
+            for k in range(min(K, len(mapping), len(segments))):
+                d = int(mapping[k])
+                per_slot_mem[d] = max(per_slot_mem[d], float(mem_mat[k, d]))
+                energy_mj += float(power_mat[k, d]) * float(cost["lat_ms"][k, d]) / 1000.0
+            mem_mb = max(per_slot_mem.values()) if per_slot_mem else 0.0
+        return {
+            "mapping": list(mapping),
+            "per_slot_time_ms": per_slot_time,
+            "total_latency_ms": float(total_lat),
+            "comm_ms": float(comm_ms),
+            "mem_mb": float(mem_mb),
+            "energy_mj": float(energy_mj),
+        }
+
     def build_traffic_matrix(
         self,
         segments: List[Segment],

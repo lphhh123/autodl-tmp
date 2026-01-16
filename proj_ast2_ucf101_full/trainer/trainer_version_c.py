@@ -25,7 +25,6 @@ from layout.sites import build_sites
 from layout.wafer_layout import WaferLayout
 from mapping.mapping_solver import MappingSolver
 from mapping.partitioner import PartitionPlanner
-from mapping.segments import build_segments_from_model
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
@@ -67,6 +66,14 @@ def _as_float(val, name: str) -> float:
 def _seed_worker(worker_id: int, base_seed: int) -> None:
     seed = base_seed + worker_id
     seed_everything(seed)
+
+
+def _get_iso_cfg_value(iso_cfg, key: str, default=None):
+    if iso_cfg is None:
+        return default
+    if isinstance(iso_cfg, dict):
+        return iso_cfg.get(key, default)
+    return getattr(iso_cfg, key, default)
 
 
 def build_dataloader(cfg):
@@ -460,6 +467,7 @@ def _solve_mapping_for_cache(
     signature = f"seg{len(segments)}_{mapping_sig}"
     mapping_result["segments"] = segments
     mapping_result["signature"] = signature
+    mapping_result["mapping_sig"] = mapping_sig
     return mapping_result
 
 
@@ -597,11 +605,18 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     partitioner = PartitionPlanner(mapping_solver, wafer_layout, hw_proxy, cfg.partition)
     optimizer_layout = torch.optim.Adam(wafer_layout.parameters(), lr=1e-3)
 
+    stable_hw_cfg = getattr(cfg, "stable_hw", None)
+    iso_cfg_global = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+    layout_opt_steps = int(_get_iso_cfg_value(iso_cfg_global, "layout_opt_steps", 10) or 10)
+    layout_opt_lr = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_lr", 5e-2) or 5e-2)
+    layout_opt_grad_clip = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_grad_clip", 1.0) or 1.0)
+    layout_opt = None
+    if bool(_get_iso_cfg_value(iso_cfg_global, "optimize_layout", False)):
+        layout_opt = torch.optim.Adam([wafer_layout.pos], lr=layout_opt_lr)
+
     global_step = 0
     last_segments: List = []
     last_mapping: List[int] = []
-
-    stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_hw_state: Dict[str, Any] = {
         "lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0)),
         "refs_inited": False,
@@ -655,8 +670,13 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         stable_hw_state["total_epochs"] = int(cfg.training.outer_epochs)
 
     for outer in range(cfg.training.outer_epochs):
-        if stable_hw_cfg:
-            stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+        if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", False)):
+            lambda_hw = stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+            stable_hw_state["lambda_hw"] = float(lambda_hw)
+            stable_hw_state["lambda_hw_after_guard"] = float(lambda_hw)
+        elif stable_hw_cfg:
+            stable_hw_state["lambda_hw"] = float(getattr(cfg.hw, "lambda_hw", 0.0))
+            stable_hw_state["lambda_hw_after_guard"] = float(stable_hw_state["lambda_hw"])
         update_alpha = base_update_alpha
         frozen_until = int(stable_hw_state.get("rho_frozen_until_epoch", -1) or -1)
         if frozen_until >= 0 and outer < frozen_until:
@@ -682,7 +702,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 model_info=run_state.get("last_model_info"),
             )
             cache["mapping"] = mapping_res
-            cache["mapping_signature"] = mapping_res.get("signature")
+            cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
             mapping_updated = True
         else:
             mapping_res = cache["mapping"]
@@ -729,7 +749,6 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 slot_out = chiplet_slots(hard=False)
                 alpha = slot_out["alpha"]
                 eff_specs = slot_out["eff_specs"]
-                layout_positions = wafer_layout.current_pos_continuous()
 
                 segments_cached = mapping_res.get("segments", []) if mapping_res else []
                 mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
@@ -779,6 +798,41 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                             cache["layout_signature"] = layout_res.get("signature")
                             step_layout_updated = True
 
+                if layout_opt is not None and bool(_get_iso_cfg_value(iso_cfg, "optimize_layout", False)):
+                    if step_layout_updated and segments_for_hw and mapping_for_hw:
+                        prev_requires = {}
+                        for n, p in model.named_parameters():
+                            prev_requires[n] = p.requires_grad
+                            p.requires_grad_(False)
+
+                        wafer_layout.train()
+                        for _k in range(layout_opt_steps):
+                            layout_opt.zero_grad(set_to_none=True)
+                            out = wafer_layout.forward(
+                                mapping=mapping_for_hw,
+                                segments=segments_for_hw,
+                                eff_specs=eff_specs,
+                                lambda_boundary=cfg.hw.lambda_boundary,
+                                lambda_overlap=cfg.hw.lambda_overlap,
+                                lambda_comm=cfg.hw.lambda_comm_extra,
+                                lambda_thermal=cfg.hw.lambda_thermal,
+                                distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
+                            )
+                            loss_layout = out[0] if isinstance(out, (tuple, list)) else out["total"]
+                            loss_layout.backward()
+                            torch.nn.utils.clip_grad_norm_([wafer_layout.pos], max_norm=layout_opt_grad_clip)
+                            layout_opt.step()
+
+                        for n, p in model.named_parameters():
+                            p.requires_grad_(prev_requires[n])
+
+                        layout_positions = wafer_layout.current_pos_continuous()
+                        pos_round = [[round(float(x), 6) for x in row] for row in layout_positions.detach().cpu().tolist()]
+                        cache["layout_signature"] = stable_hash({"pos": pos_round})
+                        cache["layout"] = {"signature": cache["layout_signature"]}
+
+                layout_positions = wafer_layout.current_pos_continuous()
+
                 segments_sig = None
                 try:
                     segments_sig = stable_hash(
@@ -789,7 +843,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
                 mapping_sig_for_hw = None
                 if (segments_for_hw is segments_cached) or (segments_for_hw == segments_cached):
-                    mapping_sig_for_hw = mapping_res.get("signature") if mapping_res else None
+                    mapping_sig_for_hw = (
+                        (mapping_res.get("mapping_sig") or mapping_res.get("signature")) if mapping_res else None
+                    )
                 else:
                     mapping_sig_for_hw = None
 
@@ -905,7 +961,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     stable_hw_state=stable_hw_state,
                     segments=segments_cached,
                     mapping=mapping_cached,
-                    mapping_sig=mapping_res.get("signature") if mapping_res else None,
+                    mapping_sig=(mapping_res.get("mapping_sig") or mapping_res.get("signature")) if mapping_res else None,
                     segments_sig=segments_sig,
                     eff_specs=eff_specs,
                     layout_positions=layout_positions,
@@ -959,7 +1015,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 model_type=str(getattr(cfg.training, "model_type", "video")),
                 max_batches=max_eval_batches,
             )
-            apply_accuracy_guard(stable_hw_cfg, stable_hw_state, float(val_acc1), outer)
+            apply_accuracy_guard(outer, stable_hw_cfg, stable_hw_state, float(val_acc1))
         else:
             val_acc1 = eval_acc1(
                 model,

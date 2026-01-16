@@ -161,8 +161,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         stable_state["total_epochs"] = int(cfg.train.epochs)
 
     for epoch in range(cfg.train.epochs):
-        if stable_hw_cfg:
-            stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+        if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", False)):
+            lambda_hw = stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+            stable_state["lambda_hw"] = float(lambda_hw)
+            stable_state["lambda_hw_after_guard"] = float(lambda_hw)
+        elif stable_hw_cfg:
+            stable_state["lambda_hw"] = float(getattr(cfg.hw, "lambda_hw", 0.0))
+            stable_state["lambda_hw_after_guard"] = float(stable_state["lambda_hw"])
         model.train()
         last_hw_stats = None
         for step, batch in enumerate(train_loader):
@@ -221,7 +226,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         if stable_hw_cfg:
             stable_state["epoch"] = int(epoch)
             val_acc1 = float(last_acc)
-            apply_accuracy_guard(stable_hw_cfg, stable_state, val_acc1, epoch)
+            apply_accuracy_guard(epoch, stable_hw_cfg, stable_state, val_acc1)
             if last_hw_stats:
                 stable_state = update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats)
         if metrics_path:

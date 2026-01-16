@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from mapping.mapping_solver import MappingSolver
-from mapping.segments import LayerNode, Segment, build_coarse_segments, build_layer_nodes_from_model, build_segments_from_model
+from mapping.segments import LayerNode, Segment, build_coarse_segments, build_layer_nodes_from_model
 from layout.wafer_layout import WaferLayout
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 
@@ -15,6 +17,24 @@ from hw_proxy.layer_hw_proxy import LayerHwProxy
 @dataclass
 class GraphRewritePlan:
     splits: List[Dict[str, Any]]
+
+
+def _mapping_signature(segments: List[Segment], mapping: List[int], graph_rewrite_plan: Dict[str, Any]) -> str:
+    seg_ids = []
+    for s in segments:
+        seg_ids.append(
+            {
+                "sid": int(getattr(s, "segment_id", getattr(s, "id", -1))),
+                "layers": list(getattr(s, "layer_ids", [])),
+            }
+        )
+    payload = {
+        "segments": seg_ids,
+        "mapping": list(mapping),
+        "rewrite": graph_rewrite_plan or {},
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()
 
 
 class PartitionPlanner:
@@ -151,7 +171,12 @@ class PartitionPlanner:
         filtered.sort(key=lambda x: x[1], reverse=True)
         return filtered[:max_layers]
 
-    def _apply_split_plans(self, segments_base: List[Segment], accepted_plans: List[Tuple[int, float, Dict[str, Any], List[Segment], Dict]]) -> Tuple[List[Segment], GraphRewritePlan]:
+    def _apply_split_plans(
+        self,
+        segments_base: List[Segment],
+        accepted_plans: List[Tuple[int, float, Dict[str, Any], List[Segment], Dict]],
+        layer_nodes: List[LayerNode],
+    ) -> Tuple[List[Segment], GraphRewritePlan]:
         if not accepted_plans:
             return segments_base, GraphRewritePlan(splits=[])
         # For simplicity, apply segments from best plan (first one)
@@ -172,25 +197,44 @@ class PartitionPlanner:
         segments_base = self._build_coarse(layer_nodes, alpha)
         objective_base, cost_base, mapping_base = self._evaluate(segments_base, eff_specs)
         if not use_fine_split:
+            graph_rewrite_plan = {"splits": []}
+            mapping_sig = _mapping_signature(segments_base, mapping_base.get("mapping", []), graph_rewrite_plan)
             return {
                 "segments": segments_base,
                 "mapping": mapping_base.get("mapping", []),
-                "graph_rewrite_plan": {"splits": []},
+                "graph_rewrite_plan": graph_rewrite_plan,
                 "rewire_meta": {},
                 "objective": objective_base,
                 "hw_stats": {},
+                "mapping_sig": mapping_sig,
             }
-
-        segments_fine = build_segments_from_model(model, self.cfg, model_info=model_info)
-        objective_final, cost_final, mapping_final = self._evaluate(segments_fine, eff_specs)
-        graph_rewrite_plan = {
-            "splits": [{"block_idx": idx, "segments": ["attn", "mlp"]} for idx in range(model.cfg.depth)]
-        }
+        candidates = self._select_split_candidates(
+            layer_nodes,
+            segments_base,
+            mapping_base.get("mapping", []),
+            cost_base,
+            eff_specs,
+        )
+        split_trials = []
+        for ln in candidates:
+            ok, gain_ratio, segments_split, mapping_split, local_plan = self._simulate_split_for_layer(
+                ln,
+                segments_base,
+                eff_specs,
+            )
+            if ok:
+                split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
+        accepted = self._select_accepted_splits(split_trials)
+        segments_final, graph_rewrite = self._apply_split_plans(segments_base, accepted, layer_nodes)
+        objective_final, _, mapping_final = self._evaluate(segments_final, eff_specs)
+        graph_rewrite_plan = {"splits": graph_rewrite.splits}
+        mapping_sig = _mapping_signature(segments_final, mapping_final.get("mapping", []), graph_rewrite_plan)
         return {
-            "segments": segments_fine,
+            "segments": segments_final,
             "mapping": mapping_final.get("mapping", []),
             "graph_rewrite_plan": graph_rewrite_plan,
             "rewire_meta": {},
             "objective": objective_final,
             "hw_stats": {},
+            "mapping_sig": mapping_sig,
         }
