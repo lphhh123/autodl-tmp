@@ -21,7 +21,12 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
-from utils.stable_hw import apply_accuracy_guard, stable_hw_schedule, update_hw_refs_from_stats
+from utils.stable_hw import (
+    stable_hw_after_validation,
+    stable_hw_before_epoch,
+    stable_hw_init_state,
+    stable_hw_log_fields,
+)
 
 
 def _as_float(val, name: str) -> float:
@@ -123,51 +128,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     scaler = GradScaler(enabled=cfg.train.amp)
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    stable_state = {
-        "lambda_hw": float(getattr(cfg.hw, "lambda_hw", 0.0)),
-        "refs_inited": False,
-        "ref_source": "unset",
-    }
-    if stable_hw_cfg is not None and bool(getattr(stable_hw_cfg, "enabled", False)):
-        try:
-            ref_up = getattr(stable_hw_cfg, "hw_refs_update", None)
-            ref_source = str(getattr(ref_up, "ref_source", "bootstrap")) if ref_up is not None else "bootstrap"
-            baseline_path = str(getattr(ref_up, "baseline_stats_path", "") or "")
-            if (not baseline_path) and hasattr(cfg, "paths"):
-                baseline_path = str(getattr(cfg.paths, "baseline_stats_path", "") or "")
-
-            if ref_source == "baseline_stats":
-                from utils.stable_hw import init_hw_refs_from_baseline
-
-                stable_state = init_hw_refs_from_baseline(stable_state, stable_hw_cfg, baseline_path)
-
-                try:
-                    from pathlib import Path
-
-                    p = Path(stable_state.get("ref_path", ""))
-                    if p.exists() and out_dir is not None:
-                        (out_dir / "baseline_stats_used.json").write_text(
-                            p.read_text(encoding="utf-8"),
-                            encoding="utf-8",
-                        )
-                except Exception:
-                    pass
-        except Exception as e:
-            raise RuntimeError(f"[StableHW] failed to init refs from baseline_stats: {e}")
+    stable_state = stable_hw_init_state(cfg)
 
     best_acc = 0.0
     last_acc = 0.0
-    if stable_state is not None:
-        stable_state["total_epochs"] = int(cfg.train.epochs)
-
     for epoch in range(cfg.train.epochs):
-        if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", False)):
-            lambda_hw = stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
-            stable_state["lambda_hw"] = float(lambda_hw)
-            stable_state["lambda_hw_after_guard"] = float(lambda_hw)
-        elif stable_hw_cfg:
-            stable_state["lambda_hw"] = float(getattr(cfg.hw, "lambda_hw", 0.0))
-            stable_state["lambda_hw_after_guard"] = float(stable_state["lambda_hw"])
+        decision = stable_hw_before_epoch(cfg, stable_state)
+        lambda_hw_eff = float(decision.lambda_hw_effective)
         model.train()
         last_hw_stats = None
         for step, batch in enumerate(train_loader):
@@ -194,10 +161,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if stable_hw_cfg:
                     last_hw_stats = {k: float(v) for k, v in hw_stats.items()}
 
-                lambda_hw = float(stable_state.get("lambda_hw", 0.0))
                 L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
 
-                loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw * L_hw
+                loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw_eff * L_hw
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -210,7 +176,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     "acc1": acc1.item(),
                     "acc5": acc5.item(),
                     "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item(),
-                    "lambda_hw": float(lambda_hw),
+                    "lambda_hw": float(lambda_hw_eff),
                     "hw_loss": float(L_hw),
                 }
                 stats.update(
@@ -223,12 +189,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 log_stats(logger, stats)
         last_acc = validate(model, val_loader, device, logger, epoch, cfg)
         best_acc = max(best_acc, last_acc)
-        if stable_hw_cfg:
-            stable_state["epoch"] = int(epoch)
-            val_acc1 = float(last_acc)
-            apply_accuracy_guard(epoch, stable_hw_cfg, stable_state, val_acc1)
-            if last_hw_stats:
-                stable_state = update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats)
+        decision = stable_hw_after_validation(
+            cfg,
+            stable_state,
+            epoch,
+            val_metrics={"val_acc1": float(last_acc)},
+            train_metrics=None,
+        )
         if metrics_path:
             metrics = {
                 "epoch": int(epoch),
@@ -237,36 +204,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "loss": float(loss.item()),
                 "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
                 "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
-                "lambda_hw": float(lambda_hw),
+                "lambda_hw": float(lambda_hw_eff),
                 "hw_loss": float(L_hw),
                 "stable_hw_disabled": not bool(getattr(cfg.stable_hw, "enabled", False))
                 if getattr(cfg, "stable_hw", None)
                 else True,
-                "stable_hw_lambda_hw": float(stable_state.get("lambda_hw", 0.0)),
-                "stable_hw_refs_inited": bool(stable_state.get("refs_inited", False)),
-                "stable_hw_ref_source": str(stable_state.get("ref_source", "unset")),
             }
-            metrics.update(
-                {
-                    "stable_hw_lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0)),
-                    "stable_hw_lambda_hw_scale": float(stable_state.get("lambda_hw_scale", 1.0)),
-                    "stable_hw_lambda_hw_after_guard": float(
-                        stable_state.get("lambda_hw_after_guard", stable_state.get("lambda_hw", 0.0))
-                    ),
-                    "stable_hw_schedule_phase": str(stable_state.get("schedule_phase", "unknown")),
-                    "stable_hw_baseline_acc": float(stable_state.get("baseline_acc", 0.0)),
-                    "stable_hw_current_acc": float(stable_state.get("current_acc", 0.0)),
-                    "stable_hw_current_acc_ema": float(
-                        stable_state.get("current_acc_ema", stable_state.get("current_acc_ema", 0.0))
-                    ),
-                    "stable_hw_acc_drop": float(stable_state.get("acc_drop", 0.0)),
-                    "stable_hw_epsilon_drop": float(stable_state.get("epsilon_drop", 0.0)),
-                    "stable_hw_violate_streak": int(stable_state.get("violate_streak", 0)),
-                    "stable_hw_guard_triggered": bool(stable_state.get("guard_triggered", False)),
-                    "stable_hw_hw_disabled": bool(stable_state.get("hw_disabled", False)),
-                    "stable_hw_rho_frozen_until_epoch": int(stable_state.get("rho_frozen_until_epoch", 0)),
-                }
-            )
+            metrics["stable_hw"] = stable_hw_log_fields(stable_state)
             metrics.update({k: float(v) for k, v in hw_stats.items()})
             with metrics_path.open("w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2)
