@@ -45,20 +45,26 @@ def compute_hw_loss(
     comm_ms = None
 
     if segments and mapping is not None and eff_specs is not None and mapping_solver is not None:
-        need_grad = False
-        if torch.is_grad_enabled():
-            if isinstance(alpha, torch.Tensor) and alpha.requires_grad:
-                need_grad = True
-            if isinstance(layout_positions, torch.Tensor) and layout_positions.requires_grad:
-                need_grad = True
-            if eff_specs is not None:
-                for v in eff_specs.values():
-                    if isinstance(v, torch.Tensor) and v.requires_grad:
-                        need_grad = True
-                        break
+        iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+
+        # ---- cache policy: ONLY for no-grad paths ----
+        use_cached = bool(getattr(iso_cfg, "use_cached_hw_mats", True))
+        want_grad = False
+        try:
+            for v in (eff_specs or {}).values():
+                if hasattr(v, "requires_grad") and bool(v.requires_grad):
+                    want_grad = True
+                    break
+            if torch.is_grad_enabled():
+                want_grad = True
+        except Exception:
+            want_grad = True
+
+        if want_grad:
+            use_cached = False
 
         cache = None
-        if (not need_grad) and (stable_hw_state is not None) and (mapping_sig is not None):
+        if use_cached and (stable_hw_state is not None) and (mapping_sig is not None):
             cache = stable_hw_state.setdefault("discrete_cache", {}).setdefault("hw_mats", {})
 
         eff_sig = {}
@@ -82,20 +88,20 @@ def compute_hw_loss(
             )
 
         if cache is not None and key in cache:
-            lat_ms_mat = cache[key]["cost_ms"]
-            mem_mb_mat = cache[key]["mem_mb"]
-            power_w_mat = cache[key]["power_w"]
+            lat_ms_mat = cache[key]["cost_ms"].to(device=device)
+            mem_mb_mat = cache[key]["mem_mb"].to(device=device)
+            power_w_mat = cache[key]["power_w"].to(device=device)
         else:
             cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
             lat_ms_mat = cost["lat_ms"]
             mem_mb_mat = cost["mem_mb"]
             power_w_mat = cost["power_w"]
 
-            if cache is not None and key is not None:
+            if use_cached and (cache is not None) and (key is not None) and (not want_grad):
                 cache[key] = {
-                    "cost_ms": lat_ms_mat.detach(),
-                    "mem_mb": mem_mb_mat.detach(),
-                    "power_w": power_w_mat.detach(),
+                    "cost_ms": lat_ms_mat.detach().cpu(),
+                    "mem_mb": mem_mb_mat.detach().cpu(),
+                    "power_w": power_w_mat.detach().cpu(),
                 }
         K, S = lat_ms_mat.shape
 

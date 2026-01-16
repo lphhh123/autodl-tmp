@@ -225,20 +225,16 @@ class Env(BaseEnv):
     def is_complete_solution(self) -> bool:
         return True
 
-    def validate_solution(self, solution: WaferLayoutSolution) -> bool:
-        if solution is None or not hasattr(solution, "assign"):
-            return False
-        a = list(solution.assign)
-        if len(a) != self.S:
-            return False
-        for x in a:
-            if not (0 <= int(x) < self.Ns):
-                return False
-        return True
-
-    def is_valid_solution(self, solution=None) -> bool:
+    def validate_solution(self, solution=None) -> bool:
         sol = self.current_solution if solution is None else solution
-        return bool(self.validate_solution(sol))
+        try:
+            return (sol is not None) and hasattr(sol, "assign") and (len(sol.assign) == self.S)
+        except Exception:
+            return False
+
+    @property
+    def is_valid_solution(self) -> bool:
+        return bool(self.validate_solution(self.current_solution))
 
     def compare(self, x, y):
         return y - x
@@ -424,9 +420,14 @@ class Env(BaseEnv):
 
     def run_heuristic(self, heuristic, algorithm_data: dict = {}, record: bool = True, **kwargs):
         t0 = time.time()
-        add_record_item = kwargs.get("add_record_item") or {}
+        # --- pop internal control args (do NOT pass into heuristic) ---
+        _ = kwargs.pop("selection", None)
+        add_record_item = kwargs.pop("add_record_item", None)
+        meta_in = kwargs.pop("meta", None)
+
+        add_record_item = add_record_item or {}
         stage = add_record_item.get("selection", self._stage)
-        meta_full = dict(kwargs.get("meta") or {})
+        meta_full = dict(meta_in or {})
         if isinstance(add_record_item, dict):
             nested = add_record_item.get("meta")
             if isinstance(nested, dict):
