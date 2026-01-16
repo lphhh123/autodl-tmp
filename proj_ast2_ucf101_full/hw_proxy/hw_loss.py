@@ -176,6 +176,16 @@ def compute_hw_loss(
     ref_M = float(stable_hw_state.get("ref_M", float(mem_mb.detach().item())))
     ref_C = float(stable_hw_state.get("ref_C", float(comm_ms.detach().item())))
 
+    # ---- v5 safety: never allow negative proxy metrics to bias optimization ----
+    latency_ms = torch.clamp(latency_ms, min=0.0)
+    energy_mj = torch.clamp(energy_mj, min=0.0)
+    mem_mb = torch.clamp(mem_mb, min=0.0)
+    comm_ms = torch.clamp(comm_ms, min=0.0)
+    ref_T = max(0.0, float(ref_T))
+    ref_E = max(0.0, float(ref_E))
+    ref_M = max(0.0, float(ref_M))
+    ref_C = max(0.0, float(ref_C))
+
     wT = float(getattr(norm_cfg, "wT", 0.2)) if norm_cfg else 0.0
     wE = float(getattr(norm_cfg, "wE", 0.2)) if norm_cfg else 0.0
     wM = float(getattr(norm_cfg, "wM", 0.4)) if norm_cfg else 0.0

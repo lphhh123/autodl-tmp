@@ -88,6 +88,40 @@ def _sync_layout_to_hw(cfg: Any) -> None:
             set_nested(cfg, dst, v)
 
 
+def _migrate_stable_hw_to_v5(cfg: Any) -> None:
+    stable_hw = get_nested(cfg, "stable_hw", {}) or {}
+    if not isinstance(stable_hw, dict):
+        return
+    guard = stable_hw.get("accuracy_guard", {}) or {}
+    controller = stable_hw.get("controller", {}) or {}
+
+    metric = guard.get("metric")
+    if guard.get("metric_key") is None and metric is not None:
+        if str(metric) in {"acc1", "val_acc1", "val_acc"}:
+            guard["metric_key"] = "val_acc1"
+        else:
+            guard["metric_key"] = str(metric)
+
+    on_violate = guard.get("on_violate", {}) or {}
+    recover = on_violate.get("recover", {}) if isinstance(on_violate, dict) else {}
+    cand_epochs = []
+    if isinstance(on_violate, dict) and on_violate.get("freeze_rho_epochs") is not None:
+        cand_epochs.append(int(on_violate.get("freeze_rho_epochs") or 0))
+    if isinstance(recover, dict) and recover.get("patience_epochs") is not None:
+        cand_epochs.append(int(recover.get("patience_epochs") or 0))
+    if cand_epochs and controller.get("recovery_min_epochs") is None:
+        controller["recovery_min_epochs"] = max(1, max(cand_epochs))
+
+    guard.pop("on_violate", None)
+    guard.pop("max_consecutive", None)
+    guard.pop("metric", None)
+
+    stable_hw.pop("hw_refs_update", None)
+    stable_hw["accuracy_guard"] = guard
+    stable_hw["controller"] = controller
+    cfg["stable_hw"] = stable_hw
+
+
 def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     """
     mode:
@@ -189,86 +223,68 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             },
         )
 
-    # ---- stable_hw defaults (CLEAN + SPEC-ALIGNED) ----
+    # ---- stable_hw defaults (v5 canonical) ----
     if "stable_hw" not in cfg:
         cfg["stable_hw"] = {}
+
+    _migrate_stable_hw_to_v5(cfg)
 
     stable_hw = get_nested(cfg, "stable_hw", {}) or {}
     stable_hw_enabled = bool(stable_hw.get("enabled", False))
     stable_hw["enabled"] = stable_hw_enabled
 
-    # ---------- lambda schedule ----------
+    controller = stable_hw.get("controller", {}) or {}
+    controller.setdefault("freeze_schedule_in_recovery", True)
+    controller.setdefault("recovery_min_epochs", 1)
+    controller.setdefault("margin_exit", 0.0)
+    controller.setdefault("k_exit", 1)
+    stable_hw["controller"] = controller
+
+    guard = stable_hw.get("accuracy_guard", {}) or {}
+    guard.setdefault("enabled", stable_hw_enabled)
+    guard.setdefault("metric_key", "val_acc1")
+    guard.setdefault("epsilon_drop", 0.01)
+    guard.setdefault("use_ema", True)
+    guard.setdefault("ema_beta", 0.9)
+    guard.setdefault("baseline_stats_path", str(get_nested(cfg, "paths.baseline_stats_path", "") or ""))
+    stable_hw["accuracy_guard"] = guard
+
     sched = stable_hw.get("lambda_hw_schedule", {}) or {}
     stable_hw["lambda_hw_schedule"] = sched
     sched.setdefault("enabled", stable_hw_enabled)
+    sched.setdefault("lambda_hw_max", 0.0)
     sched.setdefault("warmup_epochs", 5)
     sched.setdefault("ramp_epochs", 10)
-    sched.setdefault("stabilize_epochs", 0)
-    sched.setdefault("lambda_hw_min", 0.0)
-    sched.setdefault("clamp_min", 0.0)
 
-    # IMPORTANT: DO NOT silently bind lambda_hw_max to hw.lambda_hw unless allow_legacy=true
-    if "lambda_hw_max" not in sched or sched.get("lambda_hw_max") is None:
-        sched["lambda_hw_max"] = 0.0
-
-    # if stable_hw enabled, require lambda_hw_max > 0 unless allow_legacy_lambda_hw
-    if stable_hw_enabled and bool(sched.get("enabled", True)):
-        lam_max = float(sched.get("lambda_hw_max", 0.0) or 0.0)
-        if lam_max <= 0.0:
-            allow_legacy = bool(stable_hw.get("allow_legacy_lambda_hw", False))
-            legacy = float(get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
-            if allow_legacy and legacy > 0.0:
-                print(
-                    "[WARN] stable_hw enabled but stable_hw.lambda_hw_schedule.lambda_hw_max missing/<=0; "
-                    f"using legacy hw.lambda_hw={legacy} because allow_legacy_lambda_hw=true."
-                )
-                sched["lambda_hw_max"] = float(legacy)
-            else:
-                raise ValueError(
-                    "stable_hw enabled but stable_hw.lambda_hw_schedule.lambda_hw_max missing/<=0.\n"
-                    "Please set stable_hw.lambda_hw_schedule.lambda_hw_max: <positive float>\n"
-                    "Or set stable_hw.allow_legacy_lambda_hw=true to reuse hw.lambda_hw."
-                )
-    sch = cfg["stable_hw"]["lambda_hw_schedule"]
-    if float(sch.get("lambda_hw_max", 0.0) or 0.0) <= 0.0:
-        print("[WARN][stable_hw] lambda_hw_schedule.lambda_hw_max is 0. HW schedule will be ineffective.")
-
-    sched.setdefault("clamp_max", float(sched.get("lambda_hw_max", 0.0) or 0.0))
-
-    # ---------- normalize ----------
     norm = stable_hw.get("normalize", {}) or {}
     stable_hw["normalize"] = norm
-    norm.setdefault("mode", "hinge_log_ratio")
-    norm.setdefault("eps", 1e-6)
+    norm.setdefault("enabled", True)
+    norm.setdefault("method", "hinge_log_ratio")
+    norm.setdefault("clip_eps", 1e-6)
     norm.setdefault("clip_term_max", 10.0)
     norm.setdefault("mem_hinge_only", True)
     norm.setdefault("abs_ratio", False)
-    norm.setdefault("wT", 0.2)
-    norm.setdefault("wE", 0.2)
-    norm.setdefault("wM", 0.4)
-    norm.setdefault("wC", 0.2)
-    norm.setdefault("target_ratio_T", 0.9)
-    norm.setdefault("target_ratio_E", 0.9)
-    norm.setdefault("target_ratio_M", 0.9)
-    norm.setdefault("target_ratio_C", 0.9)
-
-    # ref source for normalization (SPEC: baseline_stats / ema)
-    norm.setdefault("ref_source", "ema")
-    norm.setdefault("baseline_stats_path", str(get_nested(cfg, "paths.baseline_stats_path", "") or ""))
-
-    # ---------- hw_refs_update ----------
-    ref_up = stable_hw.get("hw_refs_update", {}) or {}
-    stable_hw["hw_refs_update"] = ref_up
-    ref_up.setdefault("enabled", stable_hw_enabled)
-    ref_up.setdefault("ref_source", str(ref_up.get("ref_source", "ema")))  # "ema" or "baseline_stats"
-    ref_up.setdefault("ema_beta", float(ref_up.get("ema_beta", 0.95) or 0.95))
-    ref_up.setdefault("update_only_when_better", bool(ref_up.get("update_only_when_better", False)))
-    ref_up.setdefault("better_key", str(ref_up.get("better_key", "total_scalar")))
-    ref_up.setdefault("min_delta_ratio", float(ref_up.get("min_delta_ratio", 0.01) or 0.01))
-    ref_up.setdefault(
-        "baseline_stats_path",
-        str(ref_up.get("baseline_stats_path", "")) or str(get_nested(cfg, "paths.baseline_stats_path", "")),
-    )
+    weights = norm.get("weights", {}) or {}
+    weights.setdefault("wT", 0.2)
+    weights.setdefault("wE", 0.2)
+    weights.setdefault("wM", 0.4)
+    weights.setdefault("wC", 0.2)
+    norm["weights"] = weights
+    ref = norm.get("ref", {}) or {}
+    ref.setdefault("target_ratio_T", 0.9)
+    ref.setdefault("target_ratio_E", 0.9)
+    ref.setdefault("target_ratio_M", 0.9)
+    ref.setdefault("target_ratio_C", 0.9)
+    norm["ref"] = ref
+    norm.setdefault("eps", float(norm.get("clip_eps", 1e-6)))
+    norm.setdefault("wT", float(weights["wT"]))
+    norm.setdefault("wE", float(weights["wE"]))
+    norm.setdefault("wM", float(weights["wM"]))
+    norm.setdefault("wC", float(weights["wC"]))
+    norm.setdefault("target_ratio_T", float(ref["target_ratio_T"]))
+    norm.setdefault("target_ratio_E", float(ref["target_ratio_E"]))
+    norm.setdefault("target_ratio_M", float(ref["target_ratio_M"]))
+    norm.setdefault("target_ratio_C", float(ref["target_ratio_C"]))
 
     # ---------- discrete_isolation ----------
     iso = stable_hw.get("discrete_isolation", {}) or {}
@@ -292,29 +308,6 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if v < 1:
             raise ValueError(f"stable_hw.discrete_isolation.{k} must be >=1")
         iso[k] = v
-
-    # ---------- accuracy_guard (SPEC keys) ----------
-    guard = stable_hw.get("accuracy_guard", {}) or {}
-    stable_hw["accuracy_guard"] = guard
-    guard.setdefault("enabled", stable_hw_enabled)
-    guard.setdefault("metric", "acc1")
-    guard.setdefault("use_ema", True)
-    guard.setdefault("ema_beta", 0.98)
-    guard.setdefault("epsilon_drop", 0.02)
-    guard.setdefault("max_consecutive", int(guard.get("max_consecutive", 3) or 3))
-    guard.setdefault("guard_val_batches", int(guard.get("guard_val_batches", 0) or 0))  # 0=use full val
-
-    onv = guard.get("on_violate", {}) or {}
-    guard["on_violate"] = onv
-    onv.setdefault("scale_lambda_hw", 0.5)
-    onv.setdefault("freeze_rho_epochs", int(onv.get("freeze_rho_epochs", 1) or 1))
-    onv.setdefault("max_violations", int(onv.get("max_violations", guard.get("max_consecutive", 3)) or 3))
-    onv.setdefault("disable_hw_after_max_violations", False)
-    recover = onv.get("recover", {}) or {}
-    onv["recover"] = recover
-    recover.setdefault("enable", True)
-    recover.setdefault("patience_epochs", 1)
-    recover.setdefault("restore_lambda_hw", True)
 
     cfg["stable_hw"] = stable_hw
 
