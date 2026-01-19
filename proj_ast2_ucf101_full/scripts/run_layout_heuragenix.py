@@ -420,12 +420,14 @@ def _write_trace_and_pareto(
         eps_therm=float(pareto_cfg.get("eps_therm", 0.0)),
         max_points=int(pareto_cfg.get("max_points", 2000)),
     )
+
     trace_path = out_dir / "trace.csv"
     prev_metrics = evaluator.evaluate(base_state)
     prev_total = float(prev_metrics["total_scalar"])
     prev_comm = float(prev_metrics["comm_norm"])
     prev_therm = float(prev_metrics["therm_norm"])
     prev_assign = _derive_initial_assign(layout_input)
+
     best_eval: Dict[str, Any] | None = None
     best_assign: List[int] | None = None
     accepts = 0
@@ -436,23 +438,27 @@ def _write_trace_and_pareto(
     cooldown_hits = 0
     has_records = False
 
+    # always emit a valid trace with at least one row
     with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
+
+        last_idx = -1
         for idx, rec in enumerate(_iter_recordings(recordings_path)):
             has_records = True
+            last_idx = idx
             if max_steps is not None and idx >= max_steps:
                 break
+
             if "signature" not in rec:
-                # fallback: derive from assign if possible (compat mode)
                 try:
                     signature = signature_from_assign(rec.get("assign", []))
                 except Exception:
                     signature = "assign:unknown"
                 rec["signature"] = signature
+
             step_id = int(rec.get("iter", rec.get("step", idx)))
             stage = str(rec.get("stage", "heuragenix"))
-
             accepted = int(rec.get("accepted", 1))
             op = rec.get("op", "noop")
             op_args = rec.get("op_args") or rec.get("op_args_json") or {}
@@ -471,15 +477,12 @@ def _write_trace_and_pareto(
                     assign_arr = _apply_action(prev_assign, action, base_state.Ns)
                 else:
                     assign_arr = np.asarray(prev_assign, dtype=int)
-            base_state.assign = assign_arr
 
+            base_state.assign = assign_arr
             eval_out = evaluator.evaluate(base_state)
             signature = signature_from_assign(base_state.assign.tolist())
 
             d_total = float(eval_out["total_scalar"]) - float(prev_total)
-            d_comm = float(eval_out["comm_norm"]) - float(prev_comm)
-            d_therm = float(eval_out["therm_norm"]) - float(prev_therm)
-
             if accepted == 1:
                 accepts += 1
 
@@ -511,6 +514,7 @@ def _write_trace_and_pareto(
             pen = eval_out.get("penalty", {}) or {}
             dup_pen = float(pen.get("duplicate", 0.0))
             bnd_pen = float(pen.get("boundary", 0.0))
+
             writer.writerow(
                 [
                     step_id,
@@ -527,71 +531,81 @@ def _write_trace_and_pareto(
                     seed,
                     int(rec.get("time_ms", 0)),
                     signature,
-                    d_total,
-                    d_comm,
-                    d_therm,
-                    tabu_hit,
-                    inverse_hit,
-                    cooldown_hit,
+                    float(d_total),
+                    float(float(eval_out["comm_norm"]) - float(prev_comm)),
+                    float(float(eval_out["therm_norm"]) - float(prev_therm)),
+                    int(tabu_hit),
+                    int(inverse_hit),
+                    int(cooldown_hit),
                 ]
             )
+
+            # update prev
             if accepted == 1:
-                prev_assign = base_state.assign.copy()
-            prev_total = float(eval_out.get("total_scalar", 0.0))
-            prev_comm = float(eval_out.get("comm_norm", 0.0))
-            prev_therm = float(eval_out.get("therm_norm", 0.0))
-            if float(eval_out.get("total_scalar", 0.0)) < float(best_eval.get("total_scalar", 1e30) if best_eval else 1e30):
+                prev_assign = base_state.assign.tolist()
+                prev_total = float(eval_out["total_scalar"])
+                prev_comm = float(eval_out["comm_norm"])
+                prev_therm = float(eval_out["therm_norm"])
+
+            if best_eval is None or float(eval_out["total_scalar"]) < float(best_eval["total_scalar"]):
                 best_eval = dict(eval_out)
                 best_assign = base_state.assign.tolist()
                 best_step = step_id
-    if not has_records:
-        signature = signature_from_assign(prev_assign)
-        writer.writerow(
-            [
-                0,
-                "init",
-                "init",
-                json.dumps({"op": "init"}, ensure_ascii=False),
-                1,
-                float(prev_total),
-                float(prev_comm),
-                float(prev_therm),
-                0,
-                0.0,
-                0.0,
-                int(seed),
-                0,
-                signature,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]
+
+        if not has_records:
+            # init-only row (steps=0 / empty recordings)
+            signature0 = signature_from_assign(list(prev_assign))
+            writer.writerow(
+                [
+                    0,
+                    "init",
+                    "init",
+                    json.dumps({"op": "init"}, ensure_ascii=False, sort_keys=True),
+                    1,
+                    float(prev_total),
+                    float(prev_comm),
+                    float(prev_therm),
+                    0,
+                    0.0,
+                    0.0,
+                    seed,
+                    0,
+                    signature0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                    0,
+                    0,
+                ]
+            )
+            best_eval = dict(prev_metrics)
+            best_assign = list(prev_assign)
+            best_step = 0
+
+    report = {
+        "seed": int(seed),
+        "has_records": bool(has_records),
+        "accepts": int(accepts),
+        "improve_cnt": int(improve_cnt),
+        "tabu_hits": int(tabu_hits),
+        "inverse_hits": int(inverse_hits),
+        "cooldown_hits": int(cooldown_hits),
+        "best_step": int(best_step),
+        "best_total": float(best_eval["total_scalar"]) if best_eval else float(prev_total),
+        "best_comm": float(best_eval["comm_norm"]) if best_eval else float(prev_comm),
+        "best_therm": float(best_eval["therm_norm"]) if best_eval else float(prev_therm),
+    }
+
+    # persist layout_best.json
+    if best_assign is not None:
+        (out_dir / "layout_best.json").write_text(
+            json.dumps({"assign": best_assign, "eval": best_eval, "seed": seed}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
-    status = "ok" if has_records else "no_recordings"
-    if not has_records:
-        best_assign = list(prev_assign)
-        best_eval = dict(prev_metrics)
-    steps_total = idx + 1 if "idx" in locals() else 0
-    improve_step_ratio = (float(improve_cnt) / float(steps_total)) if steps_total > 0 else 0.0
-    return {
-        "trace_path": trace_path,
-        "best_eval": best_eval,
-        "best_assign": best_assign,
-        "base_eval": prev_metrics,
-        "accepts": accepts,
-        "best_step": best_step,
-        "steps_total": steps_total,
-        "num_steps": steps_total,
-        "improve_step_ratio": improve_step_ratio,
-        "tabu_hits": tabu_hits,
-        "inverse_hits": inverse_hits,
-        "cooldown_hits": cooldown_hits,
-        "status": status,
-        "evaluator_calls": int(getattr(evaluator, "evaluator_calls", getattr(evaluator, "evaluate_calls", 0))),
-    }, pareto
+
+    (out_dir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report, pareto
 
 
 def _write_layout_best(
