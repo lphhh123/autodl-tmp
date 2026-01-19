@@ -510,6 +510,13 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     device_type = device.type
     seed_everything(int(getattr(cfg.train, "seed", 0)))
     logger = setup_logger()
+    # ---- v5.4: allow config-driven export (OneCommand) ----
+    if not export_layout_input:
+        export_layout_input = bool(getattr(cfg, "export_layout_input", False))
+    if layout_export_dir is None:
+        layout_export_dir = str(getattr(cfg, "export_dir", "") or "")
+        if not layout_export_dir:
+            layout_export_dir = str(Path(cfg.train.out_dir) / "exports" / "layout_input")
     # out_dir: training outputs root
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,5 @@
 # SPEC_version_c_full_latest_merged_FULL_v2 — Version-C + Hyper-heuristic Wafer Layout (LLM Pick-ID) + Paper-grade Experiments (NO OMISSION)
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 
 （多尺度滑窗 + 视频/音频跨模态堆积 + AST2.0-lite 时空熵剪枝 + Version-C 多芯粒联合/交替优化 + L4/L5 超启发布局增强 + 震荡治理 + 论文级实验脚本生成）
 

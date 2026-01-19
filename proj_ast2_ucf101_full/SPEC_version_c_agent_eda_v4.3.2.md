@@ -1,4 +1,5 @@
 # SPEC_version_c_agent_eda_v4.3.2
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 
 **Version-C（s+α+m） + 离线 EDA-Agent（Region Global Place + Pareto + Alt-Opt）总规范（可直接驱动代码编写）**
 

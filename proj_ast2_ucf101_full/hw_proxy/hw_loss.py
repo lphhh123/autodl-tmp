@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -167,8 +166,6 @@ def compute_hw_loss(
         comm_ms = torch.tensor(0.0, device=device)
 
     norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg else None
-    eps = float(getattr(norm_cfg, "eps", 1e-6)) if norm_cfg else 1e-6
-
     if stable_hw_state is None:
         stable_hw_state = {}
     ref_T = float(stable_hw_state.get("ref_T", float(latency_ms.detach().item())))
@@ -176,67 +173,58 @@ def compute_hw_loss(
     ref_M = float(stable_hw_state.get("ref_M", float(mem_mb.detach().item())))
     ref_C = float(stable_hw_state.get("ref_C", float(comm_ms.detach().item())))
 
-    # ---- v5.1 safety: never allow non-positive into ratios ----
-    eps_ratio = 1e-9
-    raw_latency = float(latency_ms.detach().item())
-    raw_energy = float(energy_mj.detach().item())
-    raw_mem = float(mem_mb.detach().item())
-    raw_comm = float(comm_ms.detach().item())
+    # ---- Non-negative guard: prevent "negative latency reward" ----
+    eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9) if stable_hw_cfg is not None else 1e-9)
 
-    latency_ms = torch.clamp(latency_ms, min=eps_ratio)
-    energy_mj = torch.clamp(energy_mj, min=eps_ratio)
-    mem_mb = torch.clamp(mem_mb, min=eps_ratio)
-    comm_ms = torch.clamp(comm_ms, min=eps_ratio)
-    ref_T = max(eps_ratio, float(ref_T))
-    ref_E = max(eps_ratio, float(ref_E))
-    ref_M = max(eps_ratio, float(ref_M))
-    ref_C = max(eps_ratio, float(ref_C))
+    # keep raw for logging (may be negative)
+    raw_latency_ms = float(latency_ms.detach().item())
+    raw_energy_mj = float(energy_mj.detach().item())
+    raw_mem_mb = float(mem_mb.detach().item())
+    raw_comm_ms = float(comm_ms.detach().item())
+
+    # clamp for optimization / ratios
+    latency_ms_pos = torch.clamp(latency_ms, min=eps_ratio)
+    energy_mj_pos = torch.clamp(energy_mj, min=eps_ratio)
+    mem_mb_pos = torch.clamp(mem_mb, min=eps_ratio)
+    comm_ms_pos = torch.clamp(comm_ms, min=eps_ratio)
+
+    # init refs using clamped values (and sanitize any stale negative refs in state)
+    def _pos_ref(state_key: str, default_val: float) -> float:
+        v = float(stable_hw_state.get(state_key, default_val))
+        return max(eps_ratio, v)
+
+    ref_T = _pos_ref("ref_T", float(latency_ms_pos.detach().item()))
+    ref_E = _pos_ref("ref_E", float(energy_mj_pos.detach().item()))
+    ref_M = _pos_ref("ref_M", float(mem_mb_pos.detach().item()))
+    ref_C = _pos_ref("ref_C", float(comm_ms_pos.detach().item()))
+
+    stable_hw_state["ref_T"] = ref_T
+    stable_hw_state["ref_E"] = ref_E
+    stable_hw_state["ref_M"] = ref_M
+    stable_hw_state["ref_C"] = ref_C
 
     wT = float(getattr(norm_cfg, "wT", 0.2)) if norm_cfg else 0.0
     wE = float(getattr(norm_cfg, "wE", 0.2)) if norm_cfg else 0.0
     wM = float(getattr(norm_cfg, "wM", 0.4)) if norm_cfg else 0.0
     wC = float(getattr(norm_cfg, "wC", 0.2)) if norm_cfg else 0.0
 
-    tT = float(getattr(norm_cfg, "target_ratio_T", 0.9)) if norm_cfg else 1.0
-    tE = float(getattr(norm_cfg, "target_ratio_E", 0.9)) if norm_cfg else 1.0
-    tM = float(getattr(norm_cfg, "target_ratio_M", 0.9)) if norm_cfg else 1.0
-    tC = float(getattr(norm_cfg, "target_ratio_C", 0.9)) if norm_cfg else 1.0
+    # ratios / hinge
+    rt = latency_ms_pos / ref_T
+    re = energy_mj_pos / ref_E
+    rm = mem_mb_pos / ref_M
+    rc = comm_ms_pos / ref_C
 
-    clip_term_max = float(getattr(norm_cfg, "clip_term_max", 10.0)) if norm_cfg else 10.0
-    mem_hinge_only = bool(getattr(norm_cfg, "mem_hinge_only", True)) if norm_cfg else True
-    abs_ratio = bool(getattr(norm_cfg, "abs_ratio", False)) if norm_cfg else False
+    L_T = torch.clamp(rt - 1.0, min=0.0)
+    L_E = torch.clamp(re - 1.0, min=0.0)
+    L_M = torch.clamp(rm - 1.0, min=0.0)
+    L_C = torch.clamp(rc - 1.0, min=0.0)
 
-    def _log_ratio(x: torch.Tensor, ref: float) -> torch.Tensor:
-        r = x / x.new_tensor(ref)
-        if abs_ratio:
-            r = torch.abs(r)
-        return torch.log(r + eps)
+    L_hw_norm = wT * L_T + wE * L_E + wM * L_M + wC * L_C
 
-    t = _log_ratio(latency_ms, ref_T)
-    e = _log_ratio(energy_mj, ref_E)
-    m = _log_ratio(mem_mb, ref_M)
-    c = _log_ratio(comm_ms, ref_C)
-
-    if abs_ratio:
-        t_term = torch.abs(t)
-        e_term = torch.abs(e)
-        m_term = torch.abs(m)
-        c_term = torch.abs(c)
-    else:
-        t_term = F.softplus(t - math.log(max(tT, 1e-9)))
-        e_term = F.softplus(e - math.log(max(tE, 1e-9)))
-        if mem_hinge_only:
-            m_term = F.softplus(m)
-        else:
-            m_term = F.softplus(m - math.log(max(tM, 1e-9)))
-        c_term = F.softplus(c - math.log(max(tC, 1e-9)))
-
-    t_term = torch.clamp(t_term, 0.0, clip_term_max)
-    e_term = torch.clamp(e_term, 0.0, clip_term_max)
-    m_term = torch.clamp(m_term, 0.0, clip_term_max)
-    c_term = torch.clamp(c_term, 0.0, clip_term_max)
-
-    L_hw_norm = wT * t_term + wE * e_term + wM * m_term + wC * c_term
+    t_term = L_T
+    e_term = L_E
+    m_term = L_M
+    c_term = L_C
 
     lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0))
     L_chip = torch.zeros((), device=device)
@@ -271,22 +259,22 @@ def compute_hw_loss(
     L_hw = L_hw_norm + L_chip + L_area + L_layout
 
     hw_stats = {
-        "latency_ms": float(latency_ms.detach().cpu().item()),
-        "energy_mj": float(energy_mj.detach().cpu().item()),
-        "mem_mb": float(mem_mb.detach().cpu().item()),
-        "comm_ms": float(comm_ms.detach().cpu().item()),
-        "raw_latency_ms": raw_latency,
-        "raw_energy_j": raw_energy,
-        "raw_mem_mb": raw_mem,
-        "raw_comm_mb": raw_comm,
-        "clamped_latency_ms": float(latency_ms.detach().cpu().item()),
-        "clamped_energy_j": float(energy_mj.detach().cpu().item()),
-        "clamped_mem_mb": float(mem_mb.detach().cpu().item()),
-        "clamped_comm_mb": float(comm_ms.detach().cpu().item()),
-        "ref_T": float(ref_T),
-        "ref_E": float(ref_E),
-        "ref_M": float(ref_M),
-        "ref_C": float(ref_C),
+        "latency_ms": float(latency_ms_pos.detach().cpu().item()),
+        "energy_mj": float(energy_mj_pos.detach().cpu().item()),
+        "mem_mb": float(mem_mb_pos.detach().cpu().item()),
+        "comm_ms": float(comm_ms_pos.detach().cpu().item()),
+        "raw_latency_ms": raw_latency_ms,
+        "raw_energy_mj": raw_energy_mj,
+        "raw_mem_mb": raw_mem_mb,
+        "raw_comm_ms": raw_comm_ms,
+        "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
+        "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
+        "clamped_mem_mb": float(mem_mb_pos.detach().cpu().item()),
+        "clamped_comm_ms": float(comm_ms_pos.detach().cpu().item()),
+        "ref_latency_ms": float(ref_T),
+        "ref_energy_mj": float(ref_E),
+        "ref_mem_mb": float(ref_M),
+        "ref_comm_ms": float(ref_C),
         "t_term": float(t_term.detach().cpu().item()),
         "e_term": float(e_term.detach().cpu().item()),
         "m_term": float(m_term.detach().cpu().item()),

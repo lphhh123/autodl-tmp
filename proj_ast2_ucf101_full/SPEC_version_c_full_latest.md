@@ -1,4 +1,5 @@
 # SPEC_version_c_full_latest — Version-C 实现 & 实验说明书
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 
 （多尺度滑窗 + 视频/音频跨模态堆积 + AST2.0-lite + Version-C）
 

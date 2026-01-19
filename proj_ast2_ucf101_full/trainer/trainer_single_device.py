@@ -5,7 +5,7 @@ import json
 import random
 from pathlib import Path
 from functools import partial
-from typing import Dict
+from typing import Dict, Any
 
 import numpy as np
 import torch
