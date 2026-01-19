@@ -647,6 +647,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         decision = stable_hw_before_epoch(cfg, stable_hw_state)
         lambda_hw_eff = float(decision.lambda_hw_effective)
         allow_discrete = bool(decision.allow_discrete_updates)
+        # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
+        #   - partition/mapping updates
+        #   - device mapping updates
+        #   - layout optimization updates (layout_opt.step/track_live/refine)
+        #   - any step that changes discrete assignment/signature
         update_alpha = base_update_alpha and allow_discrete
         iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
         map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)

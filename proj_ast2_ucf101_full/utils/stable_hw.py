@@ -92,6 +92,7 @@ def stable_hw_init_state(cfg: Any) -> Dict[str, Any]:
     guard = _deepget(cfg, "stable_hw.accuracy_guard", {}) or {}
     baseline_path = str(_get(guard, "baseline_stats_path", "") or "").strip()
     metric_key = str(_get(guard, "metric_key", "val_acc1"))
+    state["metric_key"] = metric_key
     if baseline_path:
         js = _load_json(baseline_path)
         cand = None
@@ -262,6 +263,7 @@ def stable_hw_log_fields(state: Dict[str, Any]) -> Dict[str, Any]:
         "lambda_hw_base": state.get("lambda_hw_base"),
         "lambda_hw_effective": state.get("lambda_hw_effective"),
         "allow_discrete_updates": state.get("allow_discrete_updates"),
+        "metric_key": state.get("metric_key"),
         "acc_ref": state.get("acc_ref"),
         "acc_ref_locked": state.get("acc_ref_locked"),
         "acc_used": state.get("acc_used"),
