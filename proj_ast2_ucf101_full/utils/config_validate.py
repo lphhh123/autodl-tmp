@@ -521,6 +521,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         stable_hw = getattr(cfg, "stable_hw", None)
         if stable_hw is not None and bool(getattr(stable_hw, "enabled", False)):
             if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
+                loss_lambda_hw = float(getattr(cfg.loss, "lambda_hw", 0.0) or 0.0)
+                if loss_lambda_hw not in (0.0, 1.0):
+                    print(
+                        "[WARN] stable_hw is enabled; loss.lambda_hw is ignored by v5.4 NoDoubleScale. "
+                        "Set loss.lambda_hw to 0/1 or remove it to avoid confusion."
+                    )
                 cfg.loss.lambda_hw = 0.0
             if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
                 cfg.hw.lambda_hw = 0.0
