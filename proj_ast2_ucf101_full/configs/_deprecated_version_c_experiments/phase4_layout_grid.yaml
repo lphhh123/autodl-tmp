@@ -1,0 +1,8 @@
+# DEPRECATED (pre-v5.4): keys under `version_c.*` are no longer consumed.
+# Use `configs/vc_phase3_full_ucf101.yaml` and `stable_hw.*` instead.
+_base_: ../version_c_ucf101.yaml
+version_c:
+  enable_layout: true
+  enable_mapping: true
+layout:
+  wafer_radius_mm: 55.0

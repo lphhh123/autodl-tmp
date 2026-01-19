@@ -1,8 +1,42 @@
 _base_: ./ast2_ucf101.yaml
+
 training:
   mode: single_device_ast
   epochs: 2
   batch_size: 2
+
+# legacy hw.lambda_hw will be ignored when stable_hw.enabled=true (NoDoubleScale)
 hw:
   mode: single_device
-  lambda_hw: 1.0
+  lambda_hw: 0.0
+
+stable_hw:
+  enabled: true
+
+  # AST2 侧做 HW-aware baseline：建议不强制 locked_acc_ref（Version-C 才要求严格锁定）
+  locked_acc_ref:
+    enabled: false
+
+  accuracy_guard:
+    enabled: true
+    epsilon_drop: 0.002
+    guard_mode: hard
+    freeze_hw_on_drop: true
+    freeze_discrete_on_drop: false
+
+  lambda_hw_schedule:
+    enabled: true
+    warmup_epochs: 0
+    ramp_epochs: 1
+    lambda_hw_min: 0.0
+    lambda_hw_max: 0.2
+
+  normalize:
+    enabled: true
+    mode: hinge_log_ratio
+    wT: 1.0
+    wE: 0.0
+    wM: 0.0
+    wC: 0.0
+    clip_term_max: 2.0
+    eps: 1e-6

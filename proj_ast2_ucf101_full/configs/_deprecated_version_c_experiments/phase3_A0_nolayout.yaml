@@ -1,0 +1,8 @@
+# DEPRECATED (pre-v5.4): keys under `version_c.*` are no longer consumed.
+# Use `configs/vc_phase3_full_ucf101.yaml` and `stable_hw.*` instead.
+_base_: ../vc_phase3_nolayout_ucf101.yaml
+
+layout_seed:
+  method: grid
+  enable_micro_place: false
+  micro_place_steps: 0
