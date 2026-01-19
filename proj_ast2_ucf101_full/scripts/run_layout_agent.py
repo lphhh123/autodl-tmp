@@ -287,6 +287,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         "metrics_window_lastN": metrics_window,
         "eps_flat": eps_flat,
         "runtime_s": float(runtime_s),
+        "evaluator_calls": int(getattr(evaluator, "evaluator_calls", getattr(evaluator, "evaluate_calls", 0))),
         "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
         **trace_metrics,
     }

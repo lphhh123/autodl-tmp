@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
 from layout.coarsen import Cluster
+from layout.candidate_pool import signature_from_assign
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from layout.llm_provider import HeuristicProvider, VolcArkProvider, LLMProvider
@@ -80,7 +81,7 @@ def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: Opti
 
 
 def signature_for_assign(assign: np.ndarray) -> str:
-    return "assign:" + ",".join(map(str, assign.tolist()))
+    return signature_from_assign(assign.tolist())
 
 
 def _select_cluster_target_sites(
@@ -279,6 +280,35 @@ def run_detailed_place(
 
         # initial eval
         eval_out = evaluator.evaluate(layout_state)
+        prev_total = float(eval_out.get("total_scalar", 0.0))
+        prev_comm = float(eval_out.get("comm_norm", 0.0))
+        prev_therm = float(eval_out.get("therm_norm", 0.0))
+        prev_assign = assign.copy()
+
+        writer.writerow(
+            [
+                0,
+                "init",
+                "init",
+                json.dumps({"op": "init"}, ensure_ascii=False),
+                1,
+                prev_total,
+                prev_comm,
+                prev_therm,
+                0,
+                0.0,
+                0.0,
+                int(seed_id),
+                0,
+                signature_for_assign(prev_assign.tolist()),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        )
         pareto.add(
             eval_out["comm_norm"],
             eval_out["therm_norm"],

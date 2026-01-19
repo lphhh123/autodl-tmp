@@ -25,6 +25,7 @@ import numpy as np
 
 project_root = Path(__file__).resolve().parents[1]
 
+from layout.candidate_pool import signature_from_assign
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from layout.pareto_io import write_pareto_points_csv
@@ -468,7 +469,7 @@ def _write_trace_and_pareto(
             base_state.assign = assign_arr
 
             eval_out = evaluator.evaluate(base_state)
-            signature = f"assign:{','.join(map(str, base_state.assign.tolist()))}"
+            signature = signature_from_assign(base_state.assign.tolist())
 
             d_total = float(eval_out["total_scalar"]) - float(prev_total)
             d_comm = float(eval_out["comm_norm"]) - float(prev_comm)
@@ -538,6 +539,32 @@ def _write_trace_and_pareto(
                 best_eval = dict(eval_out)
                 best_assign = base_state.assign.tolist()
                 best_step = step_id
+    if not has_records:
+        signature = signature_from_assign(prev_assign)
+        writer.writerow(
+            [
+                0,
+                "init",
+                "init",
+                json.dumps({"op": "init"}, ensure_ascii=False),
+                1,
+                float(prev_total),
+                float(prev_comm),
+                float(prev_therm),
+                0,
+                0.0,
+                0.0,
+                int(seed),
+                0,
+                signature,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        )
     status = "ok" if has_records else "no_recordings"
     if not has_records:
         best_assign = list(prev_assign)
@@ -558,6 +585,7 @@ def _write_trace_and_pareto(
         "inverse_hits": inverse_hits,
         "cooldown_hits": cooldown_hits,
         "status": status,
+        "evaluator_calls": int(getattr(evaluator, "evaluator_calls", getattr(evaluator, "evaluate_calls", 0))),
     }, pareto
 
 
@@ -1187,6 +1215,8 @@ def main() -> None:
         "llm_fallback_used": bool(llm_summary.get("fallback_used", False)),
         "llm_fallback_count": int(llm_summary.get("fallback_count", 0)),
         "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
+        "evaluator_calls": int(trace_info.get("evaluator_calls", 0)),
+        "evaluate_calls": int(trace_info.get("evaluator_calls", 0)),
     }
     require_main = bool(layout_input.get("require_main_evaluator", True))
     if require_main and evaluator_source != "main_project":

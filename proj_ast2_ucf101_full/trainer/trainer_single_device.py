@@ -5,6 +5,7 @@ import json
 import random
 from pathlib import Path
 from functools import partial
+from typing import Dict
 
 import numpy as np
 import torch
@@ -21,12 +22,7 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
-from utils.stable_hw import (
-    stable_hw_after_validation,
-    stable_hw_before_epoch,
-    stable_hw_init_state,
-    stable_hw_log_fields,
-)
+from utils.stable_hw import apply_accuracy_guard, stable_hw_log_fields, stable_hw_schedule
 
 
 def _as_float(val, name: str) -> float:
@@ -128,13 +124,30 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     scaler = GradScaler(enabled=cfg.train.amp)
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    stable_state = stable_hw_init_state(cfg)
+    stable_state: Dict[str, Any] = {}
 
     best_acc = 0.0
     last_acc = 0.0
     for epoch in range(cfg.train.epochs):
-        decision = stable_hw_before_epoch(cfg, stable_state)
-        lambda_hw_eff = float(decision.lambda_hw_effective)
+        stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+        if stable_hw_enabled:
+            stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+            apply_accuracy_guard(
+                epoch,
+                stable_hw_cfg,
+                stable_state,
+                None,
+                has_val_this_epoch=False,
+                train_acc1_ema=float(stable_state.get("train_acc1_ema", 0.0))
+                if stable_state.get("train_acc1_ema") is not None
+                else None,
+            )
+        lambda_hw_eff = float(
+            stable_state.get(
+                "lambda_hw_effective",
+                stable_state.get("lambda_hw_after_guard", stable_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0)))),
+            )
+        )
         model.train()
         last_hw_stats = None
         for step, batch in enumerate(train_loader):
@@ -189,13 +202,17 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 log_stats(logger, stats)
         last_acc = validate(model, val_loader, device, logger, epoch, cfg)
         best_acc = max(best_acc, last_acc)
-        decision = stable_hw_after_validation(
-            cfg,
-            stable_state,
-            epoch,
-            val_metrics={"val_acc1": float(last_acc)},
-            train_metrics=None,
-        )
+        if stable_hw_enabled:
+            apply_accuracy_guard(
+                epoch,
+                stable_hw_cfg,
+                stable_state,
+                float(last_acc) if last_acc is not None else None,
+                has_val_this_epoch=(last_acc is not None),
+                train_acc1_ema=float(stable_state.get("train_acc1_ema", 0.0))
+                if stable_state.get("train_acc1_ema") is not None
+                else None,
+            )
         if metrics_path:
             metrics = {
                 "epoch": int(epoch),

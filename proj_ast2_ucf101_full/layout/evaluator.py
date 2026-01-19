@@ -25,7 +25,7 @@ class LayoutEvaluator:
         self.sigma_mm = sigma_mm
         self.baseline = baseline
         self.scalar_w = scalar_w
-        self.evaluate_calls = 0
+        self.evaluator_calls = 0
 
     def _compute_comm(self, pos: np.ndarray, traffic_bytes: np.ndarray) -> float:
         t_sym = traffic_bytes + traffic_bytes.T
@@ -47,7 +47,7 @@ class LayoutEvaluator:
         return total
 
     def evaluate(self, st: LayoutState) -> Dict:
-        self.evaluate_calls += 1
+        self.evaluator_calls += 1
         assign = np.asarray(st.assign, dtype=int)
         if assign.shape[0] != int(st.S):
             raise ValueError(f"[LayoutEvaluator] len(assign)={assign.shape[0]} != S={st.S}")
@@ -94,3 +94,7 @@ class LayoutEvaluator:
             "penalty": {"duplicate": penalty_duplicate, "boundary": penalty_boundary},
             "total_scalar": total,
         }
+
+    @property
+    def evaluate_calls(self) -> int:
+        return int(self.evaluator_calls)

@@ -12,6 +12,17 @@ if [[ -z "$EXP_ID" ]]; then
   exit 1
 fi
 
+LAYOUT_INPUT="outputs/P3/A3/layout_input.json"
+if [[ "$EXP_ID" == EXP-B* ]]; then
+  if [ ! -f "${LAYOUT_INPUT}" ]; then
+    echo "[ERROR] Missing ${LAYOUT_INPUT}"
+    echo "Run EXP-A3 (or run_version_c with --export_layout_input) first to generate layout_input.json"
+    echo "Example:"
+    echo "  python scripts/run_version_c.py --config configs/vc_phase3_full_ucf101.yaml --out_dir outputs/P3/A3 --seed 0 --export_layout_input true"
+    exit 2
+  fi
+fi
+
 run_ast () {
   local cfg="$1"
   local out="$2"
