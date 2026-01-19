@@ -1,4 +1,4 @@
-"""Plot Pareto scatter from layout_best.json (SPEC v4.3.2 §12.3)."""
+"""Plot Pareto scatter from layout_best.json (SPEC v5.4 §12.3)."""
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,4 @@
-"""Detailed placement with SA and Pareto updates (SPEC v4.3.2 §8.6).
+"""Detailed placement with SA and Pareto updates (SPEC v5.4 §8.6).
 
 Key guarantees:
 - No NameError on mixed/llm path (planner_type/llm_provider/llm_init_error always defined)

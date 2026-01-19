@@ -1,4 +1,4 @@
-"""Expand cluster-to-region plan into slot-to-site assignment (SPEC v4.3.2 §8.4)."""
+"""Expand cluster-to-region plan into slot-to-site assignment (SPEC v5.4 §8.4)."""
 from __future__ import annotations
 
 from typing import Dict, List, Tuple

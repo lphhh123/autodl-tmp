@@ -49,7 +49,7 @@ def main():
         nargs="?",
         const=True,
         default=False,
-        help="Export layout_input.json per SPEC v4.3.2 (accepts flag alone or true/false)",
+        help="Export layout_input.json per SPEC v5.4 (accepts flag alone or true/false)",
     )
     parser.add_argument(
         "--baseline_stats",

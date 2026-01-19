@@ -1,4 +1,4 @@
-"""Region construction for ring/sector partitioning (SPEC v4.3.2 §8.3.1)."""
+"""Region construction for ring/sector partitioning (SPEC v5.4 §8.3.1)."""
 from __future__ import annotations
 
 import math

@@ -1,4 +1,4 @@
-"""Cluster-to-region placement (SPEC v4.3.2 §8.3.2)."""
+"""Cluster-to-region placement (SPEC v5.4 §8.3.2)."""
 from __future__ import annotations
 
 import math

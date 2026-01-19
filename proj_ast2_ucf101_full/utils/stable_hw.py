@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import json
 from pathlib import Path
 
@@ -211,181 +211,241 @@ def _update_train_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc: float) -> Non
 
 
 def apply_accuracy_guard(
+    *,
     epoch: int,
     stable_hw_cfg: Any,
     stable_hw_state: Dict[str, Any],
-    val_acc1: Optional[float],
+    val_metric_or_none: Optional[float] = None,
     has_val_this_epoch: bool = True,
+    train_ema_or_none: Optional[float] = None,
+    # ---- back-compat (trainer older call sites) ----
+    val_acc1: Optional[float] = None,
     train_acc1_ema: Optional[float] = None,
-) -> None:
+) -> Tuple[str, float, bool]:
     """
-    v5.4 semantics (SPEC_C §12B.4):
-      - acc_used: prefer val_acc1 (explicit downgrade only)
-      - acc_ref: ONLY from dense_baseline OR warmup_best(val_acc1), then frozen forever
-      - hard gating: if acc_used < acc_ref - eps_drop => lambda_hw_effective=0 + freeze discrete
-      - anti-starvation: restart window if stuck in RECOVERY
+    v5.4 Acc-First Hard Gating + LockedAccRef.
+    Compatible with BOTH call styles:
+      - new: val_metric_or_none / has_val_this_epoch / train_ema_or_none
+      - old: val_acc1 / train_acc1_ema
+    Returns: (guard_mode, lambda_hw_after_guard, allow_discrete_updates)
     """
+
     st = stable_hw_state
-    val_metric_or_none = val_acc1
-    if st is None:
-        return
-    guard_cfg = _cfg_get(stable_hw_cfg, "accuracy_guard", {}) or {}
-    lock_cfg = _cfg_get(stable_hw_cfg, "locked_acc_ref", {}) or {}
-    ctrl_cfg = _cfg_get(stable_hw_cfg, "controller", {}) or {}
+    gcfg = _cfg_get(stable_hw_cfg, "accuracy_guard", {}) or {}
+    ctrl = _cfg_get(gcfg, "controller", {}) or {}
 
-    eps_drop = float(_cfg_get(guard_cfg, "epsilon_drop", 0.01) or 0.01)
-    prefer_val = bool(_cfg_get(guard_cfg, "prefer_val_acc1", True))
-    allow_train_fallback = bool(_cfg_get(guard_cfg, "allow_train_ema_fallback", False))
-    delta_below = float(_cfg_get(guard_cfg, "delta_below_thr", 0.005) or 0.005)
-    st["epsilon_drop"] = eps_drop
+    # resolve inputs (prefer explicit new args; fall back to legacy names)
+    if val_metric_or_none is None and val_acc1 is not None:
+        val_metric_or_none = float(val_acc1)
+    if train_ema_or_none is None and train_acc1_ema is not None:
+        train_ema_or_none = float(train_acc1_ema)
+    if val_metric_or_none is None:
+        has_val_this_epoch = False
 
-    warmup_epochs = int(
-        _cfg_get(_cfg_get(stable_hw_cfg, "lambda_hw_schedule", {}) or {}, "warmup_epochs", 0) or 0
-    )
+    eps_drop = float(_cfg_get(ctrl, "epsilon_drop", _cfg_get(gcfg, "epsilon_drop", 0.01)))
+    cut_hw = bool(_cfg_get(ctrl, "cut_hw_loss_on_violate", True))
+    freeze_discrete = bool(_cfg_get(ctrl, "freeze_discrete_updates", True))
+    freeze_sched = bool(_cfg_get(ctrl, "freeze_schedule_in_recovery", True))
+    recovery_min_epochs = int(_cfg_get(ctrl, "recovery_min_epochs", 1))
+    k_exit = int(_cfg_get(ctrl, "k_exit", 2))
+    margin_exit = float(_cfg_get(ctrl, "margin_exit", 0.0))
 
-    st.setdefault("acc_ref_locked", False)
-    st.setdefault("acc_ref_source", None)
-    st.setdefault("acc_ref", None)
-    st.setdefault("acc_ref_warmup_best_val", None)
-    st.setdefault("val_acc1_last", None)
-
-    if (not st["acc_ref_locked"]) and bool(_cfg_get(lock_cfg, "prefer_dense_baseline", True)):
-        baseline_path = _cfg_get(lock_cfg, "baseline_stats_path", None) or _cfg_get(
-            guard_cfg, "baseline_stats_path", None
-        )
-        st["baseline_stats_path"] = baseline_path
-        if baseline_path:
-            try:
-                with open(str(baseline_path), "r", encoding="utf-8") as f:
-                    js = json.load(f)
-                v = js.get("val_acc1_best", None)
-                if v is None and isinstance(js.get("metrics", None), dict):
-                    v = js["metrics"].get("val_acc1_best", None)
-                if v is None:
-                    v = js.get("best_acc1", None)
-                if v is not None:
-                    st["acc_ref"] = float(v)
-                    st["acc_ref_locked"] = True
-                    st["acc_ref_source"] = "dense_baseline"
-            except Exception:
-                pass
-
-    if has_val_this_epoch and (val_metric_or_none is not None):
-        st["val_acc1_last"] = float(val_metric_or_none)
-
-    acc_used = None
-    acc_used_source = None
-    if prefer_val and has_val_this_epoch and (val_metric_or_none is not None):
-        acc_used = float(val_metric_or_none)
-        acc_used_source = "val_acc1"
-    elif prefer_val and (st.get("val_acc1_last") is not None):
-        acc_used = float(st["val_acc1_last"])
-        acc_used_source = "val_acc1_last"
-    elif allow_train_fallback and (train_acc1_ema is not None):
-        acc_used = float(train_acc1_ema)
-        acc_used_source = "train_acc1_ema"
-    else:
-        acc_used = None
-        acc_used_source = None
-
-    st["acc_used"] = acc_used
-    st["acc_used_source"] = acc_used_source
-
-    if (not st["acc_ref_locked"]) and (epoch < warmup_epochs):
-        if acc_used_source in ("val_acc1", "val_acc1_last") and (acc_used is not None):
-            prev = st.get("acc_ref_warmup_best_val", None)
-            st["acc_ref_warmup_best_val"] = float(acc_used) if prev is None else max(float(prev), float(acc_used))
-
-    if (not st["acc_ref_locked"]) and (epoch >= warmup_epochs):
-        wb = st.get("acc_ref_warmup_best_val", None)
-        if wb is not None:
-            st["acc_ref"] = float(wb)
-            st["acc_ref_locked"] = True
-            st["acc_ref_source"] = "warmup_best"
-
+    # LockedAccRef must exist (init_locked_acc_ref should have set it)
     acc_ref = st.get("acc_ref", None)
-    acc_ref_f = float(acc_ref) if acc_ref is not None else None
+    if acc_ref is None:
+        # fallback: if no acc_ref, behave like warmup (do not amplify hw)
+        st["guard_mode"] = "WARMUP"
+        st["lambda_hw_after_guard"] = float(st.get("lambda_hw_base", st.get("lambda_hw", 0.0)))
+        st["allow_discrete_updates"] = True
+        return st["guard_mode"], float(st["lambda_hw_after_guard"]), True
 
-    st.setdefault("recovery_no_improve_epochs", 0)
-    st.setdefault("restart_until_epoch", -1)
-    st.setdefault("last_restart_epoch", -999999)
-    st.setdefault("request_lr_restart", False)
-
-    best_seen = st.get("val_acc1_best_seen", None)
-    if best_seen is None and st.get("val_acc1_last") is not None:
-        best_seen = float(st["val_acc1_last"])
-    st.setdefault("val_acc1_best_seen", best_seen)
-
-    in_restart = epoch <= int(st.get("restart_until_epoch", -1))
-
-    violated = False
-    if (acc_ref_f is not None) and (acc_used is not None):
-        violated = (acc_ref_f - float(acc_used)) > eps_drop
-
-    far_below = False
-    if (acc_ref_f is not None) and (acc_used is not None):
-        far_below = float(acc_used) < (acc_ref_f - eps_drop - delta_below)
-
-    if (acc_ref_f is not None) and violated and (has_val_this_epoch and val_metric_or_none is not None):
-        prev_best = st.get("_best_seen_for_patience", None)
-        cur_best = st.get("val_acc1_best_seen", None)
-        if prev_best is None:
-            st["_best_seen_for_patience"] = cur_best
-        else:
-            if (cur_best is not None) and (float(cur_best) > float(prev_best) + 1e-12):
-                st["_best_seen_for_patience"] = cur_best
-                st["recovery_no_improve_epochs"] = 0
-            else:
-                st["recovery_no_improve_epochs"] = int(st.get("recovery_no_improve_epochs", 0)) + 1
-
-        patience = int(_cfg_get(ctrl_cfg, "recovery_patience_epochs", 3) or 3)
-        restart_len = int(_cfg_get(ctrl_cfg, "restart_window_epochs", 1) or 1)
-        min_gap = int(_cfg_get(ctrl_cfg, "min_epochs_between_restarts", 1) or 1)
-
-        if ((st["recovery_no_improve_epochs"] >= patience) or far_below) and (
-            epoch - int(st.get("last_restart_epoch", -999999)) >= min_gap
-        ):
-            st["restart_until_epoch"] = int(epoch + restart_len - 1)
-            st["last_restart_epoch"] = int(epoch)
-            st["request_lr_restart"] = True
-            in_restart = True
-
-    lambda_hw_base = float(st.get("lambda_hw_base", st.get("lambda_hw", 0.0)) or 0.0)
-
-    if in_restart or violated:
-        guard_mode = "RESTART_WINDOW" if in_restart else "RECOVERY"
-        lambda_hw_eff = 0.0
-        allow_discrete = False
-        freeze_discrete = True
+    # choose metric
+    metric_key = str(_cfg_get(ctrl, "metric", "val_acc1"))
+    metric = None
+    if metric_key in ("val_acc1", "acc1", "val"):
+        metric = float(val_metric_or_none) if (has_val_this_epoch and val_metric_or_none is not None) else None
+    elif metric_key in ("train_acc1_ema", "train_ema"):
+        metric = float(train_ema_or_none) if train_ema_or_none is not None else None
     else:
-        if (acc_ref_f is None) or (acc_used is None):
-            guard_mode = "NO_ACCREF"
-            lambda_hw_eff = lambda_hw_base
-            allow_discrete = True
-            freeze_discrete = False
+        metric = float(val_metric_or_none) if (has_val_this_epoch and val_metric_or_none is not None) else None
+
+    # persist last seen
+    if has_val_this_epoch and val_metric_or_none is not None:
+        st["val_acc1_last"] = float(val_metric_or_none)
+    if train_ema_or_none is not None:
+        st["train_acc1_ema"] = float(train_ema_or_none)
+
+    # threshold check
+    violate = False
+    if metric is not None:
+        violate = (float(acc_ref) - float(metric)) > float(eps_drop)
+
+    # recovery bookkeeping
+    if st.get("guard_mode") not in ("RECOVERY", "VIOLATE", "OK", "WARMUP"):
+        st["guard_mode"] = "WARMUP"
+
+    if violate:
+        st["guard_mode"] = "VIOLATE"
+        st["recovery_enter_epoch"] = int(epoch)
+        st["recovery_good_streak"] = 0
+    else:
+        # if previously in recovery, require consecutive good epochs
+        if st.get("guard_mode") in ("RECOVERY", "VIOLATE"):
+            enter = int(st.get("recovery_enter_epoch", epoch))
+            min_ok = (epoch - enter + 1) >= recovery_min_epochs
+            ok_margin = (metric is not None) and (float(metric) + margin_exit >= float(acc_ref) - float(eps_drop))
+            if min_ok and ok_margin:
+                st["recovery_good_streak"] = int(st.get("recovery_good_streak", 0)) + 1
+            else:
+                st["recovery_good_streak"] = 0
+
+            if int(st.get("recovery_good_streak", 0)) >= k_exit:
+                st["guard_mode"] = "OK"
+            else:
+                st["guard_mode"] = "RECOVERY"
         else:
-            guard_mode = "HW_OPT"
-            lambda_hw_eff = lambda_hw_base
-            allow_discrete = True
-            freeze_discrete = False
+            st["guard_mode"] = "OK"
 
-    st["guard_mode"] = str(guard_mode)
-    st["lambda_hw_effective"] = float(lambda_hw_eff)
-    st["allow_discrete_updates"] = bool(allow_discrete)
-    st["freeze_discrete_updates"] = bool(freeze_discrete)
+    # apply gating
+    base = float(st.get("lambda_hw_effective", st.get("lambda_hw_base", st.get("lambda_hw", 0.0))))
+    allow_discrete_updates = True
+    after = base
 
-    return StableHWDecision(
-        guard_mode=str(guard_mode),
-        lambda_hw_base=float(lambda_hw_base),
-        lambda_hw_effective=float(lambda_hw_eff),
-        allow_discrete_updates=bool(allow_discrete),
-        reason={
-            "acc_ref": acc_ref_f,
-            "acc_used": float(acc_used) if acc_used is not None else None,
-            "acc_used_source": acc_used_source,
-            "epsilon_drop": eps_drop,
-            "violated": bool(violated),
-            "in_restart_window": bool(in_restart),
-            "restart_until_epoch": int(st.get("restart_until_epoch", -1)),
-        },
+    if st["guard_mode"] in ("VIOLATE", "RECOVERY"):
+        if cut_hw:
+            after = 0.0
+        if freeze_discrete:
+            allow_discrete_updates = False
+        if freeze_sched:
+            st["freeze_schedule"] = True
+    else:
+        st["freeze_schedule"] = False
+
+    st["lambda_hw_after_guard"] = float(after)
+    st["allow_discrete_updates"] = bool(allow_discrete_updates)
+    return st["guard_mode"], float(after), bool(allow_discrete_updates)
+
+
+def init_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
+    """Initialize LockedAccRef once (alias for internal loader)."""
+    _load_locked_acc_ref(stable_hw_cfg, st)
+
+
+# ===== v5.4: Locked HW refs (NoDrift for proxy refs) =====
+def init_hw_refs_from_baseline_stats(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
+    """
+    Initialize ref_T/ref_E/ref_M/ref_C into stable_hw_state.
+    Priority:
+      1) If locked_acc_ref.baseline_stats_path exists AND prefer_dense_baseline=True -> lock refs from that file.
+      2) Else: leave refs unset (compute_hw_loss will fallback to cfg.hw.*), and allow EMA update later.
+    This function is idempotent.
+    """
+    if st.get("_hw_refs_inited", False):
+        return
+
+    locked = _cfg_get(stable_hw_cfg, "locked_acc_ref", {}) or {}
+    baseline_stats_path = (
+        _cfg_get(locked, "baseline_stats_path", None)
+        or _cfg_get(stable_hw_cfg, "baseline_stats_path", None)  # back-compat alias
     )
+    prefer_dense = bool(_cfg_get(locked, "prefer_dense_baseline", True))
+
+    norm = _cfg_get(stable_hw_cfg, "normalize", {}) or {}
+    eps = float(_cfg_get(norm, "eps", 1e-6))
+
+    def _pos(x: Any) -> float:
+        try:
+            v = float(x)
+        except Exception:
+            return eps
+        if not (v > 0.0):
+            return eps
+        return max(eps, v)
+
+    if baseline_stats_path and prefer_dense:
+        p = Path(str(baseline_stats_path))
+        if p.exists():
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                hw = d.get("last_hw_stats") or d.get("hw_stats") or d.get("hw") or {}
+                if not hw and any(k in d for k in ["latency_ms", "energy_mj", "mem_mb", "comm_ms"]):
+                    hw = d
+
+                # tolerate multiple key styles
+                T = hw.get("latency_ms", hw.get("lat_ms", hw.get("T_ms", hw.get("latency", None))))
+                E = hw.get("energy_mj", hw.get("E_mj", hw.get("energy", None)))
+                M = hw.get("mem_mb", hw.get("M_mb", hw.get("mem", None)))
+                C = hw.get("comm_ms", hw.get("C_ms", hw.get("comm", None)))
+
+                if T is not None:
+                    st["ref_T"] = _pos(T)
+                if E is not None:
+                    st["ref_E"] = _pos(E)
+                if M is not None:
+                    st["ref_M"] = _pos(M)
+                if C is not None:
+                    st["ref_C"] = _pos(C)
+
+                st["hw_ref_source"] = f"dense_baseline:{p}"
+            except Exception:
+                st["hw_ref_source"] = f"dense_baseline_parse_error:{p}"
+        else:
+            st["hw_ref_source"] = f"dense_baseline_missing:{p}"
+    else:
+        # no dense baseline locking
+        st.setdefault("hw_ref_source", "ema_or_cfg_fallback")
+
+    st["_hw_refs_inited"] = True
+
+
+def update_hw_refs_from_stats(stable_hw_cfg: Any, st: Dict[str, Any], hw_stats: Dict[str, Any]) -> None:
+    """
+    EMA update refs from observed hw_stats (ONLY when not locked to dense baseline).
+    Guards against negative/zero values to avoid 'negative latency reward' drifting refs.
+    """
+    src = str(st.get("hw_ref_source", ""))
+    if src.startswith("dense_baseline:"):
+        return
+
+    norm = _cfg_get(stable_hw_cfg, "normalize", {}) or {}
+    eps = float(_cfg_get(norm, "eps", 1e-6))
+    beta = float(_cfg_get(norm, "ref_ema_beta", 0.9))  # optional; default 0.9
+
+    def _read_pos(keys):
+        for k in keys:
+            if k in hw_stats and hw_stats[k] is not None:
+                try:
+                    v = float(hw_stats[k])
+                except Exception:
+                    continue
+                if v > 0.0:
+                    return max(eps, v)
+        return None
+
+    T = _read_pos(["latency_ms", "lat_ms", "T_ms", "latency"])
+    E = _read_pos(["energy_mj", "E_mj", "energy"])
+    M = _read_pos(["mem_mb", "M_mb", "mem"])
+    C = _read_pos(["comm_ms", "C_ms", "comm"])
+
+    def _ema(key: str, v: float):
+        old = st.get(key, None)
+        if old is None:
+            st[key] = v
+            return
+        try:
+            oldf = float(old)
+        except Exception:
+            st[key] = v
+            return
+        st[key] = beta * max(eps, oldf) + (1.0 - beta) * v
+
+    if T is not None:
+        _ema("ref_T", T)
+    if E is not None:
+        _ema("ref_E", E)
+    if M is not None:
+        _ema("ref_M", M)
+    if C is not None:
+        _ema("ref_C", C)
+
+    st["hw_ref_source"] = "ema"

@@ -33,6 +33,7 @@ from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.stable_hw import (
     apply_accuracy_guard,
+    init_locked_acc_ref,
     init_hw_refs_from_baseline_stats,
     stable_hw_log_fields,
     stable_hw_schedule,
@@ -263,7 +264,7 @@ def _export_layout_input(
     wafer_layout: WaferLayout,
     seed: int = 0,
 ):
-    """Export layout_input.json following SPEC v4.3.2 (§10.1).
+    """Export layout_input.json following SPEC v5.4 (§10.1).
 
     This uses deterministic square-grid sites and the latest mapping/segments
     from training to provide a reproducible offline entry point.
@@ -646,6 +647,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             "hw_mats": {},
         },
     )
+    if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
+        init_locked_acc_ref(stable_hw_cfg, stable_hw_state)
+        init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_hw_state)
     (out_dir / "stable_hw_state.json").write_text(
         json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -659,25 +663,16 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
         if stable_hw_enabled:
             stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
-            has_any_acc_source = (
-                (stable_hw_state.get("val_acc1_last") is not None)
-                or (stable_hw_state.get("train_acc1_ema") is not None)
-                or bool(getattr(stable_hw_cfg, "baseline_stats_path", None))
+            apply_accuracy_guard(
+                epoch=outer,
+                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_state=stable_hw_state,
+                val_metric_or_none=stable_hw_state.get("val_acc1_last", None),
+                has_val_this_epoch=False,
+                train_ema_or_none=float(stable_hw_state["train_acc1_ema"])
+                if stable_hw_state.get("train_acc1_ema") is not None
+                else None,
             )
-            if has_any_acc_source:
-                apply_accuracy_guard(
-                    epoch=outer,
-                    stable_hw_cfg=stable_hw_cfg,
-                    stable_hw_state=stable_hw_state,
-                    val_acc1=None,
-                    train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
-                    if stable_hw_state.get("train_acc1_ema") is not None
-                    else None,
-                )
-            else:
-                stable_hw_state["guard_mode"] = "WARMUP"
-                stable_hw_state["lambda_hw_effective"] = float(stable_hw_state.get("lambda_hw_base", 0.0))
-                stable_hw_state["allow_discrete_updates"] = True
             # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
             if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
                 last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
@@ -1047,18 +1042,17 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 epoch=outer,
                 stable_hw_cfg=stable_hw_cfg,
                 stable_hw_state=stable_hw_state,
-                val_acc1=float(val_acc1) if val_acc1 is not None else None,
-                train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
+                val_metric_or_none=float(val_acc1) if val_acc1 is not None else None,
+                has_val_this_epoch=True,
+                train_ema_or_none=float(stable_hw_state.get("train_acc1_ema", 0.0))
                 if stable_hw_state.get("train_acc1_ema") is not None
                 else None,
             )
 
         # ---- v5.4: update HW ref via EMA if not from dense baseline ----
-        if stable_hw_enabled:
-            init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_hw_state)
-            if stable_hw_state.get("hw_ref_source", "") != "dense_baseline":
-                # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
-                update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
+        if stable_hw_enabled and not str(stable_hw_state.get("hw_ref_source", "")).startswith("dense_baseline:"):
+            # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
+            update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
         last_acc1 = float(val_acc1)
         best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
         stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
@@ -1079,6 +1073,17 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
             seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
             stable_hw_state=stable_hw_state,
+            extra={
+                "stable_hw_refs_used": {
+                    "acc_ref": stable_hw_state.get("acc_ref"),
+                    "acc_ref_source": stable_hw_state.get("acc_ref_source"),
+                    "ref_T": stable_hw_state.get("ref_T"),
+                    "ref_E": stable_hw_state.get("ref_E"),
+                    "ref_M": stable_hw_state.get("ref_M"),
+                    "ref_C": stable_hw_state.get("ref_C"),
+                    "hw_ref_source": stable_hw_state.get("hw_ref_source"),
+                },
+            },
         )
     except Exception:
         pass

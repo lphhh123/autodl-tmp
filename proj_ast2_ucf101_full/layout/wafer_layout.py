@@ -1,4 +1,4 @@
-"""Wafer layout model supporting discrete sites (SPEC v4.3.2 §7)."""
+"""Wafer layout model supporting discrete sites (SPEC v5.4 §7)."""
 from __future__ import annotations
 
 import math
