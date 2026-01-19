@@ -303,502 +303,503 @@ def run_detailed_place(
                 ]
             )
 
-            if True:
-                # initial eval
-                eval_out = evaluator.evaluate(layout_state)
-                prev_total = float(eval_out.get("total_scalar", 0.0))
-                prev_comm = float(eval_out.get("comm_norm", 0.0))
-                prev_therm = float(eval_out.get("therm_norm", 0.0))
-                prev_assign = assign.copy()
-
-                writer.writerow(
-                    [
-                        0,
-                        "init",
-                        "init",
-                        json.dumps({"op": "init"}, ensure_ascii=False),
-                        1,
-                        prev_total,
-                        prev_comm,
-                        prev_therm,
-                        0,
-                        0.0,
-                        0.0,
-                        int(seed_id),
-                        0,
-                        signature_for_assign(prev_assign.tolist()),
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                    ]
-                )
-                pareto.add(
-                    eval_out["comm_norm"],
-                    eval_out["therm_norm"],
-                    {
-                        "assign": assign.copy(),
-                        "total_scalar": eval_out["total_scalar"],
-                        "stage": stage_label,
-                        "iter": 0,
-                        "seed": seed_id,
-                    },
-                )
-
-                best_total_seen = float(eval_out.get("total_scalar", 0.0))
-                best_assign = assign.copy()
-                best_eval = dict(eval_out)
-                tabu_signatures: deque[str] = deque(maxlen=tabu_tenure)
-                inverse_signatures: deque[str] = deque(maxlen=inverse_tenure)
-                last_site_per_slot: Dict[int, int] = {int(i): int(assign[int(i)]) for i in range(len(assign))}
-                last_move_step_per_slot: Dict[int, int] = {int(i): -10**6 for i in range(len(assign))}
-
-            def _touched_slots(act: Dict[str, Any]) -> List[int]:
-                op_local = act.get("op")
-                if op_local == "swap":
-                    return [int(act.get("i", -1)), int(act.get("j", -1))]
-                if op_local == "relocate":
-                    return [int(act.get("i", -1))]
-                if op_local == "cluster_move":
-                    cid = int(act.get("cluster_id", -1))
-                    if 0 <= cid < len(clusters):
-                        return [int(s) for s in clusters[cid].slots]
-                return []
+            try:
+                if True:
+                    # initial eval
+                    eval_out = evaluator.evaluate(layout_state)
+                    prev_total = float(eval_out.get("total_scalar", 0.0))
+                    prev_comm = float(eval_out.get("comm_norm", 0.0))
+                    prev_therm = float(eval_out.get("therm_norm", 0.0))
+                    prev_assign = assign.copy()
     
-            def _apply_action_for_candidate(base_assign: np.ndarray, act: Dict[str, Any]) -> np.ndarray:
-                new_assign = base_assign.copy()
-                op_local = str(act.get("op", "none"))
-                if op_local == "swap":
-                    _apply_swap(new_assign, int(act.get("i", 0)), int(act.get("j", 0)))
-                elif op_local == "relocate":
-                    _apply_relocate(new_assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
-                elif op_local == "cluster_move":
-                    cid = int(act.get("cluster_id", 0))
-                    rid = int(act.get("region_id", 0))
-                    if 0 <= cid < len(clusters):
-                        cluster = clusters[cid]
-                        target_sites = act.get("target_sites")
-                        if not target_sites:
-                            target_sites = _select_cluster_target_sites(new_assign, cluster, rid, site_to_region, sites_xy)
-                        _apply_cluster_move(new_assign, cluster, target_sites)
-                return new_assign
-    
-            action_queue: List[Dict] = []
-            forbidden_history: List[List[int]] = []
-            failed_counts: Dict[int, int] = {}
-            recent_failed_ids: set[int] = set()
-            consecutive_queue_rejects = 0
-            queue_window_steps = int(_cfg_get(planner_cfg, "queue_window_steps", 30))
-            refresh_due_to_rejects = False
-            progress_every = int(_cfg_get(cfg, "progress_every", 10))
-            save_every = int(_cfg_get(cfg, "save_every", 50))
-            accepted_steps = 0
-    
-            for step in range(steps):
-                step_start = time.perf_counter()
-                forced_family = None
-                forced_policy = None
-                if controller is not None:
-                    forced_family = controller.choose_action_family()
-                    forced_policy = controller.choose_policy()
-    
-                candidate_pool = build_candidate_pool(
-                    assign,
-                    eval_out,
-                    evaluator,
-                    layout_state,
-                    traffic_sym,
-                    sites_xy,
-                    site_to_region,
-                    regions,
-                    clusters,
-                    cluster_to_region,
-                    chip_tdp,
-                    cfg,
-                    rng,
-                    debug_out_path=(out_dir / "candidate_pool_debug.json") if step == 0 else None,
-                )
-                if forced_family:
-                    filtered = [
-                        c for c in candidate_pool if str(c.action.get("op", "")).lower() == forced_family.lower()
-                    ]
-                    if filtered:
-                        candidate_pool = filtered
-                lookahead_scores: Dict[int, float] = {}
-                if lookahead_enabled and len(candidate_pool) > 1:
-                    cand_infos: List[Dict[str, Any]] = []
-                    base_assign = assign.copy()
-                    for cand in candidate_pool:
-                        action_copy = copy.deepcopy(cand.action)
-                        action_copy.setdefault("signature", cand.signature)
-                        new_assign = _apply_action_for_candidate(base_assign, action_copy)
-                        sig1 = signature_for_assign(new_assign)
-                        cached = eval_cache.get(sig1) if eval_cache is not None else None
-                        if cached is None:
-                            layout_state.assign = new_assign
-                            eval_new = evaluator.evaluate(layout_state)
-                            if eval_cache is not None:
-                                eval_cache.put(sig1, dict(eval_new))
-                        else:
-                            eval_new = dict(cached)
-                        d_total = float(eval_out["total_scalar"] - eval_new["total_scalar"])
-                        cand_infos.append(
-                            {
-                                "candidate": cand,
-                                "new_assign": new_assign,
-                                "d_total": d_total,
-                                "apply_fn": lambda base, act=action_copy: _apply_action_for_candidate(base, act),
-                            }
-                        )
-    
-                    cand_infos_sorted = sorted(cand_infos, key=lambda x: x["d_total"], reverse=True)
-                    top = cand_infos_sorted[: min(lookahead_topk, len(cand_infos_sorted))]
-    
-                    for ci in top:
-                        best2 = None
-                        for cj in top:
-                            if cj is ci:
-                                continue
-                            assign2 = cj["apply_fn"](ci["new_assign"])
-                            sig2 = signature_for_assign(assign2)
-                            cached2 = eval_cache.get(sig2) if eval_cache is not None else None
-                            if cached2 is None:
-                                layout_state.assign = assign2
-                                eval2 = evaluator.evaluate(layout_state)
-                                if eval_cache is not None:
-                                    eval_cache.put(sig2, dict(eval2))
-                            else:
-                                eval2 = dict(cached2)
-                            d2 = float(eval_out["total_scalar"] - eval2["total_scalar"])
-                            if best2 is None or d2 > best2:
-                                best2 = d2
-                        ci["lookahead_best_d2"] = float(best2) if best2 is not None else 0.0
-                        ci["lookahead_score"] = float(ci["d_total"]) + lookahead_beta * float(ci["lookahead_best_d2"])
-    
-                    for ci in cand_infos:
-                        if "lookahead_score" not in ci:
-                            ci["lookahead_score"] = float(ci["d_total"])
-                        cand = ci["candidate"]
-                        if isinstance(getattr(cand, "est", None), dict):
-                            cand.est["lookahead_score"] = float(ci["lookahead_score"])
-                        lookahead_scores[int(cand.id)] = float(ci["lookahead_score"])
-                    layout_state.assign = base_assign
-                cand_map = {c.id: c for c in candidate_pool}
-                candidate_ids = [c.id for c in candidate_pool]
-                forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
-    
-                use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
-                if forced_policy:
-                    if forced_policy.lower() == "heuristic":
-                        use_llm = False
-                    elif forced_policy.lower() == "llm":
-                        use_llm = planner_type in ("llm", "mixed") and llm_provider is not None
-                need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
-                refresh_due_to_rejects = False
-    
-                if need_refresh:
-                    ss = build_state_summary(
-                        step,
-                        T,
-                        eval_out,
-                        traffic_sym,
-                        assign,
-                        site_to_region,
-                        chip_tdp,
-                        clusters,
-                        regions,
-                        candidate_pool,
-                        candidate_ids,
-                        forbidden_ids,
-                        k_actions,
+                    writer.writerow(
+                        [
+                            0,
+                            "init",
+                            "init",
+                            json.dumps({"op": "init"}, ensure_ascii=False),
+                            1,
+                            prev_total,
+                            prev_comm,
+                            prev_therm,
+                            0,
+                            0.0,
+                            0.0,
+                            int(seed_id),
+                            0,
+                            signature_for_assign(prev_assign.tolist()),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        ]
                     )
-                    raw_text = ""
-                    pick_ids: List[int] = []
-                    pick_types_count: Dict[str, int] = {}
-                    best_d_total = None
-                    try:
-                        pick_ids = llm_provider.propose_pick(ss, k_actions) or []
-                        for pid in pick_ids:
-                            cand = cand_map.get(pid)
-                            if cand:
-                                pick_types_count[cand.type] = pick_types_count.get(cand.type, 0) + 1
-                                if best_d_total is None or cand.est.get("d_total", 0) < best_d_total:
-                                    best_d_total = cand.est.get("d_total", 0)
-                    except Exception as e:
-                        if usage_fp:
-                            json.dump(
-                                {
-                                    "event": "llm_step_failed",
-                                    "step": int(step),
-                                    "error": repr(e),
-                                    "raw_preview": raw_text[:200],
-                                },
-                                usage_fp,
-                            )
-                            usage_fp.write("\\n")
-                            usage_fp.flush()
-                    actions: List[Dict[str, Any]] = []
-                    if pick_ids:
-                        forbidden_history.append(pick_ids)
-                        if feasibility_check:
-                            actions = pick_ids_to_actions_sequential(
-                                assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions
-                            )
-                        else:
-                            for pid in pick_ids[:k_actions]:
-                                cand = cand_map.get(pid)
-                                if cand is None:
-                                    continue
-                                action_copy = copy.deepcopy(cand.action)
-                                action_copy.setdefault("signature", cand.signature)
-                                actions.append(
-                                    {
-                                        **action_copy,
-                                        "candidate_id": pid,
-                                        "type": cand.type,
-                                        "signature": action_copy.get("signature", cand.signature),
-                                    }
-                                )
-                    if usage_fp and hasattr(llm_provider, "last_usage"):
-                        usage = dict(getattr(llm_provider, "last_usage") or {})
-                        raw_text = str(usage.get("raw_preview", ""))
-                        usage.setdefault("ok", bool(pick_ids))
-                        usage.setdefault("n_pick", len(pick_ids))
-                        usage["pick_ids"] = pick_ids
-                        usage["picked_types"] = pick_types_count
-                        usage["best_d_total"] = best_d_total
-                        usage["n_queue_push"] = len(actions)
-                        usage["step"] = int(step)
-                        json.dump(usage, usage_fp)
-                        usage_fp.write("\\n")
-                        usage_fp.flush()
-                        expire_step = step + queue_window_steps
-                        if queue_enabled:
-                            for act in actions:
-                                action_copy = copy.deepcopy(act)
-                                if "signature" not in action_copy:
-                                    action_copy["signature"] = _signature_for_action(action_copy, assign)
-                                action_queue.append({"action": action_copy, "expire": expire_step})
-                        elif actions:
-                            action_queue = [
-                                {
-                                    "action": copy.deepcopy(actions[0]),
-                                    "expire": step,
-                                }
-                            ]
-    
-                action_queue = [a for a in action_queue if a.get("expire", step) >= step]
-                fallback_candidates = [c for c in candidate_pool if c.id not in forbidden_ids]
-                if lookahead_scores:
-                    fallback_candidates.sort(
-                        key=lambda c: float(lookahead_scores.get(int(c.id), 0.0)),
-                        reverse=True,
-                    )
-                fallback_idx = 0
-    
-                action = {"op": "none"}
-                tabu_hit = inverse_hit = cooldown_hit = 0
-                est_total_new = None
-                op_signature = "none"
-                inverse_sig = "none"
-                max_attempts = max(5, len(action_queue) + len(fallback_candidates) + 3)
-    
-                for _ in range(max_attempts):
-                    action_payload = None
-                    if action_queue:
-                        action_payload = action_queue.pop(0).get("action")
-                    elif fallback_idx < len(fallback_candidates):
-                        fb = fallback_candidates[fallback_idx]
-                        fallback_idx += 1
-                        action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
-                    else:
-                        action_payload = _sample_action(
-                            cfg,
-                            traffic_sym,
-                            site_to_region,
-                            regions,
-                            clusters,
-                            assign,
-                            sites_xy,
-                            chip_tdp,
-                            cluster_to_region,
-                            py_rng,
-                        )
-    
-                    action = copy.deepcopy(action_payload) if action_payload else {"op": "none"}
-                    op = str(action.get("op", "none"))
-                    if op == "relocate":
-                        action["from_site"] = int(assign[int(action.get("i", -1))])
-                    if op == "cluster_move":
-                        cid = int(action.get("cluster_id", -1))
-                        if 0 <= cid < len(clusters) and clusters[cid].slots:
-                            slot_id = int(clusters[cid].slots[0])
-                            if 0 <= slot_id < len(assign):
-                                action["from_region"] = int(site_to_region[int(assign[slot_id])])
-                            if "target_sites" not in action:
-                                action["target_sites"] = _select_cluster_target_sites(
-                                    assign, clusters[cid], int(action.get("region_id", -1)), site_to_region, sites_xy
-                                )
-                    if "signature" not in action:
-                        action["signature"] = _signature_for_action(action, assign)
-                    op_signature = str(action.get("signature", "none"))
-                    inverse_sig = inverse_signature(action, assign)
-                    est_total_new = None
-                    cand_ref = None
-                    cid = action.get("candidate_id")
-                    cid_int = int(cid) if cid is not None else None
-                    if cid_int is not None and cid_int in cand_map:
-                        cand_ref = cand_map[int(cid_int)]
-                        est_total_new = cand_ref.est.get("total_new")
-                        action.setdefault("type", cand_ref.type)
-                        action.setdefault("signature", cand_ref.signature)
-    
-                    aspiration = est_total_new is not None and est_total_new < best_total_seen - aspiration_delta
-                    tabu_hit = 1 if op_signature in tabu_signatures else 0
-                    inverse_hit = 1 if op_signature in inverse_signatures else 0
-                    cooldown_hit = 0
-                    for slot in _touched_slots(action):
-                        if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
-                            cooldown_hit = 1
-                            break
-    
-                    if aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
-                        break
-                op = str(action.get("op", "none"))
-    
-                new_assign = assign.copy()
-                if op == "swap":
-                    _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
-                elif op == "relocate":
-                    _apply_relocate(new_assign, int(action.get("i", 0)), int(action.get("site_id", 0)))
-                elif op == "cluster_move":
-                    cid = int(action.get("cluster_id", 0))
-                    rid = int(action.get("region_id", 0))
-                    if 0 <= cid < len(clusters):
-                        cluster = clusters[cid]
-                        target_sites = action.get("target_sites")
-                        if not target_sites:
-                            target_sites = _select_cluster_target_sites(assign, cluster, rid, site_to_region, sites_xy)
-                            action["target_sites"] = target_sites
-                        _apply_cluster_move(new_assign, cluster, target_sites)
-    
-                layout_state.assign = new_assign
-                sig2 = signature_for_assign(new_assign)
-                cached = eval_cache.get(sig2) if eval_cache is not None else None
-                if cached is None:
-                    eval_new = evaluator.evaluate(layout_state)
-                    if eval_cache is not None:
-                        eval_cache.put(sig2, dict(eval_new))
-                else:
-                    eval_new = dict(cached)
-                delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
-                delta_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
-                delta_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
-                accept = (delta < 0) or (math.exp(-delta / max(T, 1e-6)) > float(rng.random()))
-    
-                if accept:
-                    assign = new_assign
-                    eval_out = eval_new
-                    layout_state.assign = assign
-                    accepted_steps += 1
-                    added = pareto.add(
+                    pareto.add(
                         eval_out["comm_norm"],
                         eval_out["therm_norm"],
                         {
                             "assign": assign.copy(),
                             "total_scalar": eval_out["total_scalar"],
                             "stage": stage_label,
-                            "iter": step + 1,
+                            "iter": 0,
                             "seed": seed_id,
                         },
                     )
-                    tabu_signatures.append(op_signature)
-                    inverse_signatures.append(inverse_sig)
-                    for slot in _touched_slots(action):
-                        last_move_step_per_slot[int(slot)] = step
-                        if 0 <= int(slot) < len(assign):
-                            last_site_per_slot[int(slot)] = int(assign[int(slot)])
-                    if float(eval_out.get("total_scalar", best_total_seen)) < best_total_seen:
-                        best_total_seen = float(eval_out.get("total_scalar", best_total_seen))
-                        best_assign = assign.copy()
-                        best_eval = dict(eval_out)
-                    consecutive_queue_rejects = 0
-                else:
-                    layout_state.assign = assign
-                    added = False
-                    if action.get("candidate_id") is not None:
-                        cid = int(action.get("candidate_id"))
-                        failed_counts[cid] = failed_counts.get(cid, 0) + 1
-                        if failed_counts[cid] > 10:
-                            recent_failed_ids.add(cid)
-                    consecutive_queue_rejects += 1
-                    if consecutive_queue_rejects >= 6:
-                        refresh_due_to_rejects = True
     
-                T *= alpha
+                    best_total_seen = float(eval_out.get("total_scalar", 0.0))
+                    best_assign = assign.copy()
+                    best_eval = dict(eval_out)
+                    tabu_signatures: deque[str] = deque(maxlen=tabu_tenure)
+                    inverse_signatures: deque[str] = deque(maxlen=inverse_tenure)
+                    last_site_per_slot: Dict[int, int] = {int(i): int(assign[int(i)]) for i in range(len(assign))}
+                    last_move_step_per_slot: Dict[int, int] = {int(i): -10**6 for i in range(len(assign))}
     
-                assign_signature = signature_for_assign(assign)
-                time_ms = int((time.perf_counter() - step_start) * 1000)
-                writer.writerow(
-                    [
-                        step,
-                        stage_label,
-                        op,
-                        json.dumps(action),
-                        int(accept),
-                        eval_out["total_scalar"],
-                        eval_out["comm_norm"],
-                        eval_out["therm_norm"],
-                        int(added),
-                        eval_out["penalty"]["duplicate"],
-                        eval_out["penalty"]["boundary"],
-                        seed_id,
-                        time_ms,
-                        assign_signature,
-                        delta,
-                        delta_comm,
-                        delta_therm,
-                        tabu_hit,
-                        inverse_hit,
-                        cooldown_hit,
-                    ]
-                )
-                if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
-                    f_trace.flush()
-                if progress_every > 0 and step % progress_every == 0:
-                    heartbeat = {
-                        "step": int(step),
-                        "elapsed_s": float(time.time() - start_time),
-                        "cur_total": float(eval_out.get("total_scalar", 0.0)),
-                        "best_total": float(best_total_seen),
-                        "accept_rate": float(accepted_steps / max(1, step + 1)),
-                        "queue_len": int(len(action_queue)),
-                        "last_op": op,
-                        "temperature": float(T),
-                        "policy_switch_enabled": bool(use_ps),
-                        "policy_last_action_family": getattr(controller, "last_action_family", None),
-                        "policy_last_policy": getattr(controller, "last_policy", None),
-                        "cache_hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None,
-                    }
-                    with (out_dir / "heartbeat.json").open("w", encoding="utf-8") as hb_fp:
-                        json.dump(heartbeat, hb_fp, indent=2)
-                if save_every > 0 and step % save_every == 0:
-                    checkpoint = {
-                        "step": int(step),
-                        "assign": assign.tolist(),
-                        "best_assign": best_assign.tolist(),
-                        "best_eval": best_eval,
-                        "cur_eval": eval_out,
-                        "temperature": float(T),
-                        "recent_signatures": list(tabu_signatures),
-                    }
-                    with (out_dir / "checkpoint_state.json").open("w", encoding="utf-8") as ck_fp:
-                        json.dump(checkpoint, ck_fp, indent=2)
-                if controller is not None:
-                    improved = bool(accept) and float(delta) < 0.0
-                    controller.update(improved=improved, delta_total=float(delta))
+                def _touched_slots(act: Dict[str, Any]) -> List[int]:
+                    op_local = act.get("op")
+                    if op_local == "swap":
+                        return [int(act.get("i", -1)), int(act.get("j", -1))]
+                    if op_local == "relocate":
+                        return [int(act.get("i", -1))]
+                    if op_local == "cluster_move":
+                        cid = int(act.get("cluster_id", -1))
+                        if 0 <= cid < len(clusters):
+                            return [int(s) for s in clusters[cid].slots]
+                    return []
+        
+                def _apply_action_for_candidate(base_assign: np.ndarray, act: Dict[str, Any]) -> np.ndarray:
+                    new_assign = base_assign.copy()
+                    op_local = str(act.get("op", "none"))
+                    if op_local == "swap":
+                        _apply_swap(new_assign, int(act.get("i", 0)), int(act.get("j", 0)))
+                    elif op_local == "relocate":
+                        _apply_relocate(new_assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
+                    elif op_local == "cluster_move":
+                        cid = int(act.get("cluster_id", 0))
+                        rid = int(act.get("region_id", 0))
+                        if 0 <= cid < len(clusters):
+                            cluster = clusters[cid]
+                            target_sites = act.get("target_sites")
+                            if not target_sites:
+                                target_sites = _select_cluster_target_sites(new_assign, cluster, rid, site_to_region, sites_xy)
+                            _apply_cluster_move(new_assign, cluster, target_sites)
+                    return new_assign
+        
+                action_queue: List[Dict] = []
+                forbidden_history: List[List[int]] = []
+                failed_counts: Dict[int, int] = {}
+                recent_failed_ids: set[int] = set()
+                consecutive_queue_rejects = 0
+                queue_window_steps = int(_cfg_get(planner_cfg, "queue_window_steps", 30))
+                refresh_due_to_rejects = False
+                progress_every = int(_cfg_get(cfg, "progress_every", 10))
+                save_every = int(_cfg_get(cfg, "save_every", 50))
+                accepted_steps = 0
+        
+                for step in range(steps):
+                    step_start = time.perf_counter()
+                    forced_family = None
+                    forced_policy = None
+                    if controller is not None:
+                        forced_family = controller.choose_action_family()
+                        forced_policy = controller.choose_policy()
+        
+                    candidate_pool = build_candidate_pool(
+                        assign,
+                        eval_out,
+                        evaluator,
+                        layout_state,
+                        traffic_sym,
+                        sites_xy,
+                        site_to_region,
+                        regions,
+                        clusters,
+                        cluster_to_region,
+                        chip_tdp,
+                        cfg,
+                        rng,
+                        debug_out_path=(out_dir / "candidate_pool_debug.json") if step == 0 else None,
+                    )
+                    if forced_family:
+                        filtered = [
+                            c for c in candidate_pool if str(c.action.get("op", "")).lower() == forced_family.lower()
+                        ]
+                        if filtered:
+                            candidate_pool = filtered
+                    lookahead_scores: Dict[int, float] = {}
+                    if lookahead_enabled and len(candidate_pool) > 1:
+                        cand_infos: List[Dict[str, Any]] = []
+                        base_assign = assign.copy()
+                        for cand in candidate_pool:
+                            action_copy = copy.deepcopy(cand.action)
+                            action_copy.setdefault("signature", cand.signature)
+                            new_assign = _apply_action_for_candidate(base_assign, action_copy)
+                            sig1 = signature_for_assign(new_assign)
+                            cached = eval_cache.get(sig1) if eval_cache is not None else None
+                            if cached is None:
+                                layout_state.assign = new_assign
+                                eval_new = evaluator.evaluate(layout_state)
+                                if eval_cache is not None:
+                                    eval_cache.put(sig1, dict(eval_new))
+                            else:
+                                eval_new = dict(cached)
+                            d_total = float(eval_out["total_scalar"] - eval_new["total_scalar"])
+                            cand_infos.append(
+                                {
+                                    "candidate": cand,
+                                    "new_assign": new_assign,
+                                    "d_total": d_total,
+                                    "apply_fn": lambda base, act=action_copy: _apply_action_for_candidate(base, act),
+                                }
+                            )
+        
+                        cand_infos_sorted = sorted(cand_infos, key=lambda x: x["d_total"], reverse=True)
+                        top = cand_infos_sorted[: min(lookahead_topk, len(cand_infos_sorted))]
+        
+                        for ci in top:
+                            best2 = None
+                            for cj in top:
+                                if cj is ci:
+                                    continue
+                                assign2 = cj["apply_fn"](ci["new_assign"])
+                                sig2 = signature_for_assign(assign2)
+                                cached2 = eval_cache.get(sig2) if eval_cache is not None else None
+                                if cached2 is None:
+                                    layout_state.assign = assign2
+                                    eval2 = evaluator.evaluate(layout_state)
+                                    if eval_cache is not None:
+                                        eval_cache.put(sig2, dict(eval2))
+                                else:
+                                    eval2 = dict(cached2)
+                                d2 = float(eval_out["total_scalar"] - eval2["total_scalar"])
+                                if best2 is None or d2 > best2:
+                                    best2 = d2
+                            ci["lookahead_best_d2"] = float(best2) if best2 is not None else 0.0
+                            ci["lookahead_score"] = float(ci["d_total"]) + lookahead_beta * float(ci["lookahead_best_d2"])
+        
+                        for ci in cand_infos:
+                            if "lookahead_score" not in ci:
+                                ci["lookahead_score"] = float(ci["d_total"])
+                            cand = ci["candidate"]
+                            if isinstance(getattr(cand, "est", None), dict):
+                                cand.est["lookahead_score"] = float(ci["lookahead_score"])
+                            lookahead_scores[int(cand.id)] = float(ci["lookahead_score"])
+                        layout_state.assign = base_assign
+                    cand_map = {c.id: c for c in candidate_pool}
+                    candidate_ids = [c.id for c in candidate_pool]
+                    forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
+        
+                    use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+                    if forced_policy:
+                        if forced_policy.lower() == "heuristic":
+                            use_llm = False
+                        elif forced_policy.lower() == "llm":
+                            use_llm = planner_type in ("llm", "mixed") and llm_provider is not None
+                    need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
+                    refresh_due_to_rejects = False
+        
+                    if need_refresh:
+                        ss = build_state_summary(
+                            step,
+                            T,
+                            eval_out,
+                            traffic_sym,
+                            assign,
+                            site_to_region,
+                            chip_tdp,
+                            clusters,
+                            regions,
+                            candidate_pool,
+                            candidate_ids,
+                            forbidden_ids,
+                            k_actions,
+                        )
+                        raw_text = ""
+                        pick_ids: List[int] = []
+                        pick_types_count: Dict[str, int] = {}
+                        best_d_total = None
+                        try:
+                            pick_ids = llm_provider.propose_pick(ss, k_actions) or []
+                            for pid in pick_ids:
+                                cand = cand_map.get(pid)
+                                if cand:
+                                    pick_types_count[cand.type] = pick_types_count.get(cand.type, 0) + 1
+                                    if best_d_total is None or cand.est.get("d_total", 0) < best_d_total:
+                                        best_d_total = cand.est.get("d_total", 0)
+                        except Exception as e:
+                            if usage_fp:
+                                json.dump(
+                                    {
+                                        "event": "llm_step_failed",
+                                        "step": int(step),
+                                        "error": repr(e),
+                                        "raw_preview": raw_text[:200],
+                                    },
+                                    usage_fp,
+                                )
+                                usage_fp.write("\\n")
+                                usage_fp.flush()
+                        actions: List[Dict[str, Any]] = []
+                        if pick_ids:
+                            forbidden_history.append(pick_ids)
+                            if feasibility_check:
+                                actions = pick_ids_to_actions_sequential(
+                                    assign, pick_ids, cand_map, clusters, site_to_region, max_k=k_actions
+                                )
+                            else:
+                                for pid in pick_ids[:k_actions]:
+                                    cand = cand_map.get(pid)
+                                    if cand is None:
+                                        continue
+                                    action_copy = copy.deepcopy(cand.action)
+                                    action_copy.setdefault("signature", cand.signature)
+                                    actions.append(
+                                        {
+                                            **action_copy,
+                                            "candidate_id": pid,
+                                            "type": cand.type,
+                                            "signature": action_copy.get("signature", cand.signature),
+                                        }
+                                    )
+                        if usage_fp and hasattr(llm_provider, "last_usage"):
+                            usage = dict(getattr(llm_provider, "last_usage") or {})
+                            raw_text = str(usage.get("raw_preview", ""))
+                            usage.setdefault("ok", bool(pick_ids))
+                            usage.setdefault("n_pick", len(pick_ids))
+                            usage["pick_ids"] = pick_ids
+                            usage["picked_types"] = pick_types_count
+                            usage["best_d_total"] = best_d_total
+                            usage["n_queue_push"] = len(actions)
+                            usage["step"] = int(step)
+                            json.dump(usage, usage_fp)
+                            usage_fp.write("\\n")
+                            usage_fp.flush()
+                            expire_step = step + queue_window_steps
+                            if queue_enabled:
+                                for act in actions:
+                                    action_copy = copy.deepcopy(act)
+                                    if "signature" not in action_copy:
+                                        action_copy["signature"] = _signature_for_action(action_copy, assign)
+                                    action_queue.append({"action": action_copy, "expire": expire_step})
+                            elif actions:
+                                action_queue = [
+                                    {
+                                        "action": copy.deepcopy(actions[0]),
+                                        "expire": step,
+                                    }
+                                ]
+        
+                    action_queue = [a for a in action_queue if a.get("expire", step) >= step]
+                    fallback_candidates = [c for c in candidate_pool if c.id not in forbidden_ids]
+                    if lookahead_scores:
+                        fallback_candidates.sort(
+                            key=lambda c: float(lookahead_scores.get(int(c.id), 0.0)),
+                            reverse=True,
+                        )
+                    fallback_idx = 0
+        
+                    action = {"op": "none"}
+                    tabu_hit = inverse_hit = cooldown_hit = 0
+                    est_total_new = None
+                    op_signature = "none"
+                    inverse_sig = "none"
+                    max_attempts = max(5, len(action_queue) + len(fallback_candidates) + 3)
+        
+                    for _ in range(max_attempts):
+                        action_payload = None
+                        if action_queue:
+                            action_payload = action_queue.pop(0).get("action")
+                        elif fallback_idx < len(fallback_candidates):
+                            fb = fallback_candidates[fallback_idx]
+                            fallback_idx += 1
+                            action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
+                        else:
+                            action_payload = _sample_action(
+                                cfg,
+                                traffic_sym,
+                                site_to_region,
+                                regions,
+                                clusters,
+                                assign,
+                                sites_xy,
+                                chip_tdp,
+                                cluster_to_region,
+                                py_rng,
+                            )
+        
+                        action = copy.deepcopy(action_payload) if action_payload else {"op": "none"}
+                        op = str(action.get("op", "none"))
+                        if op == "relocate":
+                            action["from_site"] = int(assign[int(action.get("i", -1))])
+                        if op == "cluster_move":
+                            cid = int(action.get("cluster_id", -1))
+                            if 0 <= cid < len(clusters) and clusters[cid].slots:
+                                slot_id = int(clusters[cid].slots[0])
+                                if 0 <= slot_id < len(assign):
+                                    action["from_region"] = int(site_to_region[int(assign[slot_id])])
+                                if "target_sites" not in action:
+                                    action["target_sites"] = _select_cluster_target_sites(
+                                        assign, clusters[cid], int(action.get("region_id", -1)), site_to_region, sites_xy
+                                    )
+                        if "signature" not in action:
+                            action["signature"] = _signature_for_action(action, assign)
+                        op_signature = str(action.get("signature", "none"))
+                        inverse_sig = inverse_signature(action, assign)
+                        est_total_new = None
+                        cand_ref = None
+                        cid = action.get("candidate_id")
+                        cid_int = int(cid) if cid is not None else None
+                        if cid_int is not None and cid_int in cand_map:
+                            cand_ref = cand_map[int(cid_int)]
+                            est_total_new = cand_ref.est.get("total_new")
+                            action.setdefault("type", cand_ref.type)
+                            action.setdefault("signature", cand_ref.signature)
+        
+                        aspiration = est_total_new is not None and est_total_new < best_total_seen - aspiration_delta
+                        tabu_hit = 1 if op_signature in tabu_signatures else 0
+                        inverse_hit = 1 if op_signature in inverse_signatures else 0
+                        cooldown_hit = 0
+                        for slot in _touched_slots(action):
+                            if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
+                                cooldown_hit = 1
+                                break
+        
+                        if aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
+                            break
+                    op = str(action.get("op", "none"))
+        
+                    new_assign = assign.copy()
+                    if op == "swap":
+                        _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
+                    elif op == "relocate":
+                        _apply_relocate(new_assign, int(action.get("i", 0)), int(action.get("site_id", 0)))
+                    elif op == "cluster_move":
+                        cid = int(action.get("cluster_id", 0))
+                        rid = int(action.get("region_id", 0))
+                        if 0 <= cid < len(clusters):
+                            cluster = clusters[cid]
+                            target_sites = action.get("target_sites")
+                            if not target_sites:
+                                target_sites = _select_cluster_target_sites(assign, cluster, rid, site_to_region, sites_xy)
+                                action["target_sites"] = target_sites
+                            _apply_cluster_move(new_assign, cluster, target_sites)
+        
+                    layout_state.assign = new_assign
+                    sig2 = signature_for_assign(new_assign)
+                    cached = eval_cache.get(sig2) if eval_cache is not None else None
+                    if cached is None:
+                        eval_new = evaluator.evaluate(layout_state)
+                        if eval_cache is not None:
+                            eval_cache.put(sig2, dict(eval_new))
+                    else:
+                        eval_new = dict(cached)
+                    delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
+                    delta_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
+                    delta_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
+                    accept = (delta < 0) or (math.exp(-delta / max(T, 1e-6)) > float(rng.random()))
+        
+                    if accept:
+                        assign = new_assign
+                        eval_out = eval_new
+                        layout_state.assign = assign
+                        accepted_steps += 1
+                        added = pareto.add(
+                            eval_out["comm_norm"],
+                            eval_out["therm_norm"],
+                            {
+                                "assign": assign.copy(),
+                                "total_scalar": eval_out["total_scalar"],
+                                "stage": stage_label,
+                                "iter": step + 1,
+                                "seed": seed_id,
+                            },
+                        )
+                        tabu_signatures.append(op_signature)
+                        inverse_signatures.append(inverse_sig)
+                        for slot in _touched_slots(action):
+                            last_move_step_per_slot[int(slot)] = step
+                            if 0 <= int(slot) < len(assign):
+                                last_site_per_slot[int(slot)] = int(assign[int(slot)])
+                        if float(eval_out.get("total_scalar", best_total_seen)) < best_total_seen:
+                            best_total_seen = float(eval_out.get("total_scalar", best_total_seen))
+                            best_assign = assign.copy()
+                            best_eval = dict(eval_out)
+                        consecutive_queue_rejects = 0
+                    else:
+                        layout_state.assign = assign
+                        added = False
+                        if action.get("candidate_id") is not None:
+                            cid = int(action.get("candidate_id"))
+                            failed_counts[cid] = failed_counts.get(cid, 0) + 1
+                            if failed_counts[cid] > 10:
+                                recent_failed_ids.add(cid)
+                        consecutive_queue_rejects += 1
+                        if consecutive_queue_rejects >= 6:
+                            refresh_due_to_rejects = True
+        
+                    T *= alpha
+        
+                    assign_signature = signature_for_assign(assign)
+                    time_ms = int((time.perf_counter() - step_start) * 1000)
+                    writer.writerow(
+                        [
+                            step,
+                            stage_label,
+                            op,
+                            json.dumps(action),
+                            int(accept),
+                            eval_out["total_scalar"],
+                            eval_out["comm_norm"],
+                            eval_out["therm_norm"],
+                            int(added),
+                            eval_out["penalty"]["duplicate"],
+                            eval_out["penalty"]["boundary"],
+                            seed_id,
+                            time_ms,
+                            assign_signature,
+                            delta,
+                            delta_comm,
+                            delta_therm,
+                            tabu_hit,
+                            inverse_hit,
+                            cooldown_hit,
+                        ]
+                    )
+                    if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
+                        f_trace.flush()
+                    if progress_every > 0 and step % progress_every == 0:
+                        heartbeat = {
+                            "step": int(step),
+                            "elapsed_s": float(time.time() - start_time),
+                            "cur_total": float(eval_out.get("total_scalar", 0.0)),
+                            "best_total": float(best_total_seen),
+                            "accept_rate": float(accepted_steps / max(1, step + 1)),
+                            "queue_len": int(len(action_queue)),
+                            "last_op": op,
+                            "temperature": float(T),
+                            "policy_switch_enabled": bool(use_ps),
+                            "policy_last_action_family": getattr(controller, "last_action_family", None),
+                            "policy_last_policy": getattr(controller, "last_policy", None),
+                            "cache_hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None,
+                        }
+                        with (out_dir / "heartbeat.json").open("w", encoding="utf-8") as hb_fp:
+                            json.dump(heartbeat, hb_fp, indent=2)
+                    if save_every > 0 and step % save_every == 0:
+                        checkpoint = {
+                            "step": int(step),
+                            "assign": assign.tolist(),
+                            "best_assign": best_assign.tolist(),
+                            "best_eval": best_eval,
+                            "cur_eval": eval_out,
+                            "temperature": float(T),
+                            "recent_signatures": list(tabu_signatures),
+                        }
+                        with (out_dir / "checkpoint_state.json").open("w", encoding="utf-8") as ck_fp:
+                            json.dump(checkpoint, ck_fp, indent=2)
+                    if controller is not None:
+                        improved = bool(accept) and float(delta) < 0.0
+                        controller.update(improved=improved, delta_total=float(delta))
             finally:
                 f_trace.flush()
                 os.fsync(f_trace.fileno())

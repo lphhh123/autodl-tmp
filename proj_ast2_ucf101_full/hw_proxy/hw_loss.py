@@ -195,6 +195,7 @@ def compute_hw_loss(
     clamp_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
     clamp_mins = {"T": None, "E": None, "M": None, "C": None}
     invalid_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
+    hw_stats: Dict[str, float] = {}
 
     def _audit_min(tag: str, x):
         try:
@@ -232,13 +233,30 @@ def compute_hw_loss(
     ref_M_t = torch.tensor(ref_M, device=device, dtype=torch.float32)
     ref_C_t = torch.tensor(ref_C, device=device, dtype=torch.float32)
 
-    def _sanitize_no_reward(tag: str, x: torch.Tensor, ref_t: torch.Tensor) -> torch.Tensor:
+    def _sanitize_no_reward(tag: str, name: str, x: torch.Tensor, ref_t: torch.Tensor) -> torch.Tensor:
         # invalid = negative or non-finite -> replace with ref (NO reward)
         invalid = (x < 0) | (~torch.isfinite(x))
         try:
             invalid_counts[tag] = int(invalid.detach().cpu().item())
         except Exception:
             invalid_counts[tag] = 1
+        neg_mask = x < 0
+        if torch.any(neg_mask):
+            try:
+                neg_count = int(neg_mask.detach().sum().cpu().item())
+            except Exception:
+                neg_count = 1
+            hw_stats[name + "_neg_clamped"] = float(hw_stats.get(name + "_neg_clamped", 0.0)) + float(neg_count)
+            if hw_stats.get("_neg_proxy_warned", 0.0) == 0.0:
+                try:
+                    x_val = float(torch.min(x).detach().cpu().item())
+                except Exception:
+                    x_val = None
+                if x_val is None:
+                    print(f"[WARN] Negative proxy detected and clamped: {name}.")
+                else:
+                    print(f"[WARN] Negative proxy detected and clamped: {name}={x_val}.")
+                hw_stats["_neg_proxy_warned"] = 1.0
         y = torch.where(invalid, ref_t, x)
         # non-negative clamp (contract I4)
         y = torch.clamp(y, min=0.0)
@@ -246,10 +264,10 @@ def compute_hw_loss(
             raise AssertionError(f"[I4] negative {tag} remains after clamp")
         return y
 
-    latency_ms_safe = _sanitize_no_reward("T", latency_ms, ref_T_t)
-    energy_mj_safe = _sanitize_no_reward("E", energy_mj, ref_E_t)
-    mem_mb_safe = _sanitize_no_reward("M", mem_mb, ref_M_t)
-    comm_ms_safe = _sanitize_no_reward("C", comm_ms, ref_C_t)
+    latency_ms_safe = _sanitize_no_reward("T", "latency_ms", latency_ms, ref_T_t)
+    energy_mj_safe = _sanitize_no_reward("E", "energy_mj", energy_mj, ref_E_t)
+    mem_mb_safe = _sanitize_no_reward("M", "mem_mb", mem_mb, ref_M_t)
+    comm_ms_safe = _sanitize_no_reward("C", "comm_ms", comm_ms, ref_C_t)
 
     # strictly-positive tensors for ratios/logs (numerical), but NOTE:
     # invalid negatives were already mapped to ref => no artificial reward
@@ -417,7 +435,8 @@ def compute_hw_loss(
     # v5.4: area/layout 必须保持 Tensor（禁止 float(L_area) / float(L_layout)）
     L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout)
 
-    hw_stats = {
+    hw_stats.update(
+        {
         "latency_ms": float(latency_ms_pos.detach().cpu().item()),
         "energy_mj": float(energy_mj_pos.detach().cpu().item()),
         "mem_mb": float(mem_mb_pos.detach().cpu().item()),
@@ -437,10 +456,11 @@ def compute_hw_loss(
         "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
         "proxy_clamp_min_values": clamp_mins,
         "proxy_invalid_counts": invalid_counts,
-        "proxy_had_invalid": bool(
-            (invalid_counts["T"] + invalid_counts["E"] + invalid_counts["M"] + invalid_counts["C"]) > 0
-        ),
-    }
+            "proxy_had_invalid": bool(
+                (invalid_counts["T"] + invalid_counts["E"] + invalid_counts["M"] + invalid_counts["C"]) > 0
+            ),
+        }
+    )
     if chip_used_expected is not None:
         hw_stats["chip_used_expected"] = float(chip_used_expected.detach().cpu().item())
     if area_used_mm2 is not None:
