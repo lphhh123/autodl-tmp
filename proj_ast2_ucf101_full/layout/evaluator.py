@@ -1,4 +1,4 @@
-"""Layout evaluator shared by training-time and offline stages (SPEC v4.3.2 §5)."""
+"""Layout evaluator shared by training-time and offline stages (SPEC v5.4 §5)."""
 from __future__ import annotations
 
 import math

@@ -1,4 +1,4 @@
-"""Site generation utilities for discrete wafer layouts (SPEC v4.3.2 §4)."""
+"""Site generation utilities for discrete wafer layouts (SPEC v5.4 §4)."""
 from __future__ import annotations
 
 import math
@@ -18,7 +18,7 @@ def _square_grid_in_circle(
     half_extent = wafer_radius_mm
     x_vals = np.arange(-half_extent, half_extent + 1e-6, grid_pitch_mm)
     y_vals = np.arange(-half_extent, half_extent + 1e-6, grid_pitch_mm)
-    # deterministic ordering: iterate y outer, x inner (SPEC v4.3.2)
+    # deterministic ordering: iterate y outer, x inner (SPEC v5.4)
     for y in y_vals:
         for x in x_vals:
             if math.sqrt(x * x + y * y) <= wafer_radius_mm - 0.5 * max_diag_mm - margin_mm + 1e-9:

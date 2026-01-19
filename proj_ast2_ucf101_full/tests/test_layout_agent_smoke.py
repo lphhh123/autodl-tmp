@@ -11,7 +11,7 @@ import pytest
 
 def _write_layout_input(tmp: Path):
     layout_input = {
-        "layout_version": "v4.3.2",
+        "layout_version": "v5.4",
         "wafer": {"radius_mm": 50.0, "margin_mm": 1.0},
         "sites": {"method": "square_grid_in_circle", "pitch_mm": 20.0, "sites_xy": [[0, 0], [10, 0], [0, 10], [10, 10]]},
         "slots": {"S": 4, "tdp": [300, 300, 300, 300]},
@@ -26,7 +26,7 @@ def _write_layout_input(tmp: Path):
 def _write_cfg(tmp: Path):
     yaml_text = """
 layout_agent:
-  version: v4.3.2
+  version: v5.4
   seed_list: [0]
   export_trace: true
 objective:

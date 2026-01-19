@@ -1,4 +1,4 @@
-"""Pareto front utilities (SPEC v4.3.2 §8/§11)."""
+"""Pareto front utilities (SPEC v5.4 §8/§11)."""
 from __future__ import annotations
 
 from dataclasses import dataclass

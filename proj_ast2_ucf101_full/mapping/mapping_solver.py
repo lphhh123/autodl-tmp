@@ -278,7 +278,7 @@ class MappingSolver:
         num_slots: int | None = None,
         return_meta: bool = False,
     ) -> torch.Tensor:
-        """Aggregate inter-slot traffic for layout export (SPEC v4.3.2 §6.1).
+        """Aggregate inter-slot traffic for layout export (SPEC v5.4 §6.1).
 
         When ``num_slots`` is provided, a canonical (S,S) matrix aligned to
         slot ids ``0..S-1`` is returned. When omitted, a compact (U,U) matrix

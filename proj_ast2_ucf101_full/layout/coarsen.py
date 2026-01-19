@@ -1,4 +1,4 @@
-"""Greedy traffic-based clustering (SPEC v4.3.2 §8.2)."""
+"""Greedy traffic-based clustering (SPEC v5.4 §8.2)."""
 from __future__ import annotations
 
 from dataclasses import dataclass

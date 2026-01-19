@@ -58,14 +58,14 @@ def main() -> None:
     _assert_type("stable_hw.locked_acc_ref.freeze_epoch", locked.freeze_epoch, int)
     _assert_type("stable_hw.locked_acc_ref.prefer_dense_baseline", locked.prefer_dense_baseline, bool)
 
-    # controller canonical
+    # controller canonical (v5.4)
+    _assert_type("stable_hw.accuracy_guard.controller.mode", ctrl.mode, str)
     _assert_type("stable_hw.accuracy_guard.controller.metric", ctrl.metric, str)
-    _assert_type("stable_hw.accuracy_guard.controller.freeze_schedule_in_recovery", ctrl.freeze_schedule_in_recovery, bool)
-    _assert_type("stable_hw.accuracy_guard.controller.freeze_discrete_updates_in_recovery", ctrl.freeze_discrete_updates_in_recovery, bool)
-    _assert_type("stable_hw.accuracy_guard.controller.cut_hw_loss_on_violate", ctrl.cut_hw_loss_on_violate, bool)
-    _assert_type("stable_hw.accuracy_guard.controller.scale_lambda_hw", ctrl.scale_lambda_hw, (float, int))
-    _assert_type("stable_hw.accuracy_guard.controller.recovery_epochs", ctrl.recovery_epochs, int)
+    _assert_type("stable_hw.accuracy_guard.controller.epsilon_drop", ctrl.epsilon_drop, (float, int))
     _assert_type("stable_hw.accuracy_guard.controller.recovery_min_epochs", ctrl.recovery_min_epochs, int)
+    _assert_type("stable_hw.accuracy_guard.controller.cut_hw_loss_on_violate", ctrl.cut_hw_loss_on_violate, bool)
+    _assert_type("stable_hw.accuracy_guard.controller.freeze_discrete_updates", ctrl.freeze_discrete_updates, bool)
+    _assert_type("stable_hw.accuracy_guard.controller.freeze_schedule_in_recovery", ctrl.freeze_schedule_in_recovery, bool)
     _assert_type("stable_hw.accuracy_guard.controller.k_exit", ctrl.k_exit, int)
     _assert_type("stable_hw.accuracy_guard.controller.margin_exit", ctrl.margin_exit, (float, int))
 

@@ -1,4 +1,4 @@
-"""LLM planner interface and Volc Ark implementation (SPEC v4.3.2 §9)."""
+"""LLM planner interface and Volc Ark implementation (SPEC v5.4 §9)."""
 from __future__ import annotations
 
 import json

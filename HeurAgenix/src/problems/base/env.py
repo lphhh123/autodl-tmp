@@ -64,19 +64,27 @@ class BaseEnv:
         self._ensure_rec_fp()
         try:
             self._ensure_rec_fp()
+            init_action = {"op": "init"}
+            sig = None
+            try:
+                if hasattr(self.solution, "assign") and isinstance(getattr(self.solution, "assign"), (list, tuple)):
+                    sig = "assign:" + ",".join(map(str, getattr(self.solution, "assign")))
+            except Exception:
+                sig = None
+
             init_record = {
                 "iter": 0,
+                "stage": "init",
                 "op": "init",
-                "op_args": {},
-                "op_args_json": "{}",
+                "op_args": init_action,
+                "op_args_json": json.dumps(init_action, ensure_ascii=False),
                 "accepted": 1,
-                "solution_value": self.get_key_value(self.current_solution),
-                "time_ms": 0,
+                "signature": sig,
+                "key_value": float(self.get_key_value(self.solution)),
+                "solution_value": float(self.solution.get_solution_value()) if hasattr(self.solution, "get_solution_value") else None,
+                "time_ms": 0.0,
+                "timestamp": float(time.time()),
             }
-            if hasattr(self.current_solution, "assign"):
-                a = getattr(self.current_solution, "assign")
-                if isinstance(a, (list, tuple)):
-                    init_record["signature"] = "assign:" + ",".join(map(str, a))
             self._write_record(init_record)
         except Exception:
             pass

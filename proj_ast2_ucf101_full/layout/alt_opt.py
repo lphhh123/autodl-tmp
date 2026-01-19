@@ -1,4 +1,4 @@
-"""Alternate optimization between mapping and layout (SPEC v4.3.2 §8.7)."""
+"""Alternate optimization between mapping and layout (SPEC v5.4 §8.7)."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple

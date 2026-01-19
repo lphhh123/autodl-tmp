@@ -1,4 +1,4 @@
-"""HeurAgenix baseline wrapper for wafer layout (SPEC v4.3.2/4)."""
+"""HeurAgenix baseline wrapper for wafer layout (SPEC v5.4)."""
 from __future__ import annotations
 
 # --- bootstrap sys.path for both invocation styles ---
@@ -758,8 +758,8 @@ def _run_heuragenix_inprocess(
     env = Env(str(data_path))
 
     problem_size = int(getattr(env, "problem_size", None) or getattr(env, "S", None) or 1)
-    if max_steps is not None and int(max_steps) > 0:
-        env.max_steps = int(max_steps)
+    if max_steps is not None:
+        env.max_steps = max(0, int(max_steps))
     else:
         env.max_steps = max(1, int(float(iters_sf) * max(1, problem_size)))
 
@@ -945,14 +945,14 @@ def main() -> None:
     iters_sf = float(baseline_cfg.get("iterations_scale_factor", 2.0))
     max_steps = baseline_cfg.get("max_steps", None)
     S = int(infer_problem_size(layout_input))
-    if max_steps is not None and int(max_steps) > 0:
+    if max_steps is not None and int(max_steps) >= 0:
         max_steps = int(max_steps)
         iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
     else:
         max_steps = None
     effective_max_steps = (
         int(max_steps)
-        if max_steps is not None and int(max_steps) > 0
+        if max_steps is not None and int(max_steps) >= 0
         else int(max(1, round(float(iters_sf) * max(1, S))))
     )
 
@@ -1285,7 +1285,7 @@ def main() -> None:
     problem_size_eff = int(infer_problem_size(layout_input))
     effective_max_steps = (
         int(max_steps)
-        if (max_steps is not None and int(max_steps) > 0)
+        if (max_steps is not None and int(max_steps) >= 0)
         else int(max(1, round(float(iters_sf) * max(1, problem_size_eff))))
     )
     report = {
@@ -1301,7 +1301,7 @@ def main() -> None:
             # ★按“实际预算”写入，而不是 None->0
             "max_steps": effective_max_steps,
             # ★可选：把用户是否显式指定也写清楚，方便复盘
-            "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) > 0) else None,
+            "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else None,
             # v5.4 fairness: count actual evaluator calls
             "eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
         },

@@ -24,6 +24,7 @@ from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.stable_hw import (
     apply_accuracy_guard,
+    init_locked_acc_ref,
     init_hw_refs_from_baseline_stats,
     stable_hw_log_fields,
     stable_hw_schedule,
@@ -131,6 +132,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_state: Dict[str, Any] = {}
+    if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
+        init_locked_acc_ref(stable_hw_cfg, stable_state)
+        init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_state)
 
     best_acc = 0.0
     last_acc = 0.0
@@ -143,8 +147,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 epoch=epoch,
                 stable_hw_cfg=stable_hw_cfg,
                 stable_hw_state=stable_state,
-                val_acc1=prev_val,
-                train_acc1_ema=float(stable_state.get("train_acc1_ema", 0.0))
+                val_metric_or_none=prev_val,
+                has_val_this_epoch=False,
+                train_ema_or_none=float(stable_state.get("train_acc1_ema", 0.0))
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
@@ -222,15 +227,15 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 epoch=epoch,
                 stable_hw_cfg=stable_hw_cfg,
                 stable_hw_state=stable_state,
-                val_acc1=float(last_acc) if last_acc is not None else None,
-                train_acc1_ema=float(stable_state.get("train_acc1_ema", 0.0))
+                val_metric_or_none=float(last_acc) if last_acc is not None else None,
+                has_val_this_epoch=True,
+                train_ema_or_none=float(stable_state.get("train_acc1_ema", 0.0))
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
 
             # ---- v5.4: update HW ref via EMA if not from dense baseline ----
-            init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_state)
-            if stable_state.get("hw_ref_source", "") != "dense_baseline":
+            if not str(stable_state.get("hw_ref_source", "")).startswith("dense_baseline:"):
                 update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats or {})
         if metrics_path:
             metrics = {

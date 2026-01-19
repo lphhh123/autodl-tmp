@@ -1,4 +1,4 @@
-"""Assignment legalization utilities (SPEC v4.3.2 §8.5)."""
+"""Assignment legalization utilities (SPEC v5.4 §8.5)."""
 from __future__ import annotations
 
 import numpy as np
