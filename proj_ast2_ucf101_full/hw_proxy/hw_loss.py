@@ -165,7 +165,7 @@ def compute_hw_loss(
         energy_mj = torch.tensor(float(pred.get("energy_mj", 0.0)), device=device)
         comm_ms = torch.tensor(0.0, device=device)
 
-    norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg else None
+    norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
     if stable_hw_state is None:
         stable_hw_state = {}
     ref_T = float(stable_hw_state.get("ref_T", float(latency_ms.detach().item())))
@@ -203,29 +203,6 @@ def compute_hw_loss(
     stable_hw_state["ref_M"] = ref_M
     stable_hw_state["ref_C"] = ref_C
 
-    wT = float(getattr(norm_cfg, "wT", 0.2)) if norm_cfg else 0.0
-    wE = float(getattr(norm_cfg, "wE", 0.2)) if norm_cfg else 0.0
-    wM = float(getattr(norm_cfg, "wM", 0.4)) if norm_cfg else 0.0
-    wC = float(getattr(norm_cfg, "wC", 0.2)) if norm_cfg else 0.0
-
-    # ratios / hinge
-    rt = latency_ms_pos / ref_T
-    re = energy_mj_pos / ref_E
-    rm = mem_mb_pos / ref_M
-    rc = comm_ms_pos / ref_C
-
-    L_T = torch.clamp(rt - 1.0, min=0.0)
-    L_E = torch.clamp(re - 1.0, min=0.0)
-    L_M = torch.clamp(rm - 1.0, min=0.0)
-    L_C = torch.clamp(rc - 1.0, min=0.0)
-
-    L_hw_norm = wT * L_T + wE * L_E + wM * L_M + wC * L_C
-
-    t_term = L_T
-    e_term = L_E
-    m_term = L_M
-    c_term = L_C
-
     lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0))
     L_chip = torch.zeros((), device=device)
     chip_used_expected = None
@@ -256,7 +233,106 @@ def compute_hw_loss(
             distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
         )
 
-    L_hw = L_hw_norm + L_chip + L_area + L_layout
+    # ===== stable_hw.normalize: normalize terms by ref and apply hinge/log =====
+    norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
+    norm_enabled = bool(getattr(norm_cfg, "enabled", False)) if norm_cfg is not None else False
+
+    # defaults
+    mode = "hinge_log_ratio"
+    eps = 1e-6
+    clip_term_max = 10.0
+    mem_hinge_only = True
+    abs_ratio = False
+    wT = wE = wM = wC = 0.25
+    tT = tE = tM = tC = 1.0
+
+    if norm_cfg is not None:
+        # accept both "mode" (SPEC) and legacy "method"
+        mode = str(getattr(norm_cfg, "mode", getattr(norm_cfg, "method", mode)))
+        # accept both "eps" (SPEC) and legacy "clip_eps"
+        eps = float(getattr(norm_cfg, "eps", getattr(norm_cfg, "clip_eps", eps)))
+        clip_term_max = float(getattr(norm_cfg, "clip_term_max", clip_term_max))
+        mem_hinge_only = bool(getattr(norm_cfg, "mem_hinge_only", mem_hinge_only))
+        abs_ratio = bool(getattr(norm_cfg, "abs_ratio", abs_ratio))
+
+        # weights: accept nested weights dict or flattened wT/wE...
+        weights = getattr(norm_cfg, "weights", None)
+        if isinstance(weights, dict):
+            wT = float(weights.get("wT", wT))
+            wE = float(weights.get("wE", wE))
+            wM = float(weights.get("wM", wM))
+            wC = float(weights.get("wC", wC))
+        else:
+            wT = float(getattr(norm_cfg, "wT", wT))
+            wE = float(getattr(norm_cfg, "wE", wE))
+            wM = float(getattr(norm_cfg, "wM", wM))
+            wC = float(getattr(norm_cfg, "wC", wC))
+
+        # targets: accept nested ref dict or flattened target_ratio_*
+        ref = getattr(norm_cfg, "ref", None)
+        if isinstance(ref, dict):
+            tT = float(ref.get("target_ratio_T", tT))
+            tE = float(ref.get("target_ratio_E", tE))
+            tM = float(ref.get("target_ratio_M", tM))
+            tC = float(ref.get("target_ratio_C", tC))
+        else:
+            tT = float(getattr(norm_cfg, "target_ratio_T", tT))
+            tE = float(getattr(norm_cfg, "target_ratio_E", tE))
+            tM = float(getattr(norm_cfg, "target_ratio_M", tM))
+            tC = float(getattr(norm_cfg, "target_ratio_C", tC))
+
+    # helper: compute per-term penalty
+    def _term(x_pos: float, ref: float, target_ratio: float, do_hinge: bool) -> float:
+        # ratio >= 0 (x_pos already clamped before)
+        r = (float(x_pos) + eps) / (float(ref) + eps)
+        if abs_ratio:
+            r = abs(r)
+        # allow "ratio", "log_ratio", "hinge_ratio", "hinge_log_ratio"
+        if mode == "ratio":
+            v = r
+        elif mode == "log_ratio":
+            import math
+
+            v = math.log(max(eps, r))
+        elif mode == "hinge_ratio":
+            v = max(0.0, r - float(target_ratio))
+        else:
+            # default: hinge_log_ratio (SPEC v5.4)
+            import math
+
+            v = max(0.0, math.log(max(eps, r / max(eps, float(target_ratio)))))
+        if do_hinge:
+            v = max(0.0, v)
+        if clip_term_max is not None:
+            v = min(float(clip_term_max), float(v))
+        return float(v)
+
+    if norm_enabled:
+        # ref values come from cfg.hw.*_ref (you already define these)
+        T_ref = float(getattr(cfg.hw, "latency_ref_ms", 1.0))
+        E_ref = float(getattr(cfg.hw, "energy_ref_mj", 1.0))
+        M_ref = float(getattr(cfg.hw, "mem_ref_mb", 1.0))
+        C_ref = float(getattr(cfg.hw, "comm_ref_ms", 1.0))
+
+        latency_term = _term(latency_ms_pos, T_ref, tT, do_hinge=True)
+        energy_term = _term(energy_mj_pos, E_ref, tE, do_hinge=True)
+        # SPEC: mem can be hinge-only even if other terms are log-hinge
+        mem_term = _term(mem_mb_pos, M_ref, tM, do_hinge=bool(mem_hinge_only))
+        comm_term = _term(comm_ms_pos, C_ref, tC, do_hinge=True)
+
+        L_hw_norm = (wT * latency_term) + (wE * energy_term) + (wM * mem_term) + (wC * comm_term)
+    else:
+        # fallback (legacy behavior): already-positive values scaled by refs
+        T_ref = float(getattr(cfg.hw, "latency_ref_ms", 1.0))
+        E_ref = float(getattr(cfg.hw, "energy_ref_mj", 1.0))
+        M_ref = float(getattr(cfg.hw, "mem_ref_mb", 1.0))
+        C_ref = float(getattr(cfg.hw, "comm_ref_ms", 1.0))
+        L_hw_norm = (latency_ms_pos / max(eps, T_ref)) + (energy_mj_pos / max(eps, E_ref)) + (
+            mem_mb_pos / max(eps, M_ref)
+        ) + (comm_ms_pos / max(eps, C_ref))
+
+    # IMPORTANT (v5.4): the true HW loss used for optimization must include penalties
+    L_hw_total = float(L_hw_norm) + float(L_chip) + float(L_area) + float(L_layout)
 
     hw_stats = {
         "latency_ms": float(latency_ms_pos.detach().cpu().item()),
@@ -275,14 +351,6 @@ def compute_hw_loss(
         "ref_energy_mj": float(ref_E),
         "ref_mem_mb": float(ref_M),
         "ref_comm_ms": float(ref_C),
-        "t_term": float(t_term.detach().cpu().item()),
-        "e_term": float(e_term.detach().cpu().item()),
-        "m_term": float(m_term.detach().cpu().item()),
-        "c_term": float(c_term.detach().cpu().item()),
-        "L_hw_norm": float(L_hw_norm.detach().cpu().item()),
-        "L_chip": float(L_chip.detach().cpu().item()),
-        "L_area": float(L_area.detach().cpu().item()),
-        "L_layout": float(L_layout.detach().cpu().item()),
     }
     if chip_used_expected is not None:
         hw_stats["chip_used_expected"] = float(chip_used_expected.detach().cpu().item())
@@ -292,6 +360,17 @@ def compute_hw_loss(
     if layout_stats:
         hw_stats.update({f"layout_{k}": v for k, v in layout_stats.items()})
 
-    hw_stats["L_hw_norm"] = float(L_hw_norm.detach().cpu().item())
-    hw_stats["L_hw_total"] = float(L_hw.detach().cpu().item())
-    return L_hw_norm, hw_stats
+    hw_stats.update(
+        {
+            "L_hw_norm": float(L_hw_norm),
+            "L_chip": float(L_chip),
+            "L_area": float(L_area),
+            "L_layout": float(L_layout),
+            "L_hw_total": float(L_hw_total),
+            "stable_hw_norm_enabled": bool(norm_enabled),
+            "stable_hw_norm_mode": str(mode),
+        }
+    )
+
+    # return the TRUE objective term
+    return latency_ms_pos.new_tensor(L_hw_total), hw_stats

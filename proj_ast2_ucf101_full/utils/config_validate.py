@@ -230,8 +230,37 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _migrate_stable_hw_to_v5(cfg)
 
     stable_hw = get_nested(cfg, "stable_hw", {}) or {}
-    stable_hw_enabled = bool(stable_hw.get("enabled", False))
-    stable_hw["enabled"] = stable_hw_enabled
+
+    # v5.4: if stable_hw block exists but user didn't specify stable_hw.enabled, treat as enabled by default.
+    if isinstance(stable_hw, dict):
+        if "enabled" not in stable_hw:
+            stable_hw_enabled = True
+            stable_hw["enabled"] = True
+        else:
+            stable_hw_enabled = bool(stable_hw.get("enabled", False))
+            stable_hw["enabled"] = stable_hw_enabled
+
+        # canonical: stable_hw.accuracy_guard.controller.* (SPEC) -> mirror into legacy stable_hw.controller.*
+        ag = stable_hw.get("accuracy_guard", {}) or {}
+        if isinstance(ag, dict):
+            ctl = ag.get("controller")
+            if isinstance(ctl, dict) and ctl:
+                legacy_ctl = stable_hw.get("controller", {}) or {}
+                if not isinstance(legacy_ctl, dict):
+                    legacy_ctl = {}
+                legacy_ctl = {**legacy_ctl, **ctl}
+                stable_hw["controller"] = legacy_ctl
+                # metric alias
+                if "metric" in ctl and "metric_key" not in ag:
+                    ag["metric_key"] = str(ctl["metric"])
+                stable_hw["accuracy_guard"] = ag
+    else:
+        # object style
+        if not hasattr(stable_hw, "enabled"):
+            stable_hw.enabled = True
+            stable_hw_enabled = True
+        else:
+            stable_hw_enabled = bool(getattr(stable_hw, "enabled", False))
 
     # legacy -> v5.1 canonical mapping
     if isinstance(stable_hw, dict):
