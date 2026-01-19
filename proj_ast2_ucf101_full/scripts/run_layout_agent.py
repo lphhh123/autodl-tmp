@@ -13,6 +13,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 import csv
+import hashlib
 import json
 import random
 import time
@@ -331,6 +332,36 @@ def main():
         (out_dir / "config_resolved.yaml").write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
     except Exception:
         (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
+
+    # ---- run_manifest (v5.4) ----
+    from utils.run_manifest import write_run_manifest
+
+    layout_input_path = args.layout_input or getattr(cfg, "layout_input", None)
+    layout_hash = None
+    if layout_input_path:
+        try:
+            layout_hash = hashlib.sha256(Path(layout_input_path).read_bytes()).hexdigest()
+        except Exception:
+            layout_hash = None
+    detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+    extra = {
+        "repo_root": str(_PROJECT_ROOT),
+        "problem_name": "wafer_layout",
+        "layout_input_hash": layout_hash,
+        "steps": detailed_cfg.get("max_steps") if isinstance(detailed_cfg, dict) else None,
+        "budget": detailed_cfg.get("budget") if isinstance(detailed_cfg, dict) else None,
+    }
+    resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
+    manifest = write_run_manifest(
+        out_dir=out_dir,
+        cfg_resolved_text=resolved_text,
+        cfg_path=str(args.cfg),
+        argv=sys.argv,
+        seed=int(args.seed),
+        spec_version="v5.4",
+        extra=extra,
+    )
+    cfg.run_id = manifest["run_id"]
 
     # run meta
     meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}

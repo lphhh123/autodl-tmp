@@ -59,22 +59,31 @@ class StableHWState:
     guard_triggered: bool = False
 
 
-def stable_hw_log_fields(st: StableHWState) -> Dict[str, Any]:
+def _state_get(state: Any, key: str, default=None):
+    if isinstance(state, dict):
+        return state.get(key, default)
+    return getattr(state, key, default)
+
+
+def stable_hw_log_fields(st: Any) -> Dict[str, Any]:
     return {
-        "stable_hw_enabled": bool(st.enabled),
-        "lambda_hw_base": float(st.lambda_hw_base),
-        "lambda_hw_effective": float(st.lambda_hw_effective),
-        "allow_discrete_updates": bool(st.allow_discrete_updates),
-        "acc_ref": None if st.acc_ref is None else float(st.acc_ref),
-        "acc_ref_source": str(st.acc_ref_source),
-        "acc_used_last": None if st.acc_used_last is None else float(st.acc_used_last),
-        "in_recovery": bool(st.in_recovery),
-        "recovery_start_epoch": int(st.recovery_start_epoch),
-        "recovery_good_epochs": int(st.recovery_good_epochs),
-        "violation_epoch": int(st.violation_epoch),
-        "accuracy_guard_metric_mismatch": bool(st.metric_mismatch),
-        "acc_violation": bool(st.acc_violation),
-        "guard_triggered": bool(st.guard_triggered),
+        "stable_hw_enabled": bool(_state_get(st, "enabled", False)),
+        "lambda_hw_base": float(_state_get(st, "lambda_hw_base", 0.0) or 0.0),
+        "lambda_hw_effective": float(_state_get(st, "lambda_hw_effective", 0.0) or 0.0),
+        "allow_discrete_updates": bool(_state_get(st, "allow_discrete_updates", True)),
+        "acc_ref": _state_get(st, "acc_ref", None),
+        "acc_ref_source": str(_state_get(st, "acc_ref_source", "")),
+        "acc_used": _state_get(st, "acc_used", None),
+        "acc_used_source": str(_state_get(st, "acc_used_source", "")),
+        "guard_mode": str(_state_get(st, "guard_mode", "")),
+        "violate_streak": int(_state_get(st, "violate_streak", 0) or 0),
+        "recovery_left": int(_state_get(st, "recovery_left", 0) or 0),
+        "freeze_schedule_in_recovery": bool(_state_get(st, "freeze_schedule_in_recovery", False)),
+        "hw_ref_source": str(_state_get(st, "hw_ref_source", "")),
+        "ref_T": _state_get(st, "ref_T", None),
+        "ref_E": _state_get(st, "ref_E", None),
+        "ref_M": _state_get(st, "ref_M", None),
+        "ref_C": _state_get(st, "ref_C", None),
     }
 
 
@@ -99,36 +108,56 @@ def _load_baseline_acc(baseline_stats_path: str) -> Optional[float]:
     return None
 
 
-def stable_hw_schedule(cfg: Any, epoch: int, st: StableHWState) -> StableHWState:
+def _read_baseline_val_acc1_best(baseline_stats_path: str) -> Optional[float]:
+    return _load_baseline_acc(baseline_stats_path)
+
+
+def stable_hw_schedule(epoch: int, stable_hw_cfg, stable_hw_state: dict) -> float:
     """
     v5.4 NoDoubleScale:
       - schedule produces lambda_hw_base only
       - guard chooses lambda_hw_effective = 0 or base (no extra scaling)
     """
-    stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    enabled = bool(_get_nested(stable_hw_cfg, "enabled", False))
-    st.enabled = enabled
+    if stable_hw_state is None:
+        stable_hw_state = {}
+
+    enabled = bool(getattr(stable_hw_cfg, "enabled", False)) if stable_hw_cfg is not None else False
+    stable_hw_state["enabled"] = bool(enabled)
     if not enabled:
-        st.lambda_hw_base = float(_get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
-        st.lambda_hw_effective = st.lambda_hw_base
-        st.allow_discrete_updates = True
-        return st
+        stable_hw_state["lambda_hw_base"] = float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0)
+        stable_hw_state["lambda_hw_effective"] = float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0)
+        stable_hw_state["allow_discrete_updates"] = True
+        return float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0)
 
-    sched = _get_nested(stable_hw_cfg, "lambda_hw_schedule", {}) or {}
-    sched_enabled = bool(_cfg_get(sched, "enabled", True))
+    # v5.4: freeze schedule progression while in RECOVERY if requested
+    try:
+        guard_mode = stable_hw_state.get("guard_mode", None)
+        freeze_flag = bool(stable_hw_state.get("freeze_schedule_in_recovery", False))
+        if guard_mode == "RECOVERY" and freeze_flag and ("lambda_hw_base" in stable_hw_state):
+            # keep previous schedule_phase/lambda
+            return float(stable_hw_state.get("lambda_hw_base", 0.0))
+    except Exception:
+        pass
+
+    sched = getattr(stable_hw_cfg, "lambda_hw_schedule", None)
+    if isinstance(sched, dict):
+        sched_enabled = bool(sched.get("enabled", True))
+        warmup = int(sched.get("warmup_epochs", 5) or 0)
+        ramp = int(sched.get("ramp_epochs", 10) or 0)
+        lam_max = float(sched.get("lambda_hw_max", 0.0) or 0.0)
+        clamp_min = float(sched.get("clamp_min", 0.0) or 0.0)
+        clamp_max = float(sched.get("clamp_max", lam_max) or lam_max)
+    else:
+        sched_enabled = bool(getattr(sched, "enabled", True)) if sched is not None else True
+        warmup = int(getattr(sched, "warmup_epochs", 5)) if sched is not None else 5
+        ramp = int(getattr(sched, "ramp_epochs", 10)) if sched is not None else 10
+        lam_max = float(getattr(sched, "lambda_hw_max", 0.0) or 0.0) if sched is not None else 0.0
+        clamp_min = float(getattr(sched, "clamp_min", 0.0) or 0.0) if sched is not None else 0.0
+        clamp_max = float(getattr(sched, "clamp_max", lam_max) or lam_max) if sched is not None else lam_max
+
     if not sched_enabled:
-        st.lambda_hw_base = float(_get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
-        return st
-
-    warmup = int(_cfg_get(sched, "warmup_epochs", 5))
-    ramp = int(_cfg_get(sched, "ramp_epochs", 10))
-    lam_max = float(_cfg_get(sched, "lambda_hw_max", 0.0) or 0.0)
-
-    # freeze schedule if in recovery and controller requests it
-    ctrl = _get_nested(stable_hw_cfg, "accuracy_guard.controller", {}) or _get_nested(stable_hw_cfg, "controller", {}) or {}
-    freeze_in_rec = bool(_cfg_get(ctrl, "freeze_schedule_in_recovery", True))
-    if freeze_in_rec and st.in_recovery:
-        return st
+        stable_hw_state.setdefault("lambda_hw_base", 0.0)
+        return float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0)
 
     if epoch < warmup:
         lam = 0.0
@@ -138,139 +167,278 @@ def stable_hw_schedule(cfg: Any, epoch: int, st: StableHWState) -> StableHWState
             lam = lam_max
         else:
             lam = lam_max * min(1.0, max(0.0, float(t) / float(ramp)))
-    st.lambda_hw_base = float(max(0.0, lam))
-    return st
+    lam = max(float(clamp_min), min(float(clamp_max), float(lam)))
+    stable_hw_state["lambda_hw_base"] = float(lam)
+    return float(lam)
 
 
-def apply_accuracy_guard(cfg: Any, epoch: int, metrics: Dict[str, Any], st: StableHWState) -> StableHWState:
-    """
-    v5.4 Acc-First Hard Gating:
-      - if acc drops beyond epsilon_drop vs locked acc_ref:
-          lambda_hw_effective = 0
-          allow_discrete_updates = False (freeze rho/segments)
-      - NoDrift: acc_ref is locked once initialized (baseline_file preferred)
-      - NoDoubleScale: do NOT rescale lambda_hw; only choose 0 or base
-    """
-    stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    enabled = bool(_get_nested(stable_hw_cfg, "enabled", False))
-    st.enabled = enabled
-
-    # defaults if disabled
-    if not enabled:
-        st.lambda_hw_effective = float(_get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
-        st.allow_discrete_updates = True
-        st.in_recovery = False
-        st.acc_violation = False
-        st.guard_triggered = False
-        return st
-
-    guard = _get_nested(stable_hw_cfg, "accuracy_guard", {}) or {}
-    guard_enabled = bool(_cfg_get(guard, "enabled", True))
-    ctrl = _get_nested(guard, "controller", {}) or _get_nested(stable_hw_cfg, "controller", {}) or {}
-
-    mode = str(_cfg_get(ctrl, "mode", "hard"))
-    metric_ctrl = str(_cfg_get(ctrl, "metric", "val_acc1"))
-    metric_top = guard.get("metric", None)
-    if metric_top is not None and str(metric_top) != metric_ctrl:
-        st.metric_mismatch = True
-
-    # pick metric value
-    acc_used = None
-    if metric_ctrl in metrics:
-        acc_used = metrics.get(metric_ctrl)
-    elif "val_acc1" in metrics:
-        acc_used = metrics.get("val_acc1")
-    elif "acc1" in metrics:
-        acc_used = metrics.get("acc1")
+def _update_warmup_best_value(state: dict, acc: float) -> None:
+    """Track best val acc during warmup; stored as warmup_best_val_acc1."""
+    if acc is None:
+        return
     try:
-        acc_used = float(acc_used) if acc_used is not None else None
+        acc_f = float(acc)
     except Exception:
-        acc_used = None
-    st.acc_used_last = acc_used
+        return
+    prev = state.get("warmup_best_val_acc1", None)
+    if prev is None or acc_f > float(prev):
+        state["warmup_best_val_acc1"] = acc_f
 
-    # initialize locked acc_ref
-    locked = _get_nested(stable_hw_cfg, "locked_acc_ref", {}) or {}
-    baseline_stats_path = str(_cfg_get(locked, "baseline_stats_path", "") or "")
-    freeze_epoch = int(_cfg_get(locked, "freeze_epoch", 0) or 0)
 
-    if st.acc_ref is None and acc_used is not None and epoch >= freeze_epoch:
-        base_acc = _load_baseline_acc(baseline_stats_path)
-        if base_acc is not None:
-            st.acc_ref = float(base_acc)
-            st.acc_ref_source = "baseline_file"
+def apply_accuracy_guard(
+    epoch: int,
+    stable_hw_cfg,
+    stable_hw_state: dict,
+    *,
+    val_acc1: float | None,
+    train_acc1_ema: float | None,
+) -> dict:
+    """
+    v5.4 Acc-First Hard Gating + LockedAccRef + NoDrift:
+      - acc_used := val_acc1 (preferred). If missing, fallback to last seen val or train_ema only if allowed.
+      - acc_ref locked: dense_baseline (preferred) OR warmup_best (frozen after warmup).
+      - when violated: lambda_hw_effective=0 (or scaled), freeze discrete updates, optionally freeze schedule.
+    """
+    state = stable_hw_state
+    state["epoch"] = int(epoch)
+
+    # ---- read cfg knobs (canonical paths) ----
+    guard_cfg = getattr(stable_hw_cfg, "accuracy_guard", None)
+    locked_cfg = getattr(stable_hw_cfg, "locked_acc_ref", None)
+    controller = None
+    if guard_cfg is not None:
+        controller = getattr(guard_cfg, "controller", None)
+    if controller is None:
+        controller = getattr(stable_hw_cfg, "controller", None)  # legacy fallback
+
+    # defaults
+    epsilon_drop = float(getattr(guard_cfg, "epsilon_drop", 0.01)) if guard_cfg is not None else 0.01
+    allow_train_ema_fallback = bool(getattr(stable_hw_cfg, "allow_train_ema_fallback", True))
+
+    metric_key = "val_acc1"
+    if guard_cfg is not None:
+        metric_key = str(getattr(guard_cfg, "metric_key", "val_acc1"))
+
+    freeze_schedule_in_recovery = True
+    freeze_discrete_in_recovery = True
+    cut_hw_loss_on_violate = True
+    scale_lambda_hw = 0.0
+    recovery_epochs = 1
+    recovery_min_epochs = 1
+    k_exit = 1
+    margin_exit = 0.0
+
+    if controller is not None:
+        freeze_schedule_in_recovery = bool(getattr(controller, "freeze_schedule_in_recovery", True))
+        freeze_discrete_in_recovery = bool(getattr(controller, "freeze_discrete_updates_in_recovery", True))
+        # also accept legacy name
+        if hasattr(controller, "freeze_discrete_updates"):
+            freeze_discrete_in_recovery = bool(getattr(controller, "freeze_discrete_updates"))
+        cut_hw_loss_on_violate = bool(getattr(controller, "cut_hw_loss_on_violate", True))
+        scale_lambda_hw = float(getattr(controller, "scale_lambda_hw", 0.0))
+        recovery_epochs = int(getattr(controller, "recovery_epochs", 1))
+        recovery_min_epochs = int(getattr(controller, "recovery_min_epochs", 1))
+        k_exit = int(getattr(controller, "k_exit", 1))
+        margin_exit = float(getattr(controller, "margin_exit", 0.0))
+
+    # ---- choose acc_used with explicit source ----
+    acc_used = None
+    acc_source = "none"
+
+    # 1) val_acc1 now
+    if metric_key == "val_acc1" and val_acc1 is not None:
+        acc_used = float(val_acc1)
+        acc_source = "val"
+
+    # 2) fallback to last val
+    if acc_used is None and metric_key == "val_acc1" and state.get("val_acc1_last", None) is not None:
+        acc_used = float(state["val_acc1_last"])
+        acc_source = "val_last"
+
+    # 3) train ema fallback (only if allowed)
+    if acc_used is None and allow_train_ema_fallback and train_acc1_ema is not None:
+        acc_used = float(train_acc1_ema)
+        acc_source = "train_ema"
+
+    state["acc_used"] = acc_used
+    state["acc_used_source"] = acc_source
+
+    # keep last val for next epoch gating
+    if val_acc1 is not None:
+        state["val_acc1_last"] = float(val_acc1)
+
+    # ---- ensure acc_ref locked (NoDrift) ----
+    acc_ref = state.get("acc_ref", None)
+    acc_ref_source = state.get("acc_ref_source", None)
+
+    # (a) dense baseline preferred (LockedAccRef)
+    prefer_dense = True
+    freeze_epoch = int(getattr(locked_cfg, "freeze_epoch", 0)) if locked_cfg is not None else 0
+    baseline_stats_path = None
+    if locked_cfg is not None:
+        prefer_dense = bool(getattr(locked_cfg, "prefer_dense_baseline", True))
+        baseline_stats_path = getattr(locked_cfg, "baseline_stats_path", None)
+    if baseline_stats_path is None and guard_cfg is not None:
+        baseline_stats_path = getattr(guard_cfg, "baseline_stats_path", None)
+
+    if acc_ref is None and prefer_dense and baseline_stats_path:
+        v = _read_baseline_val_acc1_best(baseline_stats_path)
+        if v is not None:
+            acc_ref = float(v)
+            acc_ref_source = "dense_baseline"
+            state["acc_ref"] = acc_ref
+            state["acc_ref_source"] = acc_ref_source
+
+    # (b) warmup_best: track during warmup then freeze after warmup
+    if acc_used is not None:
+        # warmup tracking always safe
+        _update_warmup_best_value(state, acc_used)
+
+    if acc_ref is None:
+        # if epoch >= freeze_epoch and we have warmup best, lock it
+        if epoch >= int(freeze_epoch) and state.get("warmup_best_val_acc1", None) is not None:
+            acc_ref = float(state["warmup_best_val_acc1"])
+            acc_ref_source = "warmup_best"
+            state["acc_ref"] = acc_ref
+            state["acc_ref_source"] = acc_ref_source
+
+    # ---- decide guard mode ----
+    guard_mode = state.get("guard_mode", "WARMUP")
+    violate = False
+    if acc_used is not None and acc_ref is not None:
+        violate = (acc_used < (float(acc_ref) - float(epsilon_drop)))
+
+    # streak bookkeeping
+    streak = int(state.get("violate_streak", 0))
+    if violate:
+        streak += 1
+    else:
+        streak = 0
+    state["violate_streak"] = streak
+
+    # ---- transition ----
+    if violate:
+        guard_mode = "RECOVERY"
+        state["recovery_left"] = max(int(recovery_epochs), int(recovery_min_epochs))
+    else:
+        # exit recovery only after k_exit consecutive safe epochs
+        safe_streak = int(state.get("safe_streak", 0))
+        safe_streak = safe_streak + 1
+        state["safe_streak"] = safe_streak
+        if guard_mode == "RECOVERY":
+            if safe_streak >= int(k_exit) and (acc_used >= (float(acc_ref) - float(margin_exit))):
+                guard_mode = "NORMAL"
         else:
-            # v5.4 fallback: lock to first observed val metric (NO DRIFT)
-            st.acc_ref = float(acc_used)
-            st.acc_ref_source = "first_val"
+            guard_mode = "NORMAL"
 
-    # if guard disabled: just pass through base
-    if not guard_enabled or st.acc_ref is None or acc_used is None:
-        st.lambda_hw_effective = float(st.lambda_hw_base)
-        st.allow_discrete_updates = True
-        st.acc_violation = False
-        st.guard_triggered = False
-        return st
+    if guard_mode != "RECOVERY":
+        state["recovery_left"] = 0
 
-    eps_drop = float(_cfg_get(ctrl, "epsilon_drop", 0.01))
-    eps_type = str(_cfg_get(ctrl, "epsilon_drop_type", "abs"))
-    if eps_type != "abs":
-        # only abs is supported in v5.4; fallback to abs
-        eps_type = "abs"
+    state["guard_mode"] = guard_mode
 
-    # violation check (abs drop)
-    drop = float(st.acc_ref - acc_used)
-    violated = drop > eps_drop
-    st.acc_violation = bool(violated)
+    # ---- apply hard gating to lambda_hw ----
+    lambda_hw_base = float(state.get("lambda_hw_base", 0.0))
+    lambda_hw_eff = lambda_hw_base
 
-    cut_hw = bool(_cfg_get(ctrl, "cut_hw_loss_on_violate", True))
-    freeze_rho = bool(_cfg_get(ctrl, "freeze_rho_on_violate", True))
-
-    # recovery policy
-    rec_min = int(_cfg_get(ctrl, "recovery_min_epochs", 3))
-    k_exit = int(_cfg_get(ctrl, "k_exit", 2))
-    margin_exit = float(_cfg_get(ctrl, "margin_exit", 0.002))
-
-    # enter recovery
-    if violated and (mode == "hard"):
-        st.in_recovery = True
-        st.violation_epoch = int(epoch)
-        if st.recovery_start_epoch < 0:
-            st.recovery_start_epoch = int(epoch)
-        st.recovery_good_epochs = 0
-
-        st.lambda_hw_effective = 0.0 if cut_hw else float(st.lambda_hw_base)
-        st.allow_discrete_updates = False if freeze_rho else True
-        st.guard_triggered = True
-        return st
-
-    # if already in recovery, test exit conditions
-    if st.in_recovery:
-        # good if we are within (eps_drop - margin_exit)
-        good = (st.acc_ref - acc_used) <= max(0.0, eps_drop - margin_exit)
-        if good:
-            st.recovery_good_epochs += 1
+    if guard_mode == "RECOVERY":
+        if cut_hw_loss_on_violate:
+            lambda_hw_eff = 0.0
         else:
-            st.recovery_good_epochs = 0
+            lambda_hw_eff = float(scale_lambda_hw) * float(lambda_hw_base)
 
-        in_rec_epochs = epoch - st.recovery_start_epoch + 1 if st.recovery_start_epoch >= 0 else 0
-        if in_rec_epochs >= rec_min and st.recovery_good_epochs >= k_exit:
-            # exit
-            st.in_recovery = False
-            st.recovery_start_epoch = -1
-            st.recovery_good_epochs = 0
-            st.guard_triggered = False
-            st.lambda_hw_effective = float(st.lambda_hw_base)
-            st.allow_discrete_updates = True
-            return st
+    state["lambda_hw_effective"] = float(lambda_hw_eff)
 
-        # still recovering
-        st.lambda_hw_effective = 0.0 if cut_hw else float(st.lambda_hw_base)
-        st.allow_discrete_updates = False if freeze_rho else True
-        st.guard_triggered = True
-        return st
+    # ---- publish discrete update permission (trainer reads this) ----
+    allow_discrete_updates = True
+    if guard_mode == "RECOVERY" and freeze_discrete_in_recovery:
+        allow_discrete_updates = False
+    state["allow_discrete_updates"] = bool(allow_discrete_updates)
 
-    # normal (not violated, not in recovery)
-    st.lambda_hw_effective = float(st.lambda_hw_base)
-    st.allow_discrete_updates = True
-    st.guard_triggered = False
-    return st
+    # ---- publish schedule freeze hint ----
+    state["freeze_schedule_in_recovery"] = bool(freeze_schedule_in_recovery)
+
+    return state
+
+
+def update_hw_refs_from_stats(stable_hw_cfg, state: dict, hw_stats: dict) -> None:
+    if not isinstance(state, dict) or not isinstance(hw_stats, dict):
+        return
+    norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
+    beta = float(getattr(norm_cfg, "ref_ema_beta", 0.95)) if norm_cfg is not None else 0.95
+    eps = float(getattr(norm_cfg, "eps", 1e-6)) if norm_cfg is not None else 1e-6
+
+    def _update(key: str, value_key: str) -> None:
+        raw_val = hw_stats.get(value_key, None)
+        if raw_val is None:
+            return
+        try:
+            v = float(raw_val)
+        except Exception:
+            return
+        v = max(float(eps), v)
+        prev = state.get(key, None)
+        try:
+            prev_f = float(prev) if prev is not None else None
+        except Exception:
+            prev_f = None
+        if prev_f is None:
+            state[key] = v
+        else:
+            state[key] = float(beta * prev_f + (1.0 - beta) * v)
+
+    _update("ref_T", "latency_ms")
+    _update("ref_E", "energy_mj")
+    _update("ref_M", "mem_mb")
+    _update("ref_C", "comm_ms")
+    state.setdefault("hw_ref_source", "ema")
+
+
+def init_hw_refs_from_baseline_stats(stable_hw_cfg, state: dict) -> None:
+    """Initialize ref_T/E/M/C from dense baseline stats if present."""
+    if not isinstance(state, dict):
+        return
+    guard_cfg = getattr(stable_hw_cfg, "accuracy_guard", None)
+    locked_cfg = getattr(stable_hw_cfg, "locked_acc_ref", None)
+
+    path = None
+    if locked_cfg is not None:
+        path = getattr(locked_cfg, "baseline_stats_path", None)
+    if not path and guard_cfg is not None:
+        path = getattr(guard_cfg, "baseline_stats_path", None)
+    if not path:
+        return
+
+    import json
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            j = json.load(f)
+    except Exception:
+        return
+
+    def _pick(keys, default=None):
+        for k in keys:
+            if k in j and j[k] is not None:
+                try:
+                    return float(j[k])
+                except Exception:
+                    pass
+        return default
+
+    # accept multiple common key names
+    T = _pick(["ref_T", "ref_latency_ms", "latency_ref_ms", "ref_latency", "latency_ms"])
+    E = _pick(["ref_E", "ref_energy_mj", "energy_ref_mj", "energy_mj"])
+    M = _pick(["ref_M", "ref_mem_mb", "mem_ref_mb", "peak_mem_mb", "mem_mb"])
+    C = _pick(["ref_C", "ref_comm_ms", "comm_ref_ms", "comm_ms"])
+
+    if T is not None:
+        state["ref_T"] = float(max(1e-6, T))
+    if E is not None:
+        state["ref_E"] = float(max(1e-6, E))
+    if M is not None:
+        state["ref_M"] = float(max(1e-6, M))
+    if C is not None:
+        state["ref_C"] = float(max(1e-6, C))
+
+    # lock refs if baseline provided
+    if any(v is not None for v in [T, E, M, C]):
+        state["hw_ref_source"] = "dense_baseline"

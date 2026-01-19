@@ -126,8 +126,56 @@ def _migrate_stable_hw_to_v5(cfg: Any) -> None:
         metric = "val_acc1"
     guard["metric"] = str(metric)
 
+    # ---- v5.4 hard migrations (must not crash) ----
+
+    # 1) locked_acc_ref: allow bool -> dict
+    locked = stable_hw.get("locked_acc_ref", None)
+    if isinstance(locked, bool):
+        stable_hw["locked_acc_ref"] = {
+            "enabled": bool(locked),
+            "freeze_epoch": int(stable_hw.get("warmup_epochs", 0) or 0),
+            "prefer_dense_baseline": True,
+            "baseline_stats_path": "",
+        }
+
+    # 2) normalize: keep SPEC key "mode", but also allow legacy "method"
+    norm = stable_hw.get("normalize", None)
+    if isinstance(norm, dict):
+        if "mode" not in norm and "method" in norm:
+            norm["mode"] = norm["method"]
+        if "method" not in norm and "mode" in norm:
+            norm["method"] = norm["mode"]
+        if "eps" not in norm and "clip_eps" in norm:
+            norm["eps"] = norm["clip_eps"]
+
+    # 3) accuracy_guard schema: accept legacy on_violate -> controller
+    guard = stable_hw.get("accuracy_guard", None)
+    if isinstance(guard, dict):
+        # metric_key default
+        if "metric_key" not in guard and "metric" in guard:
+            # metric="acc1" is display; internal default should be val_acc1
+            guard["metric_key"] = "val_acc1"
+        if "metric" not in guard:
+            guard["metric"] = "acc1"
+
+        # move on_violate -> controller if controller missing
+        if "controller" not in guard and isinstance(guard.get("on_violate", None), dict):
+            ov = guard["on_violate"]
+            guard["controller"] = {
+                "metric": "val_acc1",
+                "freeze_schedule_in_recovery": True,
+                "freeze_discrete_updates_in_recovery": bool(ov.get("freeze_discrete_updates", True)),
+                "cut_hw_loss_on_violate": True,
+                "scale_lambda_hw": float(ov.get("scale_lambda_hw", 0.0)),
+                "recovery_epochs": int(ov.get("recovery_epochs", 1)),
+                "recovery_min_epochs": int(ov.get("min_recovery_epochs", 1)),
+                "k_exit": 1,
+                "margin_exit": 0.0,
+            }
+
     stable_hw["accuracy_guard"] = guard
     cfg["stable_hw"] = stable_hw
+    return stable_hw
 
 
 def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
@@ -336,6 +384,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     stable_hw["normalize"] = norm
     norm.setdefault("enabled", True)
     norm.setdefault("method", "hinge_log_ratio")
+    norm.setdefault("mode", str(norm.get("method", "hinge_log_ratio")))
     norm.setdefault("clip_eps", 1e-6)
     norm.setdefault("clip_term_max", 10.0)
     norm.setdefault("mem_hinge_only", True)

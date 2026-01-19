@@ -13,6 +13,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -954,6 +955,33 @@ def main() -> None:
         if max_steps is not None and int(max_steps) > 0
         else int(max(1, round(float(iters_sf) * max(1, S))))
     )
+
+    # ---- run_manifest (v5.4) ----
+    from utils.run_manifest import write_run_manifest
+
+    layout_hash = None
+    try:
+        layout_hash = hashlib.sha256(layout_input_path.read_bytes()).hexdigest()
+    except Exception:
+        layout_hash = None
+    resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
+    extra = {
+        "repo_root": str(_PROJECT_ROOT),
+        "problem_name": str(baseline_cfg.get("problem", "wafer_layout")),
+        "layout_input_hash": layout_hash,
+        "steps": int(effective_max_steps),
+        "budget": int(rollout_budget),
+    }
+    manifest = write_run_manifest(
+        out_dir=out_dir,
+        cfg_resolved_text=resolved_text,
+        cfg_path=str(args.cfg),
+        argv=sys.argv,
+        seed=int(args.seed),
+        spec_version="v5.4",
+        extra=extra,
+    )
+    cfg.run_id = manifest["run_id"]
 
     output_root = internal_out / "output"
 

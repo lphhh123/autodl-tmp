@@ -31,7 +31,13 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.stable_hw import apply_accuracy_guard, stable_hw_log_fields, stable_hw_schedule
+from utils.stable_hw import (
+    apply_accuracy_guard,
+    init_hw_refs_from_baseline_stats,
+    stable_hw_log_fields,
+    stable_hw_schedule,
+    update_hw_refs_from_stats,
+)
 
 # v5 StableHW: allow_discrete_updates gates ALL discrete signature changes.
 # Discrete updates include: partition updates, device mapping updates, layout optimize updates,
@@ -656,11 +662,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             )
             if has_any_acc_source:
                 apply_accuracy_guard(
-                    outer,
-                    stable_hw_cfg,
-                    stable_hw_state,
-                    None,
-                    has_val_this_epoch=False,
+                    epoch=outer,
+                    stable_hw_cfg=stable_hw_cfg,
+                    stable_hw_state=stable_hw_state,
+                    val_acc1=None,
                     train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
                     if stable_hw_state.get("train_acc1_ema") is not None
                     else None,
@@ -1026,15 +1031,21 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         )
         if stable_hw_enabled:
             apply_accuracy_guard(
-                outer,
-                stable_hw_cfg,
-                stable_hw_state,
-                float(val_acc1) if val_acc1 is not None else None,
-                has_val_this_epoch=(val_acc1 is not None),
+                epoch=outer,
+                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_state=stable_hw_state,
+                val_acc1=float(val_acc1) if val_acc1 is not None else None,
                 train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
                 if stable_hw_state.get("train_acc1_ema") is not None
                 else None,
             )
+
+        # ---- v5.4: update HW ref via EMA if not from dense baseline ----
+        if stable_hw_enabled:
+            init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_hw_state)
+            if stable_hw_state.get("hw_ref_source", "") != "dense_baseline":
+                # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
+                update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
         last_acc1 = float(val_acc1)
         best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
 
