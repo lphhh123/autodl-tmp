@@ -957,8 +957,10 @@ def main() -> None:
     internal_out = out_dir / "heuragenix_internal"
     internal_out.mkdir(parents=True, exist_ok=True)
     internal_data_root = internal_out / "data"
+    internal_data_root.mkdir(parents=True, exist_ok=True)
+    (internal_data_root / problem / "test_data").mkdir(parents=True, exist_ok=True)
+    (internal_out / problem).mkdir(parents=True, exist_ok=True)
     internal_data_base = internal_data_root
-    (internal_data_base / problem / "test_data").mkdir(parents=True, exist_ok=True)
     work_dir, case_name, case_file = _prepare_work_dir(
         out_dir,
         heuragenix_root,
