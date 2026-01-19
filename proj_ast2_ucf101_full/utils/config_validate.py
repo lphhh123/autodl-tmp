@@ -358,4 +358,17 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     except Exception:
         pass
 
+    # ===== v5.4 NoDoubleScale: when stable_hw is enabled, legacy lambda_hw fields are ignored =====
+    try:
+        stable_hw = getattr(cfg, "stable_hw", None)
+        if stable_hw is not None and bool(getattr(stable_hw, "enabled", False)):
+            if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
+                cfg.loss.lambda_hw = 0.0
+            if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
+                cfg.hw.lambda_hw = 0.0
+            if hasattr(cfg, "stable_hw") and not hasattr(cfg.stable_hw, "no_double_scale"):
+                cfg.stable_hw.no_double_scale = True
+    except Exception:
+        pass
+
     return cfg

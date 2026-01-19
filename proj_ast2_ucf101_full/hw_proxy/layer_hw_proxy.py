@@ -144,7 +144,11 @@ class LayerHwProxy:
         lat = self.lat_model(x).squeeze(-1).detach().cpu().numpy()
         mem = self.mem_model(x).squeeze(-1).detach().cpu().numpy()
         power = self.power_model(x).squeeze(-1).detach().cpu().numpy()
-        return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+        pred = {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+        pred["lat_ms"] = np.maximum(pred["lat_ms"], 0.0)
+        pred["mem_mb"] = np.maximum(pred["mem_mb"], 0.0)
+        pred["power_w"] = np.maximum(pred["power_w"], 0.0)
+        return pred
 
     def predict_layers_batch_torch(
         self,
@@ -168,6 +172,11 @@ class LayerHwProxy:
         lat = self.lat_model(x).squeeze(-1)
         mem = self.mem_model(x).squeeze(-1)
         power = self.power_model(x).squeeze(-1)
+
+        # ---- v5.4 guardrail: proxy outputs must be non-negative (prevent "negative latency reward") ----
+        lat = torch.clamp(lat, min=0.0)
+        mem = torch.clamp(mem, min=0.0)
+        power = torch.clamp(power, min=0.0)
         return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
 
     def predict_from_model_info(
