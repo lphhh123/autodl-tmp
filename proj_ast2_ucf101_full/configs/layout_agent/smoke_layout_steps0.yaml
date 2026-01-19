@@ -1,0 +1,10 @@
+_base_: ./base_layout.yaml
+
+# Force ultra-light smoke
+detailed_place:
+  steps: 0
+  planner:
+    type: heuristic
+
+global:
+  seed: 0

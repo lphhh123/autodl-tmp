@@ -409,4 +409,12 @@ def compute_hw_loss(
         }
     )
 
+    # ---- v5.4 guardrail: loss terms must be non-negative in value space ----
+    assert (
+        hw_stats["latency_ms"] >= 0.0
+        and hw_stats["energy_mj"] >= 0.0
+        and hw_stats["mem_mb"] >= 0.0
+        and hw_stats["comm_ms"] >= 0.0
+    ), "Non-negative guard failed: HW stats contains negative values."
+
     return L_hw_total_t, hw_stats

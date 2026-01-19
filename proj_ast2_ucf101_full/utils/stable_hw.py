@@ -58,6 +58,8 @@ def stable_hw_log_fields(st: Dict[str, Any]) -> Dict[str, Any]:
         "stable_hw/acc_violation": bool(st.get("acc_violation", False)),
         "stable_hw/violation_epoch": int(st.get("violation_epoch", -1)) if st.get("violation_epoch") is not None else -1,
         "stable_hw/recovery_good_epochs": int(st.get("recovery_good_epochs", 0)),
+        "stable_hw/freeze_schedule": bool(st.get("freeze_schedule", False)),
+        "stable_hw/acc_margin_last": st.get("acc_margin_last", None),
     }
 
 
@@ -66,13 +68,13 @@ def stable_hw_schedule(
     stable_hw_cfg: Any,
     st: Dict[str, Any],
     hw_lambda_default: Optional[float] = None,
-) -> None:
+) -> float:
     """
     Set lambda_hw_base for this epoch (warmup->ramp->stabilize).
     Dict-state implementation to match trainer_* usage.
     """
     if st is None:
-        return
+        return 0.0
     st.setdefault("guard_mode", "HW_OPT")
     st.setdefault("in_recovery", False)
     st.setdefault("allow_discrete_updates", True)
@@ -89,7 +91,7 @@ def stable_hw_schedule(
         st["lambda_hw_effective"] = float(lam)
         st["lambda_hw"] = float(lam)
         st["lambda_hw_after_guard"] = float(lam)
-        return
+        return float(lam)
 
     warmup_epochs = int(_cfg_get(sched, "warmup_epochs", 5))
     ramp_epochs = int(_cfg_get(sched, "ramp_epochs", 10))
@@ -99,37 +101,42 @@ def stable_hw_schedule(
 
     # freeze schedule during recovery if asked (spec)
     ctrl = _cfg_get(_cfg_get(stable_hw_cfg, "accuracy_guard", {}), "controller", {}) or {}
-    freeze_schedule = bool(_cfg_get(ctrl, "freeze_schedule_in_recovery", True))
-    if bool(st.get("in_recovery", False)) and freeze_schedule and st.get("lambda_hw_base") is not None:
-        lam = _safe_float(st["lambda_hw_base"], 0.0)
-        phase = str(st.get("schedule_phase", "stabilize"))
-    else:
-        if epoch < warmup_epochs:
-            phase = "warmup"
-            lam = 0.0
-        elif epoch < (warmup_epochs + ramp_epochs):
-            phase = "ramp"
-            if ramp_epochs <= 0:
-                lam = lambda_hw_max
-            else:
-                t = min(1.0, max(0.0, float(epoch - warmup_epochs) / float(ramp_epochs)))
-                lam = t * lambda_hw_max
-        else:
-            phase = "stabilize"
+    freeze_in_recovery = bool(_cfg_get(ctrl, "freeze_schedule_in_recovery", True))
+    if freeze_in_recovery and bool(st.get("in_recovery", False)):
+        lam = float(st.get("lambda_hw_base", 0.0))
+        st["freeze_schedule"] = True
+        st["lambda_hw_base"] = float(lam)
+        st["schedule_epoch"] = int(epoch)
+        st["lambda_hw_effective"] = float(lam)  # pre-guard
+        return float(lam)
+    st["freeze_schedule"] = False
+    if epoch < warmup_epochs:
+        phase = "warmup"
+        lam = 0.0
+    elif epoch < (warmup_epochs + ramp_epochs):
+        phase = "ramp"
+        if ramp_epochs <= 0:
             lam = lambda_hw_max
+        else:
+            t = min(1.0, max(0.0, float(epoch - warmup_epochs) / float(ramp_epochs)))
+            lam = t * lambda_hw_max
+    else:
+        phase = "stabilize"
+        lam = lambda_hw_max
 
     # ---- v5.4 clamp + schedule_phase (SPEC_C §12B.3) ----
     clamp_min = float(_cfg_get(sched, "clamp_min", 0.0) or 0.0)
     clamp_max = float(_cfg_get(sched, "clamp_max", lambda_hw_max) or lambda_hw_max)
     lam = float(max(clamp_min, min(clamp_max, float(lam))))
-    st["lambda_hw_base"] = float(lam)
     st["schedule_phase"] = str(phase)
 
-    # v5.4: schedule must update EVERY epoch; do not keep stale values.
-    # Guard (apply_accuracy_guard) will overwrite lambda_hw_effective / after_guard.
-    st["lambda_hw_effective"] = float(lam)  # pre-guard base
-    st["lambda_hw"] = float(st["lambda_hw_base"])  # legacy alias
-    st["lambda_hw_after_guard"] = float(lam)
+    # ---- v5.4 canonical writeback (single source of truth) ----
+    # lambda_hw_base: schedule output (may be frozen in recovery)
+    # lambda_hw_effective: pre-guard value == base; apply_accuracy_guard will overwrite to after-guard
+    st["lambda_hw_base"] = float(lam)
+    st["schedule_epoch"] = int(epoch)
+    st["lambda_hw_effective"] = float(lam)
+    return float(lam)
 
 
 def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
@@ -324,6 +331,7 @@ def apply_accuracy_guard(
     violate = False
     if metric is not None:
         violate = (float(acc_ref) - float(metric)) > float(eps_drop)
+    margin = float(metric) - (float(acc_ref) - float(eps_drop)) if metric is not None else 0.0
 
     # recovery bookkeeping
     if st.get("guard_mode") not in ("RECOVERY", "VIOLATE", "OK", "WARMUP"):
@@ -352,7 +360,7 @@ def apply_accuracy_guard(
             st["guard_mode"] = "OK"
 
     # apply gating
-    base = float(st.get("lambda_hw_effective", st.get("lambda_hw_base", st.get("lambda_hw", 0.0))))
+    base = float(st.get("lambda_hw_base", st.get("lambda_hw_effective", st.get("lambda_hw", 0.0))))
     allow_discrete_updates = True
     after = base
 
@@ -366,9 +374,17 @@ def apply_accuracy_guard(
     else:
         st["freeze_schedule"] = False
 
-    st["in_recovery"] = bool(st["guard_mode"] in ("VIOLATE", "RECOVERY"))
-    st["lambda_hw_effective"] = float(after)
+    # ---- v5.4 canonical state writeback ----
     st["lambda_hw_after_guard"] = float(after)
+    st["lambda_hw_effective"] = float(after)  # trainer must ONLY use this
+    st["guard_mode"] = str(st["guard_mode"])
+    st["in_recovery"] = bool(st["guard_mode"] in ("VIOLATE", "RECOVERY"))
+    st["acc_violation"] = bool(violate)
+    st["acc_used_last"] = float(acc_used) if acc_used is not None else None
+    st["acc_margin_last"] = float(margin)
+
+    # schedule freeze flag mirrors controller intent
+    st["freeze_schedule"] = bool(freeze_sched and st["in_recovery"])
     st["allow_discrete_updates"] = bool(allow_discrete_updates)
     return st["guard_mode"], float(after), bool(allow_discrete_updates)
 
