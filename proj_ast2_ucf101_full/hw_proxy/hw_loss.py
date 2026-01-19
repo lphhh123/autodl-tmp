@@ -38,6 +38,16 @@ def compute_hw_loss(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # v5.4: if eff_specs/alpha need gradients, DO NOT use fixed-eval path that detaches
+    want_grad = False
+    try:
+        want_grad = torch.is_grad_enabled() and (
+            (eff_specs is not None and any(getattr(v, "requires_grad", False) for v in eff_specs.values()))
+            or (alpha is not None and getattr(alpha, "requires_grad", False))
+        )
+    except Exception:
+        want_grad = False
+
     latency_ms = None
     energy_mj = None
     mem_mb = None
@@ -52,7 +62,14 @@ def compute_hw_loss(
             else:
                 force_use_cached_mapping = bool(getattr(iso_cfg, "force_use_cached_mapping", False))
 
-        if force_use_cached_mapping and mapping is not None:
+        if force_use_cached_mapping and want_grad:
+            print(
+                "[WARN] force_use_cached_mapping=True but gradients are needed; "
+                "falling back to differentiable torch path."
+            )
+            force_use_cached_mapping = False
+
+        if (force_use_cached_mapping and (not want_grad)) and mapping is not None:
             cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
             fixed = mapping_solver.evaluate_fixed_mapping(
                 mapping=mapping,

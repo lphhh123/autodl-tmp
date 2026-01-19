@@ -99,26 +99,39 @@ def _migrate_stable_hw_to_v5(cfg: Any) -> None:
       stable_hw.accuracy_guard.metric_key / epsilon_drop etc. (alias; deprecated)
     """
     stable_hw = get_nested(cfg, "stable_hw", {}) or {}
-    if not isinstance(stable_hw, dict):
+
+    # ---- v5.4 FIX: accept DictConfig / AttrDict as mapping-like ----
+    try:
+        from omegaconf import DictConfig  # type: ignore
+        mapping_types = (dict, AttrDict, DictConfig)
+    except Exception:
+        mapping_types = (dict, AttrDict)
+
+    if not isinstance(stable_hw, mapping_types):
         return
 
     guard = stable_hw.get("accuracy_guard", {}) or {}
-    if not isinstance(guard, dict):
+    if not isinstance(guard, mapping_types):
         guard = {}
 
     # old: stable_hw.controller -> new: stable_hw.accuracy_guard.controller
     old_ctrl = stable_hw.get("controller", {}) or {}
-    if not isinstance(old_ctrl, dict):
+    if not isinstance(old_ctrl, mapping_types):
         old_ctrl = {}
 
     ctrl = guard.get("controller", {}) or {}
-    if not isinstance(ctrl, dict):
+    if not isinstance(ctrl, mapping_types):
         ctrl = {}
 
     # merge: guard.controller has higher priority
     merged = dict(old_ctrl)
-    merged.update(ctrl)
+    merged.update(dict(ctrl))
     guard["controller"] = merged
+
+    # alias migration for top-level guard params
+    for k in ["metric_key", "epsilon_drop", "acc_margin", "allow_train_ema_fallback"]:
+        if k in stable_hw and k not in guard:
+            guard[k] = stable_hw[k]
 
     # legacy metric -> controller.metric
     metric = guard.get("metric") or guard.get("metric_key") or merged.get("metric")
@@ -296,7 +309,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     stable_hw = cfg.stable_hw
 
     # default enable policy
-    default_enabled = True if str(mode) in ("version_c", "single_device", "layout") else False
+    default_enabled = True if str(mode) in ("version_c", "single_device") else False
     if getattr(stable_hw, "enabled", None) is None:
         stable_hw.enabled = bool(default_enabled)
     stable_hw_enabled = bool(stable_hw.enabled)
@@ -402,12 +415,43 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     iso.setdefault("track_live_segments", False)
     iso.setdefault("allow_cache_fallback", True)
 
-    # ---- NoDoubleScale enforcement ONLY when stable_hw is enabled ----
-    if stable_hw_enabled:
-        if hasattr(cfg, "loss"):
-            cfg.loss.lambda_hw = 0.0
-        if hasattr(cfg, "hw"):
-            cfg.hw.lambda_hw = 0.0
+    # ---- v5.4 NoDoubleScale: warn THEN override (do NOT silently zero first) ----
+    try:
+        stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
+
+        old_loss_lambda_hw = None
+        old_hw_lambda_hw = None
+        if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
+            try:
+                old_loss_lambda_hw = float(get_nested(cfg, "loss.lambda_hw", 0.0) or 0.0)
+            except Exception:
+                old_loss_lambda_hw = None
+        if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
+            try:
+                old_hw_lambda_hw = float(get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
+            except Exception:
+                old_hw_lambda_hw = None
+
+        if stable_en:
+            # warn if user provided any non-zero legacy lambda
+            if (old_loss_lambda_hw is not None and old_loss_lambda_hw != 0.0) or (
+                old_hw_lambda_hw is not None and old_hw_lambda_hw != 0.0
+            ):
+                print(
+                    "[WARN] stable_hw.enabled=True (v5.4 NoDoubleScale): legacy loss.lambda_hw / hw.lambda_hw "
+                    "are ignored and will be forced to 0. "
+                    f"(loss.lambda_hw was {old_loss_lambda_hw}, hw.lambda_hw was {old_hw_lambda_hw})"
+                )
+
+            if hasattr(cfg, "loss"):
+                cfg.loss.lambda_hw = 0.0
+            if hasattr(cfg, "hw"):
+                cfg.hw.lambda_hw = 0.0
+
+            if hasattr(cfg, "stable_hw") and not hasattr(cfg.stable_hw, "no_double_scale"):
+                cfg.stable_hw.no_double_scale = True
+    except Exception:
+        pass
 
     # ---- guardrail: HW loss enabled but lambda is effectively zero ----
     try:
@@ -429,25 +473,6 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                     "HW loss weight is zero; HW term will be ineffective. "
                     "Enable stable_hw or set hw.lambda_hw>0."
                 )
-    except Exception:
-        pass
-
-    # ===== v5.4 NoDoubleScale: when stable_hw is enabled, legacy lambda_hw fields are ignored =====
-    try:
-        stable_hw = getattr(cfg, "stable_hw", None)
-        if stable_hw is not None and bool(getattr(stable_hw, "enabled", False)):
-            if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
-                loss_lambda_hw = float(getattr(cfg.loss, "lambda_hw", 0.0) or 0.0)
-                if loss_lambda_hw not in (0.0, 1.0):
-                    print(
-                        "[WARN] stable_hw is enabled; loss.lambda_hw is ignored by v5.4 NoDoubleScale. "
-                        "Set loss.lambda_hw to 0/1 or remove it to avoid confusion."
-                    )
-                cfg.loss.lambda_hw = 0.0
-            if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
-                cfg.hw.lambda_hw = 0.0
-            if hasattr(cfg, "stable_hw") and not hasattr(cfg.stable_hw, "no_double_scale"):
-                cfg.stable_hw.no_double_scale = True
     except Exception:
         pass
 
