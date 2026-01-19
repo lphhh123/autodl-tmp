@@ -113,7 +113,7 @@ def main() -> None:
         "area_mm2": torch.tensor([200.0], device=device),
     }
 
-    stable_hw_state = {"lambda_hw_effective_after_guard": 0.0}
+    stable_hw_state = {}
 
     L_hw, hw_stats = compute_hw_loss(
         cfg,

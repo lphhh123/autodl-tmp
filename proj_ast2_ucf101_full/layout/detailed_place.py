@@ -303,7 +303,7 @@ def run_detailed_place(
                 ]
             )
 
-            try:
+            if True:
                 # initial eval
                 eval_out = evaluator.evaluate(layout_state)
                 prev_total = float(eval_out.get("total_scalar", 0.0))
