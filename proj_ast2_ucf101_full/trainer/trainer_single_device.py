@@ -141,6 +141,16 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     for epoch in range(cfg.train.epochs):
         stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
         if stable_hw_enabled:
+            legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
+            legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
+            if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_state.get(
+                "_legacy_lambda_warned", False
+            ):
+                logger.info(
+                    "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
+                    "using stable_hw_state.lambda_hw_effective."
+                )
+                stable_state["_legacy_lambda_warned"] = True
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
             prev_val = stable_state.get("val_acc1_last", None)
             apply_accuracy_guard(

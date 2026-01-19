@@ -83,8 +83,6 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
     if not llm_usage_path.exists():
         llm_usage_path.write_text("", encoding="utf-8")
-    with llm_usage_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ok": True, "reason": "layout_agent_no_llm"}, ensure_ascii=False) + "\n")
 
     start_time = time.time()
     seed_everything(int(seed))

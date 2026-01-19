@@ -324,11 +324,12 @@ class Env(BaseEnv):
                 "meta": dict(self._meta_base),
             }
             self._write_record(init_record)
-
-            # 关键：避免下一次 run_operator 也写 iter=0
-            self._step_id = 1
         except Exception:
             pass
+        finally:
+            # 关键：避免下一次 run_operator / run_heuristic 也写 iter=0
+            # 即使 init_record 写失败，也必须推进 step_id
+            self._step_id = 1
 
     def _dump_best(self):
         best = {
