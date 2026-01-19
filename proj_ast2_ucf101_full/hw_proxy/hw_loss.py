@@ -257,7 +257,12 @@ def compute_hw_loss(
 
     # ===== stable_hw.normalize: normalize terms by ref and apply hinge/log =====
     norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
-    norm_enabled = bool(getattr(norm_cfg, "enabled", False)) if norm_cfg is not None else False
+
+    # v5.4: 如果 normalize 块存在，默认认为 enabled=True（即使 YAML 里不写 enabled）
+    if norm_cfg is None:
+        norm_enabled = False
+    else:
+        norm_enabled = bool(getattr(norm_cfg, "enabled", True))
 
     # defaults
     mode = "hinge_log_ratio"
@@ -269,15 +274,12 @@ def compute_hw_loss(
     tT = tE = tM = tC = 1.0
 
     if norm_cfg is not None:
-        # accept both "mode" (SPEC) and legacy "method"
         mode = str(getattr(norm_cfg, "mode", getattr(norm_cfg, "method", mode)))
-        # accept both "eps" (SPEC) and legacy "clip_eps"
         eps = float(getattr(norm_cfg, "eps", getattr(norm_cfg, "clip_eps", eps)))
         clip_term_max = float(getattr(norm_cfg, "clip_term_max", clip_term_max))
         mem_hinge_only = bool(getattr(norm_cfg, "mem_hinge_only", mem_hinge_only))
         abs_ratio = bool(getattr(norm_cfg, "abs_ratio", abs_ratio))
 
-        # weights: accept nested weights dict or flattened wT/wE...
         weights = getattr(norm_cfg, "weights", None)
         if isinstance(weights, dict):
             wT = float(weights.get("wT", wT))
@@ -290,7 +292,6 @@ def compute_hw_loss(
             wM = float(getattr(norm_cfg, "wM", wM))
             wC = float(getattr(norm_cfg, "wC", wC))
 
-        # targets: accept nested ref dict or flattened target_ratio_*
         ref = getattr(norm_cfg, "ref", None)
         if isinstance(ref, dict):
             tT = float(ref.get("target_ratio_T", tT))
@@ -303,12 +304,15 @@ def compute_hw_loss(
             tM = float(getattr(norm_cfg, "target_ratio_M", tM))
             tC = float(getattr(norm_cfg, "target_ratio_C", tC))
 
-    # NOTE (v5.4): MUST keep tensors to avoid detaching gradients (e.g. chip-alpha).
-    def _as_t(x: float) -> torch.Tensor:
+    # v5.4: 绝对禁止把 Tensor 变成 float/item() —— 会切断计算图 & 造成“配置看似生效实际无效”
+    def _as_t(x) -> torch.Tensor:
+        if torch.is_tensor(x):
+            return x.to(device=latency_ms_pos.device, dtype=latency_ms_pos.dtype)
         return torch.as_tensor(float(x), device=latency_ms_pos.device, dtype=latency_ms_pos.dtype)
 
-    def _term_t(x_pos_f: float, ref_f: float, target_ratio_f: float, do_hinge: bool) -> torch.Tensor:
-        x_t = _as_t(x_pos_f)
+    def _term_t(x_pos_t: torch.Tensor, ref_f: float, target_ratio_f: float, do_hinge: bool) -> torch.Tensor:
+        # x_pos_t 必须是 Tensor（允许无梯度，但不能变 float）
+        x_t = _as_t(x_pos_t)
         ref_t = _as_t(ref_f)
         ratio = (x_t + float(eps)) / (ref_t + float(eps))
         if abs_ratio:
@@ -350,11 +354,11 @@ def compute_hw_loss(
         M_ref = _ref_from_state("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
         C_ref = _ref_from_state("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
 
-        # IMPORTANT: use clamped-positive values so negative proxy cannot be rewarded
-        latency_term_t = _term_t(float(latency_ms_pos.detach().cpu().item()), T_ref, tT, do_hinge=True)
-        energy_term_t = _term_t(float(energy_mj_pos.detach().cpu().item()), E_ref, tE, do_hinge=True)
-        mem_term_t = _term_t(float(mem_mb_pos.detach().cpu().item()), M_ref, tM, do_hinge=bool(mem_hinge_only))
-        comm_term_t = _term_t(float(comm_ms_pos.detach().cpu().item()), C_ref, tC, do_hinge=True)
+        # IMPORTANT: use clamped-positive tensors so negative proxy cannot be rewarded
+        latency_term_t = _term_t(latency_ms_pos, T_ref, tT, do_hinge=True)
+        energy_term_t = _term_t(energy_mj_pos, E_ref, tE, do_hinge=True)
+        mem_term_t = _term_t(mem_mb_pos, M_ref, tM, do_hinge=bool(mem_hinge_only))
+        comm_term_t = _term_t(comm_ms_pos, C_ref, tC, do_hinge=True)
 
         L_hw_norm_t = (float(wT) * latency_term_t) + (float(wE) * energy_term_t) + (float(wM) * mem_term_t) + (
             float(wC) * comm_term_t
@@ -371,8 +375,8 @@ def compute_hw_loss(
             + comm_ms_pos / max(float(eps), C_ref)
         )
 
-    # Keep as tensor to avoid detaching chip_used_expected gradient.
-    L_hw_total_t = L_hw_norm_t + L_chip + _as_t(float(L_area)) + _as_t(float(L_layout))
+    # v5.4: area/layout 必须保持 Tensor（禁止 float(L_area) / float(L_layout)）
+    L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout)
 
     hw_stats = {
         "latency_ms": float(latency_ms_pos.detach().cpu().item()),

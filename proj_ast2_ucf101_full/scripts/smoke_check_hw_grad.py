@@ -32,6 +32,8 @@ def main() -> None:
     cfg.hw.lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0) or 1.0)
 
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
+    cfg.hw.lambda_area = 1.0
+    cfg.hw.area_budget_mm2 = 100.0
     mapping_solver = MappingSolver(strategy="greedy_local", mem_limit_factor=0.9)
 
     segments = [
@@ -71,6 +73,8 @@ def main() -> None:
         "peak_bw": torch.tensor([1e11, 1.1e11], device=device),
         "mem_gb": torch.tensor([16.0, 16.0], device=device),
         "tdp_w": torch.tensor([200.0, 210.0], device=device),
+        # NEW: 用于验证 L_area 不会被 float() 切断
+        "area_mm2": torch.tensor([200.0, 200.0], device=device, requires_grad=True),
     }
 
     alpha = torch.randn(S, 2, device=device, requires_grad=True)
@@ -101,6 +105,13 @@ def main() -> None:
         raise AssertionError("alpha.grad is all zeros; HW loss gradient is cut off")
 
     print("[SMOKE] HW gradient OK; grad norm=", float(alpha.grad.norm().item()))
+
+    if eff_specs["area_mm2"].grad is None:
+        raise AssertionError("area_mm2.grad is None; L_area is detached (likely float() cast in hw_loss)")
+    if torch.all(eff_specs["area_mm2"].grad == 0):
+        raise AssertionError("area_mm2.grad is all zeros; L_area has no effect (likely detached)")
+
+    print("[SMOKE] Area gradient OK; grad norm=", float(eff_specs["area_mm2"].grad.norm().item()))
 
 
 if __name__ == "__main__":
