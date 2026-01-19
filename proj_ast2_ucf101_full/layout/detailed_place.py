@@ -228,6 +228,11 @@ def run_detailed_place(
     max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
     stage_label = str(_cfg_get(cfg, "stage_label", f"detailed_{planner_type}"))
 
+    lookahead_cfg = _cfg_get(cfg, "lookahead", {}) or {}
+    lookahead_enabled = bool(_cfg_get(lookahead_cfg, "enabled", False))
+    lookahead_topk = int(_cfg_get(lookahead_cfg, "topk", 8))
+    lookahead_beta = float(_cfg_get(lookahead_cfg, "beta", 0.5))
+
     # ===== v5.4 Ours-B2+ controller (optional) =====
     ps_cfg = _cfg_get(cfg, "policy_switch", None)
     use_ps = bool(ps_cfg and _cfg_get(ps_cfg, "enabled", False))
@@ -357,6 +362,24 @@ def run_detailed_place(
                     return [int(s) for s in clusters[cid].slots]
             return []
 
+        def _apply_action_for_candidate(base_assign: np.ndarray, act: Dict[str, Any]) -> np.ndarray:
+            new_assign = base_assign.copy()
+            op_local = str(act.get("op", "none"))
+            if op_local == "swap":
+                _apply_swap(new_assign, int(act.get("i", 0)), int(act.get("j", 0)))
+            elif op_local == "relocate":
+                _apply_relocate(new_assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
+            elif op_local == "cluster_move":
+                cid = int(act.get("cluster_id", 0))
+                rid = int(act.get("region_id", 0))
+                if 0 <= cid < len(clusters):
+                    cluster = clusters[cid]
+                    target_sites = act.get("target_sites")
+                    if not target_sites:
+                        target_sites = _select_cluster_target_sites(new_assign, cluster, rid, site_to_region, sites_xy)
+                    _apply_cluster_move(new_assign, cluster, target_sites)
+            return new_assign
+
         action_queue: List[Dict] = []
         forbidden_history: List[List[int]] = []
         failed_counts: Dict[int, int] = {}
@@ -398,6 +421,65 @@ def run_detailed_place(
                 ]
                 if filtered:
                     candidate_pool = filtered
+            lookahead_scores: Dict[int, float] = {}
+            if lookahead_enabled and len(candidate_pool) > 1:
+                cand_infos: List[Dict[str, Any]] = []
+                base_assign = assign.copy()
+                for cand in candidate_pool:
+                    action_copy = copy.deepcopy(cand.action)
+                    action_copy.setdefault("signature", cand.signature)
+                    new_assign = _apply_action_for_candidate(base_assign, action_copy)
+                    sig1 = signature_for_assign(new_assign)
+                    cached = eval_cache.get(sig1) if eval_cache is not None else None
+                    if cached is None:
+                        layout_state.assign = new_assign
+                        eval_new = evaluator.evaluate(layout_state)
+                        if eval_cache is not None:
+                            eval_cache.put(sig1, dict(eval_new))
+                    else:
+                        eval_new = dict(cached)
+                    d_total = float(eval_out["total_scalar"] - eval_new["total_scalar"])
+                    cand_infos.append(
+                        {
+                            "candidate": cand,
+                            "new_assign": new_assign,
+                            "d_total": d_total,
+                            "apply_fn": lambda base, act=action_copy: _apply_action_for_candidate(base, act),
+                        }
+                    )
+
+                cand_infos_sorted = sorted(cand_infos, key=lambda x: x["d_total"], reverse=True)
+                top = cand_infos_sorted[: min(lookahead_topk, len(cand_infos_sorted))]
+
+                for ci in top:
+                    best2 = None
+                    for cj in top:
+                        if cj is ci:
+                            continue
+                        assign2 = cj["apply_fn"](ci["new_assign"])
+                        sig2 = signature_for_assign(assign2)
+                        cached2 = eval_cache.get(sig2) if eval_cache is not None else None
+                        if cached2 is None:
+                            layout_state.assign = assign2
+                            eval2 = evaluator.evaluate(layout_state)
+                            if eval_cache is not None:
+                                eval_cache.put(sig2, dict(eval2))
+                        else:
+                            eval2 = dict(cached2)
+                        d2 = float(eval_out["total_scalar"] - eval2["total_scalar"])
+                        if best2 is None or d2 > best2:
+                            best2 = d2
+                    ci["lookahead_best_d2"] = float(best2) if best2 is not None else 0.0
+                    ci["lookahead_score"] = float(ci["d_total"]) + lookahead_beta * float(ci["lookahead_best_d2"])
+
+                for ci in cand_infos:
+                    if "lookahead_score" not in ci:
+                        ci["lookahead_score"] = float(ci["d_total"])
+                    cand = ci["candidate"]
+                    if isinstance(getattr(cand, "est", None), dict):
+                        cand.est["lookahead_score"] = float(ci["lookahead_score"])
+                    lookahead_scores[int(cand.id)] = float(ci["lookahead_score"])
+                layout_state.assign = base_assign
             cand_map = {c.id: c for c in candidate_pool}
             candidate_ids = [c.id for c in candidate_pool]
             forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
@@ -504,6 +586,11 @@ def run_detailed_place(
 
             action_queue = [a for a in action_queue if a.get("expire", step) >= step]
             fallback_candidates = [c for c in candidate_pool if c.id not in forbidden_ids]
+            if lookahead_scores:
+                fallback_candidates.sort(
+                    key=lambda c: float(lookahead_scores.get(int(c.id), 0.0)),
+                    reverse=True,
+                )
             fallback_idx = 0
 
             action = {"op": "none"}

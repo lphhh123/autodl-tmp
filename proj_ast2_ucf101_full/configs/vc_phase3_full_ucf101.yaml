@@ -11,6 +11,9 @@ hw:
   optimize_layout: true
 stable_hw:
   enabled: true
+  warmup_epochs: 1
+  locked_acc_ref: true
+  allow_train_ema_fallback: true
   lambda_hw_schedule:
     enabled: true
     warmup_epochs: 0
@@ -34,11 +37,13 @@ stable_hw:
     metric: acc1
     epsilon_drop: 0.01
     use_ema: true
-    ema_beta: 0.8
+    ema_beta: 0.9
     on_violate:
-      scale_lambda_hw: 0.5
-      freeze_rho_epochs: 1
-      max_consecutive: 3
+      mode: "RECOVERY"
+      scale_lambda_hw: 0.0
+      recovery_epochs: 1
+      freeze_discrete_updates: true
+      min_recovery_epochs: 1
   discrete_isolation:
     mapping_update_every_epochs: 1
     layout_update_every_epochs: 1

@@ -299,6 +299,23 @@ class Env(BaseEnv):
 
         self._dump_best()
         self.update_problem_state()
+        try:
+            init_record = {
+                "iter": 0,
+                "op": "init",
+                "op_args": {},
+                "op_args_json": "{}",
+                "accepted": 1,
+                "solution_value": self.get_key_value(self.current_solution),
+                "time_ms": 0,
+            }
+            if hasattr(self.current_solution, "assign"):
+                a = getattr(self.current_solution, "assign")
+                if isinstance(a, (list, tuple)):
+                    init_record["signature"] = "assign:" + ",".join(map(str, a))
+            self._write_record(init_record)
+        except Exception:
+            pass
 
     def _dump_best(self):
         best = {

@@ -7,3 +7,7 @@ detailed_place:
     action_families: ["relocate", "swap", "inverse"]
     policies: ["heuristic", "llm"]
     cache_size: 8000
+  lookahead:
+    enabled: true
+    topk: 8
+    beta: 0.5

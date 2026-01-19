@@ -62,6 +62,24 @@ class BaseEnv:
         self._rec_fp = None
         self._rec_path = None
         self._ensure_rec_fp()
+        try:
+            self._ensure_rec_fp()
+            init_record = {
+                "iter": 0,
+                "op": "init",
+                "op_args": {},
+                "op_args_json": "{}",
+                "accepted": 1,
+                "solution_value": self.get_key_value(self.current_solution),
+                "time_ms": 0,
+            }
+            if hasattr(self.current_solution, "assign"):
+                a = getattr(self.current_solution, "assign")
+                if isinstance(a, (list, tuple)):
+                    init_record["signature"] = "assign:" + ",".join(map(str, a))
+            self._write_record(init_record)
+        except Exception:
+            pass
 
     def _ensure_rec_fp(self):
         if not self.output_dir:
@@ -118,6 +136,16 @@ class BaseEnv:
         if add_record_item:
             record.update(add_record_item)
         if not record.get("_skip_record"):
+            sig = None
+            try:
+                if hasattr(self.current_solution, "assign"):
+                    a = getattr(self.current_solution, "assign")
+                    if isinstance(a, (list, tuple)):
+                        sig = "assign:" + ",".join(map(str, a))
+            except Exception:
+                sig = None
+            if sig is not None:
+                record["signature"] = sig
             try:
                 record["key_value"] = float(self.get_key_value(self.current_solution))
             except Exception:

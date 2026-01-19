@@ -170,39 +170,75 @@ def apply_accuracy_guard(
     guard = _get(stable_hw_cfg, "accuracy_guard", None) or {}
     eps_drop = _as_float(_get(guard, "epsilon_drop", 0.01), 0.01)
 
-    # decide acc_used
+    # >>> PATCH: robust acc_used + locked acc_ref (do NOT lock when acc_used is None)
     acc_used = None
-    acc_src = "unset"
-    if has_val_this_epoch and val_acc1 is not None:
+    acc_used_source = None
+
+    if has_val_this_epoch and (val_acc1 is not None):
         acc_used = float(val_acc1)
-        acc_src = "val"
+        acc_used_source = "val_acc1"
         state["val_acc1_last"] = float(val_acc1)
+    elif state.get("val_acc1_last") is not None:
+        acc_used = float(state["val_acc1_last"])
+        acc_used_source = "val_acc1_last"
+    elif (train_acc1_ema is not None) and _as_bool(_get(stable_hw_cfg, "allow_train_ema_fallback", True), True):
+        acc_used = float(train_acc1_ema)
+        acc_used_source = "train_acc1_ema"
     else:
-        if state.get("val_acc1_last") is not None:
-            acc_used = float(state["val_acc1_last"])
-            acc_src = "val_last"
-        elif train_acc1_ema is not None:
-            acc_used = float(train_acc1_ema)
-            acc_src = "train_ema"
+        acc_used = None
+        acc_used_source = "none"
 
-    # update warmup best + maybe lock
-    _update_warmup_best(epoch, stable_hw_cfg, state, float(val_acc1) if val_acc1 is not None else None)
-
+    # ---- locked acc_ref: only lock when we have a meaningful source OR baseline file
     acc_ref = state.get("acc_ref", None)
-    if acc_ref is None:
-        # if we still can't lock, treat current as ref but lock immediately (prevents drift later)
-        if acc_used is not None:
-            state["acc_ref"] = float(acc_used)
-            state["acc_ref_source"] = "fallback_first_acc"
-            state["acc_ref_locked"] = True
-            acc_ref = state["acc_ref"]
-        else:
-            acc_ref = 0.0
+    acc_ref_locked = bool(state.get("acc_ref_locked", False))
 
-    acc_used_f = float(acc_used) if acc_used is not None else 0.0
-    acc_ref_f = float(acc_ref)
-    acc_drop = acc_ref_f - acc_used_f
-    violate = (acc_drop > float(eps_drop))
+    # priority 1: baseline_stats_path (dense/best checkpoint)
+    baseline_stats_path = _get(stable_hw_cfg, "baseline_stats_path", None)
+    if (not acc_ref_locked) and baseline_stats_path:
+        try:
+            p = Path(str(baseline_stats_path))
+            if p.exists() and p.is_file():
+                js = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(js, dict):
+                    cand = js.get("val_acc1_best", None)
+                    if cand is None:
+                        cand = js.get("val_acc1", None)
+                    if cand is not None:
+                        acc_ref = float(cand)
+                        acc_ref_locked = True
+        except Exception:
+            pass
+
+    # priority 2: warmup best (lock AFTER warmup_epochs, and only if acc_used is available)
+    warmup_epochs = _as_int(_get(stable_hw_cfg, "warmup_epochs", 0), 0)
+    if not acc_ref_locked:
+        if acc_used is not None:
+            if epoch < warmup_epochs:
+                prev_best = state.get("acc_ref_warmup_best", None)
+                if (prev_best is None) or (acc_used > float(prev_best)):
+                    state["acc_ref_warmup_best"] = float(acc_used)
+                acc_ref = float(state.get("acc_ref_warmup_best", acc_used))
+            else:
+                acc_ref = float(state.get("acc_ref_warmup_best", acc_used))
+                acc_ref_locked = True
+        else:
+            # acc_used not available -> DO NOT lock, keep acc_ref as-is (may be None)
+            pass
+
+    state["acc_ref"] = acc_ref
+    state["acc_ref_locked"] = bool(acc_ref_locked)
+    state["acc_used"] = acc_used
+    state["acc_used_source"] = acc_used_source
+    # <<< PATCH
+
+    acc_used_f = float(acc_used) if acc_used is not None else None
+    acc_ref_f = float(acc_ref) if acc_ref is not None else None
+    if acc_ref_f is None or acc_used_f is None:
+        acc_drop = 0.0
+        violate = False
+    else:
+        acc_drop = acc_ref_f - acc_used_f
+        violate = (acc_drop > float(eps_drop))
 
     # schedule base
     lambda_hw_base = float(state.get("lambda_hw_base", state.get("lambda_hw", 0.0)))
@@ -213,16 +249,16 @@ def apply_accuracy_guard(
         allow_discrete = False
         state["violate_streak"] = int(state.get("violate_streak", 0)) + 1
     else:
-        guard_mode = "HW_OPT"
+        guard_mode = "WARMUP" if (acc_ref_f is None or acc_used_f is None) else "HW_OPT"
         lambda_hw_eff = lambda_hw_base
         allow_discrete = True
         state["violate_streak"] = 0
 
     state["guard_mode"] = str(guard_mode)
     state["epsilon_drop"] = float(eps_drop)
-    state["acc_used"] = float(acc_used_f)
-    state["acc_used_source"] = str(acc_src)
-    state["acc_ref"] = float(acc_ref_f)
+    state["acc_used"] = acc_used_f
+    state["acc_used_source"] = str(acc_used_source)
+    state["acc_ref"] = acc_ref_f
     state["acc_drop"] = float(acc_drop)
     state["guard_triggered"] = bool(violate)
     state["lambda_hw_effective"] = float(lambda_hw_eff)
@@ -236,9 +272,9 @@ def apply_accuracy_guard(
         lambda_hw_base=float(lambda_hw_base),
         lambda_hw_effective=float(lambda_hw_eff),
         allow_discrete_updates=bool(allow_discrete),
-        acc_used=float(acc_used_f),
-        acc_used_source=str(acc_src),
-        acc_ref=float(acc_ref_f),
+        acc_used=float(acc_used_f) if acc_used_f is not None else 0.0,
+        acc_used_source=str(acc_used_source),
+        acc_ref=float(acc_ref_f) if acc_ref_f is not None else 0.0,
         acc_drop=float(acc_drop),
         triggered=bool(violate),
     )
@@ -309,6 +345,7 @@ def stable_hw_log_fields(state: Dict[str, Any]) -> Dict[str, Any]:
         "lambda_hw_base": state.get("lambda_hw_base"),
         "lambda_hw_effective": state.get("lambda_hw_effective"),
         "allow_discrete_updates": state.get("allow_discrete_updates"),
+        "discrete_frozen_init_mapping": state.get("discrete_frozen_init_mapping"),
         "acc_ref": state.get("acc_ref"),
         "acc_ref_locked": state.get("acc_ref_locked"),
         "acc_used": state.get("acc_used"),
