@@ -66,6 +66,22 @@ class AnalyticProxy:
         }
 
 
+class NegativeProxy(AnalyticProxy):
+    """Return strictly negative proxy outputs to test I4/S3 guard (must NOT reduce loss)."""
+
+    def predict_layers_batch(self, layers_cfg):
+        out = super().predict_layers_batch(layers_cfg)
+        for k in list(out.keys()):
+            out[k] = -out[k]
+        return out
+
+    def predict_layers_batch_torch(self, layers_cfg, device):
+        out = super().predict_layers_batch_torch(layers_cfg, device)
+        for k in list(out.keys()):
+            out[k] = -out[k]
+        return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, required=True)
@@ -147,6 +163,80 @@ def main() -> None:
         eff_specs["area_mm2"].grad is not None
         and float(eff_specs["area_mm2"].grad.norm().item()) > 0.0
     ), "area grad missing/zero"
+
+    # ===== S3: negative proxy guard must NOT reduce loss =====
+    stable_state = {}
+
+    # 1) run once to get reasonable refs from the positive proxy
+    _, s0 = compute_hw_loss(
+        cfg,
+        hw_proxy,
+        model_info={},
+        stable_hw_cfg=getattr(cfg, "stable_hw", None),
+        stable_hw_state=stable_state,
+        segments=segments,
+        mapping=mapping,
+        mapping_sig=None,
+        segments_sig=None,
+        eff_specs=eff_specs,
+        layout_positions=None,
+        mapping_solver=mapping_solver,
+        wafer_layout=None,
+        alpha=alpha,
+    )
+    # set refs equal to current clamped values so normalized baseline ~ 0
+    stable_state["ref_T"] = float(s0.get("clamped_latency_ms", 1.0))
+    stable_state["ref_E"] = float(s0.get("clamped_energy_mj", 1.0))
+    stable_state["ref_M"] = float(s0.get("clamped_mem_mb", 1.0))
+    stable_state["ref_C"] = float(s0.get("clamped_comm_ms", 1.0))
+
+    # 2) baseline loss with positive proxy under these refs
+    L_base, _ = compute_hw_loss(
+        cfg,
+        hw_proxy,
+        model_info={},
+        stable_hw_cfg=getattr(cfg, "stable_hw", None),
+        stable_hw_state=stable_state,
+        segments=segments,
+        mapping=mapping,
+        mapping_sig=None,
+        segments_sig=None,
+        eff_specs=eff_specs,
+        layout_positions=None,
+        mapping_solver=mapping_solver,
+        wafer_layout=None,
+        alpha=alpha,
+    )
+
+    # 3) loss with negative proxy must NOT be smaller than baseline
+    neg_proxy = NegativeProxy()
+    L_neg, s_neg = compute_hw_loss(
+        cfg,
+        neg_proxy,
+        model_info={},
+        stable_hw_cfg=getattr(cfg, "stable_hw", None),
+        stable_hw_state=stable_state,
+        segments=segments,
+        mapping=mapping,
+        mapping_sig=None,
+        segments_sig=None,
+        eff_specs=eff_specs,
+        layout_positions=None,
+        mapping_solver=mapping_solver,
+        wafer_layout=None,
+        alpha=alpha,
+    )
+
+    assert float(s_neg.get("clamped_latency_ms", -1.0)) >= 0.0, "clamped latency must be non-negative"
+    assert float(s_neg.get("clamped_mem_mb", -1.0)) >= 0.0, "clamped mem must be non-negative"
+    assert float(s_neg.get("clamped_energy_mj", -1.0)) >= 0.0, "clamped energy must be non-negative"
+    assert float(s_neg.get("clamped_comm_ms", -1.0)) >= 0.0, "clamped comm must be non-negative"
+
+    lb = float(L_base.detach().cpu().item())
+    ln = float(L_neg.detach().cpu().item())
+    assert ln >= lb - 1e-6, f"negative proxy must NOT reduce loss: L_neg={ln}, L_base={lb}"
+
+    print("[SMOKE] Negative proxy guard OK; L_base=", lb, "L_neg=", ln)
 
     print("[SMOKE] HW gradient OK; alpha grad norm=", float(alpha.grad.norm().item()))
     print("[SMOKE] Area gradient OK; area grad norm=", float(eff_specs["area_mm2"].grad.norm().item()))

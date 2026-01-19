@@ -1085,10 +1085,11 @@ def main() -> None:
             run_mode = "subprocess"
 
     if run_mode != "inprocess":
-        llm_config_file = baseline_cfg.get("llm_config_file")
-        llm_cfg = Path(heuragenix_root) / str(llm_config_file)
-        if method == "llm_hh" and (not llm_cfg.exists()):
-            raise FileNotFoundError(f"Missing HeurAgenix llm_config_file: {llm_cfg}")
+        # llm_config has already been resolved by _resolve_llm_config_path(...)
+        if method == "llm_hh" and (llm_config is None or (not Path(llm_config).exists())):
+            raise FileNotFoundError(
+                str(llm_config) if llm_config is not None else "llm_config is None"
+            )
         launch_cmd = [
             sys.executable,
             str(heuragenix_root / "launch_hyper_heuristic.py"),

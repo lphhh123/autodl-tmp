@@ -1,3 +1,4 @@
+# SPEC_E S3 entrypoint: delegates to smoke_check_hw_grad.main
 import sys
 from pathlib import Path
 
