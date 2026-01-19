@@ -165,12 +165,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                         pg["lr"] = float(pg.get("lr", lr)) * mul
                     stable_state["_lr_restart_applied_epoch"] = int(epoch)
                 stable_state["request_lr_restart"] = False
-        lambda_hw_eff = float(
-            stable_state.get(
-                "lambda_hw_effective",
-                stable_state.get("lambda_hw_after_guard", stable_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0)))),
-            )
-        )
+        lambda_hw_eff = float(stable_state.get("lambda_hw_effective", 0.0))
+        stable_state["lambda_hw_effective"] = float(lambda_hw_eff)
+        stable_state.setdefault("lambda_hw_base", float(lambda_hw_eff))
         model.train()
         last_hw_stats = None
         for step, batch in enumerate(train_loader):
