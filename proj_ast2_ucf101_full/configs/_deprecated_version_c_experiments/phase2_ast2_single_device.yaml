@@ -1,0 +1,9 @@
+# DEPRECATED (pre-v5.4): keys under `version_c.*` are no longer consumed.
+# Use `configs/vc_phase3_full_ucf101.yaml` and `stable_hw.*` instead.
+_base_: ../ast2_ucf101.yaml
+train:
+  epochs: 3
+ast_loss:
+  lambda_token: 5.0e-4
+  lambda_head: 5.0e-4
+  lambda_channel: 5.0e-4

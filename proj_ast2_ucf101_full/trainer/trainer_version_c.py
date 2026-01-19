@@ -691,9 +691,14 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         pg["lr"] = float(pg.get("lr", lr)) * mul
                     stable_hw_state["_lr_restart_applied_epoch"] = int(outer)
                 stable_hw_state["request_lr_restart"] = False
-        # ---- v5.4 canonical: trainer MUST only use lambda_hw_effective ----
-        # stable_hw_schedule writes (base + pre-guard effective), apply_accuracy_guard overwrites effective.
-        lambda_hw_eff = float(stable_hw_state.get("lambda_hw_effective", 0.0))
+        # ---- v5.4 canonical ----
+        # stable_hw enabled: MUST use lambda_hw_effective written by schedule+guard
+        # stable_hw disabled: fallback to legacy cfg.hw.lambda_hw (for ablations/baselines)
+        if stable_hw_enabled:
+            lambda_hw_eff = float(stable_hw_state.get("lambda_hw_effective", 0.0))
+        else:
+            lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
+
         stable_hw_state["lambda_hw_effective"] = float(lambda_hw_eff)
         stable_hw_state.setdefault("lambda_hw_base", float(lambda_hw_eff))
         allow_discrete = bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True

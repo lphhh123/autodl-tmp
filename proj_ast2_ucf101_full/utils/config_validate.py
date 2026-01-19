@@ -280,218 +280,134 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         )
 
     # ---- stable_hw defaults (v5 canonical) ----
-    if "stable_hw" not in cfg:
-        cfg["stable_hw"] = {}
+    # IMPORTANT:
+    #   1) Do NOT silently override schedule fields twice.
+    #   2) Default stable_hw.enabled depends on mode to avoid "ast2 configs silently changed".
+    #   3) NoDoubleScale ONLY enforced when stable_hw.enabled=True.
 
+    stable_hw = getattr(cfg, "stable_hw", None)
+    if stable_hw is None:
+        from omegaconf import OmegaConf
+        stable_hw = OmegaConf.create({})
+        cfg.stable_hw = stable_hw
+
+    # migrate legacy keys -> v5 structure (safe no-op if already v5)
     _migrate_stable_hw_to_v5(cfg)
+    stable_hw = cfg.stable_hw
 
-    stable_hw = get_nested(cfg, "stable_hw", {}) or {}
+    # default enable policy
+    default_enabled = True if str(mode) in ("version_c", "single_device", "layout") else False
+    if getattr(stable_hw, "enabled", None) is None:
+        stable_hw.enabled = bool(default_enabled)
+    stable_hw_enabled = bool(stable_hw.enabled)
 
-    # v5.4: if stable_hw block exists but user didn't specify stable_hw.enabled, treat as enabled by default.
-    if isinstance(stable_hw, dict):
-        if "enabled" not in stable_hw:
-            stable_hw_enabled = True
-            stable_hw["enabled"] = True
-        else:
-            stable_hw_enabled = bool(stable_hw.get("enabled", False))
-            stable_hw["enabled"] = stable_hw_enabled
+    # allow legacy alias: stable_hw.allow_train_ema_fallback -> stable_hw.accuracy_guard.allow_train_ema_fallback
+    if getattr(stable_hw, "allow_train_ema_fallback", None) is not None:
+        if getattr(getattr(stable_hw, "accuracy_guard", None), "allow_train_ema_fallback", None) is None:
+            if getattr(stable_hw, "accuracy_guard", None) is None:
+                from omegaconf import OmegaConf
+                stable_hw.accuracy_guard = OmegaConf.create({})
+            stable_hw.accuracy_guard.allow_train_ema_fallback = bool(stable_hw.allow_train_ema_fallback)
 
-        # canonical: stable_hw.accuracy_guard.controller.* (SPEC) -> mirror into legacy stable_hw.controller.*
-        ag = stable_hw.get("accuracy_guard", {}) or {}
-        if isinstance(ag, dict):
-            ctl = ag.get("controller")
-            if isinstance(ctl, dict) and ctl:
-                legacy_ctl = stable_hw.get("controller", {}) or {}
-                if not isinstance(legacy_ctl, dict):
-                    legacy_ctl = {}
-                legacy_ctl = {**legacy_ctl, **ctl}
-                stable_hw["controller"] = legacy_ctl
-                # metric alias
-                if "metric" in ctl and "metric_key" not in ag:
-                    ag["metric_key"] = str(ctl["metric"])
-                stable_hw["accuracy_guard"] = ag
-    else:
-        # object style
-        if not hasattr(stable_hw, "enabled"):
-            stable_hw.enabled = True
-            stable_hw_enabled = True
-        else:
-            stable_hw_enabled = bool(getattr(stable_hw, "enabled", False))
-
-    # ---- v5.4 stable_hw schema migration (must accept bool -> dict) ----
-    locked = stable_hw.get("locked_acc_ref", None)
-    if isinstance(locked, bool):
-        locked = {"enabled": bool(locked)}
-    elif locked is None:
-        locked = {}
-    elif not isinstance(locked, dict):
-        # tolerate AttrDict/OmegaConf nodes
-        try:
-            locked = dict(locked)
-        except Exception:
-            locked = {}
-
-    stable_hw["locked_acc_ref"] = locked
-    locked.setdefault("enabled", True)
-    locked.setdefault("prefer_dense_baseline", True)
-    locked.setdefault("baseline_stats_path", stable_hw.get("baseline_stats_path", None))
+    # ---- locked acc ref (v5) ----
+    if getattr(stable_hw, "locked_acc_ref", None) is None:
+        from omegaconf import OmegaConf
+        stable_hw.locked_acc_ref = OmegaConf.create({})
+    locked = stable_hw.locked_acc_ref
+    if getattr(locked, "enabled", None) is None:
+        locked.enabled = True
+    locked.enabled = bool(locked.enabled)
     locked.setdefault("freeze_epoch", 0)
+    locked.setdefault("warmup_epochs", 1)
+    locked.setdefault("ref_source", "best_warmup_val")
+    locked.setdefault("baseline_stats_path", None)
+    locked.setdefault("prefer_dense_baseline", True)
+    locked.setdefault("acc_margin", 0.0)
+    locked.setdefault("min_acc_ref", 0.0)
 
-    # accuracy_guard: ensure baseline path parity to avoid drift
-    guard = stable_hw.get("accuracy_guard", None)
-    if isinstance(guard, bool):
-        guard = {"enabled": bool(guard)}
-    elif guard is None:
-        guard = {}
-    elif not isinstance(guard, dict):
-        try:
-            guard = dict(guard)
-        except Exception:
-            guard = {}
-    stable_hw["accuracy_guard"] = guard
-    guard.setdefault("enabled", True)
-    guard.setdefault("epsilon_drop", 0.01)
-    guard.setdefault("prefer_val_acc1", True)
-    guard.setdefault("allow_train_ema_fallback", False)  # v5.4: default forbid silent downgrade
-    guard.setdefault("baseline_stats_path", locked.get("baseline_stats_path", None))
-    guard.setdefault("delta_below_thr", 0.005)  # for restart trigger (spec §12B.4.2)
+    # ---- accuracy guard (v5) ----
+    if getattr(stable_hw, "accuracy_guard", None) is None:
+        from omegaconf import OmegaConf
+        stable_hw.accuracy_guard = OmegaConf.create({})
+    guard = stable_hw.accuracy_guard
+    if getattr(guard, "enabled", None) is None:
+        guard.enabled = True
+    guard.enabled = bool(guard.enabled)
+    guard.setdefault("epsilon_drop", 0.002)
+    guard.setdefault("guard_mode", "hard")
+    guard.setdefault("freeze_hw_on_drop", True)
+    guard.setdefault("freeze_discrete_on_drop", True)
+    guard.setdefault("freeze_alpha_on_drop", False)
+    guard.setdefault("prefer_val_metric", True)
+    guard.setdefault("allow_train_ema_fallback", False)
 
-    # lambda_hw_schedule: MUST implement clamp_min/max per spec
-    sched = stable_hw.get("lambda_hw_schedule", None)
-    if isinstance(sched, bool):
-        sched = {"enabled": bool(sched)}
-    elif sched is None:
-        sched = {}
-    elif not isinstance(sched, dict):
-        try:
-            sched = dict(sched)
-        except Exception:
-            sched = {}
-    stable_hw["lambda_hw_schedule"] = sched
-    sched.setdefault("enabled", True)
-    sched.setdefault("warmup_epochs", 0)
-    sched.setdefault("ramp_epochs", 1)
-    sched.setdefault("lambda_hw_min", 0.0)
-    sched.setdefault("lambda_hw_max", 0.2)
-    sched.setdefault("clamp_min", 0.0)
-    sched.setdefault("clamp_max", float(sched.get("lambda_hw_max", 0.2)))
+    if getattr(guard, "controller", None) is None:
+        from omegaconf import OmegaConf
+        guard.controller = OmegaConf.create({})
+    ctrl = guard.controller
+    ctrl.setdefault("max_bad_epochs", 1)
+    ctrl.setdefault("lr_restart_mul", 2.0)
+    ctrl.setdefault("cooldown_epochs", 1)
+    ctrl.setdefault("recovery_min_epochs", 1)
+    ctrl.setdefault("recovery_mode", "freeze_discrete_and_hw")
+    ctrl.setdefault("resume_hw_after", "val_recovers")
+    ctrl.setdefault("acc_ema_beta", 0.9)
+    ctrl.setdefault("train_ema_gate_eps", 0.001)
+    ctrl.setdefault("log_prefix", "StableHW")
 
-    # controller: restart window anti-starvation per spec
-    controller = stable_hw.get("controller", None)
-    if isinstance(controller, bool):
-        controller = {"enabled": bool(controller)}
-    elif controller is None:
-        controller = {}
-    elif not isinstance(controller, dict):
-        try:
-            controller = dict(controller)
-        except Exception:
-            controller = {}
-    stable_hw["controller"] = controller
-    controller.setdefault("enabled", True)
-    controller.setdefault("recovery_patience_epochs", 3)
-    controller.setdefault("restart_window_epochs", 1)
-    controller.setdefault("lr_restart_mul", 2.0)
-    controller.setdefault("min_epochs_between_restarts", 1)
-    # -------------------------------------------------------------------
+    # ---- lambda schedule (v5) ----
+    if getattr(stable_hw, "lambda_hw_schedule", None) is None:
+        from omegaconf import OmegaConf
+        stable_hw.lambda_hw_schedule = OmegaConf.create({})
+    sched = stable_hw.lambda_hw_schedule
+    if getattr(sched, "enabled", None) is None:
+        sched.enabled = True
+    sched.enabled = bool(sched.enabled)
 
-    # -------- v5.4 canonical accuracy_guard.controller --------
-    guard = stable_hw.get("accuracy_guard", {}) or {}
-    if not isinstance(guard, dict):
-        guard = {}
-    guard.setdefault("enabled", stable_hw_enabled)
-
-    controller = guard.get("controller", {}) or stable_hw.get("controller", {}) or {}
-    if not isinstance(controller, dict):
-        controller = {}
-
-    # v5.4 required controller defaults
-    controller.setdefault("mode", "accuracy_first_hard_gating")
-    controller.setdefault("metric", str(guard.get("metric", "val_acc1")))
-    controller.setdefault("epsilon_drop", 0.01)
-    controller.setdefault("epsilon_drop_type", "abs")  # abs drop in accuracy
-    controller.setdefault("freeze_rho_on_violate", True)
-    controller.setdefault("cut_hw_loss_on_violate", True)
-    controller.setdefault("recovery_min_epochs", 1)
-    controller.setdefault("freeze_schedule_in_recovery", True)
-    # naming alias: spec uses freeze_discrete_updates
-    controller.setdefault("freeze_discrete_updates", True)
-    # keep legacy name for internal callers
-    controller.setdefault("freeze_discrete_on_violate", controller.get("freeze_discrete_updates", True))
-    controller.setdefault("k_exit", 2)
-    controller.setdefault("margin_exit", 0.002)
-
-    guard["controller"] = controller
-
-    # Back-compat aliases (do NOT treat as authoritative)
-    stable_hw["controller"] = controller  # deprecated alias
-    guard.setdefault("metric_key", str(controller["metric"]))          # deprecated alias
-    guard.setdefault("epsilon_drop", float(controller["epsilon_drop"]))# deprecated alias
-
-    stable_hw["accuracy_guard"] = guard
-
-    sched = stable_hw.get("lambda_hw_schedule", {}) or {}
-    stable_hw["lambda_hw_schedule"] = sched
-    sched.setdefault("enabled", stable_hw_enabled)
-    sched.setdefault("lambda_hw_max", 0.0)
+    # defaults MUST match v5.4 intent (NOT 0.0)
     sched.setdefault("warmup_epochs", 5)
     sched.setdefault("ramp_epochs", 10)
+    sched.setdefault("lambda_hw_min", 0.0)
+    sched.setdefault("lambda_hw_max", 0.2)
 
-    norm = stable_hw.get("normalize", {}) or {}
-    stable_hw["normalize"] = norm
-    norm.setdefault("enabled", True)
-    norm.setdefault("method", "hinge_log_ratio")
-    norm.setdefault("mode", str(norm.get("method", "hinge_log_ratio")))
-    norm.setdefault("clip_eps", 1e-6)
-    norm.setdefault("clip_term_max", 10.0)
-    norm.setdefault("mem_hinge_only", True)
-    norm.setdefault("abs_ratio", False)
-    weights = norm.get("weights", {}) or {}
-    weights.setdefault("wT", 0.2)
-    weights.setdefault("wE", 0.2)
-    weights.setdefault("wM", 0.4)
-    weights.setdefault("wC", 0.2)
-    norm["weights"] = weights
-    ref = norm.get("ref", {}) or {}
-    ref.setdefault("target_ratio_T", 0.9)
-    ref.setdefault("target_ratio_E", 0.9)
-    ref.setdefault("target_ratio_M", 0.9)
-    ref.setdefault("target_ratio_C", 0.9)
-    norm["ref"] = ref
-    norm.setdefault("eps", float(norm.get("clip_eps", 1e-6)))
-    norm.setdefault("wT", float(weights["wT"]))
-    norm.setdefault("wE", float(weights["wE"]))
-    norm.setdefault("wM", float(weights["wM"]))
-    norm.setdefault("wC", float(weights["wC"]))
-    norm.setdefault("target_ratio_T", float(ref["target_ratio_T"]))
-    norm.setdefault("target_ratio_E", float(ref["target_ratio_E"]))
-    norm.setdefault("target_ratio_M", float(ref["target_ratio_M"]))
-    norm.setdefault("target_ratio_C", float(ref["target_ratio_C"]))
+    # clamp defaults
+    sched.setdefault("clamp_min", float(sched.lambda_hw_min))
+    sched.setdefault("clamp_max", float(sched.lambda_hw_max))
 
-    # ---------- discrete_isolation ----------
-    iso = stable_hw.get("discrete_isolation", {}) or {}
-    if "track_live_in_inner_steps" in iso and "track_live_segments" not in iso:
-        iso["track_live_segments"] = bool(iso.get("track_live_in_inner_steps"))
-        print(
-            "[WARN] stable_hw.discrete_isolation.track_live_in_inner_steps is deprecated; "
-            "use track_live_segments instead."
-        )
-    stable_hw["discrete_isolation"] = iso
-    iso.setdefault("use_cached_mapping_for_inner_steps", True)
-    iso.setdefault("use_cached_layout_for_inner_steps", True)
+    # ---- normalization defaults (v5) ----
+    if getattr(stable_hw, "normalize", None) is None:
+        from omegaconf import OmegaConf
+        stable_hw.normalize = OmegaConf.create({})
+    norm = stable_hw.normalize
+    if getattr(norm, "enabled", None) is None:
+        norm.enabled = True
+    norm.enabled = bool(norm.enabled)
+    norm.setdefault("mode", "hinge_log_ratio")
+    norm.setdefault("wT", 1.0)
+    norm.setdefault("wE", 0.0)
+    norm.setdefault("wM", 0.0)
+    norm.setdefault("wC", 0.0)
+    norm.setdefault("clip_term_max", 2.0)
+    norm.setdefault("eps", 1e-6)
+
+    # ---- discrete isolation defaults (v5) ----
+    if getattr(stable_hw, "discrete_isolation", None) is None:
+        from omegaconf import OmegaConf
+        stable_hw.discrete_isolation = OmegaConf.create({})
+    iso = stable_hw.discrete_isolation
+    iso.setdefault("enabled", True)
     iso.setdefault("mapping_update_every_epochs", 1)
     iso.setdefault("layout_update_every_epochs", 1)
-    iso.setdefault("track_live_segments", False)  # optional debug mode
-    iso.setdefault("track_live_every_steps", 1)
+    iso.setdefault("cache_mapping_layout", True)
+    iso.setdefault("track_live_segments", False)
+    iso.setdefault("allow_cache_fallback", True)
 
-    # validate ints
-    for k in ["mapping_update_every_epochs", "layout_update_every_epochs", "track_live_every_steps"]:
-        v = int(iso.get(k, 1))
-        if v < 1:
-            raise ValueError(f"stable_hw.discrete_isolation.{k} must be >=1")
-        iso[k] = v
-
-    cfg["stable_hw"] = stable_hw
+    # ---- NoDoubleScale enforcement ONLY when stable_hw is enabled ----
+    if stable_hw_enabled:
+        if hasattr(cfg, "loss"):
+            cfg.loss.lambda_hw = 0.0
+        if hasattr(cfg, "hw"):
+            cfg.hw.lambda_hw = 0.0
 
     # ---- guardrail: HW loss enabled but lambda is effectively zero ----
     try:

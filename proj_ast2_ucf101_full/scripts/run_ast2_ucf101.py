@@ -42,6 +42,15 @@ def main():
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
     from utils.stable_hash import stable_hash
 
+    print("[CFG] mode =", "ast2")
+    print("[CFG] stable_hw.enabled =", bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)))
+    print(
+        "[CFG] stable_hw.lambda_hw_schedule.lambda_hw_max =",
+        float(getattr(getattr(getattr(cfg, "stable_hw", None), "lambda_hw_schedule", None), "lambda_hw_max", -1.0)),
+    )
+    print("[CFG] loss.lambda_hw =", float(getattr(getattr(cfg, "loss", None), "lambda_hw", -1.0)))
+    print("[CFG] hw.lambda_hw =", float(getattr(getattr(cfg, "hw", None), "lambda_hw", -1.0)))
+
     cfg_hash = stable_hash({"cfg": resolved_text})
     if hasattr(cfg, "train"):
         cfg.train.cfg_hash = cfg_hash

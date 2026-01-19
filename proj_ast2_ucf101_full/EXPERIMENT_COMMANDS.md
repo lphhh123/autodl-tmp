@@ -8,19 +8,19 @@ Each command exports `layout_input.json` to the specified directory after traini
 
 ```bash
 # A0: no layout loss, grid seed only
-python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A0_nolayout.yaml \
+python -m scripts.run_version_c --cfg configs/_deprecated_version_c_experiments/phase3_A0_nolayout.yaml \
   --export_layout_input true --export_dir outputs/P3/A0
 
 # A1: grid seed baseline (layout step on, no micro-place)
-python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A1_grid.yaml \
+python -m scripts.run_version_c --cfg configs/_deprecated_version_c_experiments/phase3_A1_grid.yaml \
   --export_layout_input true --export_dir outputs/P3/A1
 
 # A2: traffic-aware seed (no micro-place)
-python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A2_seed.yaml \
+python -m scripts.run_version_c --cfg configs/_deprecated_version_c_experiments/phase3_A2_seed.yaml \
   --export_layout_input true --export_dir outputs/P3/A2
 
 # A3: traffic-aware seed + micro-place (default)
-python -m scripts.run_version_c --cfg configs/version_c_experiments/phase3_A3_seed_micro.yaml \
+python -m scripts.run_version_c --cfg configs/_deprecated_version_c_experiments/phase3_A3_seed_micro.yaml \
   --export_layout_input true --export_dir outputs/P3/A3
 ```
 
