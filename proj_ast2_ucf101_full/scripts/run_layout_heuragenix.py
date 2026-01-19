@@ -298,6 +298,9 @@ def _build_evaluator(layout_input: dict, cfg: Any) -> Tuple[LayoutState, LayoutE
 
 
 def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
+    if not recordings_path.exists():
+        # caller already wrote init row; just return empty iterator
+        return
     with recordings_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -442,12 +445,37 @@ def _write_trace_and_pareto(
     with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
+        # ---- v5.4 required init row (even if steps=0 / no recordings) ----
+        writer.writerow(
+            [
+                0,
+                "init",
+                "init",
+                json.dumps({"op": "init"}, ensure_ascii=False),
+                1,
+                prev_total,
+                prev_comm,
+                prev_therm,
+                0,
+                float(prev_metrics.get("penalty", {}).get("duplicate", 0.0)),
+                float(prev_metrics.get("penalty", {}).get("boundary", 0.0)),
+                int(seed),
+                0,
+                signature_from_assign(prev_assign),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        )
 
         last_idx = -1
-        for idx, rec in enumerate(_iter_recordings(recordings_path)):
+        for idx, rec in enumerate(_iter_recordings(recordings_path), start=1):
             has_records = True
             last_idx = idx
-            if max_steps is not None and idx >= max_steps:
+            if max_steps is not None and (idx - 1) >= int(max_steps):
                 break
 
             if "signature" not in rec:
@@ -517,7 +545,7 @@ def _write_trace_and_pareto(
 
             writer.writerow(
                 [
-                    step_id,
+                    idx,
                     stage,
                     op,
                     json.dumps({"op": op, **op_args}, ensure_ascii=False, sort_keys=True),
@@ -553,32 +581,6 @@ def _write_trace_and_pareto(
                 best_step = step_id
 
         if not has_records:
-            # init-only row (steps=0 / empty recordings)
-            signature0 = signature_from_assign(list(prev_assign))
-            writer.writerow(
-                [
-                    0,
-                    "init",
-                    "init",
-                    json.dumps({"op": "init"}, ensure_ascii=False, sort_keys=True),
-                    1,
-                    float(prev_total),
-                    float(prev_comm),
-                    float(prev_therm),
-                    0,
-                    0.0,
-                    0.0,
-                    seed,
-                    0,
-                    signature0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0,
-                    0,
-                    0,
-                ]
-            )
             best_eval = dict(prev_metrics)
             best_assign = list(prev_assign)
             best_step = 0
@@ -1208,6 +1210,11 @@ def main() -> None:
         _append_llm_usage(
             llm_usage_path,
             {"ok": False, "reason": "missing_llm_usage", "engine": method},
+        )
+    if not recordings_path.exists():
+        llm_usage_path.write_text(
+            json.dumps({"event": "recordings_missing", "path": str(recordings_path)}) + "\n",
+            encoding="utf-8",
         )
     trace_info, pareto = _write_trace_and_pareto(
         out_dir,

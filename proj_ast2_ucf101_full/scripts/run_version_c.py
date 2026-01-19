@@ -77,7 +77,11 @@ def main():
         if not hasattr(cfg.stable_hw, "accuracy_guard") or cfg.stable_hw.accuracy_guard is None:
             cfg.stable_hw.accuracy_guard = {}
         cfg.stable_hw.locked_acc_ref.baseline_stats_path = str(args.baseline_stats)
-        cfg.stable_hw.accuracy_guard.baseline_stats_path = str(args.baseline_stats)
+        # optional back-compat alias (do not use as authoritative)
+        try:
+            cfg.stable_hw.baseline_stats_path = str(args.baseline_stats)
+        except Exception:
+            pass
         cfg.stable_hw.locked_acc_ref.prefer_dense_baseline = True
 
     # out_dir: CLI 优先；否则 cfg.train.out_dir；否则自动生成一个

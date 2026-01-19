@@ -89,36 +89,44 @@ def _sync_layout_to_hw(cfg: Any) -> None:
 
 
 def _migrate_stable_hw_to_v5(cfg: Any) -> None:
+    """
+    v5.4 canonical:
+      stable_hw.locked_acc_ref.*
+      stable_hw.lambda_hw_schedule.*
+      stable_hw.accuracy_guard.controller.*   (AUTHORITATIVE)
+    Back-compat:
+      stable_hw.controller.*   (alias; deprecated)
+      stable_hw.accuracy_guard.metric_key / epsilon_drop etc. (alias; deprecated)
+    """
     stable_hw = get_nested(cfg, "stable_hw", {}) or {}
     if not isinstance(stable_hw, dict):
         return
+
     guard = stable_hw.get("accuracy_guard", {}) or {}
-    controller = stable_hw.get("controller", {}) or {}
+    if not isinstance(guard, dict):
+        guard = {}
 
-    metric = guard.get("metric")
-    if guard.get("metric_key") is None and metric is not None:
-        if str(metric) in {"acc1", "val_acc1", "val_acc"}:
-            guard["metric_key"] = "val_acc1"
-        else:
-            guard["metric_key"] = str(metric)
+    # old: stable_hw.controller -> new: stable_hw.accuracy_guard.controller
+    old_ctrl = stable_hw.get("controller", {}) or {}
+    if not isinstance(old_ctrl, dict):
+        old_ctrl = {}
 
-    on_violate = guard.get("on_violate", {}) or {}
-    recover = on_violate.get("recover", {}) if isinstance(on_violate, dict) else {}
-    cand_epochs = []
-    if isinstance(on_violate, dict) and on_violate.get("freeze_rho_epochs") is not None:
-        cand_epochs.append(int(on_violate.get("freeze_rho_epochs") or 0))
-    if isinstance(recover, dict) and recover.get("patience_epochs") is not None:
-        cand_epochs.append(int(recover.get("patience_epochs") or 0))
-    if cand_epochs and controller.get("recovery_min_epochs") is None:
-        controller["recovery_min_epochs"] = max(1, max(cand_epochs))
+    ctrl = guard.get("controller", {}) or {}
+    if not isinstance(ctrl, dict):
+        ctrl = {}
 
-    guard.pop("on_violate", None)
-    guard.pop("max_consecutive", None)
-    guard.pop("metric", None)
+    # merge: guard.controller has higher priority
+    merged = dict(old_ctrl)
+    merged.update(ctrl)
+    guard["controller"] = merged
 
-    stable_hw.pop("hw_refs_update", None)
+    # legacy metric -> controller.metric
+    metric = guard.get("metric") or guard.get("metric_key") or merged.get("metric")
+    if metric is None:
+        metric = "val_acc1"
+    guard["metric"] = str(metric)
+
     stable_hw["accuracy_guard"] = guard
-    stable_hw["controller"] = controller
     cfg["stable_hw"] = stable_hw
 
 
@@ -286,20 +294,35 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if ag is not None and getattr(ag, "on_violate", None) is not None:
             setattr(ag.on_violate, "scale_lambda_hw", float(getattr(ag.on_violate, "scale_lambda_hw", 0.0)))
 
-    controller = stable_hw.get("controller", {}) or {}
-    controller.setdefault("freeze_schedule_in_recovery", True)
-    controller.setdefault("recovery_min_epochs", 1)
-    controller.setdefault("margin_exit", 0.0)
-    controller.setdefault("k_exit", 1)
-    stable_hw["controller"] = controller
-
+    # -------- v5.4 canonical accuracy_guard.controller --------
     guard = stable_hw.get("accuracy_guard", {}) or {}
+    if not isinstance(guard, dict):
+        guard = {}
     guard.setdefault("enabled", stable_hw_enabled)
-    guard.setdefault("metric_key", "val_acc1")
-    guard.setdefault("epsilon_drop", 0.01)
-    guard.setdefault("use_ema", True)
-    guard.setdefault("ema_beta", 0.9)
-    guard.setdefault("baseline_stats_path", str(get_nested(cfg, "paths.baseline_stats_path", "") or ""))
+
+    controller = guard.get("controller", {}) or stable_hw.get("controller", {}) or {}
+    if not isinstance(controller, dict):
+        controller = {}
+
+    # v5.4 required controller defaults
+    controller.setdefault("mode", "hard")
+    controller.setdefault("metric", str(guard.get("metric", "val_acc1")))
+    controller.setdefault("epsilon_drop", 0.01)
+    controller.setdefault("epsilon_drop_type", "abs")  # abs drop in accuracy
+    controller.setdefault("freeze_rho_on_violate", True)
+    controller.setdefault("cut_hw_loss_on_violate", True)
+    controller.setdefault("recovery_min_epochs", 3)
+    controller.setdefault("freeze_schedule_in_recovery", True)
+    controller.setdefault("k_exit", 2)
+    controller.setdefault("margin_exit", 0.002)
+
+    guard["controller"] = controller
+
+    # Back-compat aliases (do NOT treat as authoritative)
+    stable_hw["controller"] = controller  # deprecated alias
+    guard.setdefault("metric_key", str(controller["metric"]))          # deprecated alias
+    guard.setdefault("epsilon_drop", float(controller["epsilon_drop"]))# deprecated alias
+
     stable_hw["accuracy_guard"] = guard
 
     sched = stable_hw.get("lambda_hw_schedule", {}) or {}
