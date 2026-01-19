@@ -7,6 +7,35 @@ import time
 from typing import Any, Dict, List, Optional
 
 
+def _safe_int(x, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def _get_env_seed_id(env) -> int:
+    if hasattr(env, "_seed_id"):
+        return _safe_int(getattr(env, "_seed_id"), 0)
+    if hasattr(env, "seed_id"):
+        return _safe_int(getattr(env, "seed_id"), 0)
+    if hasattr(env, "seed"):
+        return _safe_int(getattr(env, "seed"), 0)
+    return 0
+
+
+def _signature_from_assign(assign) -> str:
+    try:
+        import layout.candidate_pool as candidate_pool
+
+        fn = getattr(candidate_pool, "signature_from_assign", None)
+        if callable(fn):
+            return str(fn(list(assign)))
+    except Exception:
+        pass
+    return "assign:" + ",".join(map(str, list(assign)))
+
+
 class BaseEnv:
     def __init__(self, data_path: str, problem: Optional[str] = None):
         self.data_path = data_path
@@ -68,10 +97,11 @@ class BaseEnv:
             sig = None
             try:
                 if hasattr(self.solution, "assign") and isinstance(getattr(self.solution, "assign"), (list, tuple)):
-                    sig = "assign:" + ",".join(map(str, getattr(self.solution, "assign")))
+                    sig = _signature_from_assign(getattr(self.solution, "assign"))
             except Exception:
                 sig = None
 
+            seed_id = _get_env_seed_id(self)
             init_record = {
                 "iter": 0,
                 "stage": "init",
@@ -79,6 +109,7 @@ class BaseEnv:
                 "op_args": init_action,
                 "op_args_json": json.dumps(init_action, ensure_ascii=False),
                 "accepted": 1,
+                "seed_id": int(seed_id),
                 "signature": sig,
                 "key_value": float(self.get_key_value(self.solution)),
                 "solution_value": float(self.solution.get_solution_value()) if hasattr(self.solution, "get_solution_value") else None,
@@ -130,6 +161,7 @@ class BaseEnv:
             self.construction_steps = 0
         self.construction_steps += 1
         self.current_steps += 1
+        seed_id = _get_env_seed_id(self)
         record = {
             "iter": int(self.current_steps),
             "stage": stage,
@@ -137,6 +169,7 @@ class BaseEnv:
             "heuristic_name": heuristic_name,
             "time_ms": float(time_ms) if time_ms is not None else None,
             "meta": meta or {},
+            "seed_id": int(seed_id),
         }
         action = operator.to_action() if hasattr(operator, "to_action") else {"op": type(operator).__name__}
         record["op_args"] = action
@@ -149,7 +182,7 @@ class BaseEnv:
                 if hasattr(self.current_solution, "assign"):
                     a = getattr(self.current_solution, "assign")
                     if isinstance(a, (list, tuple)):
-                        sig = "assign:" + ",".join(map(str, a))
+                        sig = _signature_from_assign(a)
             except Exception:
                 sig = None
             if sig is not None:

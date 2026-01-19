@@ -37,6 +37,7 @@ from utils.stable_hw import (
     init_hw_refs_from_baseline_stats,
     stable_hw_log_fields,
     stable_hw_schedule,
+    update_train_acc1_ema,
     update_hw_refs_from_stats,
 )
 
@@ -943,6 +944,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 acc1 = (logits.argmax(dim=1) == y).float().mean()
                 last_acc1 = float(acc1.item())
                 best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
+                if stable_hw_enabled:
+                    metric = str(getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "metric", "val_acc1"))
+                    if metric == "train_ema":
+                        update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
                 stats = {
                     "outer": outer,
                     "step": step,

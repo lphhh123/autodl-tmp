@@ -394,6 +394,10 @@ def init_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
     _load_locked_acc_ref(stable_hw_cfg, st)
 
 
+def update_train_acc1_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc1: float) -> None:
+    _update_train_ema(stable_hw_cfg, st, float(acc1))
+
+
 # ===== v5.4: Locked HW refs (NoDrift for proxy refs) =====
 def init_hw_refs_from_baseline_stats(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
     """
