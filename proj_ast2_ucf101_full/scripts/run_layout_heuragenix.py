@@ -1296,6 +1296,8 @@ def main() -> None:
             "max_steps": effective_max_steps,
             # ★可选：把用户是否显式指定也写清楚，方便复盘
             "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) > 0) else None,
+            # v5.4 fairness: count actual evaluator calls
+            "eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
         },
         "evaluator": {
             "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),

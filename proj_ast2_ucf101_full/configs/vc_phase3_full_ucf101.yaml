@@ -1,26 +1,16 @@
-_base_: ./ast2_ucf101.yaml
-training:
-  mode: version_c_full
-  outer_epochs: 2
-  inner_steps_ast: 2
-  inner_steps_alpha: 1
-  inner_steps_layout: 1
-hw:
-  mode: version_c_full
-  use_fine_split: true
-  optimize_layout: true
 stable_hw:
   enabled: true
 
-  # --- LockedAccRef：必须是 dict，不能是 bool ---
+  # v5.4 canonical: locked acc ref is a dict (no drift)
   locked_acc_ref:
     enabled: true
-    # warmup_best 冻结点（与 stable_hw.lambda_hw_schedule.warmup_epochs 对齐）
-    freeze_epoch: 1
+    # optional: points to EXP-A1 dense baseline stats; if missing -> warmup_best
+    baseline_stats_path: null
+    freeze_epoch: 0
     prefer_dense_baseline: true
-    baseline_stats_path: ""  # CLI --baseline_stats 注入；留空不崩
 
-  # --- λ_hw schedule（NoDoubleScale：只允许这里产出 base） ---
+  allow_train_ema_fallback: true
+
   lambda_hw_schedule:
     enabled: true
     warmup_epochs: 0
@@ -29,48 +19,37 @@ stable_hw:
     clamp_min: 0.0
     clamp_max: 0.2
 
-  # --- normalize（v5.4：mode=hinge_log_ratio + ref 机制） ---
   normalize:
-    enabled: true
     mode: hinge_log_ratio
     eps: 1.0e-6
-    clip_term_max: 10.0
-    mem_hinge_only: true
-    abs_ratio: false
     wT: 0.4
     wE: 0.2
     wM: 0.2
     wC: 0.2
     target_ratio_T: 0.9
     target_ratio_E: 0.9
-    target_ratio_M: 1.0
-    target_ratio_C: 1.0
-    # ref 更新策略（spec：baseline 优先，否则 EMA）
-    ref_ema_beta: 0.95
+    mem_hinge_only: true
+    clip_term_max: 10.0
 
-  # --- accuracy guard（Acc-First Hard Gating） ---
   accuracy_guard:
     enabled: true
-    metric: acc1                 # 论文展示用
-    metric_key: val_acc1         # 训练内部读取 key（优先 val）
+    metric: acc1
     epsilon_drop: 0.01
-    baseline_stats_path: ""      # CLI 注入
     use_ema: true
     ema_beta: 0.9
 
-    # v5.4 canonical：controller（替代旧 on_violate）
+    # v5.4 canonical controller (Acc-First Hard Gating)
     controller:
+      mode: accuracy_first_hard_gating
       metric: val_acc1
-      freeze_schedule_in_recovery: true
-      freeze_discrete_updates_in_recovery: true
-      cut_hw_loss_on_violate: true
-      scale_lambda_hw: 0.0
-      recovery_epochs: 1
+      epsilon_drop: 0.01
       recovery_min_epochs: 1
-      k_exit: 1
-      margin_exit: 0.0
+      cut_hw_loss_on_violate: true
+      freeze_discrete_updates: true
+      freeze_schedule_in_recovery: true
+      k_exit: 2
+      margin_exit: 0.002
 
-  # --- Version-C 离散隔离/缓存（用于公平对比 & 可复现） ---
   discrete_isolation:
     mapping_update_every_epochs: 1
     layout_update_every_epochs: 1

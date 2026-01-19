@@ -321,11 +321,18 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     # legacy -> v5.1 canonical mapping
     if isinstance(stable_hw, dict):
         locked = stable_hw.get("locked_acc_ref")
+        # legacy configs sometimes used: locked_acc_ref: true/false
+        if isinstance(locked, bool):
+            locked = {"enabled": bool(locked)}
         if locked is None:
             locked = {}
+        if not isinstance(locked, dict):
+            # best-effort: coerce unknown types to dict
+            locked = {"baseline_stats_path": getattr(locked, "baseline_stats_path", None)}
         locked.setdefault("baseline_stats_path", stable_hw.get("baseline_stats_path"))
         locked.setdefault("freeze_epoch", 0)
         locked.setdefault("prefer_dense_baseline", True)
+        locked.setdefault("enabled", True)
         stable_hw["locked_acc_ref"] = locked
         ag = stable_hw.get("accuracy_guard")
         if isinstance(ag, dict):
@@ -353,14 +360,18 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         controller = {}
 
     # v5.4 required controller defaults
-    controller.setdefault("mode", "hard")
+    controller.setdefault("mode", "accuracy_first_hard_gating")
     controller.setdefault("metric", str(guard.get("metric", "val_acc1")))
     controller.setdefault("epsilon_drop", 0.01)
     controller.setdefault("epsilon_drop_type", "abs")  # abs drop in accuracy
     controller.setdefault("freeze_rho_on_violate", True)
     controller.setdefault("cut_hw_loss_on_violate", True)
-    controller.setdefault("recovery_min_epochs", 3)
+    controller.setdefault("recovery_min_epochs", 1)
     controller.setdefault("freeze_schedule_in_recovery", True)
+    # naming alias: spec uses freeze_discrete_updates
+    controller.setdefault("freeze_discrete_updates", True)
+    # keep legacy name for internal callers
+    controller.setdefault("freeze_discrete_on_violate", controller.get("freeze_discrete_updates", True))
     controller.setdefault("k_exit", 2)
     controller.setdefault("margin_exit", 0.002)
 

@@ -646,6 +646,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             "hw_mats": {},
         },
     )
+    (out_dir / "stable_hw_state.json").write_text(
+        json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     run_state: Dict[str, Any] = {"last_model_info": None}
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None
