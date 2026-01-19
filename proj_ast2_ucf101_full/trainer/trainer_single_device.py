@@ -28,6 +28,7 @@ from utils.stable_hw import (
     init_hw_refs_from_baseline_stats,
     stable_hw_log_fields,
     stable_hw_schedule,
+    update_train_acc1_ema,
     update_hw_refs_from_stats,
 )
 
@@ -216,6 +217,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             scaler.update()
             if step % 10 == 0:
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
+                if stable_hw_enabled:
+                    metric = str(getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "metric", "val_acc1"))
+                    if metric == "train_ema":
+                        update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
                 stats = {
                     "epoch": epoch,
                     "step": step,
