@@ -31,12 +31,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.stable_hw import (
-    stable_hw_after_validation,
-    stable_hw_before_epoch,
-    stable_hw_init_state,
-    stable_hw_log_fields,
-)
+from utils.stable_hw import apply_accuracy_guard, stable_hw_log_fields, stable_hw_schedule
 
 # v5 StableHW: allow_discrete_updates gates ALL discrete signature changes.
 # Discrete updates include: partition updates, device mapping updates, layout optimize updates,
@@ -627,7 +622,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     global_step = 0
     last_segments: List = []
     last_mapping: List[int] = []
-    stable_hw_state: Dict[str, Any] = stable_hw_init_state(cfg)
+    stable_hw_state: Dict[str, Any] = {}
     stable_hw_state.setdefault(
         "discrete_cache",
         {
@@ -644,9 +639,26 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     last_hw_stats = None
 
     for outer in range(cfg.training.outer_epochs):
-        decision = stable_hw_before_epoch(cfg, stable_hw_state)
-        lambda_hw_eff = float(decision.lambda_hw_effective)
-        allow_discrete = bool(decision.allow_discrete_updates)
+        stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+        if stable_hw_enabled:
+            stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+            apply_accuracy_guard(
+                outer,
+                stable_hw_cfg,
+                stable_hw_state,
+                None,
+                has_val_this_epoch=False,
+                train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
+                if stable_hw_state.get("train_acc1_ema") is not None
+                else None,
+            )
+        lambda_hw_eff = float(
+            stable_hw_state.get(
+                "lambda_hw_effective",
+                stable_hw_state.get("lambda_hw_after_guard", stable_hw_state.get("lambda_hw", float(getattr(cfg.hw, "lambda_hw", 0.0)))),
+            )
+        )
+        allow_discrete = bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
         # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
         #   - partition/mapping updates
         #   - device mapping updates
@@ -661,40 +673,47 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
         mapping_updated = False
         layout_updated = False
+        allow_discrete_updates = bool(stable_hw_state.get("allow_discrete_updates", True))
 
-        if allow_discrete and ((outer % map_every) == 0 or cache["mapping"] is None):
-            mapping_res = _solve_mapping_for_cache(
-                model=model,
-                chiplet_slots=chiplet_slots,
-                mapping_solver=mapping_solver,
-                hw_proxy=hw_proxy,
-                wafer_layout=wafer_layout,
-                partitioner=partitioner,
-                hw_cfg=cfg.hw,
-                model_info=run_state.get("last_model_info"),
-            )
-            cache["mapping"] = mapping_res
-            cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
-            mapping_updated = True
-        else:
-            if cache["mapping"] is None:
-                raise RuntimeError("[StableHW] RECOVERY requires cached mapping, but none is available.")
+        if (not allow_discrete_updates) and cache["mapping"] is not None:
             mapping_res = cache["mapping"]
-
-        if allow_discrete and ((outer % lay_every) == 0 or cache["layout"] is None):
-            layout_res = _solve_layout_for_cache(
-                chiplet_slots=chiplet_slots,
-                wafer_layout=wafer_layout,
-                hw_cfg=cfg.hw,
-                mapping_result=mapping_res,
-            )
-            cache["layout"] = layout_res
-            cache["layout_signature"] = layout_res.get("signature")
-            layout_updated = True
+            mapping_updated = False
         else:
-            if cache["layout"] is None:
-                raise RuntimeError("[StableHW] RECOVERY requires cached layout, but none is available.")
+            if (outer % map_every) == 0 or cache["mapping"] is None:
+                mapping_res = _solve_mapping_for_cache(
+                    model=model,
+                    chiplet_slots=chiplet_slots,
+                    mapping_solver=mapping_solver,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
+                    partitioner=partitioner,
+                    hw_cfg=cfg.hw,
+                    model_info=run_state.get("last_model_info"),
+                )
+                cache["mapping"] = mapping_res
+                cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
+                mapping_updated = True
+            else:
+                mapping_res = cache["mapping"]
+                mapping_updated = False
+
+        if (not allow_discrete_updates) and cache["layout"] is not None:
             layout_res = cache["layout"]
+            layout_updated = False
+        else:
+            if (outer % lay_every) == 0 or cache["layout"] is None:
+                layout_res = _solve_layout_for_cache(
+                    chiplet_slots=chiplet_slots,
+                    wafer_layout=wafer_layout,
+                    hw_cfg=cfg.hw,
+                    mapping_result=mapping_res,
+                )
+                cache["layout"] = layout_res
+                cache["layout_signature"] = layout_res.get("signature")
+                layout_updated = True
+            else:
+                layout_res = cache["layout"]
+                layout_updated = False
         tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
         chiplet_slots.set_tau(tau)
         last_hw_stats = None
@@ -748,7 +767,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 mapping_for_hw = mapping_cached
                 step_mapping_updated = mapping_updated
                 step_layout_updated = layout_updated
-                if allow_discrete and track_live and iso_cfg is not None:
+                if allow_discrete_updates and track_live and iso_cfg is not None:
                     track_every = int(getattr(iso_cfg, "track_live_every_steps", 1) or 1)
                     if (step % track_every) == 0:
                         if not use_cached_mapping:
@@ -778,7 +797,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                             cache["layout_signature"] = layout_res.get("signature")
                             step_layout_updated = True
 
-                if allow_discrete and layout_opt is not None and bool(_get_iso_cfg_value(iso_cfg, "optimize_layout", False)):
+                if (
+                    allow_discrete_updates
+                    and layout_opt is not None
+                    and bool(_get_iso_cfg_value(iso_cfg, "optimize_layout", False))
+                ):
                     if step_layout_updated and segments_for_hw and mapping_for_hw:
                         prev_requires = {}
                         for n, p in model.named_parameters():
@@ -981,13 +1004,17 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             model_type=str(getattr(cfg.training, "model_type", "video")),
             max_batches=max_eval_batches,
         )
-        decision = stable_hw_after_validation(
-            cfg,
-            stable_hw_state,
-            outer,
-            val_metrics={"val_acc1": float(val_acc1)},
-            train_metrics=None,
-        )
+        if stable_hw_enabled:
+            apply_accuracy_guard(
+                outer,
+                stable_hw_cfg,
+                stable_hw_state,
+                float(val_acc1) if val_acc1 is not None else None,
+                has_val_this_epoch=(val_acc1 is not None),
+                train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
+                if stable_hw_state.get("train_acc1_ema") is not None
+                else None,
+            )
         last_acc1 = float(val_acc1)
         best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
 

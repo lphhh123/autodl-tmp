@@ -4,6 +4,15 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+LAYOUT_INPUT="outputs/P3/A3/layout_input.json"
+if [ ! -f "${LAYOUT_INPUT}" ]; then
+  echo "[ERROR] Missing ${LAYOUT_INPUT}"
+  echo "Run EXP-A3 (or run_version_c with --export_layout_input) first to generate layout_input.json"
+  echo "Example:"
+  echo "  python scripts/run_version_c.py --config configs/vc_phase3_full_ucf101.yaml --out_dir outputs/P3/A3 --seed 0 --export_layout_input true"
+  exit 2
+fi
+
 echo "[SMOKE] Proxy ms/mem"
 python -m scripts.run_proxy_ms_mem --cfg configs/proxy_ms_mem.yaml
 

@@ -29,7 +29,7 @@ def compute_hw_loss(
     SPEC-aligned HW loss:
       L_hw = L_hw_norm + L_chip + L_area + L_layout
     Returns:
-      (L_hw_total, hw_stats_dict)
+      (L_hw_norm, hw_stats_dict)
     """
     device = None
     for v in (layout_positions, alpha):
@@ -176,15 +176,21 @@ def compute_hw_loss(
     ref_M = float(stable_hw_state.get("ref_M", float(mem_mb.detach().item())))
     ref_C = float(stable_hw_state.get("ref_C", float(comm_ms.detach().item())))
 
-    # ---- v5 safety: never allow negative proxy metrics to bias optimization ----
-    latency_ms = torch.clamp(latency_ms, min=0.0)
-    energy_mj = torch.clamp(energy_mj, min=0.0)
-    mem_mb = torch.clamp(mem_mb, min=0.0)
-    comm_ms = torch.clamp(comm_ms, min=0.0)
-    ref_T = max(0.0, float(ref_T))
-    ref_E = max(0.0, float(ref_E))
-    ref_M = max(0.0, float(ref_M))
-    ref_C = max(0.0, float(ref_C))
+    # ---- v5.1 safety: never allow non-positive into ratios ----
+    eps_ratio = 1e-9
+    raw_latency = float(latency_ms.detach().item())
+    raw_energy = float(energy_mj.detach().item())
+    raw_mem = float(mem_mb.detach().item())
+    raw_comm = float(comm_ms.detach().item())
+
+    latency_ms = torch.clamp(latency_ms, min=eps_ratio)
+    energy_mj = torch.clamp(energy_mj, min=eps_ratio)
+    mem_mb = torch.clamp(mem_mb, min=eps_ratio)
+    comm_ms = torch.clamp(comm_ms, min=eps_ratio)
+    ref_T = max(eps_ratio, float(ref_T))
+    ref_E = max(eps_ratio, float(ref_E))
+    ref_M = max(eps_ratio, float(ref_M))
+    ref_C = max(eps_ratio, float(ref_C))
 
     wT = float(getattr(norm_cfg, "wT", 0.2)) if norm_cfg else 0.0
     wE = float(getattr(norm_cfg, "wE", 0.2)) if norm_cfg else 0.0
@@ -269,6 +275,14 @@ def compute_hw_loss(
         "energy_mj": float(energy_mj.detach().cpu().item()),
         "mem_mb": float(mem_mb.detach().cpu().item()),
         "comm_ms": float(comm_ms.detach().cpu().item()),
+        "raw_latency_ms": raw_latency,
+        "raw_energy_j": raw_energy,
+        "raw_mem_mb": raw_mem,
+        "raw_comm_mb": raw_comm,
+        "clamped_latency_ms": float(latency_ms.detach().cpu().item()),
+        "clamped_energy_j": float(energy_mj.detach().cpu().item()),
+        "clamped_mem_mb": float(mem_mb.detach().cpu().item()),
+        "clamped_comm_mb": float(comm_ms.detach().cpu().item()),
         "ref_T": float(ref_T),
         "ref_E": float(ref_E),
         "ref_M": float(ref_M),
@@ -290,4 +304,6 @@ def compute_hw_loss(
     if layout_stats:
         hw_stats.update({f"layout_{k}": v for k, v in layout_stats.items()})
 
-    return L_hw, hw_stats
+    hw_stats["L_hw_norm"] = float(L_hw_norm.detach().cpu().item())
+    hw_stats["L_hw_total"] = float(L_hw.detach().cpu().item())
+    return L_hw_norm, hw_stats

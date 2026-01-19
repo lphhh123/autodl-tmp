@@ -233,6 +233,30 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     stable_hw_enabled = bool(stable_hw.get("enabled", False))
     stable_hw["enabled"] = stable_hw_enabled
 
+    # legacy -> v5.1 canonical mapping
+    if isinstance(stable_hw, dict):
+        locked = stable_hw.get("locked_acc_ref")
+        if locked is None:
+            locked = {}
+        locked.setdefault("baseline_stats_path", stable_hw.get("baseline_stats_path"))
+        locked.setdefault("freeze_epoch", 0)
+        locked.setdefault("prefer_dense_baseline", True)
+        stable_hw["locked_acc_ref"] = locked
+        ag = stable_hw.get("accuracy_guard")
+        if isinstance(ag, dict):
+            on_violate = ag.get("on_violate")
+            if isinstance(on_violate, dict):
+                on_violate["scale_lambda_hw"] = float(on_violate.get("scale_lambda_hw", 0.0))
+    else:
+        if getattr(stable_hw, "locked_acc_ref", None) is None:
+            stable_hw.locked_acc_ref = type("Obj", (), {})()
+            stable_hw.locked_acc_ref.baseline_stats_path = getattr(stable_hw, "baseline_stats_path", None)
+            stable_hw.locked_acc_ref.freeze_epoch = 0
+            stable_hw.locked_acc_ref.prefer_dense_baseline = True
+        ag = getattr(stable_hw, "accuracy_guard", None)
+        if ag is not None and getattr(ag, "on_violate", None) is not None:
+            setattr(ag.on_violate, "scale_lambda_hw", float(getattr(ag.on_violate, "scale_lambda_hw", 0.0)))
+
     controller = stable_hw.get("controller", {}) or {}
     controller.setdefault("freeze_schedule_in_recovery", True)
     controller.setdefault("recovery_min_epochs", 1)
