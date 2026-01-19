@@ -992,12 +992,19 @@ def main() -> None:
     except Exception:
         layout_hash = None
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
+    objective_cfg = _build_objective_cfg(cfg)
+    baseline_payload = dict(baseline_cfg) if isinstance(baseline_cfg, dict) else baseline_cfg
     extra = {
         "repo_root": str(_PROJECT_ROOT),
         "problem_name": str(baseline_cfg.get("problem", "wafer_layout")),
         "layout_input_hash": layout_hash,
         "steps": int(effective_max_steps),
         "budget": int(rollout_budget),
+        "case_stem": str(case_name),
+        "seed": int(seed),
+        "seed_assign": [int(x) for x in seed_assign],
+        "objective_cfg": objective_cfg,
+        "baseline": baseline_payload,
     }
     from utils.stable_hash import stable_hash
 

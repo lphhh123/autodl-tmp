@@ -12,6 +12,23 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 
 
+def _is_mapping(x) -> bool:
+    if x is None:
+        return False
+    if isinstance(x, dict):
+        return True
+    try:
+        from omegaconf import DictConfig  # type: ignore
+        return isinstance(x, DictConfig)
+    except Exception:
+        return False
+
+
+def _assert_mapping(path: str, x) -> None:
+    if not _is_mapping(x):
+        raise AssertionError(f"{path} must be a mapping (dict/DictConfig); got {type(x)}")
+
+
 def _assert_type(name: str, value, expected) -> None:
     if not isinstance(value, expected):
         raise AssertionError(f"{name} expected {expected}, got {type(value)}")
@@ -59,7 +76,7 @@ def main() -> None:
     print("[SMOKE] stable_hw.lambda_hw_schedule", sched)
 
     # locked
-    _assert_type("stable_hw.locked_acc_ref", locked, dict)
+    _assert_mapping("stable_hw.locked_acc_ref", locked)
     _assert_type("stable_hw.locked_acc_ref.baseline_stats_path", _get(locked, "baseline_stats_path"), (str, type(None)))
     _assert_type("stable_hw.locked_acc_ref.freeze_epoch", _get(locked, "freeze_epoch"), int)
     _assert_type("stable_hw.locked_acc_ref.prefer_dense_baseline", _get(locked, "prefer_dense_baseline"), bool)

@@ -9,14 +9,62 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 
+import numpy as np
 import torch
 
 from hw_proxy.hw_loss import compute_hw_loss
-from hw_proxy.layer_hw_proxy import LayerHwProxy
 from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
+
+
+class AnalyticProxy:
+    """A tiny differentiable proxy used ONLY for smoke tests."""
+
+    def predict_layers_batch(self, layers_cfg):
+        lat = []
+        mem = []
+        power = []
+        eps = 1e-12
+        for x in layers_cfg:
+            dev = x["device_cfg"]
+            peak_flops = float(dev.get("peak_flops", 1.0))
+            peak_bw = float(dev.get("peak_bw", 1.0))
+            tdp = float(dev.get("tdp_w", 200.0))
+            flops = float(x.get("flops", 0.0))
+            byt = float(x.get("bytes", 0.0))
+            lat_ms = (flops / (peak_flops + eps)) * 1e3 + (byt / (peak_bw + eps)) * 1e3
+            lat.append(max(lat_ms, 0.0))
+            mem.append(max(byt / 1e6, 0.0))
+            power.append(max(0.5 * tdp, 0.0))
+        return {
+            "lat_ms": np.asarray(lat, dtype=np.float32),
+            "mem_mb": np.asarray(mem, dtype=np.float32),
+            "power_w": np.asarray(power, dtype=np.float32),
+        }
+
+    def predict_layers_batch_torch(self, layers_cfg, device):
+        lat = []
+        mem = []
+        power = []
+        eps = torch.tensor(1e-12, device=device)
+        for x in layers_cfg:
+            dev = x["device_cfg"]
+            peak_flops = dev.get("peak_flops", torch.tensor(1.0, device=device))
+            peak_bw = dev.get("peak_bw", torch.tensor(1.0, device=device))
+            tdp = dev.get("tdp_w", torch.tensor(200.0, device=device))
+            flops = torch.tensor(float(x.get("flops", 0.0)), device=device)
+            byt = torch.tensor(float(x.get("bytes", 0.0)), device=device)
+            lat_ms = (flops / (peak_flops + eps)) * 1e3 + (byt / (peak_bw + eps)) * 1e3
+            lat.append(torch.clamp(lat_ms, min=0.0))
+            mem.append(torch.clamp(byt / 1e6, min=0.0))
+            power.append(torch.clamp(0.5 * tdp, min=0.0))
+        return {
+            "lat_ms": torch.stack(lat, dim=0),
+            "mem_mb": torch.stack(mem, dim=0),
+            "power_w": torch.stack(power, dim=0),
+        }
 
 
 def main() -> None:
@@ -38,7 +86,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
+    hw_proxy = AnalyticProxy()
     mapping_solver = MappingSolver(strategy="greedy_local", mem_limit_factor=0.9)
 
     segments = [
