@@ -1,23 +1,23 @@
 stable_hw:
   enabled: true
 
-  # v5.4 canonical: locked acc ref is a dict (no drift)
   locked_acc_ref:
     enabled: true
-    # optional: points to EXP-A1 dense baseline stats; if missing -> warmup_best
+    # ★ 推荐：如果你有 dense baseline 的 metrics.json，就填这里（强锁定，最符合 v5.4）
+    # baseline_stats_path: "outputs/dense_baseline/metrics.json"
     baseline_stats_path: null
-    freeze_epoch: 0
-    prefer_dense_baseline: true
+    # ★ 必须 >=1：否则在 baseline_stats_path 为空时永远锁不住 acc_ref
+    freeze_epoch: 1
 
   allow_train_ema_fallback: true
 
   lambda_hw_schedule:
     enabled: true
-    warmup_epochs: 0
+    # ★ 必须 >=1：用于 warmup_best 产生 acc_ref（当 baseline_stats_path 为空时）
+    warmup_epochs: 1
     ramp_epochs: 1
-    lambda_hw_max: 0.2
-    clamp_min: 0.0
-    clamp_max: 0.2
+    lambda_hw_min: 0.0
+    lambda_hw_max: 0.08
 
   normalize:
     mode: hinge_log_ratio
@@ -33,22 +33,15 @@ stable_hw:
 
   accuracy_guard:
     enabled: true
-    metric: acc1
-    epsilon_drop: 0.01
-    use_ema: true
-    ema_beta: 0.9
-
-    # v5.4 canonical controller (Acc-First Hard Gating)
     controller:
-      mode: accuracy_first_hard_gating
       metric: val_acc1
-      epsilon_drop: 0.01
-      recovery_min_epochs: 1
+      epsilon_drop: 0.002
       cut_hw_loss_on_violate: true
       freeze_discrete_updates: true
       freeze_schedule_in_recovery: true
+      recovery_min_epochs: 1
       k_exit: 2
-      margin_exit: 0.002
+      margin_exit: 0.0
 
   discrete_isolation:
     mapping_update_every_epochs: 1
