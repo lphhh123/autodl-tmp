@@ -318,36 +318,82 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         else:
             stable_hw_enabled = bool(getattr(stable_hw, "enabled", False))
 
-    # legacy -> v5.1 canonical mapping
-    if isinstance(stable_hw, dict):
-        locked = stable_hw.get("locked_acc_ref")
-        # legacy configs sometimes used: locked_acc_ref: true/false
-        if isinstance(locked, bool):
-            locked = {"enabled": bool(locked)}
-        if locked is None:
+    # ---- v5.4 stable_hw schema migration (must accept bool -> dict) ----
+    locked = stable_hw.get("locked_acc_ref", None)
+    if isinstance(locked, bool):
+        locked = {"enabled": bool(locked)}
+    elif locked is None:
+        locked = {}
+    elif not isinstance(locked, dict):
+        # tolerate AttrDict/OmegaConf nodes
+        try:
+            locked = dict(locked)
+        except Exception:
             locked = {}
-        if not isinstance(locked, dict):
-            # best-effort: coerce unknown types to dict
-            locked = {"baseline_stats_path": getattr(locked, "baseline_stats_path", None)}
-        locked.setdefault("baseline_stats_path", stable_hw.get("baseline_stats_path"))
-        locked.setdefault("freeze_epoch", 0)
-        locked.setdefault("prefer_dense_baseline", True)
-        locked.setdefault("enabled", True)
-        stable_hw["locked_acc_ref"] = locked
-        ag = stable_hw.get("accuracy_guard")
-        if isinstance(ag, dict):
-            on_violate = ag.get("on_violate")
-            if isinstance(on_violate, dict):
-                on_violate["scale_lambda_hw"] = float(on_violate.get("scale_lambda_hw", 0.0))
-    else:
-        if getattr(stable_hw, "locked_acc_ref", None) is None:
-            stable_hw.locked_acc_ref = type("Obj", (), {})()
-            stable_hw.locked_acc_ref.baseline_stats_path = getattr(stable_hw, "baseline_stats_path", None)
-            stable_hw.locked_acc_ref.freeze_epoch = 0
-            stable_hw.locked_acc_ref.prefer_dense_baseline = True
-        ag = getattr(stable_hw, "accuracy_guard", None)
-        if ag is not None and getattr(ag, "on_violate", None) is not None:
-            setattr(ag.on_violate, "scale_lambda_hw", float(getattr(ag.on_violate, "scale_lambda_hw", 0.0)))
+
+    stable_hw["locked_acc_ref"] = locked
+    locked.setdefault("enabled", True)
+    locked.setdefault("prefer_dense_baseline", True)
+    locked.setdefault("baseline_stats_path", stable_hw.get("baseline_stats_path", None))
+    locked.setdefault("freeze_epoch", 0)
+
+    # accuracy_guard: ensure baseline path parity to avoid drift
+    guard = stable_hw.get("accuracy_guard", None)
+    if isinstance(guard, bool):
+        guard = {"enabled": bool(guard)}
+    elif guard is None:
+        guard = {}
+    elif not isinstance(guard, dict):
+        try:
+            guard = dict(guard)
+        except Exception:
+            guard = {}
+    stable_hw["accuracy_guard"] = guard
+    guard.setdefault("enabled", True)
+    guard.setdefault("epsilon_drop", 0.01)
+    guard.setdefault("prefer_val_acc1", True)
+    guard.setdefault("allow_train_ema_fallback", False)  # v5.4: default forbid silent downgrade
+    guard.setdefault("baseline_stats_path", locked.get("baseline_stats_path", None))
+    guard.setdefault("delta_below_thr", 0.005)  # for restart trigger (spec §12B.4.2)
+
+    # lambda_hw_schedule: MUST implement clamp_min/max per spec
+    sched = stable_hw.get("lambda_hw_schedule", None)
+    if isinstance(sched, bool):
+        sched = {"enabled": bool(sched)}
+    elif sched is None:
+        sched = {}
+    elif not isinstance(sched, dict):
+        try:
+            sched = dict(sched)
+        except Exception:
+            sched = {}
+    stable_hw["lambda_hw_schedule"] = sched
+    sched.setdefault("enabled", True)
+    sched.setdefault("warmup_epochs", 0)
+    sched.setdefault("ramp_epochs", 1)
+    sched.setdefault("lambda_hw_min", 0.0)
+    sched.setdefault("lambda_hw_max", 0.2)
+    sched.setdefault("clamp_min", 0.0)
+    sched.setdefault("clamp_max", float(sched.get("lambda_hw_max", 0.2)))
+
+    # controller: restart window anti-starvation per spec
+    controller = stable_hw.get("controller", None)
+    if isinstance(controller, bool):
+        controller = {"enabled": bool(controller)}
+    elif controller is None:
+        controller = {}
+    elif not isinstance(controller, dict):
+        try:
+            controller = dict(controller)
+        except Exception:
+            controller = {}
+    stable_hw["controller"] = controller
+    controller.setdefault("enabled", True)
+    controller.setdefault("recovery_patience_epochs", 3)
+    controller.setdefault("restart_window_epochs", 1)
+    controller.setdefault("lr_restart_mul", 2.0)
+    controller.setdefault("min_epochs_between_restarts", 1)
+    # -------------------------------------------------------------------
 
     # -------- v5.4 canonical accuracy_guard.controller --------
     guard = stable_hw.get("accuracy_guard", {}) or {}

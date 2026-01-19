@@ -956,9 +956,6 @@ def main() -> None:
         else int(max(1, round(float(iters_sf) * max(1, S))))
     )
 
-    # ---- run_manifest (v5.4) ----
-    from utils.run_manifest import write_run_manifest
-
     layout_hash = None
     try:
         layout_hash = hashlib.sha256(layout_input_path.read_bytes()).hexdigest()
@@ -972,16 +969,25 @@ def main() -> None:
         "steps": int(effective_max_steps),
         "budget": int(rollout_budget),
     }
-    manifest = write_run_manifest(
-        out_dir=out_dir,
-        cfg_resolved_text=resolved_text,
-        cfg_path=str(args.cfg),
-        argv=sys.argv,
-        seed=int(args.seed),
-        spec_version="v5.4",
-        extra=extra,
-    )
-    cfg.run_id = manifest["run_id"]
+    from utils.stable_hash import stable_hash
+
+    cfg_hash = stable_hash({"cfg": resolved_text})
+    if hasattr(cfg, "train"):
+        cfg.train.cfg_hash = cfg_hash
+        cfg.train.cfg_path = str(args.cfg)
+    try:
+        from utils.run_manifest import write_run_manifest
+
+        write_run_manifest(
+            out_dir=str(out_dir),
+            cfg_path=str(args.cfg),
+            cfg_hash=str(cfg_hash),
+            seed=int(args.seed),
+            stable_hw_state={},
+            extra=extra,
+        )
+    except Exception:
+        pass
 
     output_root = internal_out / "output"
 

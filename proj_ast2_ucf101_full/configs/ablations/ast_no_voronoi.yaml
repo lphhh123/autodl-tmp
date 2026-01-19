@@ -1,0 +1,4 @@
+_base_: ../vc_phase3_full_ucf101.yaml
+ast:
+  gamma_region: 0.0
+  num_regions: 1

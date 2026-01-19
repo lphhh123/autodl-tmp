@@ -1,0 +1,3 @@
+_base_: ../vc_phase3_full_ucf101.yaml
+ast:
+  d_modal: 0.0

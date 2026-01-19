@@ -106,43 +106,13 @@ def main():
         with open(out_dir_path / "config_resolved.yaml", "w", encoding="utf-8") as f:
             f.write(str(cfg))
 
-    # ---- run_manifest (v5.4) ----
-    from utils.run_manifest import write_run_manifest
-
+    # ---- cfg_hash for audit ----
     resolved_text = (out_dir_path / "config_resolved.yaml").read_text(encoding="utf-8")
-    extra = {"repo_root": str(_PROJECT_ROOT), "dataset_id": getattr(getattr(cfg, "data", {}), "dataset_id", None)}
-    manifest = write_run_manifest(
-        out_dir=out_dir_path,
-        cfg_resolved_text=resolved_text,
-        cfg_path=str(args.cfg),
-        argv=sys.argv,
-        seed=int(args.seed),
-        spec_version="v5.4",
-        extra=extra,
-    )
-    # also store run_id into cfg so trainers can write it into metrics.json
-    cfg.run_id = manifest["run_id"]
+    from utils.stable_hash import stable_hash
 
-    # LockedAccRef auditing fields (best-effort)
-    try:
-        lar = {}
-        if hasattr(cfg, "stable_hw") and getattr(cfg.stable_hw, "locked_acc_ref", None) is not None:
-            lar_cfg = cfg.stable_hw.locked_acc_ref
-            lar["baseline_stats_path"] = getattr(lar_cfg, "baseline_stats_path", None)
-            lar["prefer_dense_baseline"] = getattr(lar_cfg, "prefer_dense_baseline", None)
-            lar["freeze_epoch"] = getattr(lar_cfg, "freeze_epoch", None)
-        if hasattr(cfg, "stable_hw") and getattr(cfg.stable_hw, "accuracy_guard", None) is not None:
-            g = cfg.stable_hw.accuracy_guard
-            lar["epsilon_drop"] = getattr(g, "epsilon_drop", None)
-            lar["metric_key"] = getattr(g, "metric_key", None)
-        # rewrite manifest with LockedAccRef config snapshot
-        import json
-        p = out_dir_path / "run_manifest.json"
-        m = json.loads(p.read_text(encoding="utf-8"))
-        m["locked_acc_ref"] = lar
-        p.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+    cfg_hash = stable_hash({"cfg": resolved_text})
+    cfg.train.cfg_hash = cfg_hash
+    cfg.train.cfg_path = str(args.cfg)
 
     # ---- run meta ----
     meta = {

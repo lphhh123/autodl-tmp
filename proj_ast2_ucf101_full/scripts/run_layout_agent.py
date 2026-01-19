@@ -333,9 +333,6 @@ def main():
     except Exception:
         (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
 
-    # ---- run_manifest (v5.4) ----
-    from utils.run_manifest import write_run_manifest
-
     layout_input_path = args.layout_input or getattr(cfg, "layout_input", None)
     layout_hash = None
     if layout_input_path:
@@ -352,16 +349,25 @@ def main():
         "budget": detailed_cfg.get("budget") if isinstance(detailed_cfg, dict) else None,
     }
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
-    manifest = write_run_manifest(
-        out_dir=out_dir,
-        cfg_resolved_text=resolved_text,
-        cfg_path=str(args.cfg),
-        argv=sys.argv,
-        seed=int(args.seed),
-        spec_version="v5.4",
-        extra=extra,
-    )
-    cfg.run_id = manifest["run_id"]
+    from utils.stable_hash import stable_hash
+
+    cfg_hash = stable_hash({"cfg": resolved_text})
+    if hasattr(cfg, "train"):
+        cfg.train.cfg_hash = cfg_hash
+        cfg.train.cfg_path = str(args.cfg)
+    try:
+        from utils.run_manifest import write_run_manifest
+
+        write_run_manifest(
+            out_dir=str(out_dir),
+            cfg_path=str(args.cfg),
+            cfg_hash=str(cfg_hash),
+            seed=int(args.seed),
+            stable_hw_state={},
+            extra=extra,
+        )
+    except Exception:
+        pass
 
     # run meta
     meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
