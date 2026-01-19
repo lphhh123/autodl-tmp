@@ -22,7 +22,13 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
-from utils.stable_hw import apply_accuracy_guard, stable_hw_log_fields, stable_hw_schedule
+from utils.stable_hw import (
+    apply_accuracy_guard,
+    init_hw_refs_from_baseline_stats,
+    stable_hw_log_fields,
+    stable_hw_schedule,
+    update_hw_refs_from_stats,
+)
 
 
 def _as_float(val, name: str) -> float:
@@ -132,12 +138,12 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
         if stable_hw_enabled:
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+            prev_val = stable_state.get("val_acc1_last", None)
             apply_accuracy_guard(
-                epoch,
-                stable_hw_cfg,
-                stable_state,
-                None,
-                has_val_this_epoch=False,
+                epoch=epoch,
+                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_state=stable_state,
+                val_acc1=prev_val,
                 train_acc1_ema=float(stable_state.get("train_acc1_ema", 0.0))
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
@@ -204,15 +210,19 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         best_acc = max(best_acc, last_acc)
         if stable_hw_enabled:
             apply_accuracy_guard(
-                epoch,
-                stable_hw_cfg,
-                stable_state,
-                float(last_acc) if last_acc is not None else None,
-                has_val_this_epoch=(last_acc is not None),
+                epoch=epoch,
+                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_state=stable_state,
+                val_acc1=float(last_acc) if last_acc is not None else None,
                 train_acc1_ema=float(stable_state.get("train_acc1_ema", 0.0))
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
+
+            # ---- v5.4: update HW ref via EMA if not from dense baseline ----
+            init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_state)
+            if stable_state.get("hw_ref_source", "") != "dense_baseline":
+                update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats or {})
         if metrics_path:
             metrics = {
                 "epoch": int(epoch),

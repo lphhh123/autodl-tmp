@@ -168,10 +168,10 @@ def compute_hw_loss(
     norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
     if stable_hw_state is None:
         stable_hw_state = {}
-    ref_T = float(stable_hw_state.get("ref_T", float(latency_ms.detach().item())))
-    ref_E = float(stable_hw_state.get("ref_E", float(energy_mj.detach().item())))
-    ref_M = float(stable_hw_state.get("ref_M", float(mem_mb.detach().item())))
-    ref_C = float(stable_hw_state.get("ref_C", float(comm_ms.detach().item())))
+    ref_T = float(stable_hw_state.get("ref_T", float(getattr(cfg.hw, "latency_ref_ms", 1.0))))
+    ref_E = float(stable_hw_state.get("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0))))
+    ref_M = float(stable_hw_state.get("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0))))
+    ref_C = float(stable_hw_state.get("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0))))
 
     # ---- Non-negative guard: prevent "negative latency reward" ----
     eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9) if stable_hw_cfg is not None else 1e-9)
@@ -182,26 +182,48 @@ def compute_hw_loss(
     raw_mem_mb = float(mem_mb.detach().item())
     raw_comm_ms = float(comm_ms.detach().item())
 
+    # v5.4: clamp audit (counts + min raw values)
+    clamp_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
+    clamp_mins = {"T": None, "E": None, "M": None, "C": None}
+
+    def _audit_clamp(tag: str, x):
+        try:
+            x_item = float(x.detach().cpu().item())
+        except Exception:
+            return
+        if clamp_mins[tag] is None or x_item < float(clamp_mins[tag]):
+            clamp_mins[tag] = x_item
+        if x_item < float(eps_ratio):
+            clamp_counts[tag] += 1
+
+    _audit_clamp("T", latency_ms)
+    _audit_clamp("E", energy_mj)
+    _audit_clamp("M", mem_mb)
+    _audit_clamp("C", comm_ms)
+
     # clamp for optimization / ratios
     latency_ms_pos = torch.clamp(latency_ms, min=eps_ratio)
     energy_mj_pos = torch.clamp(energy_mj, min=eps_ratio)
     mem_mb_pos = torch.clamp(mem_mb, min=eps_ratio)
     comm_ms_pos = torch.clamp(comm_ms, min=eps_ratio)
 
-    # init refs using clamped values (and sanitize any stale negative refs in state)
+    # init refs using stable state (sanitize any stale negative refs in state)
     def _pos_ref(state_key: str, default_val: float) -> float:
-        v = float(stable_hw_state.get(state_key, default_val))
-        return max(eps_ratio, v)
+        v = stable_hw_state.get(state_key, None)
+        try:
+            v = float(v) if v is not None else None
+        except Exception:
+            v = None
+        if v is None or v <= eps_ratio:
+            v = float(default_val)
+        v = max(eps_ratio, float(v))
+        stable_hw_state[state_key] = float(v)
+        return float(v)
 
-    ref_T = _pos_ref("ref_T", float(latency_ms_pos.detach().item()))
-    ref_E = _pos_ref("ref_E", float(energy_mj_pos.detach().item()))
-    ref_M = _pos_ref("ref_M", float(mem_mb_pos.detach().item()))
-    ref_C = _pos_ref("ref_C", float(comm_ms_pos.detach().item()))
-
-    stable_hw_state["ref_T"] = ref_T
-    stable_hw_state["ref_E"] = ref_E
-    stable_hw_state["ref_M"] = ref_M
-    stable_hw_state["ref_C"] = ref_C
+    ref_T = _pos_ref("ref_T", float(getattr(cfg.hw, "latency_ref_ms", 1.0)))
+    ref_E = _pos_ref("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0)))
+    ref_M = _pos_ref("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
+    ref_C = _pos_ref("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
 
     lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0))
     L_chip = torch.zeros((), device=device)
@@ -308,11 +330,23 @@ def compute_hw_loss(
         return float(v)
 
     if norm_enabled:
-        # ref values come from cfg.hw.*_ref (you already define these)
-        T_ref = float(getattr(cfg.hw, "latency_ref_ms", 1.0))
-        E_ref = float(getattr(cfg.hw, "energy_ref_mj", 1.0))
-        M_ref = float(getattr(cfg.hw, "mem_ref_mb", 1.0))
-        C_ref = float(getattr(cfg.hw, "comm_ref_ms", 1.0))
+        # v5.4: ref must come from stable_hw_state (baseline preferred, else EMA-updated)
+        def _ref_from_state(key: str, fallback: float) -> float:
+            v = stable_hw_state.get(key, None) if isinstance(stable_hw_state, dict) else None
+            try:
+                v = float(v) if v is not None else None
+            except Exception:
+                v = None
+            if v is None or v <= eps:
+                v = float(fallback)
+            # persist back for auditing
+            stable_hw_state[key] = float(v)
+            return float(v)
+
+        T_ref = _ref_from_state("ref_T", float(getattr(cfg.hw, "latency_ref_ms", 1.0)))
+        E_ref = _ref_from_state("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0)))
+        M_ref = _ref_from_state("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
+        C_ref = _ref_from_state("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
 
         latency_term = _term(latency_ms_pos, T_ref, tT, do_hinge=True)
         energy_term = _term(energy_mj_pos, E_ref, tE, do_hinge=True)
@@ -351,6 +385,8 @@ def compute_hw_loss(
         "ref_energy_mj": float(ref_E),
         "ref_mem_mb": float(ref_M),
         "ref_comm_ms": float(ref_C),
+        "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
+        "proxy_clamp_min_values": clamp_mins,
     }
     if chip_used_expected is not None:
         hw_stats["chip_used_expected"] = float(chip_used_expected.detach().cpu().item())
