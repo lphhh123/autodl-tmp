@@ -673,6 +673,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 if stable_hw_state.get("train_acc1_ema") is not None
                 else None,
             )
+            # ---- invariants (v5.4) ----
+            if stable_hw_state.get("acc_ref") is not None:
+                stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
+                assert float(stable_hw_state["_acc_ref_once"]) == float(
+                    stable_hw_state["acc_ref"]
+                ), "acc_ref drift detected"
             # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
             if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
                 last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
@@ -1048,6 +1054,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 if stable_hw_state.get("train_acc1_ema") is not None
                 else None,
             )
+            # ---- invariants (v5.4) ----
+            if stable_hw_state.get("acc_ref") is not None:
+                stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
+                assert float(stable_hw_state["_acc_ref_once"]) == float(
+                    stable_hw_state["acc_ref"]
+                ), "acc_ref drift detected"
 
         # ---- v5.4: update HW ref via EMA if not from dense baseline ----
         if stable_hw_enabled and not str(stable_hw_state.get("hw_ref_source", "")).startswith("dense_baseline:"):

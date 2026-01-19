@@ -314,14 +314,20 @@ def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict
     op = record.get("op", "noop")
     op_args = record.get("op_args", None)
     if op_args is None:
-        op_args = record.get("op_args_json", None)
-        if isinstance(op_args, str):
+        op_args = record.get("op_args_json", record.get("op_args_str", {}))
+
+    if isinstance(op_args, str):
+        s = op_args.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
             try:
-                op_args = json.loads(op_args)
+                op_args = json.loads(s)
             except Exception:
-                op_args = {}
+                op_args = {"raw": op_args}
+        else:
+            op_args = {"raw": op_args}
+
     if not isinstance(op_args, dict):
-        op_args = {}
+        op_args = {"raw": str(op_args)}
     action = {"op": op, "type": op}
     if op == "swap":
         action.update({"i": int(op_args.get("i", -1)), "j": int(op_args.get("j", -1))})
@@ -474,6 +480,12 @@ def _write_trace_and_pareto(
 
         last_idx = -1
         for idx, rec in enumerate(_iter_recordings(recordings_path), start=1):
+            # skip init record from heuragenix (we already wrote our own init row)
+            try:
+                if str(rec.get("op", "")).lower() == "init" and int(rec.get("iter", 0)) == 0:
+                    continue
+            except Exception:
+                pass
             has_records = True
             last_idx = idx
             if max_steps is not None and (idx - 1) >= int(max_steps):
@@ -490,7 +502,23 @@ def _write_trace_and_pareto(
             stage = str(rec.get("stage", "heuragenix"))
             accepted = int(rec.get("accepted", 1))
             op = rec.get("op", "noop")
-            op_args = rec.get("op_args") or rec.get("op_args_json") or {}
+            op_args = rec.get("op_args", None)
+            if op_args is None:
+                op_args = rec.get("op_args_json", rec.get("op_args_str", {}))
+
+            # if it's a JSON string, parse it
+            if isinstance(op_args, str):
+                s = op_args.strip()
+                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                    try:
+                        import json as _json
+
+                        op_args = _json.loads(s)
+                    except Exception:
+                        op_args = {"raw": op_args}
+                else:
+                    op_args = {"raw": op_args}
+
             if not isinstance(op_args, dict):
                 op_args = {"raw": str(op_args)}
 
@@ -585,6 +613,8 @@ def _write_trace_and_pareto(
             best_eval = dict(prev_metrics)
             best_assign = list(prev_assign)
             best_step = 0
+
+    assert trace_path.exists(), "trace.csv must exist even if steps=0"
 
     report = {
         "seed": int(seed),
