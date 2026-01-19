@@ -683,7 +683,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
                 last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
                 if last_applied != int(outer):
-                    mul = float(getattr(getattr(stable_hw_cfg, "controller", {}), "lr_restart_mul", 2.0) or 2.0)
+                    _ctrl = getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "controller", None)
+                    if _ctrl is None:
+                        _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
+                    mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
                     for pg in optimizer_model.param_groups:
                         pg["lr"] = float(pg.get("lr", lr)) * mul
                     stable_hw_state["_lr_restart_applied_epoch"] = int(outer)

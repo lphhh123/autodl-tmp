@@ -17,6 +17,12 @@ def _assert_type(name: str, value, expected) -> None:
         raise AssertionError(f"{name} expected {expected}, got {type(value)}")
 
 
+def _get(x, k):
+    if isinstance(x, dict):
+        return x.get(k)
+    return getattr(x, k, None)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, required=True)
@@ -54,29 +60,29 @@ def main() -> None:
 
     # locked
     _assert_type("stable_hw.locked_acc_ref", locked, dict)
-    _assert_type("stable_hw.locked_acc_ref.baseline_stats_path", locked.baseline_stats_path, (str, type(None)))
-    _assert_type("stable_hw.locked_acc_ref.freeze_epoch", locked.freeze_epoch, int)
-    _assert_type("stable_hw.locked_acc_ref.prefer_dense_baseline", locked.prefer_dense_baseline, bool)
+    _assert_type("stable_hw.locked_acc_ref.baseline_stats_path", _get(locked, "baseline_stats_path"), (str, type(None)))
+    _assert_type("stable_hw.locked_acc_ref.freeze_epoch", _get(locked, "freeze_epoch"), int)
+    _assert_type("stable_hw.locked_acc_ref.prefer_dense_baseline", _get(locked, "prefer_dense_baseline"), bool)
 
     # controller canonical (v5.4)
-    _assert_type("stable_hw.accuracy_guard.controller.mode", ctrl.mode, str)
-    _assert_type("stable_hw.accuracy_guard.controller.metric", ctrl.metric, str)
-    _assert_type("stable_hw.accuracy_guard.controller.epsilon_drop", ctrl.epsilon_drop, (float, int))
-    _assert_type("stable_hw.accuracy_guard.controller.recovery_min_epochs", ctrl.recovery_min_epochs, int)
-    _assert_type("stable_hw.accuracy_guard.controller.cut_hw_loss_on_violate", ctrl.cut_hw_loss_on_violate, bool)
-    _assert_type("stable_hw.accuracy_guard.controller.freeze_discrete_updates", ctrl.freeze_discrete_updates, bool)
-    _assert_type("stable_hw.accuracy_guard.controller.freeze_schedule_in_recovery", ctrl.freeze_schedule_in_recovery, bool)
-    _assert_type("stable_hw.accuracy_guard.controller.k_exit", ctrl.k_exit, int)
-    _assert_type("stable_hw.accuracy_guard.controller.margin_exit", ctrl.margin_exit, (float, int))
+    _assert_type("stable_hw.accuracy_guard.controller.mode", _get(ctrl, "mode"), str)
+    _assert_type("stable_hw.accuracy_guard.controller.metric", _get(ctrl, "metric"), str)
+    _assert_type("stable_hw.accuracy_guard.controller.epsilon_drop", _get(ctrl, "epsilon_drop"), (float, int))
+    _assert_type("stable_hw.accuracy_guard.controller.recovery_min_epochs", _get(ctrl, "recovery_min_epochs"), int)
+    _assert_type("stable_hw.accuracy_guard.controller.cut_hw_loss_on_violate", _get(ctrl, "cut_hw_loss_on_violate"), bool)
+    _assert_type("stable_hw.accuracy_guard.controller.freeze_discrete_updates", _get(ctrl, "freeze_discrete_updates"), bool)
+    _assert_type("stable_hw.accuracy_guard.controller.freeze_schedule_in_recovery", _get(ctrl, "freeze_schedule_in_recovery"), bool)
+    _assert_type("stable_hw.accuracy_guard.controller.k_exit", _get(ctrl, "k_exit"), int)
+    _assert_type("stable_hw.accuracy_guard.controller.margin_exit", _get(ctrl, "margin_exit"), (float, int))
 
     # schedule
-    _assert_type("stable_hw.lambda_hw_schedule.enabled", sched.enabled, bool)
-    _assert_type("stable_hw.lambda_hw_schedule.warmup_epochs", sched.warmup_epochs, int)
-    _assert_type("stable_hw.lambda_hw_schedule.ramp_epochs", sched.ramp_epochs, int)
-    _assert_type("stable_hw.lambda_hw_schedule.lambda_hw_max", sched.lambda_hw_max, (float, int))
+    _assert_type("stable_hw.lambda_hw_schedule.enabled", _get(sched, "enabled"), bool)
+    _assert_type("stable_hw.lambda_hw_schedule.warmup_epochs", _get(sched, "warmup_epochs"), int)
+    _assert_type("stable_hw.lambda_hw_schedule.ramp_epochs", _get(sched, "ramp_epochs"), int)
+    _assert_type("stable_hw.lambda_hw_schedule.lambda_hw_max", _get(sched, "lambda_hw_max"), (float, int))
 
     # normalize
-    _assert_type("stable_hw.normalize.mode", norm.mode, str)
+    _assert_type("stable_hw.normalize.mode", _get(norm, "mode"), str)
 
     print("[SMOKE] StableHW schema OK (v5.4)")
 

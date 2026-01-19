@@ -157,7 +157,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             if stable_hw_enabled and bool(stable_state.get("request_lr_restart", False)):
                 last_applied = int(stable_state.get("_lr_restart_applied_epoch", -999999))
                 if last_applied != int(epoch):
-                    mul = float(getattr(getattr(stable_hw_cfg, "controller", {}), "lr_restart_mul", 2.0) or 2.0)
+                    _ctrl = getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "controller", None)
+                    if _ctrl is None:
+                        _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
+                    mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
                     for pg in opt.param_groups:
                         pg["lr"] = float(pg.get("lr", lr)) * mul
                     stable_state["_lr_restart_applied_epoch"] = int(epoch)
