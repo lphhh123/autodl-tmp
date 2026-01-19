@@ -14,6 +14,13 @@ class StableHWDecision:
     allow_discrete_updates: bool
     reason: Dict[str, Any]
 
+"""
+StableHW v5.4 field ownership:
+  - schedule writes: lambda_hw_base
+  - guard writes: lambda_hw_effective (authoritative value for training)
+  - lambda_hw_after_guard is legacy/compat alias only
+"""
+
 
 def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
     """Get nested key from dict/AttrDict-like objects."""
@@ -77,11 +84,11 @@ def stable_hw_schedule(
     if not enabled or not sched_enabled:
         # legacy behavior
         lam = _safe_float(hw_lambda_default, 0.0)
-        st["lambda_hw_base"] = lam
-        # default effective = base; guard may override
-        st.setdefault("lambda_hw_effective", lam)
-        st["lambda_hw"] = st["lambda_hw_base"]
-        st["lambda_hw_after_guard"] = st.get("lambda_hw_effective", st["lambda_hw_base"])
+        st["lambda_hw_base"] = float(lam)
+        st["schedule_phase"] = str(st.get("schedule_phase", "legacy"))
+        st["lambda_hw_effective"] = float(lam)
+        st["lambda_hw"] = float(lam)
+        st["lambda_hw_after_guard"] = float(lam)
         return
 
     warmup_epochs = int(_cfg_get(sched, "warmup_epochs", 5))
@@ -118,11 +125,11 @@ def stable_hw_schedule(
     st["lambda_hw_base"] = float(lam)
     st["schedule_phase"] = str(phase)
 
-    # default: effective==base; accuracy guard may set to 0 in recovery
-    if st.get("lambda_hw_effective") is None:
-        st["lambda_hw_effective"] = lam
-    st["lambda_hw"] = st["lambda_hw_base"]
-    st["lambda_hw_after_guard"] = st.get("lambda_hw_effective", st["lambda_hw_base"])
+    # v5.4: schedule must update EVERY epoch; do not keep stale values.
+    # Guard (apply_accuracy_guard) will overwrite lambda_hw_effective / after_guard.
+    st["lambda_hw_effective"] = float(lam)  # pre-guard base
+    st["lambda_hw"] = float(st["lambda_hw_base"])  # legacy alias
+    st["lambda_hw_after_guard"] = float(lam)
 
 
 def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
@@ -261,41 +268,41 @@ def apply_accuracy_guard(
     if acc_used is not None:
         st["acc_used_last"] = float(acc_used)
 
+    # ---- v5.4 LockedAccRef (must be stable across epochs) ----
+    # Priority:
+    #   1) locked_acc_ref.baseline_stats_path (dense baseline)
+    #   2) warmup_best: during warmup, track best val_acc1; freeze at freeze_epoch
+    _load_locked_acc_ref(stable_hw_cfg, st)
     locked = _cfg_get(stable_hw_cfg, "locked_acc_ref", {}) or {}
-    freeze_epoch = int(_cfg_get(locked, "freeze_epoch", 0))
+    freeze_epoch = int(
+        _cfg_get(
+            locked,
+            "freeze_epoch",
+            _cfg_get(_cfg_get(stable_hw_cfg, "lambda_hw_schedule", {}), "warmup_epochs", 0),
+        )
+    )
 
-    # ===== v5.4 LockedAccRef: warmup-best then freeze =====
-    st.setdefault("warmup_best", None)
+    # update warmup best (ONLY when we have a val metric)
+    if has_val_this_epoch and val_metric_or_none is not None:
+        cur = float(val_metric_or_none)
+        best = st.get("warmup_acc_best")
+        st["warmup_acc_best"] = cur if best is None else max(float(best), cur)
 
-    # 1) warmup 阶段：只更新 warmup_best（取最大）
-    if acc_used is not None and epoch < freeze_epoch:
-        prev = st.get("warmup_best", None)
-        st["warmup_best"] = float(acc_used) if prev is None else float(max(float(prev), float(acc_used)))
-        st["acc_ref_source"] = "warmup_best_tracking"
+    # freeze acc_ref from warmup best when reaching freeze_epoch (end of warmup)
+    if st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
+        if st.get("warmup_acc_best") is not None:
+            st["acc_ref"] = float(st["warmup_acc_best"])
+            st["acc_ref_source"] = "warmup_best"
 
-    # 2) freeze 时刻（epoch >= freeze_epoch）：如果 acc_ref 还没锁定，则锁定为 warmup_best
-    if st.get("acc_ref") is None and epoch >= freeze_epoch:
-        wb = st.get("warmup_best", None)
-        if wb is not None:
-            st["acc_ref"] = float(wb)
-            st["acc_ref_source"] = "warmup_best_frozen"
-        else:
-            # 没有 warmup_best（例如 val 一直没跑出来），则保持 pending，等待后续首次可用 acc_used 再锁
-            st.setdefault("acc_ref_source", "warmup_best_pending")
-
-    # 3) 兜底：若 freeze 后依旧没有 acc_ref，但此时 acc_used 可用，则锁一次（只锁一次，不漂移）
-    if st.get("acc_ref") is None and epoch >= freeze_epoch and acc_used is not None:
-        st["acc_ref"] = float(acc_used)
-        st["acc_ref_source"] = "post_freeze_first_seen"
-
-    # LockedAccRef must exist (init_locked_acc_ref should have set it)
     acc_ref = st.get("acc_ref", None)
     if acc_ref is None:
-        # fallback: if no acc_ref, behave like warmup (do not amplify hw)
+        # No reliable reference yet: hard-disable HW influence (Acc-First)
         st["guard_mode"] = "WARMUP"
-        st["lambda_hw_after_guard"] = float(st.get("lambda_hw_base", st.get("lambda_hw", 0.0)))
+        st["in_recovery"] = False
+        st["lambda_hw_effective"] = 0.0
+        st["lambda_hw_after_guard"] = 0.0
         st["allow_discrete_updates"] = True
-        return st["guard_mode"], float(st["lambda_hw_after_guard"]), True
+        return st["guard_mode"], 0.0, True
 
     # choose metric
     metric_key = str(_cfg_get(ctrl, "metric", "val_acc1"))
@@ -359,6 +366,8 @@ def apply_accuracy_guard(
     else:
         st["freeze_schedule"] = False
 
+    st["in_recovery"] = bool(st["guard_mode"] in ("VIOLATE", "RECOVERY"))
+    st["lambda_hw_effective"] = float(after)
     st["lambda_hw_after_guard"] = float(after)
     st["allow_discrete_updates"] = bool(allow_discrete_updates)
     return st["guard_mode"], float(after), bool(allow_discrete_updates)

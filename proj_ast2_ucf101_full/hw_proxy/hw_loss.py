@@ -303,37 +303,37 @@ def compute_hw_loss(
             tM = float(getattr(norm_cfg, "target_ratio_M", tM))
             tC = float(getattr(norm_cfg, "target_ratio_C", tC))
 
-    # helper: compute per-term penalty (TENSOR, keeps grad)
-    def _term_tensor(x_pos: torch.Tensor, ref: float, target_ratio: float, do_hinge: bool) -> torch.Tensor:
-        # refs/targets -> tensor on same device/dtype
-        ref_t = torch.tensor(float(ref), device=x_pos.device, dtype=x_pos.dtype)
-        tgt_t = torch.tensor(float(target_ratio), device=x_pos.device, dtype=x_pos.dtype)
-        eps_t = torch.tensor(float(eps), device=x_pos.device, dtype=x_pos.dtype)
+    # NOTE (v5.4): MUST keep tensors to avoid detaching gradients (e.g. chip-alpha).
+    def _as_t(x: float) -> torch.Tensor:
+        return torch.as_tensor(float(x), device=latency_ms_pos.device, dtype=latency_ms_pos.dtype)
 
-        # ratio
-        r = (x_pos + eps_t) / (ref_t + eps_t)
+    def _term_t(x_pos_f: float, ref_f: float, target_ratio_f: float, do_hinge: bool) -> torch.Tensor:
+        x_t = _as_t(x_pos_f)
+        ref_t = _as_t(ref_f)
+        ratio = (x_t + float(eps)) / (ref_t + float(eps))
         if abs_ratio:
-            r = torch.abs(r)
+            ratio = ratio.abs()
 
-        if mode == "ratio":
-            v = r
-        elif mode == "log_ratio":
-            v = torch.log(torch.clamp(r, min=float(eps)))
-        elif mode == "hinge_ratio":
-            v = torch.relu(r - torch.clamp(tgt_t, min=float(eps)))
+        mode_local = str(mode)
+        if mode_local == "ratio":
+            v = ratio
+        elif mode_local == "log_ratio":
+            v = torch.log(torch.clamp(ratio, min=float(eps)))
+        elif mode_local == "hinge_ratio":
+            v = torch.clamp(ratio - float(target_ratio_f), min=0.0)
         else:
-            # default: hinge_log_ratio (v5.4)
-            v = torch.relu(torch.log(torch.clamp(r / torch.clamp(tgt_t, min=float(eps)), min=float(eps))))
+            # default: hinge_log_ratio (SPEC v5.4)
+            tr = max(float(eps), float(target_ratio_f))
+            v = torch.log(torch.clamp(ratio / tr, min=float(eps)))
+            v = torch.clamp(v, min=0.0)
 
         if do_hinge:
-            v = torch.relu(v)
-
+            v = torch.clamp(v, min=0.0)
         if clip_term_max is not None:
             v = torch.clamp(v, max=float(clip_term_max))
         return v
 
     if norm_enabled:
-        # v5.4: ref must come from stable_hw_state (baseline preferred, else EMA-updated)
         def _ref_from_state(key: str, fallback: float) -> float:
             v = stable_hw_state.get(key, None) if isinstance(stable_hw_state, dict) else None
             try:
@@ -342,7 +342,6 @@ def compute_hw_loss(
                 v = None
             if v is None or v <= eps:
                 v = float(fallback)
-            # persist back for auditing
             stable_hw_state[key] = float(v)
             return float(v)
 
@@ -351,27 +350,29 @@ def compute_hw_loss(
         M_ref = _ref_from_state("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
         C_ref = _ref_from_state("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
 
-        latency_term = _term_tensor(latency_ms_pos, T_ref, tT, do_hinge=True)
-        energy_term = _term_tensor(energy_mj_pos, E_ref, tE, do_hinge=True)
-        # SPEC: mem can be hinge-only even if other terms are log-hinge
-        mem_term = _term_tensor(mem_mb_pos, M_ref, tM, do_hinge=bool(mem_hinge_only))
-        comm_term = _term_tensor(comm_ms_pos, C_ref, tC, do_hinge=True)
+        # IMPORTANT: use clamped-positive values so negative proxy cannot be rewarded
+        latency_term_t = _term_t(float(latency_ms_pos.detach().cpu().item()), T_ref, tT, do_hinge=True)
+        energy_term_t = _term_t(float(energy_mj_pos.detach().cpu().item()), E_ref, tE, do_hinge=True)
+        mem_term_t = _term_t(float(mem_mb_pos.detach().cpu().item()), M_ref, tM, do_hinge=bool(mem_hinge_only))
+        comm_term_t = _term_t(float(comm_ms_pos.detach().cpu().item()), C_ref, tC, do_hinge=True)
 
-        L_hw_norm = (float(wT) * latency_term) + (float(wE) * energy_term) + (float(wM) * mem_term) + (
-            float(wC) * comm_term
+        L_hw_norm_t = (float(wT) * latency_term_t) + (float(wE) * energy_term_t) + (float(wM) * mem_term_t) + (
+            float(wC) * comm_term_t
         )
     else:
-        # fallback (legacy behavior): already-positive values scaled by refs
         T_ref = float(getattr(cfg.hw, "latency_ref_ms", 1.0))
         E_ref = float(getattr(cfg.hw, "energy_ref_mj", 1.0))
         M_ref = float(getattr(cfg.hw, "mem_ref_mb", 1.0))
         C_ref = float(getattr(cfg.hw, "comm_ref_ms", 1.0))
-        L_hw_norm = (latency_ms_pos / max(eps, T_ref)) + (energy_mj_pos / max(eps, E_ref)) + (
-            mem_mb_pos / max(eps, M_ref)
-        ) + (comm_ms_pos / max(eps, C_ref))
+        L_hw_norm_t = (
+            latency_ms_pos / max(float(eps), T_ref)
+            + energy_mj_pos / max(float(eps), E_ref)
+            + mem_mb_pos / max(float(eps), M_ref)
+            + comm_ms_pos / max(float(eps), C_ref)
+        )
 
-    # IMPORTANT (v5.4): the true HW loss used for optimization must include penalties
-    L_hw_total = L_hw_norm + L_chip + L_area + L_layout
+    # Keep as tensor to avoid detaching chip_used_expected gradient.
+    L_hw_total_t = L_hw_norm_t + L_chip + _as_t(float(L_area)) + _as_t(float(L_layout))
 
     hw_stats = {
         "latency_ms": float(latency_ms_pos.detach().cpu().item()),
@@ -403,18 +404,9 @@ def compute_hw_loss(
 
     hw_stats.update(
         {
-            "L_hw_norm": float(L_hw_norm),
-            "L_chip": float(L_chip),
-            "L_area": float(L_area),
-            "L_layout": float(L_layout),
-            "L_hw_total": float(L_hw_total),
-            "stable_hw_norm_enabled": bool(norm_enabled),
-            "stable_hw_norm_mode": str(mode),
+            "L_hw_norm": float(L_hw_norm_t.detach().cpu().item()),
+            "L_hw_total": float(L_hw_total_t.detach().cpu().item()),
         }
     )
 
-    if torch.is_grad_enabled():
-        assert isinstance(L_hw_total, torch.Tensor), "L_hw_total must be Tensor (do not float())"
-
-    # return the TRUE objective term
-    return L_hw_total, hw_stats
+    return L_hw_total_t, hw_stats

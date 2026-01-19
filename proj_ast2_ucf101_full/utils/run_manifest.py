@@ -18,6 +18,7 @@ def write_run_manifest(
         "seed": int(seed),
         "acc_ref": stable_hw_state.get("acc_ref"),
         "acc_ref_source": stable_hw_state.get("acc_ref_source"),
+        "warmup_acc_best": stable_hw_state.get("warmup_acc_best"),
         "baseline_stats_path": (
             stable_hw_state.get("baseline_stats_path")
             or stable_hw_state.get("baseline_path")
