@@ -86,8 +86,9 @@ def _locked_acc_ref_init(stable_hw_cfg: Any, state: Dict[str, Any]) -> None:
       - Else lock from warmup-best (val) once after warmup window.
     """
     lock = _get(stable_hw_cfg, "locked_acc_ref", None) or {}
+    guard_cfg = _get(stable_hw_cfg, "accuracy_guard", None) or {}
     # canonical keys
-    baseline_path = _get(lock, "baseline_stats_path", None) or _get(stable_hw_cfg, "baseline_stats_path", None)
+    baseline_path = _get(lock, "baseline_stats_path", None) or _get(guard_cfg, "baseline_stats_path", None)
     freeze_epoch = _as_int(_get(lock, "freeze_epoch", 0), 0)
     prefer_dense = _as_bool(_get(lock, "prefer_dense_baseline", True), True)
 
@@ -255,28 +256,51 @@ def init_hw_refs_from_baseline(state: Dict[str, Any], stable_hw_cfg: Any, baseli
     return state
 
 
-def update_hw_refs_from_stats(stable_hw_cfg: Any, state: Dict[str, Any], epoch_hw_stats: Dict[str, Any]) -> Dict[str, Any]:
+def update_hw_refs_from_stats(stable_hw_cfg: Any, stable_hw_state: Dict[str, Any], epoch_hw_stats: Dict[str, Any]) -> None:
     """
-    v5.1: allowed to update hardware refs (T/E/mem) from stats, but NEVER acc_ref.
+    Update ref_T/ref_E/ref_M/ref_C from epoch stats.
+    Accept both legacy keys and v5.4 canonical keys to avoid drift.
+    Canonical (v5.4): latency_ms, energy_mj, mem_mb, comm_ms
+    Legacy compat    : energy_j, comm_mb
     """
-    # Only update numeric hw refs if enabled
-    ref_up = _get(stable_hw_cfg, "hw_refs_update", None)
-    if not ref_up or not _as_bool(_get(ref_up, "enabled", False), False):
-        return state
+    if stable_hw_cfg is None:
+        return
+    controller_cfg = getattr(stable_hw_cfg, "controller", None)
+    if controller_cfg is not None and not bool(getattr(controller_cfg, "update_hw_refs", True)):
+        return
 
-    # Accept common keys
-    for k_src, k_dst in [
-        ("latency_ms", "ref_latency_ms"),
-        ("energy_j", "ref_energy_j"),
-        ("mem_mb", "ref_mem_mb"),
-        ("comm_mb", "ref_comm_mb"),
-    ]:
-        if k_src in epoch_hw_stats:
-            try:
-                state[k_dst] = float(epoch_hw_stats[k_src])
-            except Exception:
-                pass
-    return state
+    eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9))
+
+    # prefer canonical
+    lat = epoch_hw_stats.get("latency_ms", None)
+    en_mj = epoch_hw_stats.get("energy_mj", None)
+    mem = epoch_hw_stats.get("mem_mb", None)
+    comm = epoch_hw_stats.get("comm_ms", None)
+
+    # legacy fallbacks
+    if en_mj is None and "energy_j" in epoch_hw_stats:
+        # if someone logs joules, convert to mJ for internal consistency
+        try:
+            en_mj = float(epoch_hw_stats["energy_j"]) * 1000.0
+        except Exception:
+            en_mj = None
+    if comm is None and "comm_mb" in epoch_hw_stats:
+        # legacy comm_mb does not equal comm_ms; only use if user explicitly logs ms elsewhere
+        comm = None
+
+    def _set_pos(key: str, v) -> None:
+        if v is None:
+            return
+        try:
+            fv = float(v)
+        except Exception:
+            return
+        stable_hw_state[key] = max(eps_ratio, fv)
+
+    _set_pos("ref_T", lat)
+    _set_pos("ref_E", en_mj)
+    _set_pos("ref_M", mem)
+    _set_pos("ref_C", comm)
 
 
 def stable_hw_log_fields(state: Dict[str, Any]) -> Dict[str, Any]:

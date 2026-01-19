@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -12,16 +12,49 @@ if [[ -z "$EXP_ID" ]]; then
   exit 1
 fi
 
-LAYOUT_INPUT="outputs/P3/A3/layout_input.json"
-if [[ "$EXP_ID" == EXP-B* ]]; then
-  if [ ! -f "${LAYOUT_INPUT}" ]; then
-    echo "[ERROR] Missing ${LAYOUT_INPUT}"
-    echo "Run EXP-A3 (or run_version_c with --export_layout_input) first to generate layout_input.json"
-    echo "Example:"
-    echo "  python scripts/run_version_c.py --config configs/vc_phase3_full_ucf101.yaml --out_dir outputs/P3/A3 --seed 0 --export_layout_input true"
-    exit 2
+BASE_OUT="outputs"
+SHARED_DIR="${BASE_OUT}/_shared"
+mkdir -p "${SHARED_DIR}"
+
+BASELINE_OUT="${BASE_OUT}/EXP-A0/seed${SEED}"
+BASELINE_STATS="${BASELINE_OUT}/metrics.json"
+
+LAYOUT_GEN_OUT="${SHARED_DIR}/gen_layout_input/seed${SEED}"
+LAYOUT_INPUT="${SHARED_DIR}/layout_input_seed${SEED}.json"
+
+ensure_baseline() {
+  if [[ -f "${BASELINE_STATS}" ]]; then
+    echo "[OK] baseline exists: ${BASELINE_STATS}"
+    return
   fi
-fi
+  echo "[GEN] baseline not found, running EXP-A0 (dense baseline) ..."
+  python -m scripts.run_ast2_ucf101 \
+    --cfg configs/ast2_ucf101_dense.yaml \
+    --out_dir "${BASE_OUT}/EXP-A0/seed${SEED}" \
+    --seed "${SEED}"
+  test -f "${BASELINE_STATS}"
+}
+
+ensure_layout_input() {
+  if [[ -f "${LAYOUT_INPUT}" ]]; then
+    echo "[OK] layout_input exists: ${LAYOUT_INPUT}"
+    return
+  fi
+  echo "[GEN] layout_input not found, exporting from Version-C once ..."
+  mkdir -p "${LAYOUT_GEN_OUT}"
+  python -m scripts.run_version_c \
+    --cfg configs/smoke_version_c_ucf101.yaml \
+    --out_dir "${LAYOUT_GEN_OUT}" \
+    --seed "${SEED}" \
+    --baseline_stats "${BASELINE_STATS}" \
+    --export_layout_input true \
+    --export_dir "${LAYOUT_GEN_OUT}/exports/layout_input"
+  test -f "${LAYOUT_GEN_OUT}/exports/layout_input/layout_input.json"
+  cp -f "${LAYOUT_GEN_OUT}/exports/layout_input/layout_input.json" "${LAYOUT_INPUT}"
+}
+
+ensure_baseline
+ensure_layout_input
 
 run_ast () {
   local cfg="$1"
@@ -32,14 +65,14 @@ run_ast () {
 run_vc () {
   local cfg="$1"
   local out="$2"
-  python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED"
+  python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" --baseline_stats "${BASELINE_STATS}"
 }
 
 run_layout () {
   local cfg="$1"
   local out="$2"
   python -m scripts.run_layout_agent \
-    --layout_input outputs/P3/A3/layout_input.json \
+    --layout_input "${LAYOUT_INPUT}" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
@@ -47,7 +80,7 @@ run_layout_heuragenix () {
   local cfg="$1"
   local out="$2"
   python -m scripts.run_layout_heuragenix \
-    --layout_input outputs/P3/A3/layout_input.json \
+    --layout_input "${LAYOUT_INPUT}" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 

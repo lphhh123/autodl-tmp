@@ -21,6 +21,10 @@ stable_hw:
   normalize:
     mode: hinge_log_ratio
     eps: 1.0e-6
+    wT: 0.4
+    wE: 0.2
+    wM: 0.2
+    wC: 0.2
     target_ratio_T: 0.9
     target_ratio_E: 0.9
     mem_hinge_only: true

@@ -1,5 +1,6 @@
 # Version-C 实现总规范（给代码助手看的硬性需求）
 
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 > 你现在要在现有的 `proj_ast2_ucf101_full` 工程中，完全按照本 `SPEC_version_c.md` 的规范实现 Version-C 系统。
 > 所有算法细节（时空熵、token/head/channel/block gating、芯粒槽位 Gumbel-Softmax、segment 划分规则、映射局部搜索、晶圆布局损失、硬件损失组合、交替优化训练流程）都以本规范为唯一准则，不需要自行设计新方法。
 > 实现时：严格遵守本规范中的输入输出维度、公式和损失定义；所有超参数从配置文件读取；在代码注释中标明对应规范章节（例如 `# SPEC §5.4`）。

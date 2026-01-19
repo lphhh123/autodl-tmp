@@ -1,4 +1,5 @@
 # SPEC_version_c_full — Version-C 实现 & 实验说明书（给代码助手看的硬规范）
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 
 > 你（代码助手）要在现有 PyTorch 项目基础上，实现一个
 > **AST2.0-lite + 时空熵剪枝 v2 + 可学习芯粒 + 映射 + 晶圆布局 + 可选计算图重构** 的系统。

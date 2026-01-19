@@ -1,4 +1,5 @@
 # SPEC_version_c_v4.md
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 
 Version-C 实现说明书（带统一任务划分与可选细粒度拆分）
 

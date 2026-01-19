@@ -51,6 +51,12 @@ def main():
         default=False,
         help="Export layout_input.json per SPEC v4.3.2 (accepts flag alone or true/false)",
     )
+    parser.add_argument(
+        "--baseline_stats",
+        type=str,
+        default=None,
+        help="Path to dense baseline metrics/stats json for LockedAccRef",
+    )
     parser.add_argument("--export_dir", type=str, default=None, help="Directory to write layout artifacts")
     args = parser.parse_args()
     if args.export_dir is None and args.out_dir is not None:
@@ -62,6 +68,17 @@ def main():
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
+    if args.baseline_stats:
+        # inject into both places to avoid schema drift
+        if not hasattr(cfg, "stable_hw") or cfg.stable_hw is None:
+            raise ValueError("cfg.stable_hw missing; cannot set baseline_stats")
+        if not hasattr(cfg.stable_hw, "locked_acc_ref") or cfg.stable_hw.locked_acc_ref is None:
+            cfg.stable_hw.locked_acc_ref = {}
+        if not hasattr(cfg.stable_hw, "accuracy_guard") or cfg.stable_hw.accuracy_guard is None:
+            cfg.stable_hw.accuracy_guard = {}
+        cfg.stable_hw.locked_acc_ref.baseline_stats_path = str(args.baseline_stats)
+        cfg.stable_hw.accuracy_guard.baseline_stats_path = str(args.baseline_stats)
+        cfg.stable_hw.locked_acc_ref.prefer_dense_baseline = True
 
     # out_dir: CLI 优先；否则 cfg.train.out_dir；否则自动生成一个
     cfg_name = Path(args.cfg).stem

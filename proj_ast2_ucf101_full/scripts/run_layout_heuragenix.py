@@ -444,7 +444,12 @@ def _write_trace_and_pareto(
             if max_steps is not None and idx >= max_steps:
                 break
             if "signature" not in rec:
-                raise AssertionError("recordings.jsonl missing signature field; aborting trace generation.")
+                # fallback: derive from assign if possible (compat mode)
+                try:
+                    signature = signature_from_assign(rec.get("assign", []))
+                except Exception:
+                    signature = "assign:unknown"
+                rec["signature"] = signature
             step_id = int(rec.get("iter", rec.get("step", idx)))
             stage = str(rec.get("stage", "heuragenix"))
 

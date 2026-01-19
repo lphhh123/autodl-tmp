@@ -1,4 +1,5 @@
 # SPEC_version_c_v2.md
+[DEPRECATED] v5.4 SPEC is canonical; do not implement from this file.
 
 **AST2.0-v2 + 多芯粒 + 晶圆布局联合优化实现规范**
 
