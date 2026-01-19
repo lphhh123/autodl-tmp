@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+echo "[SMOKE] Python compileall"
+python -m compileall -q . ../HeurAgenix
+
 SEED="${SEED:-0}"
 BASE_OUT="outputs"
 SHARED_DIR="${BASE_OUT}/_shared"

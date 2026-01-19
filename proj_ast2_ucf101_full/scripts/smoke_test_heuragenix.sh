@@ -6,7 +6,7 @@ TMP_DIR="$(mktemp -d)"
 
 cat <<'JSON' > "${TMP_DIR}/layout_input.json"
 {
-  "layout_version": "v4.3.2",
+  "layout_version": "v5.4",
   "wafer": {"radius_mm": 50.0, "margin_mm": 1.0},
   "sites": {"method": "square_grid_in_circle", "pitch_mm": 20.0, "sites_xy": [[0, 0], [10, 0], [0, 10], [10, 10]]},
   "slots": {"S": 4, "tdp": [300, 300, 300, 300]},
