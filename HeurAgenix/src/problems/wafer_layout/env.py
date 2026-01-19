@@ -300,20 +300,33 @@ class Env(BaseEnv):
         self._dump_best()
         self.update_problem_state()
         try:
+            penalty = self.current_eval.get("penalty", {}) if isinstance(self.current_eval.get("penalty", {}), dict) else {}
+            duplicate_penalty = float(penalty.get("duplicate", 0.0))
+            boundary_penalty = float(penalty.get("boundary", 0.0))
+            assign_list = list(self.current_solution.assign) if hasattr(self.current_solution, "assign") else []
+
             init_record = {
                 "iter": 0,
+                "stage": "init",
                 "op": "init",
                 "op_args": {},
                 "op_args_json": "{}",
+                "assign": assign_list,
+                "seed_id": int(self._seed_id),
                 "accepted": 1,
-                "solution_value": self.get_key_value(self.current_solution),
+                "total_scalar": float(self.key_value),
+                "comm_norm": float(self.current_comm),
+                "therm_norm": float(self.current_therm),
+                "duplicate_penalty": duplicate_penalty,
+                "boundary_penalty": boundary_penalty,
                 "time_ms": 0,
+                "signature": _make_signature(assign_list),
+                "meta": dict(self._meta_base),
             }
-            if hasattr(self.current_solution, "assign"):
-                a = getattr(self.current_solution, "assign")
-                if isinstance(a, (list, tuple)):
-                    init_record["signature"] = "assign:" + ",".join(map(str, a))
             self._write_record(init_record)
+
+            # 关键：避免下一次 run_operator 也写 iter=0
+            self._step_id = 1
         except Exception:
             pass
 

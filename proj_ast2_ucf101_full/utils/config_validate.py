@@ -529,4 +529,18 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     except Exception:
         pass
 
+    # ---- v5.4: sanitize hw refs early (avoid silent instability) ----
+    for k, default in [
+        ("latency_ref_ms", 1.0),
+        ("energy_ref_mj", 1.0),
+        ("mem_ref_mb", 1.0),
+        ("comm_ref_ms", 1.0),
+    ]:
+        try:
+            v = float(getattr(cfg.hw, k, default))
+        except Exception:
+            v = default
+        if v <= 0.0:
+            setattr(cfg.hw, k, float(default))
+
     return cfg

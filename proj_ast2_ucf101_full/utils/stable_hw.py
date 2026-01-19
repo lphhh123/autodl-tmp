@@ -250,6 +250,44 @@ def apply_accuracy_guard(
     k_exit = int(_cfg_get(ctrl, "k_exit", 2))
     margin_exit = float(_cfg_get(ctrl, "margin_exit", 0.0))
 
+    acc_used = _pick_acc_used(
+        epoch,
+        stable_hw_cfg,
+        st,
+        val_metric_or_none,
+        has_val_this_epoch,
+        train_ema_or_none,
+    )
+    if acc_used is not None:
+        st["acc_used_last"] = float(acc_used)
+
+    locked = _cfg_get(stable_hw_cfg, "locked_acc_ref", {}) or {}
+    freeze_epoch = int(_cfg_get(locked, "freeze_epoch", 0))
+
+    # ===== v5.4 LockedAccRef: warmup-best then freeze =====
+    st.setdefault("warmup_best", None)
+
+    # 1) warmup 阶段：只更新 warmup_best（取最大）
+    if acc_used is not None and epoch < freeze_epoch:
+        prev = st.get("warmup_best", None)
+        st["warmup_best"] = float(acc_used) if prev is None else float(max(float(prev), float(acc_used)))
+        st["acc_ref_source"] = "warmup_best_tracking"
+
+    # 2) freeze 时刻（epoch >= freeze_epoch）：如果 acc_ref 还没锁定，则锁定为 warmup_best
+    if st.get("acc_ref") is None and epoch >= freeze_epoch:
+        wb = st.get("warmup_best", None)
+        if wb is not None:
+            st["acc_ref"] = float(wb)
+            st["acc_ref_source"] = "warmup_best_frozen"
+        else:
+            # 没有 warmup_best（例如 val 一直没跑出来），则保持 pending，等待后续首次可用 acc_used 再锁
+            st.setdefault("acc_ref_source", "warmup_best_pending")
+
+    # 3) 兜底：若 freeze 后依旧没有 acc_ref，但此时 acc_used 可用，则锁一次（只锁一次，不漂移）
+    if st.get("acc_ref") is None and epoch >= freeze_epoch and acc_used is not None:
+        st["acc_ref"] = float(acc_used)
+        st["acc_ref_source"] = "post_freeze_first_seen"
+
     # LockedAccRef must exist (init_locked_acc_ref should have set it)
     acc_ref = st.get("acc_ref", None)
     if acc_ref is None:
