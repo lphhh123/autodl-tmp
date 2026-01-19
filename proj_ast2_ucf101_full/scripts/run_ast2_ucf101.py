@@ -1,6 +1,5 @@
 """Entry for AST2.0-lite single device training (SPEC)."""
 import argparse
-import sys
 import time
 from pathlib import Path
 
@@ -39,21 +38,14 @@ def main():
     except Exception:
         (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
 
-    # ---- run_manifest (v5.4) ----
-    from utils.run_manifest import write_run_manifest
-
+    # ---- cfg_hash for audit ----
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
-    extra = {"repo_root": str(Path(__file__).resolve().parents[1]), "dataset_id": getattr(getattr(cfg, "data", {}), "dataset_id", None)}
-    manifest = write_run_manifest(
-        out_dir=out_dir,
-        cfg_resolved_text=resolved_text,
-        cfg_path=str(args.cfg),
-        argv=sys.argv,
-        seed=int(seed),
-        spec_version="v5.4",
-        extra=extra,
-    )
-    cfg.run_id = manifest["run_id"]
+    from utils.stable_hash import stable_hash
+
+    cfg_hash = stable_hash({"cfg": resolved_text})
+    if hasattr(cfg, "train"):
+        cfg.train.cfg_hash = cfg_hash
+        cfg.train.cfg_path = str(args.cfg)
     train_single_device(cfg, out_dir=out_dir)
 
 

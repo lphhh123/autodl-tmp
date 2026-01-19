@@ -1,0 +1,4 @@
+_base_: ../vc_phase3_full_ucf101.yaml
+ast:
+  time_window_levels: [1]
+  space_window_levels: [1]

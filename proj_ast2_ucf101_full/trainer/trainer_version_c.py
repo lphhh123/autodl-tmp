@@ -678,6 +678,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 stable_hw_state["guard_mode"] = "WARMUP"
                 stable_hw_state["lambda_hw_effective"] = float(stable_hw_state.get("lambda_hw_base", 0.0))
                 stable_hw_state["allow_discrete_updates"] = True
+            # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
+            if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
+                last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
+                if last_applied != int(outer):
+                    mul = float(getattr(getattr(stable_hw_cfg, "controller", {}), "lr_restart_mul", 2.0) or 2.0)
+                    for pg in optimizer_model.param_groups:
+                        pg["lr"] = float(pg.get("lr", lr)) * mul
+                    stable_hw_state["_lr_restart_applied_epoch"] = int(outer)
+                stable_hw_state["request_lr_restart"] = False
         lambda_hw_eff = float(
             stable_hw_state.get(
                 "lambda_hw_effective",
@@ -1052,12 +1061,27 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
         last_acc1 = float(val_acc1)
         best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
+        stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
 
         stable_state_path = log_path.parent / "stable_hw_state.json"
         stable_state_path.write_text(
             json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    # write run_manifest.json (auditable LockedAccRef)
+    try:
+        from utils.run_manifest import write_run_manifest
+
+        write_run_manifest(
+            out_dir=str(out_dir),
+            cfg_path=str(getattr(cfg.train, "cfg_path", "")),
+            cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+            seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
+            stable_hw_state=stable_hw_state,
+        )
+    except Exception:
+        pass
 
     metrics = {
         "stable_hw_disabled": False if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)) else True,

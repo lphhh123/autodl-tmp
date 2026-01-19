@@ -261,6 +261,13 @@ class ASTPruner(nn.Module):
             + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * H_space_token
             + cfg.get("gamma_region", cfg.get("gamma_space_fine", 0.5)) * region_score
         )
+        # ---- ablations: token_gating_policy (entropy|uniform|random) ----
+        policy = str(cfg.get("token_gating_policy", "entropy")).lower()
+        if policy == "random":
+            score = torch.rand_like(score)
+        elif policy == "uniform":
+            idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
+            score = idx / (float(score.numel()) + 1e-12)
         mask_soft = []
         rho = cfg.get("rho_token_target", 0.5)
         temperature = cfg.get("token_temperature", 0.1)
@@ -321,6 +328,13 @@ class ASTPruner(nn.Module):
             + self.cfg.get("gamma_region", self.cfg.get("gamma_space_fine", 0.5)) * region_score
         )
         score = score + self.cfg.get("d_modal", 1.0) * w_modal[modal_id_for_token][None, None, :]
+        # ---- ablations: token_gating_policy (entropy|uniform|random) ----
+        policy = str(self.cfg.get("token_gating_policy", "entropy")).lower()
+        if policy == "random":
+            score = torch.rand_like(score)
+        elif policy == "uniform":
+            idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
+            score = idx / (float(score.numel()) + 1e-12)
 
         mask_soft = []
         rho = self.cfg.get("rho_token_target", 0.5)

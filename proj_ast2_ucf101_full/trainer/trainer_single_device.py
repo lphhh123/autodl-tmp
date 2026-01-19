@@ -148,6 +148,15 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
+            # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
+            if stable_hw_enabled and bool(stable_state.get("request_lr_restart", False)):
+                last_applied = int(stable_state.get("_lr_restart_applied_epoch", -999999))
+                if last_applied != int(epoch):
+                    mul = float(getattr(getattr(stable_hw_cfg, "controller", {}), "lr_restart_mul", 2.0) or 2.0)
+                    for pg in opt.param_groups:
+                        pg["lr"] = float(pg.get("lr", lr)) * mul
+                    stable_state["_lr_restart_applied_epoch"] = int(epoch)
+                stable_state["request_lr_restart"] = False
         lambda_hw_eff = float(
             stable_state.get(
                 "lambda_hw_effective",
@@ -244,6 +253,20 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         if out_dir is not None and stable_hw_cfg:
             with (out_dir / "stable_hw_state.json").open("w", encoding="utf-8") as f:
                 json.dump(stable_state, f, indent=2)
+
+    if out_dir is not None:
+        try:
+            from utils.run_manifest import write_run_manifest
+
+            write_run_manifest(
+                out_dir=str(out_dir),
+                cfg_path=str(getattr(cfg.train, "cfg_path", "")),
+                cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+                seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
+                stable_hw_state=stable_state,
+            )
+        except Exception:
+            pass
 
 
 def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:
