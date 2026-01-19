@@ -31,6 +31,19 @@ def main():
         if not bool(getattr(cfg.stable_hw, "no_double_scale", True)):
             raise AssertionError("stable_hw.no_double_scale must be True in v5.4")
 
+        # ---- SPEC v5.4 LockedAccRef must be achievable ----
+        locked = getattr(cfg.stable_hw, "locked_acc_ref", None)
+        sched = getattr(cfg.stable_hw, "lambda_hw_schedule", None)
+        if locked is not None and bool(getattr(locked, "enabled", False)):
+            baseline_path = getattr(locked, "baseline_stats_path", None)
+            warmup_epochs = int(getattr(sched, "warmup_epochs", 0) or 0) if sched is not None else 0
+            freeze_epoch = int(getattr(locked, "freeze_epoch", warmup_epochs) or 0)
+            if (baseline_path is None) and (warmup_epochs <= 0 or freeze_epoch <= 0):
+                raise AssertionError(
+                    "LockedAccRef violated: baseline_stats_path is None, but warmup_epochs/freeze_epoch are not >=1. "
+                    "acc_ref will never be locked -> HW gating degenerates."
+                )
+
     print("[SMOKE] config no_drift OK. stable_hw.enabled=", stable_en)
 
 

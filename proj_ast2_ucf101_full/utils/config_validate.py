@@ -450,6 +450,44 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
             if hasattr(cfg, "stable_hw") and not hasattr(cfg.stable_hw, "no_double_scale"):
                 cfg.stable_hw.no_double_scale = True
+
+            # ---- v5.4 LockedAccRef contract guardrail ----
+            # If locked_acc_ref is enabled but baseline_stats_path is missing,
+            # we MUST have warmup_epochs>=1 so that warmup_best can produce acc_ref.
+            try:
+                locked = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+                if bool(locked.get("enabled", False)):
+                    baseline_path = locked.get("baseline_stats_path", None)
+                    sched = get_nested(cfg, "stable_hw.lambda_hw_schedule", {}) or {}
+                    warmup_epochs = int(sched.get("warmup_epochs", 0) or 0)
+                    freeze_epoch = int(locked.get("freeze_epoch", warmup_epochs) or 0)
+
+                    if (baseline_path is None) or (str(baseline_path).strip() == ""):
+                        if warmup_epochs <= 0:
+                            warmup_epochs = 1
+                            sched["warmup_epochs"] = warmup_epochs
+                            print(
+                                "[WARN] v5.4 LockedAccRef: baseline_stats_path is missing; "
+                                "forcing stable_hw.lambda_hw_schedule.warmup_epochs=1 so warmup_best can lock acc_ref."
+                            )
+                        if freeze_epoch <= 0:
+                            freeze_epoch = warmup_epochs
+                            locked["freeze_epoch"] = freeze_epoch
+                            print(
+                                "[WARN] v5.4 LockedAccRef: freeze_epoch<=0 with missing baseline_stats_path; "
+                                f"forcing stable_hw.locked_acc_ref.freeze_epoch={freeze_epoch}."
+                            )
+                        if freeze_epoch > warmup_epochs:
+                            sched["warmup_epochs"] = freeze_epoch
+                            print(
+                                "[WARN] v5.4 LockedAccRef: freeze_epoch>warmup_epochs; "
+                                f"forcing warmup_epochs={freeze_epoch}."
+                            )
+
+                    set_nested(cfg, "stable_hw.locked_acc_ref", locked)
+                    set_nested(cfg, "stable_hw.lambda_hw_schedule", sched)
+            except Exception:
+                pass
     except Exception:
         pass
 
