@@ -909,8 +909,9 @@ def main() -> None:
     problem = str(baseline_cfg.get("problem", "wafer_layout"))
     internal_out = out_dir / "heuragenix_internal"
     internal_out.mkdir(parents=True, exist_ok=True)
-    internal_data_base = internal_out
-    internal_data_base.mkdir(parents=True, exist_ok=True)
+    internal_data_root = internal_out / "data"
+    internal_data_base = internal_data_root
+    (internal_data_base / problem / "test_data").mkdir(parents=True, exist_ok=True)
     work_dir, case_name, case_file = _prepare_work_dir(
         out_dir,
         heuragenix_root,
@@ -947,6 +948,15 @@ def main() -> None:
         llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
         if llm_config is None and (not bool(baseline_cfg.get("allow_llm_missing", False))):
             raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
+        if llm_config is not None:
+            with open(llm_config, "r", encoding="utf-8") as f:
+                js = json.load(f)
+            if "top-p" in js and "top_p" not in js:
+                js["top_p"] = js.pop("top-p")
+            adapted = internal_out / "llm_config_adapted.json"
+            with open(adapted, "w", encoding="utf-8") as f:
+                json.dump(js, f, indent=2, ensure_ascii=False)
+            llm_config = adapted
     output_dir = output_root / problem / case_name / "result" / method
     case_stem = case_name
 
@@ -955,7 +965,7 @@ def main() -> None:
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
     env["AMLT_OUTPUT_DIR"] = str(internal_out)
-    env["AMLT_DATA_DIR"] = str(internal_data_base)
+    env["AMLT_DATA_DIR"] = str(internal_data_root)
     timeout_s = int(baseline_cfg.get("subprocess_timeout_s", 1800))
     result = None
     if run_mode == "inprocess":

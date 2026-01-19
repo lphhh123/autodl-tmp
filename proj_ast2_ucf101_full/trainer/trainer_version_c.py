@@ -387,7 +387,7 @@ def _export_layout_input(
         )
 
     layout_input = {
-        "layout_version": "v4.3.2",
+        "layout_version": "v5.4",
         "wafer": {"radius_mm": float(cfg.hw.wafer_radius_mm), "margin_mm": float(getattr(cfg.hw, "site_margin_mm", 5.0))},
         "sites": {
             "method": "square_grid_in_circle",
@@ -649,16 +649,26 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
         if stable_hw_enabled:
             stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
-            apply_accuracy_guard(
-                outer,
-                stable_hw_cfg,
-                stable_hw_state,
-                None,
-                has_val_this_epoch=False,
-                train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
-                if stable_hw_state.get("train_acc1_ema") is not None
-                else None,
+            has_any_acc_source = (
+                (stable_hw_state.get("val_acc1_last") is not None)
+                or (stable_hw_state.get("train_acc1_ema") is not None)
+                or bool(getattr(stable_hw_cfg, "baseline_stats_path", None))
             )
+            if has_any_acc_source:
+                apply_accuracy_guard(
+                    outer,
+                    stable_hw_cfg,
+                    stable_hw_state,
+                    None,
+                    has_val_this_epoch=False,
+                    train_acc1_ema=float(stable_hw_state.get("train_acc1_ema", 0.0))
+                    if stable_hw_state.get("train_acc1_ema") is not None
+                    else None,
+                )
+            else:
+                stable_hw_state["guard_mode"] = "WARMUP"
+                stable_hw_state["lambda_hw_effective"] = float(stable_hw_state.get("lambda_hw_base", 0.0))
+                stable_hw_state["allow_discrete_updates"] = True
         lambda_hw_eff = float(
             stable_hw_state.get(
                 "lambda_hw_effective",
@@ -681,11 +691,14 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         mapping_updated = False
         layout_updated = False
         allow_discrete_updates = bool(stable_hw_state.get("allow_discrete_updates", True))
+        stable_hw_state["discrete_frozen_init_mapping"] = False
 
         if (not allow_discrete_updates) and cache["mapping"] is not None:
             mapping_res = cache["mapping"]
             mapping_updated = False
         else:
+            if (not allow_discrete_updates) and cache["mapping"] is None:
+                stable_hw_state["discrete_frozen_init_mapping"] = True
             if (outer % map_every) == 0 or cache["mapping"] is None:
                 mapping_res = _solve_mapping_for_cache(
                     model=model,
