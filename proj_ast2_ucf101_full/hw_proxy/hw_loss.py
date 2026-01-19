@@ -87,17 +87,8 @@ def compute_hw_loss(
 
             # ---- cache policy: ONLY for no-grad paths ----
             use_cached = bool(getattr(iso_cfg, "use_cached_hw_mats", True))
-            want_grad = False
-            try:
-                for v in (eff_specs or {}).values():
-                    if hasattr(v, "requires_grad") and bool(v.requires_grad):
-                        want_grad = True
-                        break
-                if torch.is_grad_enabled():
-                    want_grad = True
-            except Exception:
-                want_grad = True
-
+            # NOTE: want_grad is computed at function entry from differentiable inputs.
+            # Do NOT override want_grad based on global torch.is_grad_enabled().
             if want_grad:
                 use_cached = False
 
@@ -194,44 +185,37 @@ def compute_hw_loss(
     eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9) if stable_hw_cfg is not None else 1e-9)
 
     # keep raw for logging (may be negative)
-    raw_latency_ms = float(latency_ms.detach().item())
-    raw_energy_mj = float(energy_mj.detach().item())
-    raw_mem_mb = float(mem_mb.detach().item())
-    raw_comm_ms = float(comm_ms.detach().item())
+    raw_latency_ms = float(latency_ms.detach().cpu().item())
+    raw_energy_mj = float(energy_mj.detach().cpu().item())
+    raw_mem_mb = float(mem_mb.detach().cpu().item())
+    raw_comm_ms = float(comm_ms.detach().cpu().item())
 
     # v5.4: clamp audit (counts + min raw values)
     clamp_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
     clamp_mins = {"T": None, "E": None, "M": None, "C": None}
+    invalid_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
 
-    def _audit_clamp(tag: str, x):
+    def _audit_min(tag: str, x):
         try:
             x_item = float(x.detach().cpu().item())
         except Exception:
             return
         if clamp_mins[tag] is None or x_item < float(clamp_mins[tag]):
             clamp_mins[tag] = x_item
-        if x_item < float(eps_ratio):
-            clamp_counts[tag] += 1
 
-    _audit_clamp("T", latency_ms)
-    _audit_clamp("E", energy_mj)
-    _audit_clamp("M", mem_mb)
-    _audit_clamp("C", comm_ms)
+    _audit_min("T", latency_ms)
+    _audit_min("E", energy_mj)
+    _audit_min("M", mem_mb)
+    _audit_min("C", comm_ms)
 
-    # clamp for optimization / ratios
-    latency_ms_pos = torch.clamp(latency_ms, min=eps_ratio)
-    energy_mj_pos = torch.clamp(energy_mj, min=eps_ratio)
-    mem_mb_pos = torch.clamp(mem_mb, min=eps_ratio)
-    comm_ms_pos = torch.clamp(comm_ms, min=eps_ratio)
-
-    # init refs using stable state (sanitize any stale negative refs in state)
+    # init refs using stable state (sanitize any stale/invalid refs in state)
     def _pos_ref(state_key: str, default_val: float) -> float:
         v = stable_hw_state.get(state_key, None)
         try:
             v = float(v) if v is not None else None
         except Exception:
             v = None
-        if v is None or v <= eps_ratio:
+        if v is None or (not (v > 0.0)) or (not np.isfinite(v)):
             v = float(default_val)
         v = max(eps_ratio, float(v))
         stable_hw_state[state_key] = float(v)
@@ -241,6 +225,43 @@ def compute_hw_loss(
     ref_E = _pos_ref("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0)))
     ref_M = _pos_ref("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
     ref_C = _pos_ref("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
+
+    ref_T_t = torch.tensor(ref_T, device=device, dtype=torch.float32)
+    ref_E_t = torch.tensor(ref_E, device=device, dtype=torch.float32)
+    ref_M_t = torch.tensor(ref_M, device=device, dtype=torch.float32)
+    ref_C_t = torch.tensor(ref_C, device=device, dtype=torch.float32)
+
+    def _sanitize_no_reward(tag: str, x: torch.Tensor, ref_t: torch.Tensor) -> torch.Tensor:
+        # invalid = negative or non-finite -> replace with ref (NO reward)
+        invalid = (x < 0) | (~torch.isfinite(x))
+        try:
+            invalid_counts[tag] = int(invalid.detach().cpu().item())
+        except Exception:
+            invalid_counts[tag] = 1
+        y = torch.where(invalid, ref_t, x)
+        # non-negative clamp (contract I4)
+        y = torch.clamp(y, min=0.0)
+        if torch.any(y < 0):
+            raise AssertionError(f"[I4] negative {tag} remains after clamp")
+        return y
+
+    latency_ms_safe = _sanitize_no_reward("T", latency_ms, ref_T_t)
+    energy_mj_safe = _sanitize_no_reward("E", energy_mj, ref_E_t)
+    mem_mb_safe = _sanitize_no_reward("M", mem_mb, ref_M_t)
+    comm_ms_safe = _sanitize_no_reward("C", comm_ms, ref_C_t)
+
+    # strictly-positive tensors for ratios/logs (numerical), but NOTE:
+    # invalid negatives were already mapped to ref => no artificial reward
+    latency_ms_pos = torch.clamp(latency_ms_safe, min=eps_ratio)
+    energy_mj_pos = torch.clamp(energy_mj_safe, min=eps_ratio)
+    mem_mb_pos = torch.clamp(mem_mb_safe, min=eps_ratio)
+    comm_ms_pos = torch.clamp(comm_ms_safe, min=eps_ratio)
+
+    # count “clamps” for audit (invalid -> ref is considered a clamp event)
+    clamp_counts["T"] = int(invalid_counts["T"])
+    clamp_counts["E"] = int(invalid_counts["E"])
+    clamp_counts["M"] = int(invalid_counts["M"])
+    clamp_counts["C"] = int(invalid_counts["C"])
 
     lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0))
     L_chip = torch.zeros((), device=device)
@@ -414,6 +435,10 @@ def compute_hw_loss(
         "ref_comm_ms": float(ref_C),
         "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
         "proxy_clamp_min_values": clamp_mins,
+        "proxy_invalid_counts": invalid_counts,
+        "proxy_had_invalid": bool(
+            (invalid_counts["T"] + invalid_counts["E"] + invalid_counts["M"] + invalid_counts["C"]) > 0
+        ),
     }
     if chip_used_expected is not None:
         hw_stats["chip_used_expected"] = float(chip_used_expected.detach().cpu().item())

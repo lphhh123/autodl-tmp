@@ -214,7 +214,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     "acc5": acc5.item(),
                     "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item(),
                     "lambda_hw": float(lambda_hw_eff),
-                    "hw_loss": float(L_hw),
+                    "hw_loss": float(L_hw.detach().cpu().item()),
                 }
                 stats.update(
                     {
@@ -250,7 +250,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
                 "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
                 "lambda_hw": float(lambda_hw_eff),
-                "hw_loss": float(L_hw),
+                "hw_loss": float(L_hw.detach().cpu().item()),
                 "stable_hw_disabled": not bool(getattr(cfg.stable_hw, "enabled", False))
                 if getattr(cfg, "stable_hw", None)
                 else True,
