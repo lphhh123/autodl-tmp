@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+import hashlib
+import json
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -97,13 +100,28 @@ def compute_hw_loss(
             if use_cached and (stable_hw_state is not None) and (mapping_sig is not None):
                 cache = stable_hw_state.setdefault("discrete_cache", {}).setdefault("hw_mats", {})
 
-            eff_sig = {}
-            if eff_specs is not None:
-                eff_sig = {
-                    k: float(v.detach().mean().cpu())
-                    for k, v in eff_specs.items()
-                    if isinstance(v, torch.Tensor)
-                }
+            def _effspec_to_hashable(v):
+                # NOTE: hash 用于缓存命中；必须包含 tensor + 标量 + 列表等，否则会错用缓存导致跑偏
+                if torch.is_tensor(v):
+                    t = v.detach()
+                    if t.numel() == 0:
+                        return 0.0
+                    return float(t.mean().cpu().item())
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, (list, tuple)):
+                    # 尽量保留数值列表
+                    if all(isinstance(x, (int, float)) for x in v):
+                        return [float(x) for x in v]
+                    return [str(x) for x in v]
+                if isinstance(v, dict):
+                    # dict 递归可序列化
+                    return {str(kk): _effspec_to_hashable(vv) for kk, vv in v.items()}
+                return str(v)
+
+            eff_sig = {str(k): _effspec_to_hashable(v) for k, v in (eff_specs or {}).items()}
+            sig_json = json.dumps(eff_sig, sort_keys=True, separators=(",", ":"))
+            eff_key = hashlib.md5(sig_json.encode("utf-8")).hexdigest()[:10]
 
             key = None
             if cache is not None:
@@ -111,7 +129,7 @@ def compute_hw_loss(
                     {
                         "mapping_sig": mapping_sig,
                         "segments_sig": segments_sig,
-                        "eff": eff_sig,
+                        "eff": eff_key,
                         "distance_scale": float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
                         "mem_limit_factor": float(getattr(mapping_solver, "mem_limit_factor", 0.9)),
                     }
@@ -437,25 +455,25 @@ def compute_hw_loss(
 
     hw_stats.update(
         {
-        "latency_ms": float(latency_ms_pos.detach().cpu().item()),
-        "energy_mj": float(energy_mj_pos.detach().cpu().item()),
-        "mem_mb": float(mem_mb_pos.detach().cpu().item()),
-        "comm_ms": float(comm_ms_pos.detach().cpu().item()),
-        "raw_latency_ms": raw_latency_ms,
-        "raw_energy_mj": raw_energy_mj,
-        "raw_mem_mb": raw_mem_mb,
-        "raw_comm_ms": raw_comm_ms,
-        "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
-        "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
-        "clamped_mem_mb": float(mem_mb_pos.detach().cpu().item()),
-        "clamped_comm_ms": float(comm_ms_pos.detach().cpu().item()),
-        "ref_latency_ms": float(ref_T),
-        "ref_energy_mj": float(ref_E),
-        "ref_mem_mb": float(ref_M),
-        "ref_comm_ms": float(ref_C),
-        "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
-        "proxy_clamp_min_values": clamp_mins,
-        "proxy_invalid_counts": invalid_counts,
+            "latency_ms": float(latency_ms_pos.detach().cpu().item()),
+            "energy_mj": float(energy_mj_pos.detach().cpu().item()),
+            "mem_mb": float(mem_mb_pos.detach().cpu().item()),
+            "comm_ms": float(comm_ms_pos.detach().cpu().item()),
+            "raw_latency_ms": raw_latency_ms,
+            "raw_energy_mj": raw_energy_mj,
+            "raw_mem_mb": raw_mem_mb,
+            "raw_comm_ms": raw_comm_ms,
+            "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
+            "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
+            "clamped_mem_mb": float(mem_mb_pos.detach().cpu().item()),
+            "clamped_comm_ms": float(comm_ms_pos.detach().cpu().item()),
+            "ref_latency_ms": float(ref_T),
+            "ref_energy_mj": float(ref_E),
+            "ref_mem_mb": float(ref_M),
+            "ref_comm_ms": float(ref_C),
+            "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
+            "proxy_clamp_min_values": clamp_mins,
+            "proxy_invalid_counts": invalid_counts,
             "proxy_had_invalid": bool(
                 (invalid_counts["T"] + invalid_counts["E"] + invalid_counts["M"] + invalid_counts["C"]) > 0
             ),
