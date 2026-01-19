@@ -1,0 +1,9 @@
+_base_: layout_L4_region_pareto_llm_mixed_pick.yaml
+
+detailed_place:
+  policy_switch:
+    enabled: true
+    eps: 0.15
+    action_families: ["relocate", "swap", "inverse"]
+    policies: ["heuristic", "llm"]
+    cache_size: 8000

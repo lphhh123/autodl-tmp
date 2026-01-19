@@ -34,6 +34,7 @@ from layout.candidate_pool import (
     pick_ids_to_actions_sequential,
     _signature_for_action,
 )
+from layout.policy_switch import EvalCache, PolicySwitchController
 
 
 @dataclass
@@ -41,6 +42,7 @@ class DetailedPlaceResult:
     assign: np.ndarray
     pareto: ParetoSet
     trace_path: Path
+    policy_meta: Optional[Dict[str, Any]] = None
 
 
 def _cfg_get(cfg: Any, key: str, default=None):
@@ -226,6 +228,20 @@ def run_detailed_place(
     max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
     stage_label = str(_cfg_get(cfg, "stage_label", f"detailed_{planner_type}"))
 
+    # ===== v5.4 Ours-B2+ controller (optional) =====
+    ps_cfg = _cfg_get(cfg, "policy_switch", None)
+    use_ps = bool(ps_cfg and _cfg_get(ps_cfg, "enabled", False))
+    eval_cache = None
+    controller = None
+    if use_ps:
+        eval_cache = EvalCache(max_size=int(_cfg_get(ps_cfg, "cache_size", 5000)))
+        controller = PolicySwitchController(
+            action_families=list(_cfg_get(ps_cfg, "action_families", ["relocate", "swap", "inverse"])),
+            policies=list(_cfg_get(ps_cfg, "policies", ["heuristic", "llm"])),
+            eps=float(_cfg_get(ps_cfg, "eps", 0.1)),
+            seed=int(base_seed),
+        )
+
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
     if planner_type in ("llm", "mixed"):
@@ -354,6 +370,12 @@ def run_detailed_place(
 
         for step in range(steps):
             step_start = time.perf_counter()
+            forced_family = None
+            forced_policy = None
+            if controller is not None:
+                forced_family = controller.choose_action_family()
+                forced_policy = controller.choose_policy()
+
             candidate_pool = build_candidate_pool(
                 assign,
                 eval_out,
@@ -370,11 +392,22 @@ def run_detailed_place(
                 rng,
                 debug_out_path=(out_dir / "candidate_pool_debug.json") if step == 0 else None,
             )
+            if forced_family:
+                filtered = [
+                    c for c in candidate_pool if str(c.action.get("op", "")).lower() == forced_family.lower()
+                ]
+                if filtered:
+                    candidate_pool = filtered
             cand_map = {c.id: c for c in candidate_pool}
             candidate_ids = [c.id for c in candidate_pool]
             forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
 
             use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+            if forced_policy:
+                if forced_policy.lower() == "heuristic":
+                    use_llm = False
+                elif forced_policy.lower() == "llm":
+                    use_llm = planner_type in ("llm", "mixed") and llm_provider is not None
             need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
             refresh_due_to_rejects = False
 
@@ -560,7 +593,14 @@ def run_detailed_place(
                     _apply_cluster_move(new_assign, cluster, target_sites)
 
             layout_state.assign = new_assign
-            eval_new = evaluator.evaluate(layout_state)
+            sig2 = signature_for_assign(new_assign)
+            cached = eval_cache.get(sig2) if eval_cache is not None else None
+            if cached is None:
+                eval_new = evaluator.evaluate(layout_state)
+                if eval_cache is not None:
+                    eval_cache.put(sig2, dict(eval_new))
+            else:
+                eval_new = dict(cached)
             delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
             delta_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
             delta_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
@@ -645,6 +685,10 @@ def run_detailed_place(
                     "queue_len": int(len(action_queue)),
                     "last_op": op,
                     "temperature": float(T),
+                    "policy_switch_enabled": bool(use_ps),
+                    "policy_last_action_family": getattr(controller, "last_action_family", None),
+                    "policy_last_policy": getattr(controller, "last_policy", None),
+                    "cache_hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None,
                 }
                 with (out_dir / "heartbeat.json").open("w", encoding="utf-8") as hb_fp:
                     json.dump(heartbeat, hb_fp, indent=2)
@@ -660,7 +704,20 @@ def run_detailed_place(
                 }
                 with (out_dir / "checkpoint_state.json").open("w", encoding="utf-8") as ck_fp:
                     json.dump(checkpoint, ck_fp, indent=2)
+            if controller is not None:
+                improved = bool(accept) and float(delta) < 0.0
+                controller.update(improved=improved, delta_total=float(delta))
     if usage_fp:
         usage_fp.close()
 
-    return DetailedPlaceResult(assign=assign, pareto=pareto, trace_path=trace_path)
+    policy_meta = {
+        "policy_switch": {
+            "enabled": bool(use_ps),
+            "last_action_family": getattr(controller, "last_action_family", None),
+            "last_policy": getattr(controller, "last_policy", None),
+        },
+        "cache": {"hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None},
+    }
+    (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
+
+    return DetailedPlaceResult(assign=assign, pareto=pareto, trace_path=trace_path, policy_meta=policy_meta)

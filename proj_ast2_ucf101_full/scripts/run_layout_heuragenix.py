@@ -811,6 +811,40 @@ def _run_heuragenix_inprocess(
     return out_dir
 
 
+def _collect_subprocess_outputs(
+    out_dir: Path,
+    problem: str,
+    case_stem: str,
+    engine: str,
+    result_dir: str = "result",
+) -> Path:
+    """
+    HeurAgenix subprocess writes into:
+      <AMLT_OUTPUT_DIR>/output/{problem}/{case_stem}/{result_dir}/{engine}/
+    Mirror outputs into:
+      <out_dir>/{problem}/{case_stem}/{result_dir}/{engine}/
+    """
+    out_dir = Path(out_dir)
+    internal_out = out_dir / "heuragenix_internal"
+    internal_base = internal_out / "output" / problem / case_stem / result_dir / engine
+    if not internal_base.exists():
+        raise FileNotFoundError(f"[HeurAgenix] internal output not found: {internal_base}")
+
+    mirror = out_dir / problem / case_stem / result_dir / engine
+    mirror.mkdir(parents=True, exist_ok=True)
+
+    for name in ["recordings.jsonl", "best_solution.json", "llm_usage.jsonl"]:
+        src = internal_base / name
+        if src.exists():
+            (mirror / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            if name in ["recordings.jsonl", "best_solution.json"]:
+                raise FileNotFoundError(f"[HeurAgenix] missing {name}: {src}")
+            (mirror / name).write_text("", encoding="utf-8")
+
+    return mirror
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--layout_input", type=str, required=True)
@@ -909,6 +943,7 @@ def main() -> None:
         if llm_config is None and (not bool(baseline_cfg.get("allow_llm_missing", False))):
             raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
     output_dir = output_root / problem / case_name / "result" / method
+    case_stem = case_name
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -948,6 +983,10 @@ def main() -> None:
             run_mode = "subprocess"
 
     if run_mode != "inprocess":
+        llm_config_file = baseline_cfg.get("llm_config_file")
+        llm_cfg = Path(heuragenix_root) / str(llm_config_file)
+        if method == "llm_hh" and (not llm_cfg.exists()):
+            raise FileNotFoundError(f"Missing HeurAgenix llm_config_file: {llm_cfg}")
         launch_cmd = [
             sys.executable,
             str(heuragenix_root / "launch_hyper_heuristic.py"),
@@ -1074,23 +1113,39 @@ def main() -> None:
                         {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
                     )
 
-    cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
-    if not cands:
-        cands = list((output_root / problem / case_name / "result").glob("*/recordings.jsonl"))
-    if cands:
-        recordings_path = cands[0]
-        output_dir = recordings_path.parent
-        method = output_dir.name
-        fallback_used = method != baseline_method
+    if run_mode == "inprocess":
+        cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
+        if not cands:
+            cands = list((output_root / problem / case_name / "result").glob("*/recordings.jsonl"))
+        if cands:
+            recordings_path = cands[0]
+            output_dir = recordings_path.parent
+            method = output_dir.name
+            fallback_used = method != baseline_method
+        else:
+            output_dir = out_dir
+            recordings_path = out_dir / "recordings.jsonl"
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "missing_recordings", "engine": method},
+            )
+            recordings_path.parent.mkdir(parents=True, exist_ok=True)
+            recordings_path.write_text("", encoding="utf-8")
     else:
-        output_dir = out_dir
-        recordings_path = out_dir / "recordings.jsonl"
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "reason": "missing_recordings", "engine": method},
+        output_dir = _collect_subprocess_outputs(
+            out_dir=out_dir,
+            problem=problem,
+            case_stem=case_stem,
+            engine=method,
+            result_dir="result",
         )
-        recordings_path.parent.mkdir(parents=True, exist_ok=True)
-        recordings_path.write_text("", encoding="utf-8")
+        recordings_path = output_dir / "recordings.jsonl"
+        if not recordings_path.exists():
+            _append_llm_usage(
+                llm_usage_path,
+                {"ok": False, "reason": "missing_recordings", "engine": method},
+            )
+            recordings_path.write_text("", encoding="utf-8")
     # merge heuragenix internal llm_usage into wrapper llm_usage.jsonl
     heuragenix_usage_path = output_dir / "llm_usage.jsonl"
     if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:

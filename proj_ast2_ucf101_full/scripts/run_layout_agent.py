@@ -1,4 +1,4 @@
-"""Offline EDA-Agent driver (SPEC v4.3.2)."""
+"""Offline EDA-Agent driver (SPEC v5.4)."""
 from __future__ import annotations
 
 # --- bootstrap sys.path for both invocation styles ---
@@ -289,6 +289,8 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         "runtime_s": float(runtime_s),
         "evaluator_calls": int(getattr(evaluator, "evaluator_calls", getattr(evaluator, "evaluate_calls", 0))),
         "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+        "policy_switch": result.policy_meta.get("policy_switch") if result.policy_meta else None,
+        "cache": result.policy_meta.get("cache") if result.policy_meta else None,
         **trace_metrics,
     }
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
