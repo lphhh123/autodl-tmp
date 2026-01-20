@@ -195,7 +195,18 @@ def stable_hw_schedule(
     warmup_epochs = int(_cfg_get(sched, "warmup_epochs", 5))
     ramp_epochs = int(_cfg_get(sched, "ramp_epochs", 10))
     lambda_hw_max = _safe_float(_cfg_get(sched, "lambda_hw_max", _cfg_get(sched, "max_lambda", 0.0)), 0.0)
-    clamp_min = _safe_float(_cfg_get(sched, "clamp_min", _cfg_get(sched, "min_lambda", 0.0)), 0.0)
+    clamp_min = _safe_float(
+        _cfg_get(
+            sched,
+            "clamp_min",
+            _cfg_get(
+                sched,
+                "lambda_hw_min",
+                _cfg_get(sched, "min_lambda", _cfg_get(sched, "min_hw_lambda", 0.0)),
+            ),
+        ),
+        0.0,
+    )
     clamp_max = _safe_float(_cfg_get(sched, "clamp_max", 1.0), 1.0)
 
     # freeze schedule during recovery if asked (spec)
@@ -225,7 +236,18 @@ def stable_hw_schedule(
         lam = lambda_hw_max
 
     # ---- v5.4 clamp + schedule_phase (SPEC_C §12B.3) ----
-    clamp_min = float(_cfg_get(sched, "clamp_min", _cfg_get(sched, "min_lambda", 0.0)) or 0.0)
+    clamp_min = float(
+        _cfg_get(
+            sched,
+            "clamp_min",
+            _cfg_get(
+                sched,
+                "lambda_hw_min",
+                _cfg_get(sched, "min_lambda", _cfg_get(sched, "min_hw_lambda", 0.0)),
+            ),
+        )
+        or 0.0
+    )
     clamp_max = float(_cfg_get(sched, "clamp_max", lambda_hw_max) or lambda_hw_max)
     lam = float(max(clamp_min, min(clamp_max, float(lam))))
     st["schedule_phase"] = str(phase)
@@ -535,22 +557,39 @@ def apply_accuracy_guard(
 def init_locked_acc_ref(cfg_or_stable, state: dict):
     """
     v5.4 contract:
-      locked_acc_ref is allowed at root-level (preferred) OR under stable_hw (legacy).
+      locked_acc_ref can be at root-level (preferred) OR under stable_hw (legacy).
+
+    Important:
+      - accuracy guard uses state["acc_ref"] as the reference for gating.
+      - For manual source, we treat acc_ref1 as the primary reference metric.
     """
     lock = _get_locked_cfg(cfg_or_stable)
     if lock is None or not bool(getattr(lock, "enabled", False)):
         return
 
-    # source: "manual" (acc_ref1/acc_ref5 provided) or "baseline" (already loaded elsewhere)
+    src = str(getattr(lock, "source", "manual")).lower().strip()
+
+    # keep these for logging / completeness
     acc_ref1 = getattr(lock, "acc_ref1", None)
     acc_ref5 = getattr(lock, "acc_ref5", None)
-    if acc_ref1 is None or acc_ref5 is None:
-        raise ValueError("[StableHW] locked_acc_ref.enabled=True but acc_ref1/acc_ref5 missing.")
+    if acc_ref1 is not None:
+        state["acc_ref1"] = float(acc_ref1)
+    if acc_ref5 is not None:
+        state["acc_ref5"] = float(acc_ref5)
 
-    state["acc_ref1"] = float(acc_ref1)
-    state["acc_ref5"] = float(acc_ref5)
-    state["acc_ref_source"] = str(getattr(lock, "source", "manual"))
-    state["acc_ref_locked"] = True
+    # v5.4: the gating reference MUST be state["acc_ref"]
+    # - manual: directly set acc_ref from acc_ref1 (primary metric)
+    # - baseline/warmup: acc_ref will be set later by _load_locked_acc_ref / warmup_best
+    if src == "manual":
+        if acc_ref1 is None:
+            raise ValueError("[StableHW] locked_acc_ref.source=manual but acc_ref1 is missing.")
+        state["acc_ref"] = float(acc_ref1)
+        state["acc_ref_source"] = "manual"
+        state["acc_ref_locked"] = True
+    else:
+        # do not override acc_ref here; baseline_stats_path / warmup_best will handle it
+        state.setdefault("acc_ref_source", src)
+        state.setdefault("acc_ref_locked", True)
 
 
 def update_train_acc1_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc1: float) -> None:
@@ -609,13 +648,28 @@ def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) 
 def update_hw_refs_from_stats(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
     """
     v5.4 NoDrift contract:
-      - NoDrift.enabled == True  => DO NOT update any reference (lock refs)
-      - NoDrift.enabled == False => allow update if corresponding update flags are enabled
+      - no_drift.enabled == True  => DO NOT update any reference (lock refs)
+      - no_drift.enabled == False => allow update if corresponding update flags are enabled
     """
-    # v5.4 NoDrift: when enabled=True, refs MUST be frozen (no online update).
-    stable_hw_cfg = cfg
-    nd = getattr(stable_hw_cfg.stable_hw, "no_drift", None)
-    if nd is not None and bool(getattr(nd, "enabled", False)):
+    # ---- v5.4: support no_drift at root-level OR under stable_hw (legacy) ----
+    nd = _get_no_drift_cfg(cfg)
+
+    # legacy fallback (some configs may store a bool under cfg.stable_hw.no_drift)
+    if nd is None:
+        try:
+            nd = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
+        except Exception:
+            nd = None
+
+    nd_enabled = False
+    if isinstance(nd, bool):
+        nd_enabled = bool(nd)
+    elif isinstance(nd, dict):
+        nd_enabled = bool(nd.get("enabled", False))
+    elif nd is not None:
+        nd_enabled = bool(getattr(nd, "enabled", False))
+
+    if nd_enabled:
         return stats
 
     # ---- allow update when NoDrift disabled ----

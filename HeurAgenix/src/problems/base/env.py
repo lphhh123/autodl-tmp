@@ -95,7 +95,6 @@ class BaseEnv:
         self._rec_path = None
         self._ensure_rec_fp()
         try:
-            self._ensure_rec_fp()
             init_action = {"op": "init"}
             sig = None
             try:

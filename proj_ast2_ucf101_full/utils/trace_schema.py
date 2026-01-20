@@ -1,4 +1,4 @@
-# v5.4: trace schema must match actual written rows (20 columns)
+# v5.4: trace schema must match actual written rows (currently 25 columns)
 TRACE_FIELDS = [
     "iter",
     "stage",

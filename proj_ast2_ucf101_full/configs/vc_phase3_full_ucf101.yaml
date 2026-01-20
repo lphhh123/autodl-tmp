@@ -1,6 +1,6 @@
 locked_acc_ref:
   enabled: true
-  source: "manual"
+  source: "warmup_best"
   acc_ref1: 0.0
   acc_ref5: 0.0
   # ★ 推荐：如果你有 dense baseline 的 metrics.json，就填这里（强锁定，最符合 v5.4）
