@@ -953,7 +953,12 @@ def main() -> None:
     layout_input["allow_fallback_evaluator"] = bool(baseline_cfg.get("allow_fallback_evaluator", False))
     heuragenix_root = _resolve_heuragenix_root(baseline_cfg.get("heuragenix_root"), project_root)
     if not heuragenix_root.exists():
-        raise FileNotFoundError(f"HeurAgenix root not found: {heuragenix_root}")
+        raise FileNotFoundError(
+            "Cannot find HeurAgenix directory.\n"
+            f"cwd={os.getcwd()}\n"
+            f"heuragenix_dir={heuragenix_root}\n"
+            "Tip: run with --heuragenix_dir /ABS/PATH/TO/HeurAgenix"
+        )
     _ensure_heuragenix_syspath(heuragenix_root)
 
     run_mode = baseline_cfg.get("run_mode", "inprocess")
