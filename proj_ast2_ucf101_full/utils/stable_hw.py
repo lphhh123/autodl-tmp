@@ -455,27 +455,6 @@ def apply_accuracy_guard(
             },
             state=st,
         )
-        try:
-            from utils.trace_guard import append_trace_event
-
-            trace_path = st.get("_trace_path", None)
-            if trace_path:
-                append_trace_event(
-                    str(trace_path),
-                    {
-                        "event_type": "guard_decision",
-                        "payload": {
-                            "acc_best": float(st.get("warmup_acc_best")) if st.get("warmup_acc_best") is not None else None,
-                            "acc_ref": None,
-                            "allowed": True,
-                            "cut_hw_loss_on_violate": bool(cut_hw),
-                            "lambda_hw_effective": float(st.get("lambda_hw_effective", 0.0)),
-                            "reason": str(decision.reason),
-                        },
-                    },
-                )
-        except Exception:
-            pass
         return decision, True
 
     # choose metric
@@ -572,27 +551,6 @@ def apply_accuracy_guard(
         },
         state=st,
     )
-    try:
-        from utils.trace_guard import append_trace_event
-
-        trace_path = st.get("_trace_path", None)
-        if trace_path:
-            append_trace_event(
-                str(trace_path),
-                {
-                    "event_type": "guard_decision",
-                    "payload": {
-                        "acc_best": float(st.get("warmup_acc_best")) if st.get("warmup_acc_best") is not None else None,
-                        "acc_ref": float(acc_ref) if acc_ref is not None else None,
-                        "allowed": bool(allow_discrete_updates),
-                        "cut_hw_loss_on_violate": bool(cut_hw),
-                        "lambda_hw_effective": float(st.get("lambda_hw_effective", 0.0)),
-                        "reason": str(decision.reason),
-                    },
-                },
-            )
-    except Exception:
-        pass
     return decision, bool(allow_discrete_updates)
 
 
@@ -715,26 +673,4 @@ def update_hw_refs_from_stats(stable_hw_state: dict, stats: dict, cfg: dict) -> 
         return stats
 
     # ---- allow update when NoDrift disabled ----
-    updated = _update_hw_refs_when_allowed(stable_hw_state, stats, cfg)
-    try:
-        from utils.trace_guard import append_trace_event
-
-        trace_path = stable_hw_state.get("_trace_path", None)
-        if trace_path:
-            append_trace_event(
-                str(trace_path),
-                {
-                    "event_type": "ref_update",
-                    "payload": {
-                        "lat_ref_ms": float(
-                            stable_hw_state.get("lat_ref_ms", stable_hw_state.get("latency_ref_ms", 0.0))
-                        ),
-                        "lat_ref_source": str(stable_hw_state.get("lat_ref_source", "")),
-                        "comm_ref_ms": float(stable_hw_state.get("comm_ref_ms", stable_hw_state.get("ref_C", 0.0))),
-                        "comm_ref_source": str(stable_hw_state.get("comm_ref_source", "")),
-                    },
-                },
-            )
-    except Exception:
-        pass
-    return updated
+    return _update_hw_refs_when_allowed(stable_hw_state, stats, cfg)

@@ -21,8 +21,7 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.run_signature import build_run_signature
-from utils.trace_guard import ensure_trace_file, finalize_trace
+from utils.trace_guard import ensure_trace_file, append_trace_event
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -41,6 +40,36 @@ def _as_float(val, name: str) -> float:
         return float(val)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
+
+
+def _cfg_get(obj, key: str, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _build_run_signature(cfg) -> Dict[str, Any]:
+    detailed_cfg = _cfg_get(cfg, "detailed_place", None)
+    lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
+    policy_switch_cfg = _cfg_get(detailed_cfg, "policy_switch", _cfg_get(cfg, "policy_switch", {}))
+    action_families = _cfg_get(policy_switch_cfg, "action_families", None)
+    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
+    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
+    bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
+    policy_switch_enabled = bool(_cfg_get(policy_switch_cfg, "enabled", False))
+    cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
+    cache_enabled = bool(cache_size > 0)
+    cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
+    return {
+        "moves_enabled": moves_enabled,
+        "lookahead_k": lookahead_k,
+        "bandit_type": bandit_type,
+        "policy_switch": policy_switch_enabled,
+        "cache_enabled": cache_enabled,
+        "cache_key_schema_version": cache_key_schema_version,
+    }
 
 
 def _seed_worker(worker_id: int, base_seed: int) -> None:
@@ -84,124 +113,111 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     trace_path = None
     if out_dir is None and hasattr(cfg, "train") and getattr(cfg.train, "out_dir", None):
         out_dir = Path(cfg.train.out_dir)
-        if out_dir is not None:
-            out_dir = Path(out_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            metrics_path = out_dir / "metrics.json"
-            trace_path = out_dir / "trace.jsonl"
-            cfg_hash = str(getattr(getattr(cfg, "train", None), "cfg_hash", "") or "")
-            base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
-            sig = build_run_signature(
-                cfg,
-                cfg_hash=cfg_hash,
-                seed_global=base_seed,
-                seed_problem=base_seed,
-                mode="train_single_device",
-            )
-            ensure_trace_file(
-                str(trace_path),
-                header={
-                    "run_name": str(getattr(getattr(cfg, "train", None), "exp_name", None) or out_dir.name),
-                    "steps_planned": int(getattr(cfg.training, "steps", getattr(cfg, "steps", 0)) or 0),
-                    "signature": sig,
-                },
-            )
-    status = "ok"
-    final_payload: Dict[str, Any] = {}
-    try:
-        train_loader, val_loader = build_dataloaders(cfg)
-        model_type = getattr(cfg.training, "model_type", "video")
-        num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
-        audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
-        if model_type == "video_audio":
-            model = VideoAudioAST(
-                img_size=cfg.model.img_size,
-                num_frames=num_frames,
-                num_classes=cfg.model.num_classes,
-                embed_dim=cfg.model.embed_dim,
-                depth=cfg.model.depth,
-                num_heads=cfg.model.num_heads,
-                mlp_ratio=cfg.model.mlp_ratio,
-                patch_size=cfg.model.patch_size,
-                audio_feat_dim=audio_feat_dim,
-                in_chans=cfg.model.in_chans,
-                drop_rate=cfg.model.drop_rate,
-                attn_drop=cfg.model.attn_drop,
-                drop_path_rate=cfg.model.drop_path_rate,
-                use_ast_prune=cfg.ast.use_ast_prune,
-                ast_cfg=cfg.ast,
-            ).to(device)
-        else:
-            model = VideoViT(
-                img_size=cfg.model.img_size,
-                num_frames=num_frames,
-                num_classes=cfg.model.num_classes,
-                embed_dim=cfg.model.embed_dim,
-                depth=cfg.model.depth,
-                num_heads=cfg.model.num_heads,
-                mlp_ratio=cfg.model.mlp_ratio,
-                patch_size=cfg.model.patch_size,
-                in_chans=cfg.model.in_chans,
-                drop_rate=cfg.model.drop_rate,
-                attn_drop=cfg.model.attn_drop,
-                drop_path_rate=cfg.model.drop_path_rate,
-                use_ast_prune=cfg.ast.use_ast_prune,
-                ast_cfg=cfg.ast,
-            ).to(device)
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = out_dir / "metrics.json"
+        trace_path = out_dir / "trace.jsonl"
+        ensure_trace_file(
+            str(trace_path),
+            header={
+                "run_name": str(getattr(getattr(cfg, "train", None), "exp_name", None) or out_dir.name),
+                "steps_planned": int(getattr(cfg, "steps", 0)) if hasattr(cfg, "steps") else 0,
+                "run_signature": _build_run_signature(cfg),
+            },
+        )
+    train_loader, val_loader = build_dataloaders(cfg)
+    model_type = getattr(cfg.training, "model_type", "video")
+    num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
+    audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
+    if model_type == "video_audio":
+        model = VideoAudioAST(
+            img_size=cfg.model.img_size,
+            num_frames=num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            audio_feat_dim=audio_feat_dim,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
+    else:
+        model = VideoViT(
+            img_size=cfg.model.img_size,
+            num_frames=num_frames,
+            num_classes=cfg.model.num_classes,
+            embed_dim=cfg.model.embed_dim,
+            depth=cfg.model.depth,
+            num_heads=cfg.model.num_heads,
+            mlp_ratio=cfg.model.mlp_ratio,
+            patch_size=cfg.model.patch_size,
+            in_chans=cfg.model.in_chans,
+            drop_rate=cfg.model.drop_rate,
+            attn_drop=cfg.model.attn_drop,
+            drop_path_rate=cfg.model.drop_path_rate,
+            use_ast_prune=cfg.ast.use_ast_prune,
+            ast_cfg=cfg.ast,
+        ).to(device)
 
-        lr = _as_float(cfg.train.lr, "cfg.train.lr")
-        weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
-        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scaler = GradScaler(enabled=cfg.train.amp)
-        hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
-        stable_hw_cfg = getattr(cfg, "stable_hw", None)
-        stable_state: Dict[str, Any] = {}
-        stable_state["_trace_path"] = str(trace_path) if trace_path is not None else None
-        if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
-            init_locked_acc_ref(cfg, stable_state)
-            init_hw_refs_from_baseline_stats(cfg, stable_state)
-            # ---- v5.4: always materialize stable_hw_state.json even if epochs==0 / early stop ----
-            if out_dir is not None and stable_hw_cfg:
-                out_path = Path(out_dir)
-                out_path.mkdir(parents=True, exist_ok=True)
-                try:
-                    with (out_path / "stable_hw_state.json").open("w", encoding="utf-8") as f:
-                        json.dump(stable_state, f, indent=2)
-                except Exception:
-                    pass
+    lr = _as_float(cfg.train.lr, "cfg.train.lr")
+    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scaler = GradScaler(enabled=cfg.train.amp)
+    hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
+    stable_hw_cfg = getattr(cfg, "stable_hw", None)
+    stable_state: Dict[str, Any] = {}
+    if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
+        init_locked_acc_ref(cfg, stable_state)
+        init_hw_refs_from_baseline_stats(cfg, stable_state)
+        # ---- v5.4: always materialize stable_hw_state.json even if epochs==0 / early stop ----
+        if out_dir is not None and stable_hw_cfg:
+            out_path = Path(out_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            try:
+                with (out_path / "stable_hw_state.json").open("w", encoding="utf-8") as f:
+                    json.dump(stable_state, f, indent=2)
+            except Exception:
+                pass
 
-        best_acc = 0.0
-        last_acc = 0.0
-        ran_epochs = 0
-        early_stop_triggered = False
-        for epoch in range(cfg.train.epochs):
-            ran_epochs += 1
-            stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
-            if stable_hw_enabled:
-                legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
-                legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
-                if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_state.get(
-                    "_legacy_lambda_warned", False
-                ):
-                    logger.info(
-                        "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
-                        "using stable_hw_state.lambda_hw_effective."
-                    )
-                    stable_state["_legacy_lambda_warned"] = True
-                stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
-                prev_val = stable_state.get("val_acc1_last", None)
-                has_prev_val = prev_val is not None
-                stable_decision, lambda_hw_eff = apply_accuracy_guard(
-                    epoch=epoch,
-                    stable_hw_cfg=cfg,
-                    stable_hw_state=stable_state,
-                    val_metric_or_none=float(prev_val) if has_prev_val else None,
-                    has_val_this_epoch=has_prev_val,
-                    train_ema_or_none=float(stable_state.get("train_acc1_ema"))
-                    if stable_state.get("train_acc1_ema") is not None
-                    else None,
+    best_acc = 0.0
+    last_acc = 0.0
+    ran_epochs = 0
+    early_stop_triggered = False
+    for epoch in range(cfg.train.epochs):
+        ran_epochs += 1
+        stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+        if stable_hw_enabled:
+            legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
+            legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
+            if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_state.get(
+                "_legacy_lambda_warned", False
+            ):
+                logger.info(
+                    "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
+                    "using stable_hw_state.lambda_hw_effective."
                 )
-                stable_state = stable_decision.state
+                stable_state["_legacy_lambda_warned"] = True
+            stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+            prev_val = stable_state.get("val_acc1_last", None)
+            has_prev_val = prev_val is not None
+            stable_decision, lambda_hw_eff = apply_accuracy_guard(
+                epoch=epoch,
+                stable_hw_cfg=cfg,
+                stable_hw_state=stable_state,
+                val_metric_or_none=float(prev_val) if has_prev_val else None,
+                has_val_this_epoch=has_prev_val,
+                train_ema_or_none=float(stable_state.get("train_acc1_ema"))
+                if stable_state.get("train_acc1_ema") is not None
+                else None,
+            )
+            stable_state = stable_decision.state
 
             # v5.4: if stop_on_violation already triggered, do not proceed with training
             if bool(stable_decision.stop_training):
@@ -360,37 +376,23 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             with (out_dir / "stable_hw_state.json").open("w", encoding="utf-8") as f:
                 json.dump(stable_state, f, indent=2)
 
-        if out_dir is not None:
-            try:
-                from utils.run_manifest import write_run_manifest
-    
-                write_run_manifest(
-                    out_dir=str(out_dir),
-                    cfg_path=str(getattr(cfg.train, "cfg_path", "")),
-                    cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
-                    seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
-                    stable_hw_state=stable_state,
-                )
-            except Exception:
-                pass
-    
-    
-    except Exception as exc:
-        status = "error"
-        final_payload = {"error": repr(exc)}
-        raise
-    finally:
-        final_payload.setdefault(
-            "best_val_acc",
-            float(best_acc) if "best_acc" in locals() else None,
-        )
-        final_payload.setdefault(
-            "last_outer",
-            int(epoch) if "epoch" in locals() else None,
-        )
-        if trace_path is not None:
-            finalize_trace(str(trace_path), final_payload, status=status)
-    
+    if out_dir is not None:
+        try:
+            from utils.run_manifest import write_run_manifest
+
+            write_run_manifest(
+                out_dir=str(out_dir),
+                cfg_path=str(getattr(cfg.train, "cfg_path", "")),
+                cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+                seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
+                stable_hw_state=stable_state,
+            )
+        except Exception:
+            pass
+    if trace_path is not None and (early_stop_triggered or ran_epochs == 0):
+        append_trace_event(str(trace_path), {"type": "finalize", "reason": "early_stop_or_zero_step"})
+
+
 def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:
     model.eval()
     total = 0
