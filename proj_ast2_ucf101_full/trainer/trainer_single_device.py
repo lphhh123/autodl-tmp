@@ -206,17 +206,26 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 stable_state["_legacy_lambda_warned"] = True
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
             prev_val = stable_state.get("val_acc1_last", None)
-            stable_decision, _ = apply_accuracy_guard(
+            has_prev_val = prev_val is not None
+            stable_decision, lambda_hw_eff = apply_accuracy_guard(
                 epoch=epoch,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
-                val_metric_or_none=prev_val,
-                has_val_this_epoch=False,
-                train_ema_or_none=float(stable_state.get("train_acc1_ema", 0.0))
+                val_metric_or_none=float(prev_val) if has_prev_val else None,
+                has_val_this_epoch=has_prev_val,
+                train_ema_or_none=float(stable_state.get("train_acc1_ema"))
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
             stable_state = stable_decision.state
+
+            # v5.4: if stop_on_violation already triggered, do not proceed with training
+            if bool(stable_decision.stop_training):
+                logger.warning(
+                    f"[StableHW] stop_on_violation already triggered before epoch={epoch} training. Stop now."
+                )
+                early_stop_triggered = True
+                break
             # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
             if stable_hw_enabled and bool(stable_state.get("request_lr_restart", False)):
                 last_applied = int(stable_state.get("_lr_restart_applied_epoch", -999999))
@@ -235,7 +244,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
 
         stable_state["lambda_hw_effective"] = float(lambda_hw_eff)
-        stable_state.setdefault("lambda_hw_base", float(lambda_hw_eff))
+        stable_state.setdefault("lambda_hw_base", float(stable_state.get("lambda_hw_base", 0.0)))
         model.train()
         last_hw_stats = None
         for step, batch in enumerate(train_loader):
