@@ -21,4 +21,10 @@ TRACE_FIELDS = [
     "tabu_hit",
     "inverse_hit",
     "cooldown_hit",
+    # v5.4 Ours-B2+ trace fields (policy/move/lookahead/cache)
+    "policy",
+    "move",
+    "lookahead_k",
+    "cache_hit",
+    "cache_key",
 ]

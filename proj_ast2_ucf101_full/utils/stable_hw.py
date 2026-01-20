@@ -590,22 +590,32 @@ def init_hw_refs_from_baseline_stats(cfg_or_stable, state: dict):
         state["memory_ref_mb"] = float(mem)
 
 
-def update_hw_refs_from_stats(cfg_or_stable, state: dict, hw_stats: dict):
-    """
-    During training, update refs only when NoDrift allows it.
-    """
-    nd = _get_no_drift_cfg(cfg_or_stable)
-    if nd is not None and not bool(getattr(nd, "enabled", True)):
-        return
+def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
+    # ====== Original update_hw_refs_from_stats logic moved here ======
+    # Only update hardware refs; do NOT update locked_acc_ref / acc_ref here.
+    if not stats:
+        return stats
 
-    if not hw_stats:
-        return
+    lat = stats.get("latency_ms", stats.get("lat_ms", None))
+    mem = stats.get("memory_mb", stats.get("mem_mb", None))
 
-    lat = hw_stats.get("latency_ms", hw_stats.get("lat_ms", None))
-    mem = hw_stats.get("memory_mb", hw_stats.get("mem_mb", None))
-
-    # update only if present
     if lat is not None:
-        state["latency_ref_ms"] = float(lat)
+        stable_hw_state["latency_ref_ms"] = float(lat)
     if mem is not None:
-        state["memory_ref_mb"] = float(mem)
+        stable_hw_state["memory_ref_mb"] = float(mem)
+    return stats
+
+
+def update_hw_refs_from_stats(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
+    """
+    v5.4 NoDrift contract:
+      - NoDrift.enabled == True  => DO NOT update any reference (lock refs)
+      - NoDrift.enabled == False => allow update if corresponding update flags are enabled
+    """
+    nd = _get_no_drift_cfg(cfg)
+    if bool(_cfg_get(nd, "enabled", False)):
+        # hard lock: no drift at all
+        return stats
+
+    # ---- allow update when NoDrift disabled ----
+    return _update_hw_refs_when_allowed(stable_hw_state, stats, cfg)

@@ -439,6 +439,8 @@ def _write_trace_and_pareto(
     prev_comm = float(prev_metrics["comm_norm"])
     prev_therm = float(prev_metrics["therm_norm"])
     prev_assign = _derive_initial_assign(layout_input)
+    problem_signature = signature_from_assign(prev_assign)
+    hw_signature = "layout_eval"
 
     best_eval: Dict[str, Any] | None = None
     best_assign: List[int] | None = None
@@ -455,6 +457,17 @@ def _write_trace_and_pareto(
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
         # ---- v5.4 required init row (even if steps=0 / no recordings) ----
+        init_cache_key = hashlib.sha1(
+            json.dumps(
+                {
+                    "problem_sig": problem_signature,
+                    "hw_sig": hw_signature,
+                    "policy": "init",
+                    "seed": int(seed),
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
         row = [
             0,
             "init",
@@ -476,6 +489,11 @@ def _write_trace_and_pareto(
             0,
             0,
             0,
+            "init",
+            "init",
+            0,
+            0,
+            init_cache_key,
         ]
         if len(row) != len(TRACE_FIELDS):
             raise RuntimeError(f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}")
@@ -505,6 +523,7 @@ def _write_trace_and_pareto(
             stage = str(rec.get("stage", "heuragenix"))
             accepted = int(rec.get("accepted", 1))
             op = rec.get("op", "noop")
+            policy_name = rec.get("selection", stage)
             op_args = rec.get("op_args", None)
             if op_args is None:
                 op_args = rec.get("op_args_json", rec.get("op_args_str", {}))
@@ -524,6 +543,17 @@ def _write_trace_and_pareto(
 
             if not isinstance(op_args, dict):
                 op_args = {"raw": str(op_args)}
+            cache_key = hashlib.sha1(
+                json.dumps(
+                    {
+                        "problem_sig": problem_signature,
+                        "hw_sig": hw_signature,
+                        "policy": str(policy_name),
+                        "seed": int(seed),
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
 
             # ---- update assign for this step ----
             assign_arr = None
@@ -596,6 +626,11 @@ def _write_trace_and_pareto(
                 int(tabu_hit),
                 int(inverse_hit),
                 int(cooldown_hit),
+                str(policy_name),
+                str(op),
+                0,
+                int(rec.get("cache_hit", 0) or 0),
+                str(cache_key)[:64],
             ]
             if len(row) != len(TRACE_FIELDS):
                 raise RuntimeError(f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}")

@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-import random
 from pathlib import Path
 from functools import partial
 from typing import Dict, Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,6 +20,7 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
+from utils.seed import seed_everything
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -44,8 +43,7 @@ def _as_float(val, name: str) -> float:
 
 def _seed_worker(worker_id: int, base_seed: int) -> None:
     seed = base_seed + worker_id
-    random.seed(seed)
-    np.random.seed(seed)
+    seed_everything(seed)
 
 
 def build_dataloaders(cfg):
@@ -223,6 +221,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
 
                 loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw_eff * L_hw
+                assert "hw_loss_weighted" not in (hw_stats or {}), (
+                    "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
+                )
             # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
             assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
             assert float(lambda_hw_eff) >= 0.0
@@ -278,7 +279,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 )
                 break
 
-            update_hw_refs_from_stats(cfg, stable_state, last_hw_stats or {})
+            update_hw_refs_from_stats(stable_state, last_hw_stats or {}, cfg)
         guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
         allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
         print(

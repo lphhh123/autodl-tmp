@@ -56,8 +56,10 @@ def launch_heuristic(
             output_dir=str(out_dir),
             seed=seed_val,
         )
-        runner.run(env)
-        env.dump_result()
+        try:
+            runner.run(env)
+        finally:
+            env.dump_result()
 
 
 def launch_heuristic_selector(
@@ -118,5 +120,7 @@ def launch_heuristic_selector(
                 output_dir=str(out_dir),
                 seed=seed_val,
             )
-        runner.run(env)
-        env.dump_result()
+        try:
+            runner.run(env)
+        finally:
+            env.dump_result()

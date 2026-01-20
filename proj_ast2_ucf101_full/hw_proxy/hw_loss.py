@@ -4,12 +4,35 @@ from typing import Any, Dict, Optional, Tuple
 
 import hashlib
 import json
+import math
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from utils.stable_hash import stable_hash
+
+
+def _sanitize_latency_ms(x: float, min_ms: float = 1e-3) -> float:
+    # No reward for negative/invalid latency: clamp to min_ms
+    if x is None:
+        return min_ms
+    if isinstance(x, (int, float)):
+        if math.isnan(x) or math.isinf(x):
+            return min_ms
+        return max(float(x), float(min_ms))
+    # fallback
+    return min_ms
+
+
+def _sanitize_scalar(x: float, fallback: float = 0.0) -> float:
+    if x is None:
+        return fallback
+    if isinstance(x, (int, float)):
+        if math.isnan(x) or math.isinf(x):
+            return fallback
+        return float(x)
+    return fallback
 
 
 def compute_hw_loss(
@@ -202,6 +225,9 @@ def compute_hw_loss(
 
     # ---- Non-negative guard: prevent "negative latency reward" ----
     eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9) if stable_hw_cfg is not None else 1e-9)
+    min_latency_ms = float(
+        getattr(stable_hw_cfg, "min_latency_ms", getattr(getattr(cfg, "stable_hw", None), "min_latency_ms", 1e-3))
+    )
 
     # keep raw for logging (may be negative)
     raw_latency_ms = float(latency_ms.detach().cpu().item())
@@ -251,7 +277,13 @@ def compute_hw_loss(
     ref_M_t = torch.tensor(ref_M, device=device, dtype=torch.float32)
     ref_C_t = torch.tensor(ref_C, device=device, dtype=torch.float32)
 
-    def _sanitize_no_reward(tag: str, name: str, x: torch.Tensor, ref_t: torch.Tensor) -> torch.Tensor:
+    def _sanitize_no_reward(
+        tag: str,
+        name: str,
+        x: torch.Tensor,
+        ref_t: torch.Tensor,
+        min_value: float = 0.0,
+    ) -> torch.Tensor:
         # invalid = negative or non-finite -> replace with ref (NO reward)
         invalid = (x < 0) | (~torch.isfinite(x))
         try:
@@ -278,19 +310,25 @@ def compute_hw_loss(
                 hw_stats["_neg_proxy_warned"] = 1.0
         y = torch.where(invalid, ref_t, x)
         # non-negative clamp (contract I4)
-        y = torch.clamp(y, min=0.0)
+        y = torch.clamp(y, min=float(min_value))
         if torch.any(y < 0):
             raise AssertionError(f"[I4] negative {tag} remains after clamp")
         return y
 
-    latency_ms_safe = _sanitize_no_reward("T", "latency_ms", latency_ms, ref_T_t)
+    latency_ms_safe = _sanitize_no_reward(
+        "T",
+        "latency_ms",
+        latency_ms,
+        ref_T_t,
+        min_value=max(float(min_latency_ms), 0.0),
+    )
     energy_mj_safe = _sanitize_no_reward("E", "energy_mj", energy_mj, ref_E_t)
     mem_mb_safe = _sanitize_no_reward("M", "mem_mb", mem_mb, ref_M_t)
     comm_ms_safe = _sanitize_no_reward("C", "comm_ms", comm_ms, ref_C_t)
 
     # strictly-positive tensors for ratios/logs (numerical), but NOTE:
     # invalid negatives were already mapped to ref => no artificial reward
-    latency_ms_pos = torch.clamp(latency_ms_safe, min=eps_ratio)
+    latency_ms_pos = torch.clamp(latency_ms_safe, min=max(float(eps_ratio), float(min_latency_ms)))
     energy_mj_pos = torch.clamp(energy_mj_safe, min=eps_ratio)
     mem_mb_pos = torch.clamp(mem_mb_safe, min=eps_ratio)
     comm_ms_pos = torch.clamp(comm_ms_safe, min=eps_ratio)
@@ -464,6 +502,8 @@ def compute_hw_loss(
             "raw_energy_mj": raw_energy_mj,
             "raw_mem_mb": raw_mem_mb,
             "raw_comm_ms": raw_comm_ms,
+            "latency_ms_sanitized": _sanitize_latency_ms(raw_latency_ms, min_ms=min_latency_ms),
+            "comm_ms_sanitized": _sanitize_scalar(raw_comm_ms, fallback=0.0),
             "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
             "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
             "clamped_mem_mb": float(mem_mb_pos.detach().cpu().item()),
