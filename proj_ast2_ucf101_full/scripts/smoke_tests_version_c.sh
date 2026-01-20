@@ -96,7 +96,7 @@ python -m scripts.run_layout_agent \
 echo "[SMOKE] HeurAgenix baseline llm_hh (auto-fallback if no key)"
 python -m scripts.run_layout_heuragenix \
   --layout_input "${LAYOUT_INPUT}" \
-  --cfg configs/layout_agent/layout_B0_heuragenix_llm_hh.yaml \
+  --cfg configs/layout_agent/layout_B0_heuragenix_llm_hh_smoke.yaml \
   --out_dir outputs/SMOKE/layout_B0_heuragenix_llm_hh \
   --seed 0
 

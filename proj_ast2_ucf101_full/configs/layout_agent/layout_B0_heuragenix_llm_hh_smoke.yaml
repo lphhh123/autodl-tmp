@@ -1,12 +1,12 @@
 _base_: base_layout.yaml
 
 baseline:
-  name: heuragenix_random_hh
+  name: heuragenix_llm_hh
   heuragenix_root: ../HeurAgenix
   problem: wafer_layout
   heuristic_dir: basic_heuristics
-  method: random_hh
-  iterations_scale_factor: 2.0
+  method: llm_hh
+  iterations_scale_factor: 1.0
   selection_frequency: 5
   num_candidate_heuristics: 4
   rollout_budget: 0
@@ -14,3 +14,4 @@ baseline:
   fallback_on_llm_failure: random_hh
   llm_timeout_s: 30
   max_llm_failures: 2
+  llm_config_file: configs/llm/azure_gpt_4o.json
