@@ -82,7 +82,7 @@ def test_smoke_run_layout_agent():
         cmd = [
             sys.executable,
             "-m",
-            "proj_ast2_ucf101_full.scripts.run_layout_agent",
+            "scripts.run_layout_agent",
             "--layout_input",
             str(tmp / "layout_input.json"),
             "--cfg",
@@ -90,6 +90,7 @@ def test_smoke_run_layout_agent():
             "--out_dir",
             str(out_dir),
         ]
-        subprocess.check_call(cmd)
+        proj_root = Path(__file__).resolve().parents[1]
+        subprocess.check_call(cmd, cwd=str(proj_root))
         assert (out_dir / "layout_best.json").exists()
         assert (out_dir / "trace.csv").exists()

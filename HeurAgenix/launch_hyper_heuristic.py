@@ -9,6 +9,7 @@ from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeurist
 from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
 from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.heuristic_only import HeuristicOnlyHyperHeuristic
+from src.util.paths import default_llm_config_path
 from src.util.util import load_function
 
 
@@ -95,7 +96,10 @@ def parse_arguments():
     parser.add_argument("-res", "--result_name", type=str, default=None)
     parser.add_argument("-exp", "--experiment_name", type=str, default=None)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.llm_config_file is None:
+        args.llm_config_file = default_llm_config_path("azure_gpt_4o.json")
+    return args
 
 
 def main():
