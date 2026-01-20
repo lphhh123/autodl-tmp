@@ -255,7 +255,8 @@ def compute_hw_loss(
         # invalid = negative or non-finite -> replace with ref (NO reward)
         invalid = (x < 0) | (~torch.isfinite(x))
         try:
-            invalid_counts[tag] = int(invalid.detach().cpu().item())
+            # invalid can be a tensor mask; count elements robustly
+            invalid_counts[tag] = int(invalid.detach().to("cpu").sum().item())
         except Exception:
             invalid_counts[tag] = 1
         neg_mask = x < 0

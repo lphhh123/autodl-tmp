@@ -14,7 +14,7 @@ import json
 import time
 from typing import Union
 
-from utils.config import load_config
+from utils.config import AttrDict, load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from trainer.trainer_version_c import train_version_c
@@ -69,20 +69,34 @@ def main():
         cfg.training.seed = int(args.seed)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
     if args.baseline_stats:
-        # inject into both places to avoid schema drift
+        # Auto-create minimal stable_hw structure to avoid brittle failures.
         if not hasattr(cfg, "stable_hw") or cfg.stable_hw is None:
-            raise ValueError("cfg.stable_hw missing; cannot set baseline_stats")
+            cfg.stable_hw = AttrDict({"enabled": True})
         if not hasattr(cfg.stable_hw, "locked_acc_ref") or cfg.stable_hw.locked_acc_ref is None:
-            cfg.stable_hw.locked_acc_ref = {}
+            cfg.stable_hw.locked_acc_ref = AttrDict({"enabled": True})
         if not hasattr(cfg.stable_hw, "accuracy_guard") or cfg.stable_hw.accuracy_guard is None:
-            cfg.stable_hw.accuracy_guard = {}
+            cfg.stable_hw.accuracy_guard = AttrDict({})
+        if not hasattr(cfg.stable_hw, "negative_guard") or cfg.stable_hw.negative_guard is None:
+            cfg.stable_hw.negative_guard = AttrDict({})
+
         cfg.stable_hw.locked_acc_ref.baseline_stats_path = str(args.baseline_stats)
-        # optional back-compat alias (do not use as authoritative)
+
+        # Optional back-compat alias (do not use as authoritative)
         try:
             cfg.stable_hw.baseline_stats_path = str(args.baseline_stats)
         except Exception:
             pass
+
         cfg.stable_hw.locked_acc_ref.prefer_dense_baseline = True
+
+        # Enforce NoDrift: disable legacy direct-sum entrances
+        try:
+            if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
+                cfg.hw.lambda_hw = 0.0
+            if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
+                cfg.loss.lambda_hw = 0.0
+        except Exception:
+            pass
 
     # out_dir: CLI 优先；否则 cfg.train.out_dir；否则自动生成一个
     cfg_name = Path(args.cfg).stem

@@ -1,15 +1,50 @@
-_base_: ./ast2_ucf101.yaml
-training:
-  outer_epochs: 1
-  inner_steps_ast: 1
-  inner_steps_alpha: 1
-  inner_steps_layout: 0
-  batch_size: 1
+base: configs/ast2_ucf101.yaml
+
 train:
   mode: version_c
+  out_dir: outputs/SMOKE/version_c
+
+training:
+  outer_epochs: 1
+  inner_steps: 1
+  seed: 2024
+
+# === v5.4 StableHW (Acc-First Hard Gating + LockedAccRef + NoDrift + NoDoubleScale) ===
+stable_hw:
+  enabled: true
+  guard_mode: hard
+
+  locked_acc_ref:
+    enabled: true
+    baseline_stats_path: outputs/P0/baseline_stats.json
+    acc_ref_fixed: null
+
+  acc_first_hard_gating:
+    enabled: true
+    epsilon_drop: 0.002
+    beta: 5.0
+
+  lambda_hw_schedule:
+    warmup_epochs: 0
+    ramp_epochs: 1
+    lambda_hw_max: 0.5
+    clamp_min: 0.0
+    clamp_max: 0.5
+
+  negative_guard:
+    enabled: true
+    mode: clamp
+    min_value: 0.0
+
+# 显式关掉旧的“直接相加”入口（validate_and_fill_defaults 也会兜底归零）
 hw:
-  use_fine_split: true
-  num_slots: 4
+  lambda_hw: 0.0
+
+loss:
+  lambda_hw: 0.0
+
+# smoke 只导出 layout_input，避免跑全量
+version_c:
+  export_layout_input: true
+  export_dir: outputs/P3/A3/layout_input_smoke
   optimize_layout: false
-export_layout_input: true
-export_dir: outputs/P3/A3
