@@ -1,3 +1,4 @@
+# v5.4: trace schema must match actual written rows (20 columns)
 TRACE_FIELDS = [
     "iter",
     "stage",
@@ -12,5 +13,12 @@ TRACE_FIELDS = [
     "boundary_penalty",
     "seed_id",
     "time_ms",
-    "signature_hash",
+    "signature",
+    # per-step deltas / anti-loop diagnostics (must exist even when steps=0 -> init row zeros)
+    "delta_total",
+    "delta_comm",
+    "delta_therm",
+    "tabu_hit",
+    "inverse_hit",
+    "cooldown_hit",
 ]

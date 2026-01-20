@@ -272,6 +272,12 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
 
             if (not no_drift) and (ref_update == "ema"):
                 update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats or {})
+        guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
+        allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+        print(
+            f"[StableHW] epoch={epoch} mode={guard_mode} "
+            f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+        )
         if metrics_path:
             metrics = {
                 "epoch": int(epoch),
