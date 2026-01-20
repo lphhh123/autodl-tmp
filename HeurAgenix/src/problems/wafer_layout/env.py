@@ -148,6 +148,7 @@ class Env(BaseEnv):
                 raise RuntimeError(
                     "Failed to import main LayoutEvaluator (layout.evaluator). "
                     "Baseline requires main evaluator for comparability. "
+                    "Hint: wafer_layout requires proj_ast2_ucf101_full on PYTHONPATH (layout.evaluator). "
                     f"import_error={import_error}"
                 )
             self._evaluator = None

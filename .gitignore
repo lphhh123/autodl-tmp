@@ -1,6 +1,9 @@
 data/
 !HeurAgenix/src/problems/wafer_layout/data/
 !HeurAgenix/src/problems/wafer_layout/data/generate_data.py
+!HeurAgenix/data/
+!HeurAgenix/data/llm_config/
+!HeurAgenix/data/llm_config/*.json
 
 *.avi
 *.jpg

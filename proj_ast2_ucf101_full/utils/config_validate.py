@@ -600,7 +600,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     # ===========================
     # v5.4 HARD GUARDS (Acc-First / NoDoubleScale)
     # ===========================
-    stable_en = bool(getattr(cfg, "stable_hw", {}).get("enabled", False))
+    stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
     legacy_hw_lam = float(getattr(getattr(cfg, "hw", {}), "lambda_hw", 0.0) or 0.0)
     legacy_loss_lam = float(getattr(getattr(cfg, "loss", {}), "lambda_hw", 0.0) or 0.0)
 
