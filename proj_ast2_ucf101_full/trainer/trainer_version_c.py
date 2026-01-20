@@ -31,6 +31,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
+from utils.trace_guard import ensure_trace_file, append_trace_event
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -88,6 +89,36 @@ def _get_iso_cfg_value(iso_cfg, key: str, default=None):
     if isinstance(iso_cfg, dict):
         return iso_cfg.get(key, default)
     return getattr(iso_cfg, key, default)
+
+
+def _cfg_get(obj, key: str, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _build_run_signature(cfg) -> Dict[str, Any]:
+    detailed_cfg = _cfg_get(cfg, "detailed_place", None)
+    lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
+    policy_switch_cfg = _cfg_get(detailed_cfg, "policy_switch", _cfg_get(cfg, "policy_switch", {}))
+    action_families = _cfg_get(policy_switch_cfg, "action_families", None)
+    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
+    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
+    bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
+    policy_switch_enabled = bool(_cfg_get(policy_switch_cfg, "enabled", False))
+    cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
+    cache_enabled = bool(cache_size > 0)
+    cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
+    return {
+        "moves_enabled": moves_enabled,
+        "lookahead_k": lookahead_k,
+        "bandit_type": bandit_type,
+        "policy_switch": policy_switch_enabled,
+        "cache_enabled": cache_enabled,
+        "cache_key_schema_version": cache_key_schema_version,
+    }
 
 
 def build_dataloader(cfg):
@@ -528,6 +559,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     # out_dir: training outputs root
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = out_dir / "trace.jsonl"
+    ensure_trace_file(
+        str(trace_path),
+        header={
+            "run_name": str(getattr(getattr(cfg, "train", None), "exp_name", None) or out_dir.name),
+            "steps_planned": int(getattr(cfg, "steps", 0)) if hasattr(cfg, "steps") else 0,
+            "run_signature": _build_run_signature(cfg),
+        },
+    )
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
     layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
     if layout_export_dir is not None:
@@ -665,8 +705,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None
     last_hw_stats = None
+    ran_epochs = 0
+    early_stop_triggered = False
 
     for outer in range(cfg.training.outer_epochs):
+        ran_epochs += 1
         stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
         if stable_hw_enabled:
             legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
@@ -717,6 +760,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
                         f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
                     )
+                    early_stop_triggered = True
                     break
             # ---- invariants (v5.4) ----
             if stable_hw_state.get("acc_ref") is not None:
@@ -1179,6 +1223,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
                     f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
                 )
+                early_stop_triggered = True
                 break
             # ---- invariants (v5.4) ----
             if stable_hw_state.get("acc_ref") is not None:
@@ -1189,7 +1234,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
         if stable_hw_enabled:
             # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
-            update_hw_refs_from_stats(stable_hw_state, last_hw_stats or {}, cfg)
+            if hasattr(cfg, "stable_hw") and hasattr(cfg.stable_hw, "no_drift") and bool(
+                getattr(cfg.stable_hw.no_drift, "enabled", False)
+            ):
+                pass  # NoDrift: skip any ref update
+            else:
+                update_hw_refs_from_stats(stable_hw_state, last_hw_stats or {}, cfg)
         guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
         allow_discrete = (
             bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
@@ -1274,6 +1324,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     }
     with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
+    if trace_path is not None and (early_stop_triggered or ran_epochs == 0):
+        append_trace_event(str(trace_path), {"type": "finalize", "reason": "early_stop_or_zero_step"})
 
     if export_layout_input:
         export_dir_path = Path(layout_export_dir or "outputs/P3")
