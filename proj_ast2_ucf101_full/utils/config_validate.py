@@ -591,4 +591,28 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
             )
 
+    # ===========================
+    # v5.4 HARD GUARDS (Acc-First / NoDoubleScale)
+    # ===========================
+    stable_en = bool(getattr(cfg, "stable_hw", {}).get("enabled", False))
+    legacy_hw_lam = float(getattr(getattr(cfg, "hw", {}), "lambda_hw", 0.0) or 0.0)
+    legacy_loss_lam = float(getattr(getattr(cfg, "loss", {}), "lambda_hw", 0.0) or 0.0)
+
+    # If stable_hw is enabled, legacy lambdas MUST be zero (NoDoubleScale).
+    if stable_en:
+        if legacy_hw_lam != 0.0:
+            print(f"[v5.4][NoDoubleScale] Forcing hw.lambda_hw -> 0.0 (was {legacy_hw_lam})")
+            cfg.hw.lambda_hw = 0.0
+        if legacy_loss_lam != 0.0:
+            print(f"[v5.4][NoDoubleScale] Forcing loss.lambda_hw -> 0.0 (was {legacy_loss_lam})")
+            cfg.loss.lambda_hw = 0.0
+
+    # If stable_hw is disabled, ANY positive legacy lambda means direct-sum HW loss -> forbidden in v5.4.
+    if (not stable_en) and (legacy_hw_lam > 0.0 or legacy_loss_lam > 0.0):
+        raise ValueError(
+            "v5.4 Acc-First requires stable_hw.enabled=true for any HW optimization. "
+            f"Found stable_hw.enabled=false but hw.lambda_hw={legacy_hw_lam}, loss.lambda_hw={legacy_loss_lam}. "
+            "Fix: set both lambdas to 0 for pure-accuracy runs OR enable stable_hw and use lambda_hw_effective."
+        )
+
     return cfg
