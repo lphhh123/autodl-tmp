@@ -1462,6 +1462,26 @@ def main() -> None:
         )
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+    # ---- v5.4: enforce budget fairness artifact (budget.json) ----
+    try:
+        wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
+        # effective_max_steps already computed above (based on size or user override)
+        budget = {
+            "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
+            "secondary_limit": {"type": "max_steps", "limit": int(effective_max_steps)},
+            "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+            "seed_id": int(seed),
+            "method": str(method),
+            "selection_frequency": int(K),
+            "num_candidate_heuristics": int(num_cand),
+            "rollout_budget": int(rollout_budget),
+            "iterations_scale_factor": float(iters_sf),
+        }
+        (out_dir / "budget.json").write_text(
+            json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
     try:
         from utils.run_manifest import write_run_manifest
 

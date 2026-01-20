@@ -194,9 +194,18 @@ def main():
                 fallback_on_llm_failure=str(args.fallback_on_llm_failure),
             )
         elif args.heuristic == "or_solver":
-            raise NotImplementedError(
-                "or_solver is declared by the official guide, but is not implemented in this repo snapshot. "
-                "Please implement an OR exact solver runner for this problem, or remove or_solver from docs."
+            print(
+                "[WARN] or_solver is declared in docs but not implemented in this repo snapshot. "
+                "Falling back to heuristic_only."
+            )
+            runner = HeuristicOnlyHyperHeuristic(
+                heuristic_pool=heuristic_pool_files,
+                problem=args.problem,
+                heuristic_dir=str(heur_dir),
+                iterations_scale_factor=float(args.iterations_scale_factor),
+                selection_frequency=int(args.selection_frequency),
+                output_dir=str(out_dir),
+                seed=seed_val,
             )
         else:
             fn = load_function(heur_name, problem=args.problem)
