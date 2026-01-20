@@ -136,6 +136,15 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
         init_locked_acc_ref(stable_hw_cfg, stable_state)
         init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_state)
+        # ---- v5.4: always materialize stable_hw_state.json even if epochs==0 / early stop ----
+        if out_dir is not None and stable_hw_cfg:
+            out_path = Path(out_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            try:
+                with (out_path / "stable_hw_state.json").open("w", encoding="utf-8") as f:
+                    json.dump(stable_state, f, indent=2)
+            except Exception:
+                pass
 
     best_acc = 0.0
     last_acc = 0.0

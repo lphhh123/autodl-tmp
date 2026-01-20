@@ -528,4 +528,26 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if v <= 0.0:
             setattr(cfg.hw, k, float(default))
 
+    # ---- v5.4 strict contracts for Version-C mode ----
+    mode = str(get_nested(cfg, "train.mode", "") or "")
+    if mode == "version_c":
+        # Escape hatch ONLY for explicit ablations (default False).
+        force_disable_ok = bool(get_nested(cfg, "stable_hw.force_disable_ok", False))
+
+        stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
+        locked = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+        locked_en = bool(locked.get("enabled", False))
+
+        if (not stable_en) and (not force_disable_ok):
+            raise ValueError(
+                "SPEC v5.4 contract violation: train.mode=version_c requires stable_hw.enabled=true. "
+                "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
+            )
+
+        if (not locked_en) and (not force_disable_ok):
+            raise ValueError(
+                "SPEC v5.4 contract violation: train.mode=version_c requires stable_hw.locked_acc_ref.enabled=true. "
+                "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
+            )
+
     return cfg
