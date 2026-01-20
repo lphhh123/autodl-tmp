@@ -1160,6 +1160,14 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         if stable_hw_enabled and (not no_drift) and (ref_update == "ema"):
             # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
             update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
+        guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
+        allow_discrete = (
+            bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+        )
+        print(
+            f"[StableHW] epoch={outer} mode={guard_mode} "
+            f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+        )
         # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
         if val_acc1 is None:
             # keep previous last_acc1 if exists; otherwise fall back to stable_hw_state history or 0.0

@@ -290,30 +290,33 @@ def run_detailed_place(
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
                     prev_assign = assign.copy()
     
-                    writer.writerow(
-                        [
-                            0,
-                            "init",
-                            "init",
-                            json.dumps({"op": "init"}, ensure_ascii=False),
-                            1,
-                            prev_total,
-                            prev_comm,
-                            prev_therm,
-                            0,
-                            0.0,
-                            0.0,
-                            int(seed_id),
-                            0,
-                            signature_for_assign(prev_assign.tolist()),
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                        ]
-                    )
+                    row = [
+                        0,
+                        "init",
+                        "init",
+                        json.dumps({"op": "init"}, ensure_ascii=False),
+                        1,
+                        prev_total,
+                        prev_comm,
+                        prev_therm,
+                        0,
+                        0.0,
+                        0.0,
+                        int(seed_id),
+                        0,
+                        signature_for_assign(prev_assign.tolist()),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                    if len(row) != len(TRACE_FIELDS):
+                        raise RuntimeError(
+                            f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}"
+                        )
+                    writer.writerow(row)
                     pareto.add(
                         eval_out["comm_norm"],
                         eval_out["therm_norm"],
@@ -720,30 +723,33 @@ def run_detailed_place(
         
                     assign_signature = signature_for_assign(assign)
                     time_ms = int((time.perf_counter() - step_start) * 1000)
-                    writer.writerow(
-                        [
-                            step,
-                            stage_label,
-                            op,
-                            json.dumps(action),
-                            int(accept),
-                            eval_out["total_scalar"],
-                            eval_out["comm_norm"],
-                            eval_out["therm_norm"],
-                            int(added),
-                            eval_out["penalty"]["duplicate"],
-                            eval_out["penalty"]["boundary"],
-                            seed_id,
-                            time_ms,
-                            assign_signature,
-                            delta,
-                            delta_comm,
-                            delta_therm,
-                            tabu_hit,
-                            inverse_hit,
-                            cooldown_hit,
-                        ]
-                    )
+                    row = [
+                        step,
+                        stage_label,
+                        op,
+                        json.dumps(action),
+                        int(accept),
+                        eval_out["total_scalar"],
+                        eval_out["comm_norm"],
+                        eval_out["therm_norm"],
+                        int(added),
+                        eval_out["penalty"]["duplicate"],
+                        eval_out["penalty"]["boundary"],
+                        seed_id,
+                        time_ms,
+                        assign_signature,
+                        delta,
+                        delta_comm,
+                        delta_therm,
+                        tabu_hit,
+                        inverse_hit,
+                        cooldown_hit,
+                    ]
+                    if len(row) != len(TRACE_FIELDS):
+                        raise RuntimeError(
+                            f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}"
+                        )
+                    writer.writerow(row)
                     if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
                         f_trace.flush()
                     if progress_every > 0 and step % progress_every == 0:

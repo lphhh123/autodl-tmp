@@ -9,7 +9,7 @@ def _repo_root() -> Path:
     # parents[0]=util, [1]=src, [2]=HeurAgenix
     # NOTE: Path.parents is 1-based in meaning; here:
     #   data_path.py -> util -> src -> HeurAgenix
-    return Path(__file__).resolve().parents[3]
+    return Path(__file__).resolve().parents[2]
 
 
 def get_data_path() -> Path:

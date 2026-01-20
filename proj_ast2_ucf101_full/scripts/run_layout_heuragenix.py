@@ -434,30 +434,31 @@ def _write_trace_and_pareto(
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
         # ---- v5.4 required init row (even if steps=0 / no recordings) ----
-        writer.writerow(
-            [
-                0,
-                "init",
-                "init",
-                json.dumps({"op": "init"}, ensure_ascii=False),
-                1,
-                prev_total,
-                prev_comm,
-                prev_therm,
-                0,
-                float(prev_metrics.get("penalty", {}).get("duplicate", 0.0)),
-                float(prev_metrics.get("penalty", {}).get("boundary", 0.0)),
-                int(seed),
-                0,
-                signature_from_assign(prev_assign),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]
-        )
+        row = [
+            0,
+            "init",
+            "init",
+            json.dumps({"op": "init"}, ensure_ascii=False),
+            1,
+            prev_total,
+            prev_comm,
+            prev_therm,
+            0,
+            float(prev_metrics.get("penalty", {}).get("duplicate", 0.0)),
+            float(prev_metrics.get("penalty", {}).get("boundary", 0.0)),
+            int(seed),
+            0,
+            signature_from_assign(prev_assign),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+        if len(row) != len(TRACE_FIELDS):
+            raise RuntimeError(f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}")
+        writer.writerow(row)
 
         last_idx = -1
         for idx, rec in enumerate(_iter_recordings(recordings_path), start=1):
@@ -553,30 +554,31 @@ def _write_trace_and_pareto(
             dup_pen = float(pen.get("duplicate", 0.0))
             bnd_pen = float(pen.get("boundary", 0.0))
 
-            writer.writerow(
-                [
-                    idx,
-                    stage,
-                    op,
-                    json.dumps({"op": op, **op_args}, ensure_ascii=False, sort_keys=True),
-                    accepted,
-                    float(eval_out.get("total_scalar", 0.0)),
-                    float(eval_out.get("comm_norm", 0.0)),
-                    float(eval_out.get("therm_norm", 0.0)),
-                    int(pareto_added),
-                    dup_pen,
-                    bnd_pen,
-                    seed,
-                    int(rec.get("time_ms", 0)),
-                    signature,
-                    float(d_total),
-                    float(float(eval_out["comm_norm"]) - float(prev_comm)),
-                    float(float(eval_out["therm_norm"]) - float(prev_therm)),
-                    int(tabu_hit),
-                    int(inverse_hit),
-                    int(cooldown_hit),
-                ]
-            )
+            row = [
+                idx,
+                stage,
+                op,
+                json.dumps({"op": op, **op_args}, ensure_ascii=False, sort_keys=True),
+                accepted,
+                float(eval_out.get("total_scalar", 0.0)),
+                float(eval_out.get("comm_norm", 0.0)),
+                float(eval_out.get("therm_norm", 0.0)),
+                int(pareto_added),
+                dup_pen,
+                bnd_pen,
+                seed,
+                int(rec.get("time_ms", 0)),
+                signature,
+                float(d_total),
+                float(float(eval_out["comm_norm"]) - float(prev_comm)),
+                float(float(eval_out["therm_norm"]) - float(prev_therm)),
+                int(tabu_hit),
+                int(inverse_hit),
+                int(cooldown_hit),
+            ]
+            if len(row) != len(TRACE_FIELDS):
+                raise RuntimeError(f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}")
+            writer.writerow(row)
 
             # update prev
             if accepted == 1:

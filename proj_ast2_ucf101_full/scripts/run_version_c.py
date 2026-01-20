@@ -40,7 +40,12 @@ def _str2bool(value: Union[str, bool]) -> bool:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cfg", type=str, default="./configs/version_c_ucf101.yaml")
+    parser.add_argument(
+        "--cfg",
+        type=str,
+        default="configs/vc_phase3_full_ucf101.yaml",
+        help="v5.4 default config (explicit stable_hw + reproducible settings)",
+    )
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(

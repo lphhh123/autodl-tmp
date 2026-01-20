@@ -7,7 +7,7 @@ import os
 def _repo_root() -> Path:
     # this file: HeurAgenix/src/util/output_dir.py
     # output_dir.py -> util -> src -> HeurAgenix
-    return Path(__file__).resolve().parents[3]
+    return Path(__file__).resolve().parents[2]
 
 
 def get_output_dir() -> Path:
