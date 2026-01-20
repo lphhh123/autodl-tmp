@@ -296,6 +296,25 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    # ---- v5.4: enforce budget fairness artifact (budget.json) ----
+    try:
+        detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+        step_limit = int(detailed_cfg.get("steps", 0) or detailed_cfg.get("max_steps", 0) or 0)
+        wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
+
+        budget = {
+            "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
+            "secondary_limit": {"type": "steps", "limit": step_limit},
+            "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+            "seed_id": int(seed) if "seed" in locals() else None,
+            "method": "ours",
+        }
+        (out_dir / "budget.json").write_text(
+            json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
 
 def main():
     parser = argparse.ArgumentParser()

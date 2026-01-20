@@ -725,43 +725,30 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             # ---- v5.4 StableHW schedule ----
             stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
 
-            # ---- v5.4 Acc-First Hard Gating (epoch-begin) ----
-            metric_key = get_accuracy_metric_key(stable_hw_cfg)
-            last_val = stable_hw_state.get("val_acc1_last", None)
+            # ===== StableHW: v5.4 Acc-First Hard Gating (single source of truth) =====
+            metric_key = get_accuracy_metric_key(cfg)
 
-            # If guard metric is val_* but we don't even have a last val yet, force WARMUP gate:
-            if metric_key.startswith("val_") and (last_val is None):
-                stable_hw_state["guard_mode"] = "WARMUP"
-                stable_hw_state["g_hw"] = 0.0
-                # lambda_hw_base is defined by schedule; effective must be 0 under hard gate
-                stable_hw_state["lambda_hw_effective"] = 0.0
-                # block ALL discrete signature updates before first val (v5.4 acc-first)
-                stable_hw_state["allow_discrete_updates"] = False
-            else:
-                # IMPORTANT: if last_val exists, treat it as a valid val metric for gating
-                stable_decision, allow_discrete = apply_accuracy_guard(
-                    epoch=outer,
-                    stable_hw_cfg=cfg,
-                    stable_hw_state=stable_hw_state,
-                    train_ema_or_none=float(stable_hw_state.get("train_acc1_ema", 0.0))
-                    if metric_key.startswith("train_")
-                    else None,
-                    val_metric_or_none=float(last_val) if last_val is not None else None,
-                    has_val_this_epoch=(last_val is not None),
-                )
-                stable_hw_state = stable_decision.state
-                stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
+            # make sure acc_ref exists if LockedAccRef is enabled (may still be None until set)
+            if stable_hw_state.get("acc_ref") is None:
+                init_locked_acc_ref(cfg, stable_hw_state)
 
-                # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
-                if bool(stable_decision.stop_training):
-                    val_acc1_str = f"{last_val:.6f}" if last_val is not None else "None"
-                    logger.warning(
-                        f"[StableHW] stop_on_violation triggered at epoch={outer}: "
-                        f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
-                        f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
-                    )
-                    early_stop_triggered = True
-                    break
+            # guard based on *previous* validation metric (if any)
+            prev_val = stable_hw_state.get(
+                f"{metric_key}_last",
+                stable_hw_state.get("val_acc1_last", None),
+            )
+
+            # IMPORTANT: even when prev_val is None (first epoch), apply_accuracy_guard()
+            # will set guard_mode=WARMUP and allow_discrete_updates=True by contract.
+            stable_decision, allow_discrete = apply_accuracy_guard(
+                epoch=outer,
+                stable_hw_cfg=cfg,
+                stable_hw_state=stable_hw_state,
+                val_metric_or_none=float(prev_val) if prev_val is not None else None,
+                has_val_this_epoch=False,
+            )
+            stable_hw_state = stable_decision.state
+            stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
             # ---- invariants (v5.4) ----
             if stable_hw_state.get("acc_ref") is not None:
                 stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
@@ -791,23 +778,38 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         # ---- use effective lambda ONLY (already gated) ----
         stable_hw_state["lambda_hw_effective"] = float(lambda_hw_eff)
         stable_hw_state.setdefault("lambda_hw_base", float(stable_hw_state.get("lambda_hw_base", 0.0)))
-        allow_discrete = bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+        allow_discrete_updates = (
+            bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+        )
         # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
         #   - partition/mapping updates
         #   - device mapping updates
         #   - layout optimization updates (layout_opt.step/track_live/refine)
         #   - any step that changes discrete assignment/signature
-        update_alpha = base_update_alpha and allow_discrete
         iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
         map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)
         lay_every = int(getattr(iso, "layout_update_every_epochs", 1) if iso else 1)
 
-        cache = stable_hw_state["discrete_cache"]
+        cache = stable_hw_state.setdefault(
+            "discrete_cache",
+            {"mapping": None, "layout": None, "mapping_signature": None, "layout_signature": None, "hw_mats": {}},
+        )
+        stable_hw_state["discrete_frozen_init_mapping"] = False
+
+        # ---- P0 guard: never allow discrete gate to cause empty-cache crash ----
+        if (not allow_discrete_updates) and (cache.get("mapping") is None or cache.get("layout") is None):
+            logger.info(
+                "[StableHW] Discrete gate is closed but cache is empty; initializing mapping/layout once."
+            )
+            allow_discrete_updates = True
+            stable_hw_state["allow_discrete_updates"] = True
+            stable_hw_state["discrete_frozen_init_mapping"] = True
+
+        allow_discrete = allow_discrete_updates
+        update_alpha = base_update_alpha and allow_discrete
 
         mapping_updated = False
         layout_updated = False
-        allow_discrete_updates = bool(stable_hw_state.get("allow_discrete_updates", True))
-        stable_hw_state["discrete_frozen_init_mapping"] = False
 
         need_update_mapping = ((outer % map_every) == 0) or (cache["mapping"] is None)
         need_update_layout = ((outer % lay_every) == 0) or (cache["layout"] is None)
