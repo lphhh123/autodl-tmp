@@ -348,6 +348,26 @@ def compute_hw_loss(
     energy_mj_safe = _sanitize_no_reward("E", "energy_mj", energy_mj, ref_E_t)
     mem_mb_safe = _sanitize_no_reward("M", "mem_mb", mem_mb, ref_M_t)
     comm_ms_safe = _sanitize_no_reward("C", "comm_ms", comm_ms, ref_C_t)
+    try:
+        from utils.trace_guard import append_trace_event
+
+        trace_path = None
+        if stable_hw_state is not None:
+            trace_path = stable_hw_state.get("_trace_path", None)
+        if trace_path and (torch.any(latency_ms < 0) or torch.any(comm_ms < 0)):
+            append_trace_event(
+                str(trace_path),
+                {
+                    "event_type": "proxy_sanitize",
+                    "payload": {
+                        "lat_min_raw": float(torch.min(latency_ms).detach().cpu().item()),
+                        "comm_min_raw": float(torch.min(comm_ms).detach().cpu().item()),
+                        "sanitized": True,
+                    },
+                },
+            )
+    except Exception:
+        pass
 
     # strictly-positive tensors for ratios/logs (numerical), but NOTE:
     # invalid negatives were already mapped to ref => no artificial reward
