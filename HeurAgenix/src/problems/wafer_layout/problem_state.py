@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+
+import numpy as np
 from typing import Iterable, List, Tuple
 
 
@@ -74,11 +76,10 @@ def get_instance_problem_state(instance_data: dict) -> dict:
 
 
 def _evaluate_solution(instance_data: dict, assign: list[int]) -> dict:
-    try:
-        from src.problems.wafer_layout.evaluator_copy import evaluate_layout
-    except Exception:  # noqa: BLE001
-        return {"total_scalar": 0.0, "comm_norm": 0.0, "therm_norm": 0.0}
-    return evaluate_layout(instance_data, assign)
+    from src.problems.wafer_layout.evaluator_copy import evaluate_layout
+
+    total_scalar, comm_norm, therm_norm = evaluate_layout(instance_data, np.asarray(assign, dtype=np.int64))
+    return {"total_scalar": float(total_scalar), "comm_norm": float(comm_norm), "therm_norm": float(therm_norm)}
 
 
 def get_solution_problem_state(instance_data: dict, solution: dict) -> dict:

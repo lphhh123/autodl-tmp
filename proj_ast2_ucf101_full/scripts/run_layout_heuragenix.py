@@ -40,6 +40,20 @@ from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.trace_schema import TRACE_FIELDS
 
+REQUIRED_RECORDING_KEYS = [
+    "iter",
+    "stage",
+    "op",
+    "accepted",
+    "total_scalar",
+    "comm_norm",
+    "therm_norm",
+    "pareto_added",
+    "duplicate_penalty",
+    "boundary_penalty",
+    "seed_id",
+    "time_ms",
+]
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
@@ -284,11 +298,18 @@ def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
         # caller already wrote init row; just return empty iterator
         return
     with recordings_path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for ln, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            record = json.loads(line)
+            missing = [k for k in REQUIRED_RECORDING_KEYS if k not in record]
+            if missing:
+                raise ValueError(
+                    f"[recordings schema error] missing keys at {recordings_path}:{ln}: {missing}. "
+                    f"Got keys={sorted(list(record.keys()))}"
+                )
+            yield record
 
 
 def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict[str, Any]:
