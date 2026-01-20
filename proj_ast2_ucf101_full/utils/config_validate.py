@@ -342,10 +342,26 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             stable_hw.accuracy_guard.allow_train_ema_fallback = bool(stable_hw.allow_train_ema_fallback)
 
     # ---- locked acc ref (v5) ----
-    if getattr(stable_hw, "locked_acc_ref", None) is None:
+    # v5.4 contract: locked_acc_ref is defined EITHER at root (preferred) OR under stable_hw (legacy), not both.
+    root_locked = getattr(cfg, "locked_acc_ref", None)
+    nested_locked = getattr(stable_hw, "locked_acc_ref", None)
+
+    if root_locked is not None and nested_locked is not None:
+        raise ValueError(
+            "locked_acc_ref must be defined only once (root preferred). Remove one of: "
+            "locked_acc_ref OR stable_hw.locked_acc_ref"
+        )
+
+    # If neither exists, create the legacy nested container (so downstream defaults can still be applied)
+    if root_locked is None and nested_locked is None:
         from omegaconf import OmegaConf
+
         stable_hw.locked_acc_ref = OmegaConf.create({})
-    locked = stable_hw.locked_acc_ref
+        nested_locked = stable_hw.locked_acc_ref
+
+    # Apply defaults onto whichever container is actually used
+    locked = root_locked if root_locked is not None else nested_locked
+
     if getattr(locked, "enabled", None) is None:
         locked.enabled = True
     locked.enabled = bool(locked.enabled)
@@ -424,8 +440,34 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     # ===== v5.4 defaults: NoDrift + frozen HW refs =====
     if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):
-        if not hasattr(cfg.stable_hw, "no_drift"):
+        # v5.4 contract: no_drift is defined only once (root preferred).
+        root_no_drift = getattr(cfg, "no_drift", None)
+        nested_no_drift = getattr(cfg.stable_hw, "no_drift", None)
+
+        if root_no_drift is not None and nested_no_drift is not None:
+            raise ValueError(
+                "no_drift must be defined only once (root preferred). Remove one of: "
+                "no_drift OR stable_hw.no_drift"
+            )
+
+        # Only create nested default when root is absent AND nested is absent
+        if root_no_drift is None and nested_no_drift is None:
             cfg.stable_hw.no_drift = True
+            nested_no_drift = cfg.stable_hw.no_drift
+
+        # Determine enabled flag from root (dict-style) or nested (bool/dict-style)
+        no_drift_enabled = True
+        if root_no_drift is not None:
+            no_drift_enabled = (
+                bool(getattr(root_no_drift, "enabled", True))
+                if hasattr(root_no_drift, "enabled")
+                else bool(root_no_drift)
+            )
+        else:
+            if hasattr(nested_no_drift, "enabled"):
+                no_drift_enabled = bool(nested_no_drift.enabled)
+            else:
+                no_drift_enabled = bool(nested_no_drift)
 
         if not hasattr(cfg.stable_hw, "normalize") or cfg.stable_hw.normalize is None:
             cfg.stable_hw.normalize = SimpleNamespace(enabled=True)
@@ -434,7 +476,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             cfg.stable_hw.normalize.ref_update = "frozen"
 
         # NoDrift priority: enforce frozen even if user mistakenly sets ema
-        if bool(getattr(cfg.stable_hw, "no_drift", True)):
+        if no_drift_enabled:
             cfg.stable_hw.normalize.ref_update = "frozen"
 
         v = str(cfg.stable_hw.normalize.ref_update).lower()
@@ -443,6 +485,15 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 "stable_hw.normalize.ref_update must be 'frozen' or 'ema', got: "
                 f"{cfg.stable_hw.normalize.ref_update}"
             )
+
+        print(
+            "[v5.4][cfg] locked_acc_ref source = "
+            f"{'root' if getattr(cfg, 'locked_acc_ref', None) is not None else 'stable_hw'}"
+        )
+        print(
+            "[v5.4][cfg] no_drift source = "
+            f"{'root' if getattr(cfg, 'no_drift', None) is not None else 'stable_hw'}"
+        )
 
     # ---- discrete isolation defaults (v5) ----
     if getattr(stable_hw, "discrete_isolation", None) is None:
@@ -582,8 +633,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         force_disable_ok = bool(get_nested(cfg, "stable_hw.force_disable_ok", False))
 
         stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
-        locked = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
-        locked_en = bool(locked.get("enabled", False))
+        # v5.4 allows locked_acc_ref at root-level OR under stable_hw (legacy), but not both.
+        locked_root = get_nested(cfg, "locked_acc_ref", None)
+        if locked_root is not None:
+            locked_en = bool(locked_root.get("enabled", False))
+        else:
+            locked_nested = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+            locked_en = bool(locked_nested.get("enabled", False))
 
         if (not stable_en) and (not force_disable_ok):
             raise ValueError(

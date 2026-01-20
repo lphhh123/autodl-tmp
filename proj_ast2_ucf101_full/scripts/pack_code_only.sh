@@ -17,7 +17,9 @@ tar -czvf "${OUT}" \
   --exclude='proj_ast2_ucf101_full/logs' \
   --exclude='proj_ast2_ucf101_full/outputs' \
   --exclude='proj_ast2_ucf101_full/proxy_weights' \
-  --exclude='proj_ast2_ucf101_full/**/*.bak' \
+  --exclude='proj_ast2_ucf101_full/**/*.bak*' \
+  --exclude='HeurAgenix/data' \
+  --exclude='HeurAgenix/output' \
   proj_ast2_ucf101_full HeurAgenix
 
 echo "[OK] wrote ${OUT}"

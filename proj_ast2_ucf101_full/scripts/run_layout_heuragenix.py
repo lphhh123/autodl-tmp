@@ -40,19 +40,13 @@ from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.trace_schema import TRACE_FIELDS
 
+# Minimal requirements for portability across HeurAgenix versions / problem envs:
+# - iter: step index
+# - op: operator name
+# We accept op_args OR op_args_json (either may exist)
 REQUIRED_RECORDING_KEYS = [
     "iter",
-    "stage",
     "op",
-    "accepted",
-    "total_scalar",
-    "comm_norm",
-    "therm_norm",
-    "pareto_added",
-    "duplicate_penalty",
-    "boundary_penalty",
-    "seed_id",
-    "time_ms",
 ]
 
 
@@ -336,9 +330,34 @@ def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
             missing = [k for k in REQUIRED_RECORDING_KEYS if k not in record]
             if missing:
                 raise ValueError(
-                    f"[recordings schema error] missing keys at {recordings_path}:{ln}: {missing}. "
+                    f"[recordings schema error] missing minimal keys at {recordings_path}:{ln}: {missing}. "
                     f"Got keys={sorted(list(record.keys()))}"
                 )
+
+            # Normalize optional fields (do NOT require them)
+            if "stage" not in record:
+                record["stage"] = "heuragenix"
+            if "accepted" not in record:
+                # default accept=1 if env didn't provide it (some envs only log applied ops)
+                record["accepted"] = 1
+            if "seed_id" not in record:
+                record["seed_id"] = 0
+            if "time_ms" not in record:
+                record["time_ms"] = 0.0
+
+            # Normalize op args: accept op_args OR op_args_json OR op_args_str
+            if "op_args" not in record:
+                if "op_args_json" in record:
+                    record["op_args"] = record["op_args_json"]
+                elif "op_args_str" in record:
+                    record["op_args"] = record["op_args_str"]
+                else:
+                    record["op_args"] = {}
+
+            # signature is strongly preferred; but do not crash if missing
+            if "signature" not in record:
+                record["signature"] = ""
+
             yield record
 
 
@@ -1286,6 +1305,7 @@ def main() -> None:
                         {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
                     )
 
+    recordings_found = True
     if run_mode == "inprocess":
         cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
         if not cands:
@@ -1298,6 +1318,7 @@ def main() -> None:
         else:
             output_dir = out_dir
             recordings_path = out_dir / "recordings.jsonl"
+            recordings_found = False
             _append_llm_usage(
                 llm_usage_path,
                 {"ok": False, "reason": "missing_recordings", "engine": method},
@@ -1314,11 +1335,14 @@ def main() -> None:
         )
         recordings_path = output_dir / "recordings.jsonl"
         if not recordings_path.exists():
+            recordings_found = False
             _append_llm_usage(
                 llm_usage_path,
                 {"ok": False, "reason": "missing_recordings", "engine": method},
             )
             recordings_path.write_text("", encoding="utf-8")
+    extra["recordings_found"] = bool(recordings_found)
+    extra["recordings_path"] = str(recordings_path)
     # merge heuragenix internal llm_usage into wrapper llm_usage.jsonl
     heuragenix_usage_path = output_dir / "llm_usage.jsonl"
     if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:
