@@ -221,6 +221,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
 
                 loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw_eff * L_hw
+            # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
+            assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
+            assert float(lambda_hw_eff) >= 0.0
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
