@@ -9,27 +9,39 @@ training:
   inner_steps: 1
   seed: 2024
 
+locked_acc_ref:
+  enabled: true
+  source: "manual"
+  acc_ref1: 0.0
+  acc_ref5: 0.0
+
+no_drift:
+  enabled: true
+  stats_path: "${out_dir}/baseline_stats.json"
+
 # === v5.4 StableHW (Acc-First Hard Gating + LockedAccRef + NoDrift + NoDoubleScale) ===
 stable_hw:
   enabled: true
-  guard_mode: hard
-
-  locked_acc_ref:
-    enabled: true
-    baseline_stats_path: outputs/P0/baseline_stats.json
-    acc_ref_fixed: null
-
-  acc_first_hard_gating:
-    enabled: true
-    epsilon_drop: 0.002
-    beta: 5.0
 
   lambda_hw_schedule:
-    warmup_epochs: 0
-    ramp_epochs: 1
-    lambda_hw_max: 0.5
-    clamp_min: 0.0
-    clamp_max: 0.5
+    enabled: true
+    mode: "cosine"
+    warmup_epochs: 1
+    max_lambda: 0.15
+    min_lambda: 0.0
+
+  accuracy_guard:
+    enabled: true
+    controller:
+      enabled: true
+      metric: "val_acc1"
+      epsilon_drop: 1.0   # smoke 里放宽，避免无数据时误触发
+      guard_mode: "hard"
+      freeze_discrete_updates: true
+      freeze_schedule_in_recovery: true
+      recovery_min_epochs: 1
+      cut_hw_loss_on_violate: true
+      k_exit: 1
 
   negative_guard:
     enabled: true

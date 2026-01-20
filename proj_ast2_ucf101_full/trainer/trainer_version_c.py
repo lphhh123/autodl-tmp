@@ -33,6 +33,7 @@ from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.stable_hw import (
     apply_accuracy_guard,
+    get_accuracy_metric_key,
     init_locked_acc_ref,
     init_hw_refs_from_baseline_stats,
     stable_hw_log_fields,
@@ -656,8 +657,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         },
     )
     if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
-        init_locked_acc_ref(stable_hw_cfg, stable_hw_state)
-        init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_hw_state)
+        init_locked_acc_ref(cfg, stable_hw_state)
+        init_hw_refs_from_baseline_stats(cfg, stable_hw_state)
     (out_dir / "stable_hw_state.json").write_text(
         json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -684,7 +685,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
 
             # ---- v5.4 Acc-First Hard Gating (epoch-begin) ----
-            metric_key = str(getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "metric", "val_acc1"))
+            metric_key = get_accuracy_metric_key(stable_hw_cfg)
             last_val = stable_hw_state.get("val_acc1_last", None)
 
             # If guard metric is val_* but we don't even have a last val yet, force WARMUP gate:
@@ -699,7 +700,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 # IMPORTANT: if last_val exists, treat it as a valid val metric for gating
                 _, allow_discrete = apply_accuracy_guard(
                     epoch=outer,
-                    stable_hw_cfg=stable_hw_cfg,
+                    stable_hw_cfg=cfg,
                     stable_hw_state=stable_hw_state,
                     train_ema_or_none=float(stable_hw_state.get("train_acc1_ema", 0.0))
                     if metric_key.startswith("train_")
@@ -1014,7 +1015,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 last_acc1 = float(acc1.item())
                 best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
                 if stable_hw_enabled:
-                    metric = str(getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "metric", "val_acc1"))
+                    metric = get_accuracy_metric_key(stable_hw_cfg)
                     if metric == "train_ema":
                         update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
                 stats = {
@@ -1137,7 +1138,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         if stable_hw_enabled:
             apply_accuracy_guard(
                 epoch=outer,
-                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_cfg=cfg,
                 stable_hw_state=stable_hw_state,
                 val_metric_or_none=float(val_acc1) if val_acc1 is not None else None,
                 has_val_this_epoch=True,
@@ -1152,14 +1153,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     stable_hw_state["acc_ref"]
                 ), "acc_ref drift detected"
 
-        # ===== v5.4 NoDrift: HW refs are frozen by default =====
-        norm = getattr(stable_hw_cfg, "normalize", None)
-        ref_update = "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen").lower()
-        no_drift = bool(getattr(stable_hw_cfg, "no_drift", True))
-
-        if stable_hw_enabled and (not no_drift) and (ref_update == "ema"):
+        if stable_hw_enabled:
             # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
-            update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
+            update_hw_refs_from_stats(cfg, stable_hw_state, last_hw_stats or {})
         guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
         allow_discrete = (
             bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
@@ -1183,7 +1179,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
         stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
 
-        stable_hw_state["_contract_no_drift"] = bool(getattr(stable_hw_cfg, "no_drift", True))
+        no_drift_cfg = getattr(cfg, "no_drift", None)
+        if no_drift_cfg is None:
+            no_drift_cfg = getattr(stable_hw_cfg, "no_drift", None)
+        stable_hw_state["_contract_no_drift"] = bool(getattr(no_drift_cfg, "enabled", True)) if no_drift_cfg else True
         norm = getattr(stable_hw_cfg, "normalize", None)
         stable_hw_state["_contract_ref_update"] = (
             "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen")

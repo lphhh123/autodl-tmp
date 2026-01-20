@@ -77,12 +77,56 @@ def main() -> None:
 
     if float(getattr(cfg.hw, "lambda_hw", 0.0) or 0.0) != 0.0:
         raise AssertionError("cfg.hw.lambda_hw must be 0 under v5.4 NoDoubleScale")
+    if float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0) != 0.0:
+        raise AssertionError("cfg.loss.lambda_hw must be 0 under v5.4 NoDoubleScale")
 
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     if stable_hw_cfg is None:
         raise AssertionError("stable_hw config missing")
     if not bool(getattr(getattr(stable_hw_cfg, "normalize", None), "enabled", True)):
         raise AssertionError("stable_hw.normalize.enabled must be true for contract check")
+
+    guard = getattr(stable_hw_cfg, "accuracy_guard", None)
+    if guard is None:
+        raise AssertionError("stable_hw.accuracy_guard missing")
+    ctrl = getattr(guard, "controller", None)
+    if ctrl is None:
+        legacy_keys = [
+            "enabled",
+            "metric",
+            "epsilon_drop",
+            "guard_mode",
+            "freeze_discrete_updates",
+            "freeze_schedule_in_recovery",
+            "recovery_min_epochs",
+            "cut_hw_loss_on_violate",
+            "k_exit",
+            "freeze_hw_on_drop",
+            "freeze_hw_epochs",
+            "cut_hw_loss_on_drop",
+        ]
+        if any(getattr(guard, k, None) is not None for k in legacy_keys):
+            print("[WARN] accuracy_guard.controller missing; legacy keys detected.", file=sys.stderr)
+        else:
+            raise AssertionError("stable_hw.accuracy_guard.controller missing")
+
+    lock_root = getattr(cfg, "locked_acc_ref", None)
+    lock_nested = getattr(stable_hw_cfg, "locked_acc_ref", None)
+    if lock_root is not None and lock_nested is not None:
+        raise AssertionError("locked_acc_ref must be defined only once (root preferred)")
+    if lock_root is None and lock_nested is None:
+        raise AssertionError("locked_acc_ref missing (root preferred)")
+    if lock_root is None and lock_nested is not None:
+        print("[WARN] locked_acc_ref is nested under stable_hw; prefer top-level.", file=sys.stderr)
+
+    no_drift_root = getattr(cfg, "no_drift", None)
+    no_drift_nested = getattr(stable_hw_cfg, "no_drift", None)
+    if no_drift_root is not None and no_drift_nested is not None:
+        raise AssertionError("no_drift must be defined only once (root preferred)")
+    if no_drift_root is None and no_drift_nested is None:
+        raise AssertionError("no_drift missing (root preferred)")
+    if no_drift_root is None and no_drift_nested is not None:
+        print("[WARN] no_drift is nested under stable_hw; prefer top-level.", file=sys.stderr)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
