@@ -21,6 +21,7 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
+from utils.trace_guard import ensure_trace_file, append_trace_event
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -39,6 +40,36 @@ def _as_float(val, name: str) -> float:
         return float(val)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
+
+
+def _cfg_get(obj, key: str, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _build_run_signature(cfg) -> Dict[str, Any]:
+    detailed_cfg = _cfg_get(cfg, "detailed_place", None)
+    lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
+    policy_switch_cfg = _cfg_get(detailed_cfg, "policy_switch", _cfg_get(cfg, "policy_switch", {}))
+    action_families = _cfg_get(policy_switch_cfg, "action_families", None)
+    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
+    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
+    bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
+    policy_switch_enabled = bool(_cfg_get(policy_switch_cfg, "enabled", False))
+    cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
+    cache_enabled = bool(cache_size > 0)
+    cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
+    return {
+        "moves_enabled": moves_enabled,
+        "lookahead_k": lookahead_k,
+        "bandit_type": bandit_type,
+        "policy_switch": policy_switch_enabled,
+        "cache_enabled": cache_enabled,
+        "cache_key_schema_version": cache_key_schema_version,
+    }
 
 
 def _seed_worker(worker_id: int, base_seed: int) -> None:
@@ -79,12 +110,22 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     device_type = device.type
     logger = setup_logger()
     metrics_path = None
+    trace_path = None
     if out_dir is None and hasattr(cfg, "train") and getattr(cfg.train, "out_dir", None):
         out_dir = Path(cfg.train.out_dir)
     if out_dir is not None:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = out_dir / "metrics.json"
+        trace_path = out_dir / "trace.jsonl"
+        ensure_trace_file(
+            str(trace_path),
+            header={
+                "run_name": str(getattr(getattr(cfg, "train", None), "exp_name", None) or out_dir.name),
+                "steps_planned": int(getattr(cfg, "steps", 0)) if hasattr(cfg, "steps") else 0,
+                "run_signature": _build_run_signature(cfg),
+            },
+        )
     train_loader, val_loader = build_dataloaders(cfg)
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -147,7 +188,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
 
     best_acc = 0.0
     last_acc = 0.0
+    ran_epochs = 0
+    early_stop_triggered = False
     for epoch in range(cfg.train.epochs):
+        ran_epochs += 1
         stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
         if stable_hw_enabled:
             legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
@@ -277,9 +321,15 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     f"val_acc1={val_acc1_str}, acc_ref={stable_state.get('acc_ref')}, "
                     f"acc_floor={stable_state.get('acc_floor')}. Stop training now."
                 )
+                early_stop_triggered = True
                 break
 
-            update_hw_refs_from_stats(stable_state, last_hw_stats or {}, cfg)
+            if hasattr(cfg, "stable_hw") and hasattr(cfg.stable_hw, "no_drift") and bool(
+                getattr(cfg.stable_hw.no_drift, "enabled", False)
+            ):
+                pass  # NoDrift: skip any ref update
+            else:
+                update_hw_refs_from_stats(stable_state, last_hw_stats or {}, cfg)
         guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
         allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
         print(
@@ -330,6 +380,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             )
         except Exception:
             pass
+    if trace_path is not None and (early_stop_triggered or ran_epochs == 0):
+        append_trace_event(str(trace_path), {"type": "finalize", "reason": "early_stop_or_zero_step"})
 
 
 def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:

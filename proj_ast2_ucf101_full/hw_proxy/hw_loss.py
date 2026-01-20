@@ -13,6 +13,21 @@ import torch.nn.functional as F
 from utils.stable_hash import stable_hash
 
 
+def sanitize_latency(latency_ms: float, min_ms: float = 1e-3) -> Tuple[float, float]:
+    penalty = 0.0
+    if latency_ms is None:
+        return min_ms, penalty
+    if isinstance(latency_ms, (int, float)):
+        if math.isnan(latency_ms) or math.isinf(latency_ms):
+            return min_ms, penalty
+        # HARD floor: never allow negative latency to become "better"
+        if latency_ms < 0:
+            penalty = penalty + abs(float(latency_ms)) * 10.0  # strong penalty
+            latency_ms = 0.0
+        return max(float(latency_ms), float(min_ms)), penalty
+    return min_ms, penalty
+
+
 def _sanitize_latency_ms(x: float, min_ms: float = 1e-3) -> float:
     # No reward for negative/invalid latency: clamp to min_ms
     if x is None:
@@ -234,12 +249,14 @@ def compute_hw_loss(
     raw_energy_mj = float(energy_mj.detach().cpu().item())
     raw_mem_mb = float(mem_mb.detach().cpu().item())
     raw_comm_ms = float(comm_ms.detach().cpu().item())
+    sanitized_latency_ms, latency_penalty = sanitize_latency(raw_latency_ms, min_ms=min_latency_ms)
 
     # v5.4: clamp audit (counts + min raw values)
     clamp_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
     clamp_mins = {"T": None, "E": None, "M": None, "C": None}
     invalid_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
     hw_stats: Dict[str, float] = {}
+    extra_penalty = float(latency_penalty)
 
     def _audit_min(tag: str, x):
         try:
@@ -256,13 +273,19 @@ def compute_hw_loss(
 
     # init refs using stable state (sanitize any stale/invalid refs in state)
     def _pos_ref(state_key: str, default_val: float) -> float:
+        nonlocal extra_penalty
         v = stable_hw_state.get(state_key, None)
         try:
             v = float(v) if v is not None else None
         except Exception:
             v = None
         if v is None or (not (v > 0.0)) or (not np.isfinite(v)):
+            if v is not None and (not np.isfinite(v) or v <= 0):
+                extra_penalty += 1000.0
             v = float(default_val)
+        if v <= 0:
+            extra_penalty += 1000.0
+            v = 1.0
         v = max(eps_ratio, float(v))
         stable_hw_state[state_key] = float(v)
         return float(v)
@@ -490,7 +513,8 @@ def compute_hw_loss(
         )
 
     # v5.4: area/layout 必须保持 Tensor（禁止 float(L_area) / float(L_layout)）
-    L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout)
+    extra_penalty_t = torch.as_tensor(float(extra_penalty), device=device, dtype=latency_ms_pos.dtype)
+    L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout) + extra_penalty_t
 
     hw_stats.update(
         {
@@ -502,7 +526,7 @@ def compute_hw_loss(
             "raw_energy_mj": raw_energy_mj,
             "raw_mem_mb": raw_mem_mb,
             "raw_comm_ms": raw_comm_ms,
-            "latency_ms_sanitized": _sanitize_latency_ms(raw_latency_ms, min_ms=min_latency_ms),
+            "latency_ms_sanitized": float(sanitized_latency_ms),
             "comm_ms_sanitized": _sanitize_scalar(raw_comm_ms, fallback=0.0),
             "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
             "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
@@ -518,6 +542,7 @@ def compute_hw_loss(
             "proxy_had_invalid": bool(
                 (invalid_counts["T"] + invalid_counts["E"] + invalid_counts["M"] + invalid_counts["C"]) > 0
             ),
+            "proxy_extra_penalty": float(extra_penalty),
         }
     )
     if chip_used_expected is not None:

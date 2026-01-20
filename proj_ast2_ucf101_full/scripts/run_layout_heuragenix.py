@@ -55,6 +55,36 @@ REQUIRED_RECORDING_KEYS = [
     "time_ms",
 ]
 
+
+def _cfg_get(obj, key: str, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _build_run_signature(cfg: Any) -> Dict[str, Any]:
+    detailed_cfg = _cfg_get(cfg, "detailed_place", None)
+    lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
+    policy_switch_cfg = _cfg_get(detailed_cfg, "policy_switch", _cfg_get(cfg, "policy_switch", {}))
+    action_families = _cfg_get(policy_switch_cfg, "action_families", None)
+    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
+    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
+    bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
+    policy_switch_enabled = bool(_cfg_get(policy_switch_cfg, "enabled", False))
+    cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
+    cache_enabled = bool(cache_size > 0)
+    cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
+    return {
+        "moves_enabled": moves_enabled,
+        "lookahead_k": lookahead_k,
+        "bandit_type": bandit_type,
+        "policy_switch": policy_switch_enabled,
+        "cache_enabled": cache_enabled,
+        "cache_key_schema_version": cache_key_schema_version,
+    }
+
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
 
@@ -681,6 +711,7 @@ def _write_trace_and_pareto(
         "seed": int(seed),
         "max_steps": int(max_steps) if max_steps is not None else None,
         "signature_version": "v5.4",
+        "run_signature": _build_run_signature(cfg),
     }
     (out_dir / "trace_meta.json").write_text(json.dumps(trace_meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return report, pareto

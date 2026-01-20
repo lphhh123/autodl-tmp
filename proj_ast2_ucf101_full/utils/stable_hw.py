@@ -612,9 +612,10 @@ def update_hw_refs_from_stats(stable_hw_state: dict, stats: dict, cfg: dict) -> 
       - NoDrift.enabled == True  => DO NOT update any reference (lock refs)
       - NoDrift.enabled == False => allow update if corresponding update flags are enabled
     """
-    nd = _get_no_drift_cfg(cfg)
-    if bool(_cfg_get(nd, "enabled", False)):
-        # hard lock: no drift at all
+    # v5.4 NoDrift: when enabled=True, refs MUST be frozen (no online update).
+    stable_hw_cfg = cfg
+    nd = getattr(stable_hw_cfg.stable_hw, "no_drift", None)
+    if nd is not None and bool(getattr(nd, "enabled", False)):
         return stats
 
     # ---- allow update when NoDrift disabled ----
