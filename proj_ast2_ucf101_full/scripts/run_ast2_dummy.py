@@ -56,6 +56,10 @@ def compute_hw_loss(
 
 def main():
     cfg = load_config("configs/ast2_dummy.yaml")
+    if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):
+        raise RuntimeError(
+            "run_ast2_dummy.py is a legacy demo and must NOT be used with stable_hw.enabled=true (v5.4)."
+        )
 
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
     print(f"[device] using {device}")

@@ -39,10 +39,17 @@ def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
+    """
+    Safe float cast.
+    - If x is None: return default (can be None)
+    - If cast fails: return default (can be None)
+    """
+    if x is None:
+        return default
     try:
         return float(x)
     except Exception:
-        return float(default)
+        return default
 
 
 def stable_hw_log_fields(st: Dict[str, Any]) -> Dict[str, Any]:
