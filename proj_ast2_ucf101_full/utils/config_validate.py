@@ -496,7 +496,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             # If locked_acc_ref is enabled but baseline_stats_path is missing,
             # we MUST have warmup_epochs>=1 so that warmup_best can produce acc_ref.
             try:
-                locked = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+                # v5.4 allows locked_acc_ref at root-level OR under stable_hw (legacy)
+                locked = get_nested(cfg, "locked_acc_ref", None)
+                locked_path = "locked_acc_ref"
+                if not isinstance(locked, dict) or not locked:
+                    locked = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+                    locked_path = "stable_hw.locked_acc_ref"
+
                 if bool(locked.get("enabled", False)):
                     baseline_path = locked.get("baseline_stats_path", None)
                     sched = get_nested(cfg, "stable_hw.lambda_hw_schedule", {}) or {}
@@ -516,7 +522,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                             locked["freeze_epoch"] = freeze_epoch
                             print(
                                 "[WARN] v5.4 LockedAccRef: freeze_epoch<=0 with missing baseline_stats_path; "
-                                f"forcing stable_hw.locked_acc_ref.freeze_epoch={freeze_epoch}."
+                                f"forcing {locked_path}.freeze_epoch={freeze_epoch}."
                             )
                         if freeze_epoch > warmup_epochs:
                             sched["warmup_epochs"] = freeze_epoch
@@ -525,7 +531,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                                 f"forcing warmup_epochs={freeze_epoch}."
                             )
 
-                    set_nested(cfg, "stable_hw.locked_acc_ref", locked)
+                    set_nested(cfg, locked_path, locked)
                     set_nested(cfg, "stable_hw.lambda_hw_schedule", sched)
             except Exception:
                 pass
