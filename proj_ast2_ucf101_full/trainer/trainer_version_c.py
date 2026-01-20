@@ -534,6 +534,13 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         layout_export_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "logs" / "version_c_stats.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        f"[v5.4 contract] train.mode={getattr(cfg.train, 'mode', None)} "
+        f"stable_hw.enabled={getattr(cfg.stable_hw, 'enabled', None)} "
+        f"locked_acc_ref.enabled={getattr(cfg.locked_acc_ref, 'enabled', None)} "
+        f"no_drift.enabled={getattr(cfg.no_drift, 'enabled', None)} "
+        f"no_double_scale.enabled={getattr(cfg.no_double_scale, 'enabled', None)}"
+    )
 
     loader = build_dataloader(cfg)
     # ---- build val/test loader for stable_hw accuracy_guard ----
