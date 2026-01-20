@@ -1,5 +1,6 @@
 """Entry for AST2.0-lite single device training (SPEC)."""
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -7,6 +8,20 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from trainer.trainer_single_device import train_single_device
+
+
+def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
+    cur = cfg
+    for part in keypath.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, dict):
+            cur = cur.get(part, default)
+        else:
+            cur = getattr(cur, part, default)
+        if cur is default:
+            return default
+    return cur
 
 
 def main():
@@ -35,8 +50,15 @@ def main():
         import omegaconf
 
         (out_dir / "config_resolved.yaml").write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
+        resolved_cfg = omegaconf.OmegaConf.to_container(cfg, resolve=True)
     except Exception:
         (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
+        resolved_cfg = cfg
+
+    (out_dir / "resolved_config.json").write_text(
+        json.dumps(resolved_cfg, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
 
     # ---- cfg_hash for audit ----
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
@@ -50,6 +72,15 @@ def main():
     )
     print("[CFG] loss.lambda_hw =", float(getattr(getattr(cfg, "loss", None), "lambda_hw", -1.0)))
     print("[CFG] hw.lambda_hw =", float(getattr(getattr(cfg, "hw", None), "lambda_hw", -1.0)))
+    keypaths = [
+        "stable_hw.acc_first.enabled",
+        "stable_hw.locked_acc_ref.enabled",
+        "stable_hw.no_drift.enabled",
+        "stable_hw.no_double_scale.enabled",
+        "stable_hw.min_latency_ms",
+    ]
+    for kp in keypaths:
+        print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
     if hasattr(cfg, "train"):

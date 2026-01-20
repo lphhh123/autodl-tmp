@@ -38,6 +38,20 @@ def _str2bool(value: Union[str, bool]) -> bool:
     raise argparse.ArgumentTypeError(f"Boolean value expected for export_layout_input, got {value!r}")
 
 
+def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
+    cur = cfg
+    for part in keypath.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, dict):
+            cur = cur.get(part, default)
+        else:
+            cur = getattr(cur, part, default)
+        if cur is default:
+            return default
+    return cur
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -121,9 +135,14 @@ def main():
 
         with open(out_dir_path / "config_resolved.yaml", "w", encoding="utf-8") as f:
             f.write(omegaconf.OmegaConf.to_yaml(cfg))
+        resolved_cfg = omegaconf.OmegaConf.to_container(cfg, resolve=True)
     except Exception:
         with open(out_dir_path / "config_resolved.yaml", "w", encoding="utf-8") as f:
             f.write(str(cfg))
+        resolved_cfg = cfg
+
+    with (out_dir_path / "resolved_config.json").open("w", encoding="utf-8") as f:
+        json.dump(resolved_cfg, f, indent=2, ensure_ascii=False, default=str)
 
     # ---- cfg_hash for audit ----
     resolved_text = (out_dir_path / "config_resolved.yaml").read_text(encoding="utf-8")
@@ -137,6 +156,15 @@ def main():
     )
     print("[CFG] loss.lambda_hw =", float(getattr(getattr(cfg, "loss", None), "lambda_hw", -1.0)))
     print("[CFG] hw.lambda_hw =", float(getattr(getattr(cfg, "hw", None), "lambda_hw", -1.0)))
+    keypaths = [
+        "stable_hw.acc_first.enabled",
+        "stable_hw.locked_acc_ref.enabled",
+        "stable_hw.no_drift.enabled",
+        "stable_hw.no_double_scale.enabled",
+        "stable_hw.min_latency_ms",
+    ]
+    for kp in keypaths:
+        print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
     cfg.train.cfg_hash = cfg_hash

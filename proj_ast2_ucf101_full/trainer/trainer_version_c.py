@@ -517,7 +517,6 @@ def _solve_layout_for_cache(
 def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: Optional[str] = None):
     device = get_device(cfg.train.device)
     device_type = device.type
-    seed_everything(int(getattr(cfg.train, "seed", 0)))
     logger = setup_logger()
     # ---- v5.4: allow config-driven export (OneCommand) ----
     if not export_layout_input:
@@ -552,8 +551,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
     def _seed_worker(worker_id: int):
         s = base_seed + worker_id
-        random.seed(s)
-        np.random.seed(s)
+        seed_everything(s)
 
     val_loader = DataLoader(
         val_ds,
@@ -1023,6 +1021,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 hw_stats_count += 1
                 hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
+                assert "hw_loss_weighted" not in (hw_stats or {}), (
+                    "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
+                )
             # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
             assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
             assert float(lambda_hw_eff) >= 0.0
@@ -1188,7 +1189,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
         if stable_hw_enabled:
             # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
-            update_hw_refs_from_stats(cfg, stable_hw_state, last_hw_stats or {})
+            update_hw_refs_from_stats(stable_hw_state, last_hw_stats or {}, cfg)
         guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
         allow_discrete = (
             bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True

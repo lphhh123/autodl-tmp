@@ -15,8 +15,9 @@ import torch
 from hw_proxy.hw_loss import compute_hw_loss
 from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
-from utils.config import load_config
+from utils.config import AttrDict, load_config
 from utils.config_validate import validate_and_fill_defaults
+from utils.stable_hw import update_hw_refs_from_stats
 
 
 class AnalyticProxy:
@@ -65,6 +66,13 @@ class AnalyticProxy:
             "mem_mb": torch.stack(mem, dim=0),
             "power_w": torch.stack(power, dim=0),
         }
+
+
+class NegativeProxy:
+    """Proxy that emits invalid/negative values to validate sanitize behavior."""
+
+    def predict_from_model_info(self, _model_info):
+        return {"latency_ms": -5.0, "mem_mb": float("nan"), "energy_mj": float("inf")}
 
 
 def main() -> None:
@@ -182,6 +190,26 @@ def main() -> None:
     L_hw_guarded = L_hw - L_hw_norm
     if not torch.isfinite(L_hw_guarded).all():
         raise AssertionError("Guarded HW loss is not finite")
+
+    # ---- NoDrift: enabled means refs must not update ----
+    no_drift_cfg = AttrDict({"no_drift": AttrDict({"enabled": True})})
+    stable_state = {"latency_ref_ms": 1.0, "memory_ref_mb": 2.0}
+    update_hw_refs_from_stats(stable_state, {"latency_ms": 9.0, "mem_mb": 9.0}, no_drift_cfg)
+    if stable_state["latency_ref_ms"] != 1.0 or stable_state["memory_ref_mb"] != 2.0:
+        raise AssertionError("NoDrift contract violated: refs updated while enabled")
+
+    # ---- sanitize negative proxy values ----
+    neg_proxy = NegativeProxy()
+    cfg.stable_hw.min_latency_ms = float(getattr(cfg.stable_hw, "min_latency_ms", 1e-3))
+    _, neg_stats = compute_hw_loss(
+        cfg,
+        neg_proxy,
+        model_info={},
+        stable_hw_cfg=stable_hw_cfg,
+        stable_hw_state={},
+    )
+    if float(neg_stats.get("latency_ms_sanitized", 0.0)) < float(cfg.stable_hw.min_latency_ms):
+        raise AssertionError("sanitize latency failed: latency_ms_sanitized below min_latency_ms")
 
     print("[SMOKE] StableHW contract OK")
     print("  L_hw_total =", float(L_hw.detach().cpu().item()))

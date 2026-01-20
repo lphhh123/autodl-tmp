@@ -209,6 +209,8 @@ def run_detailed_place(
     # ---- init assign ----
     assign = np.array(assign_seed, dtype=int).copy()
     layout_state.assign = assign
+    problem_signature = signature_for_assign(assign_seed)
+    hw_signature = str(_cfg_get(cfg, "hw_signature", "layout_eval"))
 
     # ---- anti-oscillation params ----
     anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
@@ -269,6 +271,17 @@ def run_detailed_place(
     start_time = time.time()
     best_solution = None
     report = None
+    cache_key_default = hashlib.sha1(
+        json.dumps(
+            {
+                "problem_sig": problem_signature,
+                "hw_sig": hw_signature,
+                "policy": "init",
+                "seed": int(seed_id),
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
 
     try:
         # If LLM is requested but init failed, log once and continue with heuristic
@@ -311,6 +324,11 @@ def run_detailed_place(
                         0,
                         0,
                         0,
+                        "init",
+                        "init",
+                        0,
+                        0,
+                        cache_key_default,
                     ]
                     if len(row) != len(TRACE_FIELDS):
                         raise RuntimeError(
@@ -379,6 +397,7 @@ def run_detailed_place(
                 accepted_steps = 0
         
                 for step in range(steps):
+                    cache_hits_before = int(eval_cache.hit_count) if eval_cache is not None else 0
                     step_start = time.perf_counter()
                     forced_family = None
                     forced_policy = None
@@ -477,6 +496,7 @@ def run_detailed_place(
                             use_llm = False
                         elif forced_policy.lower() == "llm":
                             use_llm = planner_type in ("llm", "mixed") and llm_provider is not None
+                    policy_name = forced_policy or ("llm" if use_llm else "heuristic")
                     need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
                     refresh_due_to_rejects = False
         
@@ -723,6 +743,20 @@ def run_detailed_place(
         
                     assign_signature = signature_for_assign(assign)
                     time_ms = int((time.perf_counter() - step_start) * 1000)
+                    cache_hit = 0
+                    if eval_cache is not None:
+                        cache_hit = 1 if int(eval_cache.hit_count) > cache_hits_before else 0
+                    cache_key = hashlib.sha1(
+                        json.dumps(
+                            {
+                                "problem_sig": problem_signature,
+                                "hw_sig": hw_signature,
+                                "policy": str(policy_name),
+                                "seed": int(seed_id),
+                            },
+                            sort_keys=True,
+                        ).encode()
+                    ).hexdigest()
                     row = [
                         step,
                         stage_label,
@@ -744,6 +778,11 @@ def run_detailed_place(
                         tabu_hit,
                         inverse_hit,
                         cooldown_hit,
+                        str(policy_name),
+                        str(op),
+                        int(lookahead_topk if lookahead_enabled else 0),
+                        int(cache_hit),
+                        str(cache_key)[:64],
                     ]
                     if len(row) != len(TRACE_FIELDS):
                         raise RuntimeError(
