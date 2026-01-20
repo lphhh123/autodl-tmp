@@ -1,32 +1,27 @@
 from __future__ import annotations
 
-from typing import Any, Optional
-
-from .config_utils import get_nested, set_nested
+from typing import Any, Dict
 
 
-def resolve_lambda_hw(cfg: Any, stable_hw_state: Optional[dict] = None) -> float:
+def resolve_lambda_hw(cfg: Any, stable_hw_state: Dict[str, Any] | None) -> float:
     """
-    Priority:
-      1) stable_hw_state["lambda_hw"] if present
-      2) cfg.hw.lambda_hw
-      3) cfg.loss.lambda_hw (legacy compat)
-      4) 0.0
+    v5.4 Single source of truth:
+      - if StableHW enabled: ALWAYS use stable_hw_state["lambda_hw_effective"]
+        (already includes Acc-First Hard Gating g_hw)
+      - else: use cfg.hw.lambda_hw (legacy)
+    NoDrift: NEVER copy cfg.loss.lambda_hw into cfg.hw.lambda_hw here.
     """
-    if stable_hw_state is not None and isinstance(stable_hw_state, dict):
-        v = stable_hw_state.get("lambda_hw", None)
-        if v is not None:
-            return float(v)
+    stable_hw_cfg = getattr(cfg, "stable_hw", None)
+    stable_enabled = bool(getattr(stable_hw_cfg, "enabled", False)) if stable_hw_cfg is not None else False
 
-    v = get_nested(cfg, "hw.lambda_hw", None)
-    if v is not None:
-        return float(v)
+    if stable_enabled:
+        if not stable_hw_state:
+            # StableHW enabled but state missing => safest is to hard-disable HW term.
+            return 0.0
+        return float(stable_hw_state.get("lambda_hw_effective", 0.0))
 
-    v = get_nested(cfg, "loss.lambda_hw", None)
-    if v is not None:
-        # normalize legacy -> new
-        set_nested(cfg, "hw.lambda_hw", float(v))
-        return float(v)
-
-    set_nested(cfg, "hw.lambda_hw", 0.0)
-    return 0.0
+    # legacy
+    hw_cfg = getattr(cfg, "hw", None)
+    if hw_cfg is None:
+        return 0.0
+    return float(getattr(hw_cfg, "lambda_hw", 0.0))

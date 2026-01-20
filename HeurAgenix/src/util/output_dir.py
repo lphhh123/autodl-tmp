@@ -15,7 +15,8 @@ def get_output_dir() -> Path:
     Official HeurAgenix outputs under:
       <output_base>/output/{problem}/{test_data}/{result_dir}/{engine}/...
 
-    Wrapper will set AMLT_OUTPUT_DIR=<some_dir>. We append /output unless it already ends with /output.
+    Wrapper will set AMLT_OUTPUT_DIR=<base_dir>. We append /output unless it already ends with /output.
+    This keeps compatibility with guides that refer to ./output as the canonical root.
     """
     base = os.environ.get("AMLT_OUTPUT_DIR")
     if base:

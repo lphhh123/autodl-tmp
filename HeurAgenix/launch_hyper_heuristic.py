@@ -63,8 +63,11 @@ def parse_arguments():
         "--heuristic",
         type=str,
         required=True,
-        choices=["llm_hh", "random_hh", "heuristic_only"],
-        help="heuristic engine name: llm_hh/random_hh/heuristic_only",
+        help=(
+            "Heuristic / Hyper-heuristic engine. "
+            "Use one of: llm_hh | random_hh | heuristic_only | or_solver | <heuristic_function_name> "
+            "(or a .py file name under heuristic_dir)."
+        ),
     )
     parser.add_argument("-d", "--heuristic_dir", type=str, default="basic_heuristics")
     parser.add_argument("-t", "--test_data", type=str, default=None,
@@ -185,6 +188,11 @@ def main():
                 llm_timeout_s=int(args.llm_timeout_s),
                 max_llm_failures=int(args.max_llm_failures),
                 fallback_on_llm_failure=str(args.fallback_on_llm_failure),
+            )
+        elif args.heuristic == "or_solver":
+            raise NotImplementedError(
+                "or_solver is declared by the official guide, but is not implemented in this repo snapshot. "
+                "Please implement an OR exact solver runner for this problem, or remove or_solver from docs."
             )
         else:
             fn = load_function(heur_name, problem=args.problem)
