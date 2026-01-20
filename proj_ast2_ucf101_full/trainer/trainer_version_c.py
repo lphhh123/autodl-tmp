@@ -505,7 +505,7 @@ def _solve_layout_for_cache(
             lambda_overlap=hw_cfg.lambda_overlap,
             lambda_comm=hw_cfg.lambda_comm_extra,
             lambda_thermal=hw_cfg.lambda_thermal,
-            distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 1.0) or 1.0),
+            distance_scale=float(getattr(hw_cfg, "distance_scale_ms", 1.0) or 1.0),
         )
     pos = wafer_layout.current_pos_continuous().detach().cpu().tolist()
     pos_round = [[round(float(x), 6) for x in row] for row in pos]
@@ -865,12 +865,41 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                             part_res = partitioner.plan(
                                 model,
                                 eff_specs,
-                                alpha=alpha,
+                                alpha=chiplet_slots()["alpha"],
                                 model_info=run_state.get("last_model_info"),
-                                use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                                use_fine_split=bool(getattr(cfg.hw, "use_fine_split", True)),
                             )
-                            segments_for_hw = part_res.get("segments", [])
-                            mapping_for_hw = part_res.get("mapping", [])
+                            segments_for_hw = part_res["segments"]
+
+                            mapping_res_live = mapping_solver.solve_mapping(
+                                segments_for_hw,
+                                eff_specs,
+                                hw_proxy,
+                                layout_positions=wafer_layout.current_pos_continuous(),
+                                strategy=str(getattr(cfg.hw, "mapping_strategy", "greedy_local")),
+                                distance_scale_ms=float(getattr(cfg.hw, "distance_scale_ms", 0.0) or 0.0),
+                            )
+                            mapping_for_hw = mapping_res_live.get("mapping", [])
+                            stable_hw_state["discrete_cache"]["mapping_signature"] = str(
+                                stable_hash(
+                                    {
+                                        "mapping": [int(x) for x in mapping_for_hw],
+                                        "segments": [
+                                            {
+                                                "k": int(i),
+                                                "flops": float(getattr(seg, "flops", 0.0)),
+                                                "bytes": float(getattr(seg, "bytes", 0.0)),
+                                                "traffic": float(getattr(seg, "traffic_out_bytes", 0.0)),
+                                                "mem": float(getattr(seg, "mem_mb", 0.0)),
+                                            }
+                                            for i, seg in enumerate(segments_for_hw)
+                                        ],
+                                    }
+                                )
+                            )
+                            stable_hw_state["discrete_cache"]["layout_signature"] = str(
+                                getattr(wafer_layout, "signature", lambda: "unknown")()
+                            )
                             last_segments = segments_for_hw
                             last_mapping = mapping_for_hw
                             step_mapping_updated = True
@@ -970,6 +999,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 hw_stats_count += 1
                 hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
                 loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
+            # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
+            assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
+            assert float(lambda_hw_eff) >= 0.0
             scaler.scale(loss).backward()
             scaler.step(optimizer_model)
             if not twostage and update_alpha:

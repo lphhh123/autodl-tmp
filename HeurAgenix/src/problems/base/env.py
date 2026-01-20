@@ -25,15 +25,18 @@ def _get_env_seed_id(env) -> int:
 
 
 def _signature_from_assign(assign) -> str:
+    """
+    Canonical signature for an assignment vector.
+    Must match proj_ast2_ucf101_full/layout/candidate_pool.py: signature_from_assign
+    Format: "assign:" + comma-joined ints
+    """
     try:
-        import layout.candidate_pool as candidate_pool
+        import numpy as np
 
-        fn = getattr(candidate_pool, "signature_from_assign", None)
-        if callable(fn):
-            return str(fn(list(assign)))
+        a = np.asarray(assign, dtype=int).reshape(-1)
+        return "assign:" + ",".join(str(int(x)) for x in a.tolist())
     except Exception:
-        pass
-    return "assign:" + ",".join(map(str, list(assign)))
+        return "assign:unknown"
 
 
 class BaseEnv:
