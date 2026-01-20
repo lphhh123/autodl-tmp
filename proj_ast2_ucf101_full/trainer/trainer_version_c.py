@@ -505,7 +505,7 @@ def _solve_layout_for_cache(
             lambda_overlap=hw_cfg.lambda_overlap,
             lambda_comm=hw_cfg.lambda_comm_extra,
             lambda_thermal=hw_cfg.lambda_thermal,
-            distance_scale=1e-9,
+            distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 1.0) or 1.0),
         )
     pos = wafer_layout.current_pos_continuous().detach().cpu().tolist()
     pos_round = [[round(float(x), 6) for x in row] for row in pos]
@@ -1089,7 +1089,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     lambda_overlap=cfg.hw.lambda_overlap,
                     lambda_comm=cfg.hw.lambda_comm_extra,
                     lambda_thermal=cfg.hw.lambda_thermal,
-                    distance_scale=1e-9,
+                    distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 1.0) or 1.0),
                 )
                 optimizer_layout.zero_grad()
                 L_layout.backward()
