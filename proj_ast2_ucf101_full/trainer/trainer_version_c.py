@@ -698,7 +698,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 stable_hw_state["allow_discrete_updates"] = False
             else:
                 # IMPORTANT: if last_val exists, treat it as a valid val metric for gating
-                _, allow_discrete = apply_accuracy_guard(
+                stable_decision, allow_discrete = apply_accuracy_guard(
                     epoch=outer,
                     stable_hw_cfg=cfg,
                     stable_hw_state=stable_hw_state,
@@ -708,7 +708,18 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     val_metric_or_none=float(last_val) if last_val is not None else None,
                     has_val_this_epoch=(last_val is not None),
                 )
+                stable_hw_state = stable_decision.state
                 stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
+
+                # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
+                if bool(stable_decision.stop_training):
+                    val_acc1_str = f"{last_val:.6f}" if last_val is not None else "None"
+                    logger.warning(
+                        f"[StableHW] stop_on_violation triggered at epoch={outer}: "
+                        f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
+                        f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
+                    )
+                    break
             # ---- invariants (v5.4) ----
             if stable_hw_state.get("acc_ref") is not None:
                 stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
@@ -1136,7 +1147,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             max_batches=max_eval_batches,
         )
         if stable_hw_enabled:
-            apply_accuracy_guard(
+            stable_decision, _ = apply_accuracy_guard(
                 epoch=outer,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_hw_state,
@@ -1146,6 +1157,16 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 if stable_hw_state.get("train_acc1_ema") is not None
                 else None,
             )
+            stable_hw_state = stable_decision.state
+            # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
+            if bool(stable_decision.stop_training):
+                val_acc1_str = f"{val_acc1:.6f}" if val_acc1 is not None else "None"
+                logger.warning(
+                    f"[StableHW] stop_on_violation triggered at epoch={outer}: "
+                    f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
+                    f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
+                )
+                break
             # ---- invariants (v5.4) ----
             if stable_hw_state.get("acc_ref") is not None:
                 stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
@@ -1163,6 +1184,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         print(
             f"[StableHW] epoch={outer} mode={guard_mode} "
             f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+        )
+        logger.info(
+            f"[StableHW][epoch={outer}] "
+            f"lambda_base={stable_hw_state.get('lambda_hw_base')}, "
+            f"lambda_eff={stable_hw_state.get('lambda_hw_effective')}, "
+            f"acc_ref={stable_hw_state.get('acc_ref')}, "
+            f"acc_floor={stable_hw_state.get('acc_floor')}, "
+            f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
+            f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
         )
         # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
         if val_acc1 is None:

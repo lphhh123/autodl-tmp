@@ -13,7 +13,9 @@ class StableHWDecision:
     lambda_hw_base: float
     lambda_hw_effective: float
     allow_discrete_updates: bool
+    stop_training: bool
     reason: Dict[str, Any]
+    state: Dict[str, Any]
 
 """
 StableHW v5.4 field ownership:
@@ -165,13 +167,13 @@ def stable_hw_schedule(
     stable_hw_cfg: Any,
     st: Dict[str, Any],
     hw_lambda_default: Optional[float] = None,
-) -> float:
+) -> Dict[str, Any]:
     """
     Set lambda_hw_base for this epoch (warmup->ramp->stabilize).
     Dict-state implementation to match trainer_* usage.
     """
     if st is None:
-        return 0.0
+        return st
     st.setdefault("guard_mode", "HW_OPT")
     st.setdefault("in_recovery", False)
     st.setdefault("allow_discrete_updates", True)
@@ -188,7 +190,7 @@ def stable_hw_schedule(
         st["lambda_hw_effective"] = float(lam)
         st["lambda_hw"] = float(lam)
         st["lambda_hw_after_guard"] = float(lam)
-        return float(lam)
+        return st
 
     warmup_epochs = int(_cfg_get(sched, "warmup_epochs", 5))
     ramp_epochs = int(_cfg_get(sched, "ramp_epochs", 10))
@@ -206,7 +208,7 @@ def stable_hw_schedule(
         st["lambda_hw_base"] = float(lam)
         st["schedule_epoch"] = int(epoch)
         st["lambda_hw_effective"] = float(lam)  # pre-guard
-        return float(lam)
+        return st
     st["freeze_schedule"] = False
     if epoch < warmup_epochs:
         phase = "warmup"
@@ -234,7 +236,12 @@ def stable_hw_schedule(
     st["lambda_hw_base"] = float(lam)
     st["schedule_epoch"] = int(epoch)
     st["lambda_hw_effective"] = float(lam)
-    return float(lam)
+
+    # ===== v5.4 LockedAccRef guard: 未锁定 acc_ref 前，硬件项必须强制关闭 =====
+    # 目的：acc_ref 必须是“纯精度参考”，不能被硬件项污染
+    if bool(st.get("locked_acc_ref", True)) and (st.get("acc_ref", None) is None):
+        st["lambda_hw_effective"] = 0.0
+    return st
 
 
 def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
@@ -334,13 +341,13 @@ def apply_accuracy_guard(
     # ---- back-compat (trainer older call sites) ----
     val_acc1: Optional[float] = None,
     train_acc1_ema: Optional[float] = None,
-) -> Tuple[str, float, bool]:
+) -> Tuple[StableHWDecision, bool]:
     """
     v5.4 Acc-First Hard Gating + LockedAccRef.
     Compatible with BOTH call styles:
       - new: val_metric_or_none / has_val_this_epoch / train_ema_or_none
       - old: val_acc1 / train_acc1_ema
-    Returns: (guard_mode, lambda_hw_after_guard, allow_discrete_updates)
+    Returns: (StableHWDecision, allow_discrete_updates)
     """
 
     st = stable_hw_state
@@ -409,7 +416,24 @@ def apply_accuracy_guard(
         st["lambda_hw_effective"] = 0.0
         st["lambda_hw_after_guard"] = 0.0
         st["allow_discrete_updates"] = True
-        return st["guard_mode"], 0.0, True
+        st["stop_on_violation"] = False
+        decision = StableHWDecision(
+            guard_mode=str(st["guard_mode"]),
+            lambda_hw_base=float(st.get("lambda_hw_base", 0.0)),
+            lambda_hw_effective=float(st["lambda_hw_effective"]),
+            allow_discrete_updates=bool(st["allow_discrete_updates"]),
+            stop_training=False,
+            reason={
+                "acc_ref": None,
+                "metric": None,
+                "eps_drop": float(eps_drop),
+                "margin": 0.0,
+                "violate": False,
+                "stop_on_violation": False,
+            },
+            state=st,
+        )
+        return decision, True
 
     # choose metric
     metric_key = str(_cfg_get(ctrl, "metric", "val_acc1"))
@@ -432,6 +456,8 @@ def apply_accuracy_guard(
     if metric is not None:
         violate = (float(acc_ref) - float(metric)) > float(eps_drop)
     margin = float(metric) - (float(acc_ref) - float(eps_drop)) if metric is not None else 0.0
+    stop_on_violation = bool(_cfg_get(ctrl, "stop_on_violation", _cfg_get(gcfg, "stop_on_violation", False)))
+    stop_training = bool(stop_on_violation and violate)
 
     # recovery bookkeeping
     if st.get("guard_mode") not in ("RECOVERY", "VIOLATE", "OK", "WARMUP"):
@@ -482,11 +508,28 @@ def apply_accuracy_guard(
     st["acc_violation"] = bool(violate)
     st["acc_used_last"] = float(acc_used) if acc_used is not None else None
     st["acc_margin_last"] = float(margin)
+    st["stop_on_violation"] = bool(stop_training)
 
     # schedule freeze flag mirrors controller intent
     st["freeze_schedule"] = bool(freeze_sched and st["in_recovery"])
     st["allow_discrete_updates"] = bool(allow_discrete_updates)
-    return st["guard_mode"], float(after), bool(allow_discrete_updates)
+    decision = StableHWDecision(
+        guard_mode=str(st["guard_mode"]),
+        lambda_hw_base=float(base),
+        lambda_hw_effective=float(after),
+        allow_discrete_updates=bool(allow_discrete_updates),
+        stop_training=bool(stop_training),
+        reason={
+            "acc_ref": float(acc_ref) if acc_ref is not None else None,
+            "metric": float(metric) if metric is not None else None,
+            "eps_drop": float(eps_drop),
+            "margin": float(margin),
+            "violate": bool(violate),
+            "stop_on_violation": bool(stop_training),
+        },
+        state=st,
+    )
+    return decision, bool(allow_discrete_updates)
 
 
 def init_locked_acc_ref(cfg_or_stable, state: dict):

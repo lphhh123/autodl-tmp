@@ -164,7 +164,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 stable_state["_legacy_lambda_warned"] = True
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
             prev_val = stable_state.get("val_acc1_last", None)
-            apply_accuracy_guard(
+            stable_decision, _ = apply_accuracy_guard(
                 epoch=epoch,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
@@ -174,6 +174,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
+            stable_state = stable_decision.state
             # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
             if stable_hw_enabled and bool(stable_state.get("request_lr_restart", False)):
                 last_applied = int(stable_state.get("_lr_restart_applied_epoch", -999999))
@@ -255,7 +256,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         last_acc = validate(model, val_loader, device, logger, epoch, cfg)
         best_acc = max(best_acc, last_acc)
         if stable_hw_enabled:
-            apply_accuracy_guard(
+            stable_decision, _ = apply_accuracy_guard(
                 epoch=epoch,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
@@ -265,6 +266,17 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if stable_state.get("train_acc1_ema") is not None
                 else None,
             )
+            stable_state = stable_decision.state
+
+            # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
+            if bool(stable_decision.stop_training):
+                val_acc1_str = f"{last_acc:.6f}" if last_acc is not None else "None"
+                logger.warning(
+                    f"[StableHW] stop_on_violation triggered at epoch={epoch}: "
+                    f"val_acc1={val_acc1_str}, acc_ref={stable_state.get('acc_ref')}, "
+                    f"acc_floor={stable_state.get('acc_floor')}. Stop training now."
+                )
+                break
 
             update_hw_refs_from_stats(cfg, stable_state, last_hw_stats or {})
         guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
@@ -272,6 +284,15 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         print(
             f"[StableHW] epoch={epoch} mode={guard_mode} "
             f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+        )
+        logger.info(
+            f"[StableHW][epoch={epoch}] "
+            f"lambda_base={stable_state.get('lambda_hw_base')}, "
+            f"lambda_eff={stable_state.get('lambda_hw_effective')}, "
+            f"acc_ref={stable_state.get('acc_ref')}, "
+            f"acc_floor={stable_state.get('acc_floor')}, "
+            f"locked={stable_state.get('locked_acc_ref', stable_state.get('acc_ref_locked'))}, "
+            f"allow_discrete={stable_state.get('allow_discrete_updates')}"
         )
         if metrics_path:
             metrics = {
