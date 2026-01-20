@@ -36,7 +36,6 @@ from layout.candidate_pool import (
     _signature_for_action,
 )
 from layout.policy_switch import EvalCache, PolicySwitchController
-from utils.run_signature import build_run_signature
 from utils.trace_schema import TRACE_FIELDS
 
 
@@ -58,6 +57,27 @@ def _cfg_get(cfg: Any, key: str, default=None):
         return cfg.get(key, default)  # OmegaConf-like
     except Exception:
         return getattr(cfg, key, default)
+
+
+def _build_run_signature(cfg: Any) -> Dict[str, Any]:
+    lookahead_cfg = _cfg_get(cfg, "lookahead", {}) or {}
+    ps_cfg = _cfg_get(cfg, "policy_switch", None)
+    action_families = _cfg_get(ps_cfg, "action_families", None)
+    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
+    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
+    bandit_type = str(_cfg_get(ps_cfg, "bandit_type", "eps_greedy"))
+    policy_switch_enabled = bool(_cfg_get(ps_cfg, "enabled", False))
+    cache_size = int(_cfg_get(ps_cfg, "cache_size", 0) or 0)
+    cache_enabled = bool(cache_size > 0 and policy_switch_enabled)
+    cache_key_schema_version = str(_cfg_get(ps_cfg, "cache_key_schema_version", "v5.4"))
+    return {
+        "moves_enabled": moves_enabled,
+        "lookahead_k": lookahead_k,
+        "bandit_type": bandit_type,
+        "policy_switch": policy_switch_enabled,
+        "cache_enabled": cache_enabled,
+        "cache_key_schema_version": cache_key_schema_version,
+    }
 
 
 def _compute_top_pairs(traffic_sym: np.ndarray, k: int) -> List[Tuple[int, int, float]]:
@@ -841,13 +861,7 @@ def run_detailed_place(
             "cache_size": int(cache_size),
         },
         "cache": {"hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None},
-        "run_signature": build_run_signature(
-            cfg,
-            cfg_hash=str(_cfg_get(cfg, "cfg_hash", _cfg_get(getattr(cfg, "train", None), "cfg_hash", "")) or ""),
-            seed_global=int(_cfg_get(cfg, "seed", _cfg_get(getattr(cfg, "train", None), "seed", 0)) or 0),
-            seed_problem=int(_cfg_get(cfg, "seed", _cfg_get(getattr(cfg, "train", None), "seed", 0)) or 0),
-            mode="layout_detailed_place",
-        ),
+        "run_signature": _build_run_signature(cfg),
     }
     (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
 
