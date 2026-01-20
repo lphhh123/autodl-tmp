@@ -1,6 +1,7 @@
 from __future__ import annotations
 import importlib
 import json
+import math
 import os
 import time
 import random as _random
@@ -27,15 +28,24 @@ def _load_layout_evaluator():
     return module.LayoutEvaluator, module.LayoutState, ""
 
 
-def _make_signature(assign: list[int]) -> str:
-    try:
-        import layout.candidate_pool as candidate_pool
-        signature_fn = getattr(candidate_pool, "signature_from_assign", None)
-        if callable(signature_fn):
-            return signature_fn(assign)
-    except Exception:
-        pass
-    return f"assign:{','.join(map(str, assign))}"
+def _make_signature(op: str, i: int, site_id: int, candidate_id: int) -> str:
+    from src.problems.wafer_layout.candidate_pool import inverse_signature
+
+    return inverse_signature(i=i, site_id=site_id, candidate_id=candidate_id, op=op)
+
+
+def _signature_from_action(op: str, op_args: dict | None) -> str:
+    args = op_args or {}
+    i = int(args.get("i", -1)) if isinstance(args, dict) else -1
+    site_id = int(args.get("site_id", args.get("j", -1))) if isinstance(args, dict) else -1
+    candidate_id = int(args.get("candidate_id", -1)) if isinstance(args, dict) else -1
+    return _make_signature(op=op, i=i, site_id=site_id, candidate_id=candidate_id)
+
+
+def _finite(x: float) -> float:
+    if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+        raise ValueError(f"non-finite objective: {x}")
+    return float(x)
 
 
 class Env(BaseEnv):
@@ -124,6 +134,9 @@ class Env(BaseEnv):
         total_scalar = float(metrics.get("total_scalar", metrics.get("total", 0.0)))
         comm_norm = float(metrics.get("comm_norm", metrics.get("L_comm_norm", metrics.get("L_comm", 0.0))))
         therm_norm = float(metrics.get("therm_norm", metrics.get("L_therm_norm", metrics.get("L_therm", 0.0))))
+        total_scalar = _finite(total_scalar)
+        comm_norm = _finite(comm_norm)
+        therm_norm = _finite(therm_norm)
         return total_scalar, comm_norm, therm_norm
 
     def _init_evaluator(self):
@@ -320,7 +333,7 @@ class Env(BaseEnv):
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
                 "time_ms": 0,
-                "signature": _make_signature(assign_list),
+                "signature": _make_signature(op="init", i=-1, site_id=-1, candidate_id=-1),
                 "meta": dict(self._meta_base),
             }
             self._write_record(init_record)
@@ -413,7 +426,7 @@ class Env(BaseEnv):
         op_name = op_args_full.get("op", type(operator).__name__)
         op_args = dict(op_args_full)
         op_args.pop("op", None)
-        signature = _make_signature(list(self.current_solution.assign))
+        signature = _signature_from_action(op_name, op_args)
         eval_for_record = self.current_eval if accept else old_eval
         penalty = eval_for_record.get("penalty", {}) if isinstance(eval_for_record.get("penalty", {}), dict) else {}
         duplicate_penalty = float(penalty.get("duplicate", 0.0))
@@ -480,7 +493,7 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            signature = _make_signature(list(self.current_solution.assign))
+            signature = _make_signature(op="error", i=-1, site_id=-1, candidate_id=-1)
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             meta.update(self._meta_base)
             if isinstance(meta_full, dict):
@@ -519,7 +532,7 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            signature = _make_signature(list(self.current_solution.assign))
+            signature = _make_signature(op="invalid_operator", i=-1, site_id=-1, candidate_id=-1)
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             meta.update(self._meta_base)
             if isinstance(meta_full, dict):
