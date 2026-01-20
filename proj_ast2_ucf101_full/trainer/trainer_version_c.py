@@ -31,7 +31,8 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import ensure_trace_file, append_trace_event
+from utils.run_signature import build_run_signature
+from utils.trace_guard import ensure_trace_file, finalize_trace
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -89,36 +90,6 @@ def _get_iso_cfg_value(iso_cfg, key: str, default=None):
     if isinstance(iso_cfg, dict):
         return iso_cfg.get(key, default)
     return getattr(iso_cfg, key, default)
-
-
-def _cfg_get(obj, key: str, default=None):
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _build_run_signature(cfg) -> Dict[str, Any]:
-    detailed_cfg = _cfg_get(cfg, "detailed_place", None)
-    lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
-    policy_switch_cfg = _cfg_get(detailed_cfg, "policy_switch", _cfg_get(cfg, "policy_switch", {}))
-    action_families = _cfg_get(policy_switch_cfg, "action_families", None)
-    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
-    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
-    bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
-    policy_switch_enabled = bool(_cfg_get(policy_switch_cfg, "enabled", False))
-    cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
-    cache_enabled = bool(cache_size > 0)
-    cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
-    return {
-        "moves_enabled": moves_enabled,
-        "lookahead_k": lookahead_k,
-        "bandit_type": bandit_type,
-        "policy_switch": policy_switch_enabled,
-        "cache_enabled": cache_enabled,
-        "cache_key_schema_version": cache_key_schema_version,
-    }
 
 
 def build_dataloader(cfg):
@@ -560,12 +531,21 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
     trace_path = out_dir / "trace.jsonl"
+    cfg_hash = str(getattr(getattr(cfg, "train", None), "cfg_hash", "") or "")
+    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    sig = build_run_signature(
+        cfg,
+        cfg_hash=cfg_hash,
+        seed_global=base_seed,
+        seed_problem=base_seed,
+        mode="train_version_c",
+    )
     ensure_trace_file(
         str(trace_path),
         header={
             "run_name": str(getattr(getattr(cfg, "train", None), "exp_name", None) or out_dir.name),
-            "steps_planned": int(getattr(cfg, "steps", 0)) if hasattr(cfg, "steps") else 0,
-            "run_signature": _build_run_signature(cfg),
+            "steps_planned": int(getattr(cfg.training, "steps", getattr(cfg, "steps", 0)) or 0),
+            "signature": sig,
         },
     )
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
@@ -582,774 +562,769 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         f"no_double_scale.enabled={getattr(cfg.no_double_scale, 'enabled', None)}"
     )
 
-    loader = build_dataloader(cfg)
-    # ---- build val/test loader for stable_hw accuracy_guard ----
-    val_ds = UCF101Dataset(cfg, split="val")
-    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
-    generator = torch.Generator()
-    generator.manual_seed(base_seed)
+    status = "ok"
+    final_payload: Dict[str, Any] = {}
+    try:
+        loader = build_dataloader(cfg)
+        # ---- build val/test loader for stable_hw accuracy_guard ----
+        val_ds = UCF101Dataset(cfg, split="val")
+        generator = torch.Generator()
+        generator.manual_seed(base_seed)
 
-    def _seed_worker(worker_id: int):
-        s = base_seed + worker_id
-        seed_everything(s)
+        def _seed_worker(worker_id: int):
+            s = base_seed + worker_id
+            seed_everything(s)
 
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=int(getattr(cfg.data, "batch_size", cfg.train.batch_size)),
-        shuffle=False,
-        num_workers=int(getattr(cfg.data, "num_workers", 4)),
-        worker_init_fn=_seed_worker,
-        generator=generator,
-    )
-
-    max_eval_batches = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
-    data_iter = iter(loader)
-
-    mapping_only = bool(getattr(cfg.training, "mapping_only", False))
-    layout_only = bool(getattr(cfg.training, "layout_only", False))
-    twostage = bool(getattr(cfg.training, "twostage", False))
-    if mapping_only:
-        setattr(cfg.hw, "optimize_layout", False)
-        setattr(cfg.hw, "mapping_only", True)
-    if layout_only:
-        setattr(cfg.hw, "layout_only", True)
-
-    base_update_alpha = not layout_only
-    update_layout = bool(getattr(cfg.hw, "optimize_layout", True))
-
-    model_type = getattr(cfg.training, "model_type", "video")
-    num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
-    audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
-    if model_type == "video_audio":
-        model = VideoAudioAST(
-            img_size=cfg.model.img_size,
-            num_frames=num_frames,
-            num_classes=cfg.model.num_classes,
-            embed_dim=cfg.model.embed_dim,
-            depth=cfg.model.depth,
-            num_heads=cfg.model.num_heads,
-            mlp_ratio=cfg.model.mlp_ratio,
-            patch_size=cfg.model.patch_size,
-            audio_feat_dim=audio_feat_dim,
-            in_chans=cfg.model.in_chans,
-            drop_rate=cfg.model.drop_rate,
-            attn_drop=cfg.model.attn_drop,
-            drop_path_rate=cfg.model.drop_path_rate,
-            use_ast_prune=cfg.ast.use_ast_prune,
-            ast_cfg=cfg.ast,
-        ).to(device)
-    else:
-        model = VideoViT(
-            img_size=cfg.model.img_size,
-            num_frames=num_frames,
-            num_classes=cfg.model.num_classes,
-            embed_dim=cfg.model.embed_dim,
-            depth=cfg.model.depth,
-            num_heads=cfg.model.num_heads,
-            mlp_ratio=cfg.model.mlp_ratio,
-            patch_size=cfg.model.patch_size,
-            in_chans=cfg.model.in_chans,
-            drop_rate=cfg.model.drop_rate,
-            attn_drop=cfg.model.attn_drop,
-            drop_path_rate=cfg.model.drop_path_rate,
-            use_ast_prune=cfg.ast.use_ast_prune,
-            ast_cfg=cfg.ast,
-        ).to(device)
-
-    lr = _as_float(cfg.train.lr, "cfg.train.lr")
-    weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
-    optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler(device_type, enabled=cfg.train.amp)
-
-    library = ChipletLibrary(cfg.hw.gpu_yaml)
-    chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
-    optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
-
-    hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
-    mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
-    wafer_layout = WaferLayout(cfg.hw.num_slots, cfg.hw.wafer_radius_mm).to(device)
-    partitioner = PartitionPlanner(mapping_solver, wafer_layout, hw_proxy, cfg.partition)
-    optimizer_layout = torch.optim.Adam(wafer_layout.parameters(), lr=1e-3)
-
-    stable_hw_cfg = getattr(cfg, "stable_hw", None)
-    iso_cfg_global = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
-    layout_opt_steps = int(_get_iso_cfg_value(iso_cfg_global, "layout_opt_steps", 10) or 10)
-    layout_opt_lr = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_lr", 5e-2) or 5e-2)
-    layout_opt_grad_clip = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_grad_clip", 1.0) or 1.0)
-    layout_opt = None
-    if bool(_get_iso_cfg_value(iso_cfg_global, "optimize_layout", False)):
-        layout_opt = torch.optim.Adam([wafer_layout.pos], lr=layout_opt_lr)
-
-    global_step = 0
-    last_segments: List = []
-    last_mapping: List[int] = []
-    stable_hw_state: Dict[str, Any] = {}
-    stable_hw_state.setdefault(
-        "discrete_cache",
-        {
-            "mapping": None,
-            "layout": None,
-            "mapping_signature": None,
-            "layout_signature": None,
-            "hw_mats": {},
-        },
-    )
-    if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
-        init_locked_acc_ref(cfg, stable_hw_state)
-        init_hw_refs_from_baseline_stats(cfg, stable_hw_state)
-    (out_dir / "stable_hw_state.json").write_text(
-        json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    run_state: Dict[str, Any] = {"last_model_info": None}
-    last_acc1: Optional[float] = None
-    best_acc1: Optional[float] = None
-    last_hw_stats = None
-    ran_epochs = 0
-    early_stop_triggered = False
-
-    for outer in range(cfg.training.outer_epochs):
-        ran_epochs += 1
-        stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
-        if stable_hw_enabled:
-            legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
-            legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
-            if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_hw_state.get(
-                "_legacy_lambda_warned", False
-            ):
-                logger.info(
-                    "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
-                    "using stable_hw_state.lambda_hw_effective."
-                )
-                stable_hw_state["_legacy_lambda_warned"] = True
-            # ---- v5.4 StableHW schedule ----
-            stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
-
-            # ===== StableHW: v5.4 Acc-First Hard Gating (single source of truth) =====
-            metric_key = get_accuracy_metric_key(cfg)
-
-            # make sure acc_ref exists if LockedAccRef is enabled (may still be None until set)
-            if stable_hw_state.get("acc_ref") is None:
-                init_locked_acc_ref(cfg, stable_hw_state)
-
-            # guard based on *previous* validation metric (if any)
-            prev_val = stable_hw_state.get(
-                f"{metric_key}_last",
-                stable_hw_state.get("val_acc1_last", None),
-            )
-
-            # IMPORTANT: even when prev_val is None (first epoch), apply_accuracy_guard()
-            # will set guard_mode=WARMUP and allow_discrete_updates=True by contract.
-            stable_decision, allow_discrete = apply_accuracy_guard(
-                epoch=outer,
-                stable_hw_cfg=cfg,
-                stable_hw_state=stable_hw_state,
-                val_metric_or_none=float(prev_val) if prev_val is not None else None,
-                has_val_this_epoch=False,
-            )
-            stable_hw_state = stable_decision.state
-            stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
-            # ---- invariants (v5.4) ----
-            if stable_hw_state.get("acc_ref") is not None:
-                stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
-                assert float(stable_hw_state["_acc_ref_once"]) == float(
-                    stable_hw_state["acc_ref"]
-                ), "acc_ref drift detected"
-            # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
-            if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
-                last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
-                if last_applied != int(outer):
-                    _ctrl = getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "controller", None)
-                    if _ctrl is None:
-                        _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
-                    mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
-                    for pg in optimizer_model.param_groups:
-                        pg["lr"] = float(pg.get("lr", lr)) * mul
-                    stable_hw_state["_lr_restart_applied_epoch"] = int(outer)
-                stable_hw_state["request_lr_restart"] = False
-        # ---- v5.4 canonical ----
-        # stable_hw enabled: MUST use lambda_hw_effective written by schedule+guard
-        # stable_hw disabled: fallback to legacy cfg.hw.lambda_hw (for ablations/baselines)
-        if stable_hw_enabled:
-            lambda_hw_eff = float(stable_hw_state.get("lambda_hw_effective", 0.0))
-        else:
-            lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
-
-        # ---- use effective lambda ONLY (already gated) ----
-        stable_hw_state["lambda_hw_effective"] = float(lambda_hw_eff)
-        stable_hw_state.setdefault("lambda_hw_base", float(stable_hw_state.get("lambda_hw_base", 0.0)))
-        allow_discrete_updates = (
-            bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=int(getattr(cfg.data, "batch_size", cfg.train.batch_size)),
+            shuffle=False,
+            num_workers=int(getattr(cfg.data, "num_workers", 4)),
+            worker_init_fn=_seed_worker,
+            generator=generator,
         )
-        # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
-        #   - partition/mapping updates
-        #   - device mapping updates
-        #   - layout optimization updates (layout_opt.step/track_live/refine)
-        #   - any step that changes discrete assignment/signature
-        iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
-        map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)
-        lay_every = int(getattr(iso, "layout_update_every_epochs", 1) if iso else 1)
 
-        cache = stable_hw_state.setdefault(
+        max_eval_batches = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
+        data_iter = iter(loader)
+
+        mapping_only = bool(getattr(cfg.training, "mapping_only", False))
+        layout_only = bool(getattr(cfg.training, "layout_only", False))
+        twostage = bool(getattr(cfg.training, "twostage", False))
+        if mapping_only:
+            setattr(cfg.hw, "optimize_layout", False)
+            setattr(cfg.hw, "mapping_only", True)
+        if layout_only:
+            setattr(cfg.hw, "layout_only", True)
+
+        base_update_alpha = not layout_only
+        update_layout = bool(getattr(cfg.hw, "optimize_layout", True))
+
+        model_type = getattr(cfg.training, "model_type", "video")
+        num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
+        audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
+        if model_type == "video_audio":
+            model = VideoAudioAST(
+                img_size=cfg.model.img_size,
+                num_frames=num_frames,
+                num_classes=cfg.model.num_classes,
+                embed_dim=cfg.model.embed_dim,
+                depth=cfg.model.depth,
+                num_heads=cfg.model.num_heads,
+                mlp_ratio=cfg.model.mlp_ratio,
+                patch_size=cfg.model.patch_size,
+                audio_feat_dim=audio_feat_dim,
+                in_chans=cfg.model.in_chans,
+                drop_rate=cfg.model.drop_rate,
+                attn_drop=cfg.model.attn_drop,
+                drop_path_rate=cfg.model.drop_path_rate,
+                use_ast_prune=cfg.ast.use_ast_prune,
+                ast_cfg=cfg.ast,
+            ).to(device)
+        else:
+            model = VideoViT(
+                img_size=cfg.model.img_size,
+                num_frames=num_frames,
+                num_classes=cfg.model.num_classes,
+                embed_dim=cfg.model.embed_dim,
+                depth=cfg.model.depth,
+                num_heads=cfg.model.num_heads,
+                mlp_ratio=cfg.model.mlp_ratio,
+                patch_size=cfg.model.patch_size,
+                in_chans=cfg.model.in_chans,
+                drop_rate=cfg.model.drop_rate,
+                attn_drop=cfg.model.attn_drop,
+                drop_path_rate=cfg.model.drop_path_rate,
+                use_ast_prune=cfg.ast.use_ast_prune,
+                ast_cfg=cfg.ast,
+            ).to(device)
+
+        lr = _as_float(cfg.train.lr, "cfg.train.lr")
+        weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
+        optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        scaler = GradScaler(device_type, enabled=cfg.train.amp)
+    
+        library = ChipletLibrary(cfg.hw.gpu_yaml)
+        chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
+        optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
+    
+        hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
+        mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
+        wafer_layout = WaferLayout(cfg.hw.num_slots, cfg.hw.wafer_radius_mm).to(device)
+        partitioner = PartitionPlanner(mapping_solver, wafer_layout, hw_proxy, cfg.partition)
+        optimizer_layout = torch.optim.Adam(wafer_layout.parameters(), lr=1e-3)
+    
+        stable_hw_cfg = getattr(cfg, "stable_hw", None)
+        iso_cfg_global = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+        layout_opt_steps = int(_get_iso_cfg_value(iso_cfg_global, "layout_opt_steps", 10) or 10)
+        layout_opt_lr = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_lr", 5e-2) or 5e-2)
+        layout_opt_grad_clip = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_grad_clip", 1.0) or 1.0)
+        layout_opt = None
+        if bool(_get_iso_cfg_value(iso_cfg_global, "optimize_layout", False)):
+            layout_opt = torch.optim.Adam([wafer_layout.pos], lr=layout_opt_lr)
+        
+        global_step = 0
+        last_segments: List = []
+        last_mapping: List[int] = []
+        stable_hw_state: Dict[str, Any] = {}
+        stable_hw_state["_trace_path"] = str(trace_path)
+        stable_hw_state.setdefault(
             "discrete_cache",
-            {"mapping": None, "layout": None, "mapping_signature": None, "layout_signature": None, "hw_mats": {}},
+            {
+                "mapping": None,
+                "layout": None,
+                "mapping_signature": None,
+                "layout_signature": None,
+                "hw_mats": {},
+            },
         )
-        stable_hw_state["discrete_frozen_init_mapping"] = False
-
-        # ---- P0 guard: never allow discrete gate to cause empty-cache crash ----
-        if (not allow_discrete_updates) and (cache.get("mapping") is None or cache.get("layout") is None):
-            logger.info(
-                "[StableHW] Discrete gate is closed but cache is empty; initializing mapping/layout once."
-            )
-            allow_discrete_updates = True
-            stable_hw_state["allow_discrete_updates"] = True
-            stable_hw_state["discrete_frozen_init_mapping"] = True
-
-        allow_discrete = allow_discrete_updates
-        update_alpha = base_update_alpha and allow_discrete
-
-        mapping_updated = False
-        layout_updated = False
-
-        need_update_mapping = ((outer % map_every) == 0) or (cache["mapping"] is None)
-        need_update_layout = ((outer % lay_every) == 0) or (cache["layout"] is None)
-
-        if stable_hw_enabled:
-            if stable_hw_state.get("lambda_hw_effective", 0.0) <= 0.0:
-                need_update_mapping = need_update_mapping and (cache["mapping"] is None)
-                need_update_layout = need_update_layout and (cache["layout"] is None)
-
-            if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
-                print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
-                need_update_mapping = False
-                need_update_layout = False
-
-        if (not allow_discrete_updates) and cache["mapping"] is None:
-            stable_hw_state["discrete_frozen_init_mapping"] = True
-
-        if need_update_mapping:
-            assert allow_discrete_updates, (
-                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
-            )
-            mapping_res = _solve_mapping_for_cache(
-                model=model,
-                chiplet_slots=chiplet_slots,
-                mapping_solver=mapping_solver,
-                hw_proxy=hw_proxy,
-                wafer_layout=wafer_layout,
-                partitioner=partitioner,
-                hw_cfg=cfg.hw,
-                model_info=run_state.get("last_model_info"),
-            )
-            cache["mapping"] = mapping_res
-            cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
-            mapping_updated = True
-        else:
-            mapping_res = cache["mapping"]
-            mapping_updated = False
-
-        if mapping_res is None:
-            raise RuntimeError("Mapping cache is empty after mapping step (mapping_res is None).")
-
-        if need_update_layout:
-            assert allow_discrete_updates, (
-                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
-            )
-            layout_res = _solve_layout_for_cache(
-                chiplet_slots=chiplet_slots,
-                wafer_layout=wafer_layout,
-                hw_cfg=cfg.hw,
-                mapping_result=mapping_res,
-            )
-            cache["layout"] = layout_res
-            cache["layout_signature"] = layout_res.get("signature")
-            layout_updated = True
-        else:
-            layout_res = cache["layout"]
-            layout_updated = False
-
-        if layout_res is None:
-            raise RuntimeError("Layout cache is empty after layout step (layout_res is None).")
-        tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
-        chiplet_slots.set_tau(tau)
-        last_hw_stats = None
-        sum_latency = 0.0
-        sum_energy = 0.0
-        sum_mem = 0.0
-        sum_comm = 0.0
-        hw_stats_count = 0
-        for step in range(cfg.training.inner_steps_ast):
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(loader)
-                batch = next(data_iter)
-            x = batch["video"].to(device)
-            y = batch["label"].to(device)
-            optimizer_model.zero_grad()
-            optimizer_alpha.zero_grad()
-            optimizer_layout.zero_grad()
-            with autocast(device_type, enabled=cfg.train.amp):
-                if model_type == "video_audio":
-                    logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
-                else:
-                    logits, info = model(x, return_intermediate=True)
-                run_state["last_model_info"] = info
-                L_task = F.cross_entropy(logits, y)
-                model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
-                slot_out = chiplet_slots(hard=False)
-                alpha = slot_out["alpha"]
-                eff_specs = slot_out["eff_specs"]
-
-                segments_cached = mapping_res.get("segments", []) if mapping_res else []
-                mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
-
-                track_live = False
-                use_cached_mapping = True
-                use_cached_layout = True
-                iso_cfg = None
-                if stable_hw_cfg:
-                    iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None)
-                    if iso_cfg is not None:
-                        track_live = bool(getattr(iso_cfg, "track_live_segments", False))
-                        use_cached_mapping = bool(getattr(iso_cfg, "use_cached_mapping_for_inner_steps", True))
-                        use_cached_layout = bool(getattr(iso_cfg, "use_cached_layout_for_inner_steps", True))
-                if not allow_discrete:
-                    track_live = False
-                    use_cached_mapping = True
-                    use_cached_layout = True
-
-                segments_for_hw = segments_cached
-                mapping_for_hw = mapping_cached
-                step_mapping_updated = mapping_updated
-                step_layout_updated = layout_updated
-                if allow_discrete_updates and track_live and iso_cfg is not None:
-                    track_every = int(getattr(iso_cfg, "track_live_every_steps", 1) or 1)
-                    if (step % track_every) == 0:
-                        if not use_cached_mapping:
-                            assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
-                                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
-                            )
-                            part_res = partitioner.plan(
-                                model,
-                                eff_specs,
-                                alpha=chiplet_slots()["alpha"],
-                                model_info=run_state.get("last_model_info"),
-                                use_fine_split=bool(getattr(cfg.hw, "use_fine_split", True)),
-                            )
-                            segments_for_hw = part_res["segments"]
-
-                            mapping_res_live = mapping_solver.solve_mapping(
-                                segments_for_hw,
-                                eff_specs,
-                                hw_proxy,
-                                layout_positions=wafer_layout.current_pos_continuous(),
-                                strategy=str(getattr(cfg.hw, "mapping_strategy", "greedy_local")),
-                                distance_scale_ms=float(getattr(cfg.hw, "distance_scale_ms", 0.0) or 0.0),
-                            )
-                            mapping_for_hw = mapping_res_live.get("mapping", [])
-                            stable_hw_state["discrete_cache"]["mapping_signature"] = str(
-                                stable_hash(
-                                    {
-                                        "mapping": [int(x) for x in mapping_for_hw],
-                                        "segments": [
-                                            {
-                                                "k": int(i),
-                                                "flops": float(getattr(seg, "flops", 0.0)),
-                                                "bytes": float(getattr(seg, "bytes", 0.0)),
-                                                "traffic": float(getattr(seg, "traffic_out_bytes", 0.0)),
-                                                "mem": float(getattr(seg, "mem_mb", 0.0)),
-                                            }
-                                            for i, seg in enumerate(segments_for_hw)
-                                        ],
-                                    }
-                                )
-                            )
-                            stable_hw_state["discrete_cache"]["layout_signature"] = str(
-                                getattr(wafer_layout, "signature", lambda: "unknown")()
-                            )
-                            last_segments = segments_for_hw
-                            last_mapping = mapping_for_hw
-                            step_mapping_updated = True
-                        if not use_cached_layout:
-                            assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
-                                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
-                            )
-                            layout_res = _solve_layout_for_cache(
-                                chiplet_slots=chiplet_slots,
-                                wafer_layout=wafer_layout,
-                                hw_cfg=cfg.hw,
-                                mapping_result={
-                                    "segments": segments_for_hw,
-                                    "mapping": mapping_for_hw,
-                                },
-                            )
-                            cache["layout"] = layout_res
-                            cache["layout_signature"] = layout_res.get("signature")
-                            step_layout_updated = True
-
-                if (
-                    allow_discrete_updates
-                    and layout_opt is not None
-                    and bool(_get_iso_cfg_value(iso_cfg, "optimize_layout", False))
-                ):
-                    if step_layout_updated and segments_for_hw and mapping_for_hw:
-                        prev_requires = {}
-                        for n, p in model.named_parameters():
-                            prev_requires[n] = p.requires_grad
-                            p.requires_grad_(False)
-
-                        wafer_layout.train()
-                        for _k in range(layout_opt_steps):
-                            layout_opt.zero_grad(set_to_none=True)
-                            out = wafer_layout.forward(
-                                mapping=mapping_for_hw,
-                                segments=segments_for_hw,
-                                eff_specs=eff_specs,
-                                lambda_boundary=cfg.hw.lambda_boundary,
-                                lambda_overlap=cfg.hw.lambda_overlap,
-                                lambda_comm=cfg.hw.lambda_comm_extra,
-                                lambda_thermal=cfg.hw.lambda_thermal,
-                                distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
-                            )
-                            loss_layout = out[0] if isinstance(out, (tuple, list)) else out["total"]
-                            loss_layout.backward()
-                            torch.nn.utils.clip_grad_norm_([wafer_layout.pos], max_norm=layout_opt_grad_clip)
-                            layout_opt.step()
-
-                        for n, p in model.named_parameters():
-                            p.requires_grad_(prev_requires[n])
-
-                        layout_positions = wafer_layout.current_pos_continuous()
-                        pos_round = [[round(float(x), 6) for x in row] for row in layout_positions.detach().cpu().tolist()]
-                        cache["layout_signature"] = stable_hash({"pos": pos_round})
-                        cache["layout"] = {"signature": cache["layout_signature"]}
-
-                layout_positions = wafer_layout.current_pos_continuous()
-
-                segments_sig = None
-                try:
-                    segments_sig = stable_hash(
-                        [getattr(s, "signature", None) or repr(s) for s in (segments_for_hw or [])]
-                    )
-                except Exception:
-                    segments_sig = None
-
-                mapping_sig_for_hw = None
-                if (segments_for_hw is segments_cached) or (segments_for_hw == segments_cached):
-                    mapping_sig_for_hw = (
-                        (mapping_res.get("mapping_sig") or mapping_res.get("signature")) if mapping_res else None
-                    )
-                else:
-                    mapping_sig_for_hw = None
-
-                L_hw, hw_stats = compute_hw_loss(
-                    cfg,
-                    hw_proxy,
-                    model_info=model_info,
-                    stable_hw_cfg=stable_hw_cfg,
-                    stable_hw_state=stable_hw_state,
-                    segments=segments_for_hw,
-                    mapping=mapping_for_hw,
-                    mapping_sig=mapping_sig_for_hw,
-                    segments_sig=segments_sig,
-                    eff_specs=eff_specs,
-                    layout_positions=layout_positions,
-                    mapping_solver=mapping_solver,
-                    wafer_layout=wafer_layout,
-                    alpha=alpha,
-                )
-                last_hw_stats = hw_stats
-                sum_latency += float(hw_stats.get("latency_ms", 0.0))
-                sum_energy += float(hw_stats.get("energy_mj", 0.0))
-                sum_mem += float(hw_stats.get("mem_mb", 0.0))
-                sum_comm += float(hw_stats.get("comm_ms", 0.0))
-                hw_stats_count += 1
-                hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
-                loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
-                assert "hw_loss_weighted" not in (hw_stats or {}), (
-                    "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
-                )
-            # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
-            assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
-            assert float(lambda_hw_eff) >= 0.0
-            scaler.scale(loss).backward()
-            scaler.step(optimizer_model)
-            if not twostage and update_alpha:
-                scaler.step(optimizer_alpha)
-            if not twostage and update_layout and allow_discrete:
-                scaler.step(optimizer_layout)
-            scaler.update()
-            if step % 10 == 0:
-                acc1 = (logits.argmax(dim=1) == y).float().mean()
-                last_acc1 = float(acc1.item())
-                best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
-                if stable_hw_enabled:
-                    metric = get_accuracy_metric_key(stable_hw_cfg)
-                    if metric == "train_ema":
-                        update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
-                stats = {
-                    "outer": outer,
-                    "step": step,
-                    "loss": loss.item(),
-                    "acc1": acc1.item(),
-                    "lambda_hw": float(lambda_hw_eff),
-                    "allow_discrete_updates": bool(allow_discrete),
-                    "mapping_updated": step_mapping_updated,
-                    "layout_updated": step_layout_updated,
-                    "mapping_cache_hit": not step_mapping_updated,
-                    "layout_cache_hit": not step_layout_updated,
-                    "mapping_signature": cache["mapping_signature"],
-                    "layout_signature": cache["layout_signature"],
-                }
-                stats.update(hw_stats)
-                log_stats(logger, stats)
-                with log_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "step": int(global_step),
-                        "outer": int(outer),
-                        "loss": float(loss.item()),
-                        "lat_ms": float(hw_stats.get("latency_ms", 0.0)),
-                        "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
-                        "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
-                        "lambda_hw": float(lambda_hw_eff),
-                        "stable_hw": stable_hw_log_fields(stable_hw_state),
-                        "mapping_updated": step_mapping_updated,
-                        "layout_updated": step_layout_updated,
-                        "mapping_cache_hit": (not step_mapping_updated),
-                        "layout_cache_hit": (not step_layout_updated),
-                        "mapping_signature": cache["mapping_signature"],
-                        "layout_signature": cache["layout_signature"],
-                    }) + "\n")
-            global_step += 1
-
-        # Step B: alpha refinement
-        if update_alpha:
-            for _ in range(cfg.training.inner_steps_alpha):
-                model_info = {}
-                last_info = run_state.get("last_model_info")
-                if isinstance(last_info, dict):
-                    model_info = last_info.get("model_info", {})
-                slot_out = chiplet_slots(hard=False)
-                alpha = slot_out["alpha"]
-                eff_specs = slot_out["eff_specs"]
-                layout_positions = wafer_layout.current_pos_continuous()
-
-                segments_cached = mapping_res.get("segments", []) if mapping_res else []
-                mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
-
-                segments_sig = None
-                try:
-                    segments_sig = stable_hash(
-                        [getattr(s, "signature", None) or repr(s) for s in (segments_cached or [])]
-                    )
-                except Exception:
-                    segments_sig = None
-
-                L_hw, _ = compute_hw_loss(
-                    cfg,
-                    hw_proxy,
-                    model_info=model_info,
-                    stable_hw_cfg=stable_hw_cfg,
-                    stable_hw_state=stable_hw_state,
-                    segments=segments_cached,
-                    mapping=mapping_cached,
-                    mapping_sig=(mapping_res.get("mapping_sig") or mapping_res.get("signature")) if mapping_res else None,
-                    segments_sig=segments_sig,
-                    eff_specs=eff_specs,
-                    layout_positions=layout_positions,
-                    mapping_solver=mapping_solver,
-                    wafer_layout=wafer_layout,
-                    alpha=alpha,
-                )
-
-                optimizer_alpha.zero_grad()
-                (loss_alpha := (float(lambda_hw_eff) * L_hw)).backward()
-                optimizer_alpha.step()
-
-        # Step D: layout refinement
-        if update_layout and allow_discrete:
-            for _ in range(cfg.training.inner_steps_layout):
-                slot_out = chiplet_slots(hard=False)
-                eff_specs = slot_out["eff_specs"]
-                segments = mapping_res.get("segments", []) if mapping_res else []
-                mapping = mapping_res.get("mapping", []) if mapping_res else []
-                if not segments or not mapping:
-                    part_res = partitioner.plan(
-                        model,
-                        eff_specs,
-                        alpha=slot_out["alpha"],
-                        model_info=run_state.get("last_model_info"),
-                        use_fine_split=getattr(cfg.hw, "use_fine_split", True),
-                    )
-                    segments = part_res["segments"]
-                    mapping = part_res["mapping"]
-                L_layout, layout_stats = wafer_layout(
-                    mapping,
-                    segments,
-                    eff_specs,
-                    lambda_boundary=cfg.hw.lambda_boundary,
-                    lambda_overlap=cfg.hw.lambda_overlap,
-                    lambda_comm=cfg.hw.lambda_comm_extra,
-                    lambda_thermal=cfg.hw.lambda_thermal,
-                    distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 1.0) or 1.0),
-                )
-                optimizer_layout.zero_grad()
-                L_layout.backward()
-                optimizer_layout.step()
-
-        val_acc1 = eval_acc1(
-            model,
-            val_loader,
-            device,
-            model_type=str(getattr(cfg.training, "model_type", "video")),
-            max_batches=max_eval_batches,
-        )
-        if stable_hw_enabled:
-            stable_decision, _ = apply_accuracy_guard(
-                epoch=outer,
-                stable_hw_cfg=cfg,
-                stable_hw_state=stable_hw_state,
-                val_metric_or_none=float(val_acc1) if val_acc1 is not None else None,
-                has_val_this_epoch=True,
-                train_ema_or_none=float(stable_hw_state.get("train_acc1_ema", 0.0))
-                if stable_hw_state.get("train_acc1_ema") is not None
-                else None,
-            )
-            stable_hw_state = stable_decision.state
-            # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
-            if bool(stable_decision.stop_training):
-                val_acc1_str = f"{val_acc1:.6f}" if val_acc1 is not None else "None"
-                logger.warning(
-                    f"[StableHW] stop_on_violation triggered at epoch={outer}: "
-                    f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
-                    f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
-                )
-                early_stop_triggered = True
-                break
-            # ---- invariants (v5.4) ----
-            if stable_hw_state.get("acc_ref") is not None:
-                stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
-                assert float(stable_hw_state["_acc_ref_once"]) == float(
-                    stable_hw_state["acc_ref"]
-                ), "acc_ref drift detected"
-
-        if stable_hw_enabled:
-            # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
-            if hasattr(cfg, "stable_hw") and hasattr(cfg.stable_hw, "no_drift") and bool(
-                getattr(cfg.stable_hw.no_drift, "enabled", False)
-            ):
-                pass  # NoDrift: skip any ref update
-            else:
-                update_hw_refs_from_stats(stable_hw_state, last_hw_stats or {}, cfg)
-        guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
-        allow_discrete = (
-            bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
-        )
-        print(
-            f"[StableHW] epoch={outer} mode={guard_mode} "
-            f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
-        )
-        logger.info(
-            f"[StableHW][epoch={outer}] "
-            f"lambda_base={stable_hw_state.get('lambda_hw_base')}, "
-            f"lambda_eff={stable_hw_state.get('lambda_hw_effective')}, "
-            f"acc_ref={stable_hw_state.get('acc_ref')}, "
-            f"acc_floor={stable_hw_state.get('acc_floor')}, "
-            f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
-            f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
-        )
-        # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
-        if val_acc1 is None:
-            # keep previous last_acc1 if exists; otherwise fall back to stable_hw_state history or 0.0
-            prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
-            last_acc1 = float(prev_last) if prev_last is not None else 0.0
-        else:
-            last_acc1 = float(val_acc1)
-
-        if best_acc1 is None:
-            best_acc1 = float(last_acc1)
-        else:
-            best_acc1 = max(float(best_acc1), float(last_acc1))
-
-        stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
-
-        no_drift_cfg = getattr(cfg, "no_drift", None)
-        if no_drift_cfg is None:
-            no_drift_cfg = getattr(stable_hw_cfg, "no_drift", None)
-        stable_hw_state["_contract_no_drift"] = bool(getattr(no_drift_cfg, "enabled", True)) if no_drift_cfg else True
-        norm = getattr(stable_hw_cfg, "normalize", None)
-        stable_hw_state["_contract_ref_update"] = (
-            "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen")
-        )
-
-        stable_state_path = log_path.parent / "stable_hw_state.json"
-        stable_state_path.write_text(
+        if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
+            init_locked_acc_ref(cfg, stable_hw_state)
+            init_hw_refs_from_baseline_stats(cfg, stable_hw_state)
+        (out_dir / "stable_hw_state.json").write_text(
             json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-
-    # write run_manifest.json (auditable LockedAccRef)
-    try:
-        from utils.run_manifest import write_run_manifest
-
-        write_run_manifest(
-            out_dir=str(out_dir),
-            cfg_path=str(getattr(cfg.train, "cfg_path", "")),
-            cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
-            seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
-            stable_hw_state=stable_hw_state,
-            extra={
-                "stable_hw_refs_used": {
-                    "acc_ref": stable_hw_state.get("acc_ref"),
-                    "acc_ref_source": stable_hw_state.get("acc_ref_source"),
-                    "ref_T": stable_hw_state.get("ref_T"),
-                    "ref_E": stable_hw_state.get("ref_E"),
-                    "ref_M": stable_hw_state.get("ref_M"),
-                    "ref_C": stable_hw_state.get("ref_C"),
-                    "hw_ref_source": stable_hw_state.get("hw_ref_source"),
+        run_state: Dict[str, Any] = {"last_model_info": None}
+        last_acc1: Optional[float] = None
+        best_acc1: Optional[float] = None
+        last_hw_stats = None
+        ran_epochs = 0
+        early_stop_triggered = False
+    
+        for outer in range(cfg.training.outer_epochs):
+            ran_epochs += 1
+            stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+            if stable_hw_enabled:
+                legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
+                legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
+                if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_hw_state.get(
+                    "_legacy_lambda_warned", False
+                ):
+                    logger.info(
+                        "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
+                        "using stable_hw_state.lambda_hw_effective."
+                    )
+                    stable_hw_state["_legacy_lambda_warned"] = True
+                # ---- v5.4 StableHW schedule ----
+                stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
+    
+                # ===== StableHW: v5.4 Acc-First Hard Gating (single source of truth) =====
+                metric_key = get_accuracy_metric_key(cfg)
+    
+                # make sure acc_ref exists if LockedAccRef is enabled (may still be None until set)
+                if stable_hw_state.get("acc_ref") is None:
+                    init_locked_acc_ref(cfg, stable_hw_state)
+    
+                # guard based on *previous* validation metric (if any)
+                prev_val = stable_hw_state.get(
+                    f"{metric_key}_last",
+                    stable_hw_state.get("val_acc1_last", None),
+                )
+    
+                # IMPORTANT: even when prev_val is None (first epoch), apply_accuracy_guard()
+                # will set guard_mode=WARMUP and allow_discrete_updates=True by contract.
+                stable_decision, allow_discrete = apply_accuracy_guard(
+                    epoch=outer,
+                    stable_hw_cfg=cfg,
+                    stable_hw_state=stable_hw_state,
+                    val_metric_or_none=float(prev_val) if prev_val is not None else None,
+                    has_val_this_epoch=False,
+                )
+                stable_hw_state = stable_decision.state
+                stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
+                # ---- invariants (v5.4) ----
+                if stable_hw_state.get("acc_ref") is not None:
+                    stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
+                    assert float(stable_hw_state["_acc_ref_once"]) == float(
+                        stable_hw_state["acc_ref"]
+                    ), "acc_ref drift detected"
+                # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
+                if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
+                    last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
+                    if last_applied != int(outer):
+                        _ctrl = getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "controller", None)
+                        if _ctrl is None:
+                            _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
+                        mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
+                        for pg in optimizer_model.param_groups:
+                            pg["lr"] = float(pg.get("lr", lr)) * mul
+                        stable_hw_state["_lr_restart_applied_epoch"] = int(outer)
+                    stable_hw_state["request_lr_restart"] = False
+            # ---- v5.4 canonical ----
+            # stable_hw enabled: MUST use lambda_hw_effective written by schedule+guard
+            # stable_hw disabled: fallback to legacy cfg.hw.lambda_hw (for ablations/baselines)
+            if stable_hw_enabled:
+                lambda_hw_eff = float(stable_hw_state.get("lambda_hw_effective", 0.0))
+            else:
+                lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
+    
+            # ---- use effective lambda ONLY (already gated) ----
+            stable_hw_state["lambda_hw_effective"] = float(lambda_hw_eff)
+            stable_hw_state.setdefault("lambda_hw_base", float(stable_hw_state.get("lambda_hw_base", 0.0)))
+            allow_discrete_updates = (
+                bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+            )
+            # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
+            #   - partition/mapping updates
+            #   - device mapping updates
+            #   - layout optimization updates (layout_opt.step/track_live/refine)
+            #   - any step that changes discrete assignment/signature
+            iso = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+            map_every = int(getattr(iso, "mapping_update_every_epochs", 1) if iso else 1)
+            lay_every = int(getattr(iso, "layout_update_every_epochs", 1) if iso else 1)
+    
+            cache = stable_hw_state.setdefault(
+                "discrete_cache",
+                {"mapping": None, "layout": None, "mapping_signature": None, "layout_signature": None, "hw_mats": {}},
+            )
+            stable_hw_state["discrete_frozen_init_mapping"] = False
+    
+            # ---- P0 guard: never allow discrete gate to cause empty-cache crash ----
+            if (not allow_discrete_updates) and (cache.get("mapping") is None or cache.get("layout") is None):
+                logger.info(
+                    "[StableHW] Discrete gate is closed but cache is empty; initializing mapping/layout once."
+                )
+                allow_discrete_updates = True
+                stable_hw_state["allow_discrete_updates"] = True
+                stable_hw_state["discrete_frozen_init_mapping"] = True
+    
+            allow_discrete = allow_discrete_updates
+            update_alpha = base_update_alpha and allow_discrete
+    
+            mapping_updated = False
+            layout_updated = False
+    
+            need_update_mapping = ((outer % map_every) == 0) or (cache["mapping"] is None)
+            need_update_layout = ((outer % lay_every) == 0) or (cache["layout"] is None)
+    
+            if stable_hw_enabled:
+                if stable_hw_state.get("lambda_hw_effective", 0.0) <= 0.0:
+                    need_update_mapping = need_update_mapping and (cache["mapping"] is None)
+                    need_update_layout = need_update_layout and (cache["layout"] is None)
+    
+                if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
+                    print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
+                    need_update_mapping = False
+                    need_update_layout = False
+    
+            if (not allow_discrete_updates) and cache["mapping"] is None:
+                stable_hw_state["discrete_frozen_init_mapping"] = True
+    
+            if need_update_mapping:
+                assert allow_discrete_updates, (
+                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                )
+                mapping_res = _solve_mapping_for_cache(
+                    model=model,
+                    chiplet_slots=chiplet_slots,
+                    mapping_solver=mapping_solver,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
+                    partitioner=partitioner,
+                    hw_cfg=cfg.hw,
+                    model_info=run_state.get("last_model_info"),
+                )
+                cache["mapping"] = mapping_res
+                cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
+                mapping_updated = True
+            else:
+                mapping_res = cache["mapping"]
+                mapping_updated = False
+    
+            if mapping_res is None:
+                raise RuntimeError("Mapping cache is empty after mapping step (mapping_res is None).")
+    
+            if need_update_layout:
+                assert allow_discrete_updates, (
+                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                )
+                layout_res = _solve_layout_for_cache(
+                    chiplet_slots=chiplet_slots,
+                    wafer_layout=wafer_layout,
+                    hw_cfg=cfg.hw,
+                    mapping_result=mapping_res,
+                )
+                cache["layout"] = layout_res
+                cache["layout_signature"] = layout_res.get("signature")
+                layout_updated = True
+            else:
+                layout_res = cache["layout"]
+                layout_updated = False
+    
+            if layout_res is None:
+                raise RuntimeError("Layout cache is empty after layout step (layout_res is None).")
+            tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
+            chiplet_slots.set_tau(tau)
+            last_hw_stats = None
+            sum_latency = 0.0
+            sum_energy = 0.0
+            sum_mem = 0.0
+            sum_comm = 0.0
+            hw_stats_count = 0
+            for step in range(cfg.training.inner_steps_ast):
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(loader)
+                    batch = next(data_iter)
+                x = batch["video"].to(device)
+                y = batch["label"].to(device)
+                optimizer_model.zero_grad()
+                optimizer_alpha.zero_grad()
+                optimizer_layout.zero_grad()
+                with autocast(device_type, enabled=cfg.train.amp):
+                    if model_type == "video_audio":
+                        logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
+                    else:
+                        logits, info = model(x, return_intermediate=True)
+                    run_state["last_model_info"] = info
+                    L_task = F.cross_entropy(logits, y)
+                    model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                    slot_out = chiplet_slots(hard=False)
+                    alpha = slot_out["alpha"]
+                    eff_specs = slot_out["eff_specs"]
+    
+                    segments_cached = mapping_res.get("segments", []) if mapping_res else []
+                    mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
+    
+                    track_live = False
+                    use_cached_mapping = True
+                    use_cached_layout = True
+                    iso_cfg = None
+                    if stable_hw_cfg:
+                        iso_cfg = getattr(stable_hw_cfg, "discrete_isolation", None)
+                        if iso_cfg is not None:
+                            track_live = bool(getattr(iso_cfg, "track_live_segments", False))
+                            use_cached_mapping = bool(getattr(iso_cfg, "use_cached_mapping_for_inner_steps", True))
+                            use_cached_layout = bool(getattr(iso_cfg, "use_cached_layout_for_inner_steps", True))
+                    if not allow_discrete:
+                        track_live = False
+                        use_cached_mapping = True
+                        use_cached_layout = True
+    
+                    segments_for_hw = segments_cached
+                    mapping_for_hw = mapping_cached
+                    step_mapping_updated = mapping_updated
+                    step_layout_updated = layout_updated
+                    if allow_discrete_updates and track_live and iso_cfg is not None:
+                        track_every = int(getattr(iso_cfg, "track_live_every_steps", 1) or 1)
+                        if (step % track_every) == 0:
+                            if not use_cached_mapping:
+                                assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
+                                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                                )
+                                part_res = partitioner.plan(
+                                    model,
+                                    eff_specs,
+                                    alpha=chiplet_slots()["alpha"],
+                                    model_info=run_state.get("last_model_info"),
+                                    use_fine_split=bool(getattr(cfg.hw, "use_fine_split", True)),
+                                )
+                                segments_for_hw = part_res["segments"]
+    
+                                mapping_res_live = mapping_solver.solve_mapping(
+                                    segments_for_hw,
+                                    eff_specs,
+                                    hw_proxy,
+                                    layout_positions=wafer_layout.current_pos_continuous(),
+                                    strategy=str(getattr(cfg.hw, "mapping_strategy", "greedy_local")),
+                                    distance_scale_ms=float(getattr(cfg.hw, "distance_scale_ms", 0.0) or 0.0),
+                                )
+                                mapping_for_hw = mapping_res_live.get("mapping", [])
+                                stable_hw_state["discrete_cache"]["mapping_signature"] = str(
+                                    stable_hash(
+                                        {
+                                            "mapping": [int(x) for x in mapping_for_hw],
+                                            "segments": [
+                                                {
+                                                    "k": int(i),
+                                                    "flops": float(getattr(seg, "flops", 0.0)),
+                                                    "bytes": float(getattr(seg, "bytes", 0.0)),
+                                                    "traffic": float(getattr(seg, "traffic_out_bytes", 0.0)),
+                                                    "mem": float(getattr(seg, "mem_mb", 0.0)),
+                                                }
+                                                for i, seg in enumerate(segments_for_hw)
+                                            ],
+                                        }
+                                    )
+                                )
+                                stable_hw_state["discrete_cache"]["layout_signature"] = str(
+                                    getattr(wafer_layout, "signature", lambda: "unknown")()
+                                )
+                                last_segments = segments_for_hw
+                                last_mapping = mapping_for_hw
+                                step_mapping_updated = True
+                            if not use_cached_layout:
+                                assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
+                                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                                )
+                                layout_res = _solve_layout_for_cache(
+                                    chiplet_slots=chiplet_slots,
+                                    wafer_layout=wafer_layout,
+                                    hw_cfg=cfg.hw,
+                                    mapping_result={
+                                        "segments": segments_for_hw,
+                                        "mapping": mapping_for_hw,
+                                    },
+                                )
+                                cache["layout"] = layout_res
+                                cache["layout_signature"] = layout_res.get("signature")
+                                step_layout_updated = True
+    
+                    if (
+                        allow_discrete_updates
+                        and layout_opt is not None
+                        and bool(_get_iso_cfg_value(iso_cfg, "optimize_layout", False))
+                    ):
+                        if step_layout_updated and segments_for_hw and mapping_for_hw:
+                            prev_requires = {}
+                            for n, p in model.named_parameters():
+                                prev_requires[n] = p.requires_grad
+                                p.requires_grad_(False)
+    
+                            wafer_layout.train()
+                            for _k in range(layout_opt_steps):
+                                layout_opt.zero_grad(set_to_none=True)
+                                out = wafer_layout.forward(
+                                    mapping=mapping_for_hw,
+                                    segments=segments_for_hw,
+                                    eff_specs=eff_specs,
+                                    lambda_boundary=cfg.hw.lambda_boundary,
+                                    lambda_overlap=cfg.hw.lambda_overlap,
+                                    lambda_comm=cfg.hw.lambda_comm_extra,
+                                    lambda_thermal=cfg.hw.lambda_thermal,
+                                    distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 0.0)),
+                                )
+                                loss_layout = out[0] if isinstance(out, (tuple, list)) else out["total"]
+                                loss_layout.backward()
+                                torch.nn.utils.clip_grad_norm_([wafer_layout.pos], max_norm=layout_opt_grad_clip)
+                                layout_opt.step()
+    
+                            for n, p in model.named_parameters():
+                                p.requires_grad_(prev_requires[n])
+    
+                            layout_positions = wafer_layout.current_pos_continuous()
+                            pos_round = [[round(float(x), 6) for x in row] for row in layout_positions.detach().cpu().tolist()]
+                            cache["layout_signature"] = stable_hash({"pos": pos_round})
+                            cache["layout"] = {"signature": cache["layout_signature"]}
+    
+                    layout_positions = wafer_layout.current_pos_continuous()
+    
+                    segments_sig = None
+                    try:
+                        segments_sig = stable_hash(
+                            [getattr(s, "signature", None) or repr(s) for s in (segments_for_hw or [])]
+                        )
+                    except Exception:
+                        segments_sig = None
+    
+                    mapping_sig_for_hw = None
+                    if (segments_for_hw is segments_cached) or (segments_for_hw == segments_cached):
+                        mapping_sig_for_hw = (
+                            (mapping_res.get("mapping_sig") or mapping_res.get("signature")) if mapping_res else None
+                        )
+                    else:
+                        mapping_sig_for_hw = None
+    
+                    L_hw, hw_stats = compute_hw_loss(
+                        cfg,
+                        hw_proxy,
+                        model_info=model_info,
+                        stable_hw_cfg=stable_hw_cfg,
+                        stable_hw_state=stable_hw_state,
+                        segments=segments_for_hw,
+                        mapping=mapping_for_hw,
+                        mapping_sig=mapping_sig_for_hw,
+                        segments_sig=segments_sig,
+                        eff_specs=eff_specs,
+                        layout_positions=layout_positions,
+                        mapping_solver=mapping_solver,
+                        wafer_layout=wafer_layout,
+                        alpha=alpha,
+                    )
+                    last_hw_stats = hw_stats
+                    sum_latency += float(hw_stats.get("latency_ms", 0.0))
+                    sum_energy += float(hw_stats.get("energy_mj", 0.0))
+                    sum_mem += float(hw_stats.get("mem_mb", 0.0))
+                    sum_comm += float(hw_stats.get("comm_ms", 0.0))
+                    hw_stats_count += 1
+                    hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
+                    loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
+                    assert "hw_loss_weighted" not in (hw_stats or {}), (
+                        "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
+                    )
+                # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
+                assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
+                assert float(lambda_hw_eff) >= 0.0
+                scaler.scale(loss).backward()
+                scaler.step(optimizer_model)
+                if not twostage and update_alpha:
+                    scaler.step(optimizer_alpha)
+                if not twostage and update_layout and allow_discrete:
+                    scaler.step(optimizer_layout)
+                scaler.update()
+                if step % 10 == 0:
+                    acc1 = (logits.argmax(dim=1) == y).float().mean()
+                    last_acc1 = float(acc1.item())
+                    best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
+                    if stable_hw_enabled:
+                        metric = get_accuracy_metric_key(stable_hw_cfg)
+                        if metric == "train_ema":
+                            update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
+                    stats = {
+                        "outer": outer,
+                        "step": step,
+                        "loss": loss.item(),
+                        "acc1": acc1.item(),
+                        "lambda_hw": float(lambda_hw_eff),
+                        "allow_discrete_updates": bool(allow_discrete),
+                        "mapping_updated": step_mapping_updated,
+                        "layout_updated": step_layout_updated,
+                        "mapping_cache_hit": not step_mapping_updated,
+                        "layout_cache_hit": not step_layout_updated,
+                        "mapping_signature": cache["mapping_signature"],
+                        "layout_signature": cache["layout_signature"],
+                    }
+                    stats.update(hw_stats)
+                    log_stats(logger, stats)
+                    with log_path.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "step": int(global_step),
+                            "outer": int(outer),
+                            "loss": float(loss.item()),
+                            "lat_ms": float(hw_stats.get("latency_ms", 0.0)),
+                            "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
+                            "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
+                            "lambda_hw": float(lambda_hw_eff),
+                            "stable_hw": stable_hw_log_fields(stable_hw_state),
+                            "mapping_updated": step_mapping_updated,
+                            "layout_updated": step_layout_updated,
+                            "mapping_cache_hit": (not step_mapping_updated),
+                            "layout_cache_hit": (not step_layout_updated),
+                            "mapping_signature": cache["mapping_signature"],
+                            "layout_signature": cache["layout_signature"],
+                        }) + "\n")
+                global_step += 1
+    
+            # Step B: alpha refinement
+            if update_alpha:
+                for _ in range(cfg.training.inner_steps_alpha):
+                    model_info = {}
+                    last_info = run_state.get("last_model_info")
+                    if isinstance(last_info, dict):
+                        model_info = last_info.get("model_info", {})
+                    slot_out = chiplet_slots(hard=False)
+                    alpha = slot_out["alpha"]
+                    eff_specs = slot_out["eff_specs"]
+                    layout_positions = wafer_layout.current_pos_continuous()
+    
+                    segments_cached = mapping_res.get("segments", []) if mapping_res else []
+                    mapping_cached = mapping_res.get("mapping", []) if mapping_res else []
+    
+                    segments_sig = None
+                    try:
+                        segments_sig = stable_hash(
+                            [getattr(s, "signature", None) or repr(s) for s in (segments_cached or [])]
+                        )
+                    except Exception:
+                        segments_sig = None
+    
+                    L_hw, _ = compute_hw_loss(
+                        cfg,
+                        hw_proxy,
+                        model_info=model_info,
+                        stable_hw_cfg=stable_hw_cfg,
+                        stable_hw_state=stable_hw_state,
+                        segments=segments_cached,
+                        mapping=mapping_cached,
+                        mapping_sig=(mapping_res.get("mapping_sig") or mapping_res.get("signature")) if mapping_res else None,
+                        segments_sig=segments_sig,
+                        eff_specs=eff_specs,
+                        layout_positions=layout_positions,
+                        mapping_solver=mapping_solver,
+                        wafer_layout=wafer_layout,
+                        alpha=alpha,
+                    )
+    
+                    optimizer_alpha.zero_grad()
+                    (loss_alpha := (float(lambda_hw_eff) * L_hw)).backward()
+                    optimizer_alpha.step()
+    
+            # Step D: layout refinement
+            if update_layout and allow_discrete:
+                for _ in range(cfg.training.inner_steps_layout):
+                    slot_out = chiplet_slots(hard=False)
+                    eff_specs = slot_out["eff_specs"]
+                    segments = mapping_res.get("segments", []) if mapping_res else []
+                    mapping = mapping_res.get("mapping", []) if mapping_res else []
+                    if not segments or not mapping:
+                        part_res = partitioner.plan(
+                            model,
+                            eff_specs,
+                            alpha=slot_out["alpha"],
+                            model_info=run_state.get("last_model_info"),
+                            use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+                        )
+                        segments = part_res["segments"]
+                        mapping = part_res["mapping"]
+                    L_layout, layout_stats = wafer_layout(
+                        mapping,
+                        segments,
+                        eff_specs,
+                        lambda_boundary=cfg.hw.lambda_boundary,
+                        lambda_overlap=cfg.hw.lambda_overlap,
+                        lambda_comm=cfg.hw.lambda_comm_extra,
+                        lambda_thermal=cfg.hw.lambda_thermal,
+                        distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 1.0) or 1.0),
+                    )
+                    optimizer_layout.zero_grad()
+                    L_layout.backward()
+                    optimizer_layout.step()
+    
+            val_acc1 = eval_acc1(
+                model,
+                val_loader,
+                device,
+                model_type=str(getattr(cfg.training, "model_type", "video")),
+                max_batches=max_eval_batches,
+            )
+            if stable_hw_enabled:
+                stable_decision, _ = apply_accuracy_guard(
+                    epoch=outer,
+                    stable_hw_cfg=cfg,
+                    stable_hw_state=stable_hw_state,
+                    val_metric_or_none=float(val_acc1) if val_acc1 is not None else None,
+                    has_val_this_epoch=True,
+                    train_ema_or_none=float(stable_hw_state.get("train_acc1_ema", 0.0))
+                    if stable_hw_state.get("train_acc1_ema") is not None
+                    else None,
+                )
+                stable_hw_state = stable_decision.state
+                # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
+                if bool(stable_decision.stop_training):
+                    val_acc1_str = f"{val_acc1:.6f}" if val_acc1 is not None else "None"
+                    logger.warning(
+                        f"[StableHW] stop_on_violation triggered at epoch={outer}: "
+                        f"val_acc1={val_acc1_str}, acc_ref={stable_hw_state.get('acc_ref')}, "
+                        f"acc_floor={stable_hw_state.get('acc_floor')}. Stop training now."
+                    )
+                    early_stop_triggered = True
+                    break
+                # ---- invariants (v5.4) ----
+                if stable_hw_state.get("acc_ref") is not None:
+                    stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
+                    assert float(stable_hw_state["_acc_ref_once"]) == float(
+                        stable_hw_state["acc_ref"]
+                    ), "acc_ref drift detected"
+    
+        if stable_hw_enabled:
+            # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
+            update_hw_refs_from_stats(stable_hw_state, last_hw_stats or {}, cfg)
+            guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
+            allow_discrete = (
+                bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+            )
+            print(
+                f"[StableHW] epoch={outer} mode={guard_mode} "
+                f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+            )
+            logger.info(
+                f"[StableHW][epoch={outer}] "
+                f"lambda_base={stable_hw_state.get('lambda_hw_base')}, "
+                f"lambda_eff={stable_hw_state.get('lambda_hw_effective')}, "
+                f"acc_ref={stable_hw_state.get('acc_ref')}, "
+                f"acc_floor={stable_hw_state.get('acc_floor')}, "
+                f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
+                f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
+            )
+            # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
+            if val_acc1 is None:
+                # keep previous last_acc1 if exists; otherwise fall back to stable_hw_state history or 0.0
+                prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
+                last_acc1 = float(prev_last) if prev_last is not None else 0.0
+            else:
+                last_acc1 = float(val_acc1)
+    
+            if best_acc1 is None:
+                best_acc1 = float(last_acc1)
+            else:
+                best_acc1 = max(float(best_acc1), float(last_acc1))
+    
+            stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
+    
+            no_drift_cfg = getattr(cfg, "no_drift", None)
+            if no_drift_cfg is None:
+                no_drift_cfg = getattr(stable_hw_cfg, "no_drift", None)
+            stable_hw_state["_contract_no_drift"] = bool(getattr(no_drift_cfg, "enabled", True)) if no_drift_cfg else True
+            norm = getattr(stable_hw_cfg, "normalize", None)
+            stable_hw_state["_contract_ref_update"] = (
+                "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen")
+            )
+    
+            stable_state_path = log_path.parent / "stable_hw_state.json"
+            stable_state_path.write_text(
+                json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+    
+        # write run_manifest.json (auditable LockedAccRef)
+        try:
+            from utils.run_manifest import write_run_manifest
+    
+            write_run_manifest(
+                out_dir=str(out_dir),
+                cfg_path=str(getattr(cfg.train, "cfg_path", "")),
+                cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+                seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
+                stable_hw_state=stable_hw_state,
+                extra={
+                    "stable_hw_refs_used": {
+                        "acc_ref": stable_hw_state.get("acc_ref"),
+                        "acc_ref_source": stable_hw_state.get("acc_ref_source"),
+                        "ref_T": stable_hw_state.get("ref_T"),
+                        "ref_E": stable_hw_state.get("ref_E"),
+                        "ref_M": stable_hw_state.get("ref_M"),
+                        "ref_C": stable_hw_state.get("ref_C"),
+                        "hw_ref_source": stable_hw_state.get("hw_ref_source"),
+                    },
                 },
-            },
-        )
-    except Exception:
-        pass
-
-    metrics = {
-        "stable_hw_disabled": False if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)) else True,
-        "best_acc1": float(best_acc1) if best_acc1 is not None else 0.0,
-        "last_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
-        "val_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
-        "last_hw_stats": last_hw_stats if last_hw_stats is not None else {},
-        "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
-        "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
-        "stable_hw": stable_hw_log_fields(stable_hw_state),
-    }
-    with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
-        json.dump(metrics, f, ensure_ascii=False, indent=2)
-    if trace_path is not None and (early_stop_triggered or ran_epochs == 0):
-        append_trace_event(str(trace_path), {"type": "finalize", "reason": "early_stop_or_zero_step"})
-
+            )
+        except Exception:
+            pass
+    
+        metrics = {
+            "stable_hw_disabled": False if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)) else True,
+            "best_acc1": float(best_acc1) if best_acc1 is not None else 0.0,
+            "last_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
+            "val_acc1": float(last_acc1) if last_acc1 is not None else 0.0,
+            "last_hw_stats": last_hw_stats if last_hw_stats is not None else {},
+            "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
+            "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
+            "stable_hw": stable_hw_log_fields(stable_hw_state),
+        }
+        with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
+            json.dump(metrics, f, ensure_ascii=False, indent=2)
     if export_layout_input:
-        export_dir_path = Path(layout_export_dir or "outputs/P3")
-        slot_out = chiplet_slots(hard=False)
-        eff_specs = slot_out["eff_specs"]
-        part_res = partitioner.plan(
-            model,
-            eff_specs,
-            alpha=slot_out["alpha"],
-            model_info=run_state.get("last_model_info"),
-            use_fine_split=getattr(cfg.hw, "use_fine_split", True),
-        )
-        canonical_segments = part_res["segments"]
-        mapping_result = mapping_solver.solve_mapping(
-            canonical_segments,
-            eff_specs,
-            hw_proxy,
-            layout_positions=wafer_layout.current_pos_continuous(),
-            strategy=getattr(cfg.hw, "mapping_strategy", "greedy_local"),
-            distance_scale_ms=getattr(cfg.hw, "distance_scale_ms", 0.0),
-        )
-        mapping_canonical = mapping_result["mapping"]
+            export_dir_path = Path(layout_export_dir or "outputs/P3")
+            slot_out = chiplet_slots(hard=False)
+            eff_specs = slot_out["eff_specs"]
+            part_res = partitioner.plan(
+                model,
+                eff_specs,
+                alpha=slot_out["alpha"],
+                model_info=run_state.get("last_model_info"),
+                use_fine_split=getattr(cfg.hw, "use_fine_split", True),
+            )
+            canonical_segments = part_res["segments"]
+            mapping_result = mapping_solver.solve_mapping(
+                canonical_segments,
+                eff_specs,
+                hw_proxy,
+                layout_positions=wafer_layout.current_pos_continuous(),
+                strategy=getattr(cfg.hw, "mapping_strategy", "greedy_local"),
+                distance_scale_ms=getattr(cfg.hw, "distance_scale_ms", 0.0),
+            )
+            mapping_canonical = mapping_result["mapping"]
         _export_layout_input(
             cfg=cfg,
             export_dir=export_dir_path,
@@ -1360,3 +1335,17 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             wafer_layout=wafer_layout,
             seed=int(getattr(cfg.train, "seed", 0)),
         )
+    except Exception as exc:
+        status = "error"
+        final_payload = {"error": repr(exc)}
+        raise
+    finally:
+        final_payload.setdefault(
+            "best_val_acc",
+            float(best_acc1) if "best_acc1" in locals() and best_acc1 is not None else None,
+        )
+        final_payload.setdefault(
+            "last_outer",
+            int(outer) if "outer" in locals() else None,
+        )
+        finalize_trace(str(trace_path), final_payload, status=status)
