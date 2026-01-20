@@ -470,6 +470,18 @@ def update_hw_refs_from_stats(stable_hw_cfg: Any, st: Dict[str, Any], hw_stats: 
     EMA update refs from observed hw_stats (ONLY when not locked to dense baseline).
     Guards against negative/zero values to avoid 'negative latency reward' drifting refs.
     """
+    # ===== v5.4 NoDrift: freeze HW refs by default =====
+    # Only update refs if user EXPLICITLY enables EMA drift.
+    norm = getattr(stable_hw_cfg, "normalize", None)
+    ref_update = "frozen"
+    if norm is not None:
+        ref_update = str(getattr(norm, "ref_update", "frozen") or "frozen").lower()
+
+    no_drift = bool(getattr(stable_hw_cfg, "no_drift", True))
+    # NoDrift has highest priority: if no_drift=True => always freeze
+    if no_drift or ref_update != "ema":
+        return
+
     src = str(st.get("hw_ref_source", ""))
     if src.startswith("dense_baseline:"):
         return

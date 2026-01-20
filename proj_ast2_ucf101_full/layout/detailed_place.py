@@ -817,11 +817,19 @@ def run_detailed_place(
         if usage_fp:
             usage_fp.close()
 
+    cache_size = int(_cfg_get(ps_cfg, "cache_size", 0)) if ps_cfg is not None else 0
+    if eval_cache is not None:
+        cache_size = int(getattr(eval_cache, "max_size", cache_size))
+
     policy_meta = {
+        "planner_type": planner_type,
+        "steps": int(steps),
+        "lookahead": {"enabled": bool(lookahead_enabled), "topk": int(lookahead_topk), "beta": float(lookahead_beta)},
         "policy_switch": {
             "enabled": bool(use_ps),
             "last_action_family": getattr(controller, "last_action_family", None),
             "last_policy": getattr(controller, "last_policy", None),
+            "cache_size": int(cache_size),
         },
         "cache": {"hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None},
     }

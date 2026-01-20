@@ -61,6 +61,15 @@ python -m scripts.run_proxy_power --cfg configs/proxy_power.yaml
 echo "[SMOKE] StableHW schema check"
 python -m scripts.smoke_check_stable_hw_schema --cfg configs/smoke_version_c_ucf101.yaml
 
+echo "[SMOKE] StableHW NoDrift config check"
+python scripts/smoke_check_config_no_drift.py --cfg configs/vc_phase3_full_ucf101.yaml --mode version_c
+
+echo "[SMOKE] StableHW contract check"
+python scripts/smoke_check_stable_hw_contract.py --cfg configs/vc_phase3_full_ucf101.yaml
+
+echo "[SMOKE] StableHW gate check"
+python scripts/smoke_stable_hw_gate.py --cfg configs/vc_phase3_full_ucf101.yaml
+
 echo "[SMOKE] StableHW gradient check"
 python -m scripts.smoke_check_hw_loss_grad --cfg configs/smoke_version_c_ucf101.yaml
 

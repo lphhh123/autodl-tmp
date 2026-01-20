@@ -1120,8 +1120,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     stable_hw_state["acc_ref"]
                 ), "acc_ref drift detected"
 
-        # ---- v5.4: update HW ref via EMA if not from dense baseline ----
-        if stable_hw_enabled and not str(stable_hw_state.get("hw_ref_source", "")).startswith("dense_baseline:"):
+        # ===== v5.4 NoDrift: HW refs are frozen by default =====
+        norm = getattr(stable_hw_cfg, "normalize", None)
+        ref_update = "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen").lower()
+        no_drift = bool(getattr(stable_hw_cfg, "no_drift", True))
+
+        if stable_hw_enabled and (not no_drift) and (ref_update == "ema"):
             # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
             update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
         # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
@@ -1138,6 +1142,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             best_acc1 = max(float(best_acc1), float(last_acc1))
 
         stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
+
+        stable_hw_state["_contract_no_drift"] = bool(getattr(stable_hw_cfg, "no_drift", True))
+        norm = getattr(stable_hw_cfg, "normalize", None)
+        stable_hw_state["_contract_ref_update"] = (
+            "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen")
+        )
 
         stable_state_path = log_path.parent / "stable_hw_state.json"
         stable_state_path.write_text(

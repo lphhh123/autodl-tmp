@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+from types import SimpleNamespace
 
 from .config_utils import get_nested, set_nested
 from .config import AttrDict
@@ -420,6 +421,28 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     norm.setdefault("wC", 0.0)
     norm.setdefault("clip_term_max", 2.0)
     norm.setdefault("eps", 1e-6)
+
+    # ===== v5.4 defaults: NoDrift + frozen HW refs =====
+    if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):
+        if not hasattr(cfg.stable_hw, "no_drift"):
+            cfg.stable_hw.no_drift = True
+
+        if not hasattr(cfg.stable_hw, "normalize") or cfg.stable_hw.normalize is None:
+            cfg.stable_hw.normalize = SimpleNamespace(enabled=True)
+
+        if not hasattr(cfg.stable_hw.normalize, "ref_update") or cfg.stable_hw.normalize.ref_update is None:
+            cfg.stable_hw.normalize.ref_update = "frozen"
+
+        # NoDrift priority: enforce frozen even if user mistakenly sets ema
+        if bool(getattr(cfg.stable_hw, "no_drift", True)):
+            cfg.stable_hw.normalize.ref_update = "frozen"
+
+        v = str(cfg.stable_hw.normalize.ref_update).lower()
+        if v not in ("frozen", "ema"):
+            raise ValueError(
+                "stable_hw.normalize.ref_update must be 'frozen' or 'ema', got: "
+                f"{cfg.stable_hw.normalize.ref_update}"
+            )
 
     # ---- discrete isolation defaults (v5) ----
     if getattr(stable_hw, "discrete_isolation", None) is None:

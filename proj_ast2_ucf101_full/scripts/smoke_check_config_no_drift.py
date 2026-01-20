@@ -44,6 +44,14 @@ def main():
                     "acc_ref will never be locked -> HW gating degenerates."
                 )
 
+        # ---- v5.4 NoDrift: HW refs must be frozen unless explicitly opted out ----
+        no_drift = bool(getattr(cfg.stable_hw, "no_drift", True))
+        ref_update = "frozen"
+        if getattr(cfg.stable_hw, "normalize", None) is not None:
+            ref_update = str(getattr(cfg.stable_hw.normalize, "ref_update", "frozen") or "frozen").lower()
+        if no_drift and ref_update != "frozen":
+            raise AssertionError("NoDrift violated: stable_hw.no_drift=True but normalize.ref_update != 'frozen'")
+
     print("[SMOKE] config no_drift OK. stable_hw.enabled=", stable_en)
 
 

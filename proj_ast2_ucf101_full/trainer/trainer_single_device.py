@@ -262,8 +262,12 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 else None,
             )
 
-            # ---- v5.4: update HW ref via EMA if not from dense baseline ----
-            if not str(stable_state.get("hw_ref_source", "")).startswith("dense_baseline:"):
+            # ===== v5.4 NoDrift: HW refs are frozen by default =====
+            norm = getattr(stable_hw_cfg, "normalize", None)
+            ref_update = "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen").lower()
+            no_drift = bool(getattr(stable_hw_cfg, "no_drift", True))
+
+            if (not no_drift) and (ref_update == "ema"):
                 update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats or {})
         if metrics_path:
             metrics = {
