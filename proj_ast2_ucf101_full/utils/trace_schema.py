@@ -1,0 +1,16 @@
+TRACE_FIELDS = [
+    "iter",
+    "stage",
+    "op",
+    "op_args_json",
+    "accepted",
+    "total_scalar",
+    "comm_norm",
+    "therm_norm",
+    "pareto_added",
+    "duplicate_penalty",
+    "boundary_penalty",
+    "seed_id",
+    "time_ms",
+    "signature_hash",
+]

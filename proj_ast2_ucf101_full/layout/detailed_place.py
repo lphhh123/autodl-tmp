@@ -36,6 +36,7 @@ from layout.candidate_pool import (
     _signature_for_action,
 )
 from layout.policy_switch import EvalCache, PolicySwitchController
+from utils.trace_schema import TRACE_FIELDS
 
 
 @dataclass
@@ -278,30 +279,7 @@ def run_detailed_place(
 
         with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
             writer = csv.writer(f_trace)
-            writer.writerow(
-                [
-                    "iter",
-                    "stage",
-                    "op",
-                    "op_args_json",
-                    "accepted",
-                    "total_scalar",
-                    "comm_norm",
-                    "therm_norm",
-                    "pareto_added",
-                    "duplicate_penalty",
-                    "boundary_penalty",
-                    "seed_id",
-                    "time_ms",
-                    "signature",
-                    "d_total",
-                    "d_comm",
-                    "d_therm",
-                    "tabu_hit",
-                    "inverse_hit",
-                    "cooldown_hit",
-                ]
-            )
+            writer.writerow(TRACE_FIELDS)
 
             try:
                 if True:

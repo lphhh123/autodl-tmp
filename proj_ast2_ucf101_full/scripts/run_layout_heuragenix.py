@@ -38,30 +38,7 @@ from layout.trace_metrics import compute_trace_metrics_from_csv
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
-
-
-TRACE_FIELDS = [
-    "iter",
-    "stage",
-    "op",
-    "op_args_json",
-    "accepted",
-    "total_scalar",
-    "comm_norm",
-    "therm_norm",
-    "pareto_added",
-    "duplicate_penalty",
-    "boundary_penalty",
-    "seed_id",
-    "time_ms",
-    "signature",
-    "d_total",
-    "d_comm",
-    "d_therm",
-    "tabu_hit",
-    "inverse_hit",
-    "cooldown_hit",
-]
+from utils.trace_schema import TRACE_FIELDS
 
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:

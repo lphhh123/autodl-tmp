@@ -67,7 +67,8 @@ hw:
   device_name: "RTX3090_FP16"
   gpu_yaml: "./configs/gpu_data.yaml"
   proxy_weight_dir: "./proxy_weights"
-  lambda_hw: 1.0
+  # v5.4: do NOT use legacy direct-sum HW loss; StableHW will control lambda_hw_effective.
+  lambda_hw: 0.0
   lambda_T: 1.0e-3
   lambda_E: 1.0e-4
   lambda_mem: 1.0e-4
@@ -98,7 +99,8 @@ training:
 
 loss:
   lambda_AST: 1.0
-  lambda_hw: 1.0
+  # v5.4: do NOT add hw loss directly into task loss (Acc-First Hard Gating).
+  lambda_hw: 0.0
 
 chiplet:
   candidate_types: ["RTX4090_FP16", "RTX3090_FP16", "RTX2080Ti_FP16"]
