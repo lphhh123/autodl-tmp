@@ -19,13 +19,13 @@ JSON
 
 python "${ROOT_DIR}/scripts/run_layout_heuragenix.py" \
   --layout_input "${TMP_DIR}/layout_input.json" \
-  --cfg "${ROOT_DIR}/configs/layout_agent/layout_B0_heuragenix_random_hh.yaml" \
+  --cfg "${ROOT_DIR}/configs/layout_agent/layout_B0_heuragenix_random_hh_smoke.yaml" \
   --out_dir "${TMP_DIR}/out_random" \
   --seed 0
 
 python "${ROOT_DIR}/scripts/run_layout_heuragenix.py" \
   --layout_input "${TMP_DIR}/layout_input.json" \
-  --cfg "${ROOT_DIR}/configs/layout_agent/layout_B0_heuragenix_llm_hh.yaml" \
+  --cfg "${ROOT_DIR}/configs/layout_agent/layout_B0_heuragenix_llm_hh_smoke.yaml" \
   --out_dir "${TMP_DIR}/out_llm" \
   --seed 0
 

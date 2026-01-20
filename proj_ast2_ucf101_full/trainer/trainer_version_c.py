@@ -767,53 +767,65 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         allow_discrete_updates = bool(stable_hw_state.get("allow_discrete_updates", True))
         stable_hw_state["discrete_frozen_init_mapping"] = False
 
-        if (not allow_discrete_updates) and cache["mapping"] is not None:
+        need_update_mapping = ((outer % map_every) == 0) or (cache["mapping"] is None)
+        need_update_layout = ((outer % lay_every) == 0) or (cache["layout"] is None)
+
+        if stable_hw_enabled:
+            if stable_hw_state.get("lambda_hw_effective", 0.0) <= 0.0:
+                need_update_mapping = need_update_mapping and (cache["mapping"] is None)
+                need_update_layout = need_update_layout and (cache["layout"] is None)
+
+            if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
+                print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
+                need_update_mapping = False
+                need_update_layout = False
+
+        if (not allow_discrete_updates) and cache["mapping"] is None:
+            stable_hw_state["discrete_frozen_init_mapping"] = True
+
+        if need_update_mapping:
+            assert allow_discrete_updates, (
+                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+            )
+            mapping_res = _solve_mapping_for_cache(
+                model=model,
+                chiplet_slots=chiplet_slots,
+                mapping_solver=mapping_solver,
+                hw_proxy=hw_proxy,
+                wafer_layout=wafer_layout,
+                partitioner=partitioner,
+                hw_cfg=cfg.hw,
+                model_info=run_state.get("last_model_info"),
+            )
+            cache["mapping"] = mapping_res
+            cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
+            mapping_updated = True
+        else:
             mapping_res = cache["mapping"]
             mapping_updated = False
-        else:
-            if (not allow_discrete_updates) and cache["mapping"] is None:
-                stable_hw_state["discrete_frozen_init_mapping"] = True
-            if (outer % map_every) == 0 or cache["mapping"] is None:
-                assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
-                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
-                )
-                mapping_res = _solve_mapping_for_cache(
-                    model=model,
-                    chiplet_slots=chiplet_slots,
-                    mapping_solver=mapping_solver,
-                    hw_proxy=hw_proxy,
-                    wafer_layout=wafer_layout,
-                    partitioner=partitioner,
-                    hw_cfg=cfg.hw,
-                    model_info=run_state.get("last_model_info"),
-                )
-                cache["mapping"] = mapping_res
-                cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
-                mapping_updated = True
-            else:
-                mapping_res = cache["mapping"]
-                mapping_updated = False
 
-        if (not allow_discrete_updates) and cache["layout"] is not None:
+        if mapping_res is None:
+            raise RuntimeError("Mapping cache is empty after mapping step (mapping_res is None).")
+
+        if need_update_layout:
+            assert allow_discrete_updates, (
+                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+            )
+            layout_res = _solve_layout_for_cache(
+                chiplet_slots=chiplet_slots,
+                wafer_layout=wafer_layout,
+                hw_cfg=cfg.hw,
+                mapping_result=mapping_res,
+            )
+            cache["layout"] = layout_res
+            cache["layout_signature"] = layout_res.get("signature")
+            layout_updated = True
+        else:
             layout_res = cache["layout"]
             layout_updated = False
-        else:
-            if (outer % lay_every) == 0 or cache["layout"] is None:
-                assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
-                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
-                )
-                layout_res = _solve_layout_for_cache(
-                    chiplet_slots=chiplet_slots,
-                    wafer_layout=wafer_layout,
-                    hw_cfg=cfg.hw,
-                    mapping_result=mapping_res,
-                )
-                cache["layout"] = layout_res
-                cache["layout_signature"] = layout_res.get("signature")
-                layout_updated = True
-            else:
-                layout_res = cache["layout"]
-                layout_updated = False
+
+        if layout_res is None:
+            raise RuntimeError("Layout cache is empty after layout step (layout_res is None).")
         tau = max(cfg.chiplet.tau_min, cfg.chiplet.tau_init * (cfg.chiplet.tau_decay ** outer))
         chiplet_slots.set_tau(tau)
         last_hw_stats = None
