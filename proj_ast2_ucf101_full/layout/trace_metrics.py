@@ -6,6 +6,18 @@ from pathlib import Path
 
 import numpy as np
 
+from utils.trace_schema import TRACE_FIELDS
+
+
+def _get_float(row: dict, *keys: str, default: float = 0.0) -> float:
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            try:
+                return float(row[key])
+            except (TypeError, ValueError):
+                continue
+    return default
+
 
 def _is_undo_action(prev_action: dict, curr_action: dict, prev_sig: str, curr_sig: str) -> bool:
     if not prev_action or not curr_action:
@@ -39,6 +51,25 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
     rows = []
     with trace_path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        header = set(reader.fieldnames or [])
+        required = {"accepted", "stage"}
+        missing = required - header
+        if missing:
+            raise ValueError(
+                "[trace_metrics] Missing required trace fields "
+                f"{sorted(list(missing))} in {trace_path}. "
+                f"header={sorted(list(header))} TRACE_FIELDS={TRACE_FIELDS}"
+            )
+        delta_ok = (
+            ("delta_total" in header or "d_total" in header)
+            and ("delta_comm" in header or "d_comm" in header)
+            and ("delta_therm" in header or "d_therm" in header)
+        )
+        if not delta_ok:
+            raise ValueError(
+                "[trace_metrics] Unsupported trace schema: missing delta/d fields in "
+                f"{trace_path}. header={sorted(list(header))} TRACE_FIELDS={TRACE_FIELDS}"
+            )
         for row in reader:
             rows.append(row)
     if not rows:
@@ -48,10 +79,10 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
     comm_vals = [float(r.get("comm_norm", 0.0)) for r in rows]
     therm_vals = [float(r.get("therm_norm", 0.0)) for r in rows]
     signatures = [r.get("signature", "") or "" for r in rows]
-    accepted = [int(r.get("accepted", 0)) for r in rows]
-    d_total = [float(r.get("d_total", 0.0)) for r in rows]
-    d_comm = [float(r.get("d_comm", 0.0)) for r in rows]
-    d_therm = [float(r.get("d_therm", 0.0)) for r in rows]
+    accepted = [int(float(r.get("accepted", 0) or 0)) for r in rows]
+    d_total = [_get_float(r, "delta_total", "d_total", default=0.0) for r in rows]
+    d_comm = [_get_float(r, "delta_comm", "d_comm", default=0.0) for r in rows]
+    d_therm = [_get_float(r, "delta_therm", "d_therm", default=0.0) for r in rows]
 
     start = max(0, len(rows) - window)
     window_indices = list(range(start, len(rows)))
