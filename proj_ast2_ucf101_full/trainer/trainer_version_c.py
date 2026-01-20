@@ -673,17 +673,34 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     "using stable_hw_state.lambda_hw_effective."
                 )
                 stable_hw_state["_legacy_lambda_warned"] = True
+            # ---- v5.4 StableHW schedule ----
             stable_hw_schedule(outer, stable_hw_cfg, stable_hw_state)
-            apply_accuracy_guard(
-                epoch=outer,
-                stable_hw_cfg=stable_hw_cfg,
-                stable_hw_state=stable_hw_state,
-                val_metric_or_none=stable_hw_state.get("val_acc1_last", None),
-                has_val_this_epoch=False,
-                train_ema_or_none=float(stable_hw_state["train_acc1_ema"])
-                if stable_hw_state.get("train_acc1_ema") is not None
-                else None,
-            )
+
+            # ---- v5.4 Acc-First Hard Gating (epoch-begin) ----
+            metric_key = str(getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "metric", "val_acc1"))
+            last_val = stable_hw_state.get("val_acc1_last", None)
+
+            # If guard metric is val_* but we don't even have a last val yet, force WARMUP gate:
+            if metric_key.startswith("val_") and (last_val is None):
+                stable_hw_state["guard_mode"] = "WARMUP"
+                stable_hw_state["g_hw"] = 0.0
+                # lambda_hw_base is defined by schedule; effective must be 0 under hard gate
+                stable_hw_state["lambda_hw_effective"] = 0.0
+                # block ALL discrete signature updates before first val (v5.4 acc-first)
+                stable_hw_state["allow_discrete_updates"] = False
+            else:
+                # IMPORTANT: if last_val exists, treat it as a valid val metric for gating
+                _, allow_discrete = apply_accuracy_guard(
+                    epoch=outer,
+                    stable_hw_cfg=stable_hw_cfg,
+                    stable_hw_state=stable_hw_state,
+                    train_ema_or_none=float(stable_hw_state.get("train_acc1_ema", 0.0))
+                    if metric_key.startswith("train_")
+                    else None,
+                    val_metric_or_none=float(last_val) if last_val is not None else None,
+                    has_val_this_epoch=(last_val is not None),
+                )
+                stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
             # ---- invariants (v5.4) ----
             if stable_hw_state.get("acc_ref") is not None:
                 stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
@@ -710,8 +727,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         else:
             lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
 
+        # ---- use effective lambda ONLY (already gated) ----
         stable_hw_state["lambda_hw_effective"] = float(lambda_hw_eff)
-        stable_hw_state.setdefault("lambda_hw_base", float(lambda_hw_eff))
+        stable_hw_state.setdefault("lambda_hw_base", float(stable_hw_state.get("lambda_hw_base", 0.0)))
         allow_discrete = bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
         # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
         #   - partition/mapping updates
@@ -737,6 +755,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             if (not allow_discrete_updates) and cache["mapping"] is None:
                 stable_hw_state["discrete_frozen_init_mapping"] = True
             if (outer % map_every) == 0 or cache["mapping"] is None:
+                assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
+                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                )
                 mapping_res = _solve_mapping_for_cache(
                     model=model,
                     chiplet_slots=chiplet_slots,
@@ -759,6 +780,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             layout_updated = False
         else:
             if (outer % lay_every) == 0 or cache["layout"] is None:
+                assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
+                    "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                )
                 layout_res = _solve_layout_for_cache(
                     chiplet_slots=chiplet_slots,
                     wafer_layout=wafer_layout,
@@ -828,6 +852,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     track_every = int(getattr(iso_cfg, "track_live_every_steps", 1) or 1)
                     if (step % track_every) == 0:
                         if not use_cached_mapping:
+                            assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
+                                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                            )
                             part_res = partitioner.plan(
                                 model,
                                 eff_specs,
@@ -841,6 +868,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                             last_mapping = mapping_for_hw
                             step_mapping_updated = True
                         if not use_cached_layout:
+                            assert bool(stable_hw_state.get("allow_discrete_updates", True)), (
+                                "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                            )
                             layout_res = _solve_layout_for_cache(
                                 chiplet_slots=chiplet_slots,
                                 wafer_layout=wafer_layout,

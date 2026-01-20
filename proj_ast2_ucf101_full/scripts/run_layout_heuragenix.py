@@ -1,4 +1,8 @@
-"""HeurAgenix baseline wrapper for wafer layout (SPEC v5.4)."""
+"""HeurAgenix baseline wrapper for wafer layout (SPEC v5.4).
+
+Note: AMLT_OUTPUT_DIR is treated as the base directory; actual outputs are written under
+<AMLT_OUTPUT_DIR>/output/...
+"""
 from __future__ import annotations
 
 # --- bootstrap sys.path for both invocation styles ---
