@@ -1,5 +1,3 @@
 _base_: ./ast2_ucf101.yaml
-hw:
-  mode: "version_c_full"
-training:
-  mode: "version_c_full"
+train:
+  mode: version_c

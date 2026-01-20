@@ -50,3 +50,5 @@ stable_hw:
     use_cached_mapping_for_inner_steps: true
     use_cached_layout_for_inner_steps: true
     track_live_in_inner_steps: false
+train:
+  mode: version_c

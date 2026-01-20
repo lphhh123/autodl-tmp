@@ -198,6 +198,24 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
       - "layout":    layout-only agent scripts (optional; keep minimal)
       - "single":    single-device pruning baseline
     """
+    # ---- v5.4: infer train.mode for backward compatibility ----
+    train_mode = get_nested(cfg, "train.mode", None)
+    if train_mode is None:
+        # accept legacy knobs but normalize into train.mode
+        legacy_training_mode = get_nested(cfg, "training.mode", None)
+        legacy_hw_mode = get_nested(cfg, "hw.mode", None)
+
+        def _is_vc(x):
+            if x is None:
+                return False
+            s = str(x).lower()
+            return ("version_c" in s) or (s == "vc") or (s == "version-c")
+
+        if _is_vc(legacy_training_mode) or _is_vc(legacy_hw_mode) or (mode == "version_c"):
+            set_nested(cfg, "train.mode", "version_c")
+        else:
+            # keep None for non-version_c pipelines
+            pass
     # always: common train defaults
     _apply_defaults(cfg, REQ_TRAIN_DEFAULTS)
 

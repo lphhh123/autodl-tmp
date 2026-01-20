@@ -21,6 +21,7 @@ import time
 import numpy as np
 
 from layout.alt_opt import run_alt_opt
+from layout.candidate_pool import signature_from_assign
 from layout.coarsen import coarsen_traffic
 from layout.detailed_place import run_detailed_place
 from layout.evaluator import LayoutEvaluator, LayoutState
@@ -361,7 +362,15 @@ def main():
             cfg_path=str(args.cfg),
             cfg_hash=str(cfg_hash),
             seed=int(args.seed),
-            stable_hw_state={},
+            stable_hw_state={
+                "guard_mode": "acc_first_hard_gating",
+                "lambda_hw_base": None,
+                "lambda_hw_effective": None,
+                "discrete_cache": {
+                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
+                },
+            },
             extra=extra,
         )
     except Exception:
@@ -372,6 +381,34 @@ def main():
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     run_layout_agent(cfg, out_dir=out_dir, seed=int(args.seed), layout_input_path=args.layout_input)
+    try:
+        layout_best_path = out_dir / "layout_best.json"
+        layout_best = json.loads(layout_best_path.read_text(encoding="utf-8")) if layout_best_path.exists() else {}
+        best_assign = layout_best.get("best", {}).get("assign", []) if isinstance(layout_best, dict) else []
+        meta = {
+            "mapping_signature": "",
+            "layout_signature": signature_from_assign(best_assign) if best_assign else "",
+        }
+        from utils.run_manifest import write_run_manifest
+
+        write_run_manifest(
+            out_dir=str(out_dir),
+            cfg_path=str(args.cfg),
+            cfg_hash=str(cfg_hash),
+            seed=int(args.seed),
+            stable_hw_state={
+                "guard_mode": "acc_first_hard_gating",
+                "lambda_hw_base": None,
+                "lambda_hw_effective": None,
+                "discrete_cache": {
+                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
+                },
+            },
+            extra=extra,
+        )
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

@@ -1032,13 +1032,22 @@ def main() -> None:
             cfg_path=str(args.cfg),
             cfg_hash=str(cfg_hash),
             seed=int(args.seed),
-            stable_hw_state={},
+            stable_hw_state={
+                "guard_mode": "acc_first_hard_gating",
+                "lambda_hw_base": None,
+                "lambda_hw_effective": None,
+                "discrete_cache": {
+                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
+                },
+            },
             extra=extra,
         )
     except Exception:
         pass
 
     output_root = internal_out / "output"
+    output_root.mkdir(parents=True, exist_ok=True)
 
     fallback_used = False
     log_text = ""
@@ -1404,6 +1413,33 @@ def main() -> None:
         )
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+    try:
+        from utils.run_manifest import write_run_manifest
+
+        meta = {
+            "mapping_signature": best_solution_payload.get("mapping_signature", "")
+            if isinstance(best_solution_payload, dict)
+            else "",
+            "layout_signature": signature_from_assign(best_assign),
+        }
+        write_run_manifest(
+            out_dir=str(out_dir),
+            cfg_path=str(args.cfg),
+            cfg_hash=str(cfg_hash),
+            seed=int(args.seed),
+            stable_hw_state={
+                "guard_mode": "acc_first_hard_gating",
+                "lambda_hw_base": None,
+                "lambda_hw_effective": None,
+                "discrete_cache": {
+                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
+                },
+            },
+            extra=extra,
+        )
+    except Exception:
+        pass
     if require_main and evaluator_source != "main_project":
         raise RuntimeError(report["error"])
 
