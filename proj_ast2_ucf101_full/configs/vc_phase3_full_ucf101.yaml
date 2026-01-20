@@ -1,5 +1,6 @@
 stable_hw:
   enabled: true
+  force_disable_ok: false
 
   locked_acc_ref:
     enabled: true

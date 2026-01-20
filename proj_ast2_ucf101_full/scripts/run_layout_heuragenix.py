@@ -638,6 +638,12 @@ def _write_trace_and_pareto(
         )
 
     (out_dir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    trace_meta = {
+        "seed": int(seed),
+        "max_steps": int(max_steps) if max_steps is not None else None,
+        "signature_version": "v5.4",
+    }
+    (out_dir / "trace_meta.json").write_text(json.dumps(trace_meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return report, pareto
 
 

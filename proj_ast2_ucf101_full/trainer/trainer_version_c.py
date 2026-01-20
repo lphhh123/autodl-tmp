@@ -1087,8 +1087,19 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         if stable_hw_enabled and not str(stable_hw_state.get("hw_ref_source", "")).startswith("dense_baseline:"):
             # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
             update_hw_refs_from_stats(stable_hw_cfg, stable_hw_state, last_hw_stats or {})
-        last_acc1 = float(val_acc1)
-        best_acc1 = float(val_acc1) if best_acc1 is None else max(best_acc1, float(val_acc1))
+        # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
+        if val_acc1 is None:
+            # keep previous last_acc1 if exists; otherwise fall back to stable_hw_state history or 0.0
+            prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
+            last_acc1 = float(prev_last) if prev_last is not None else 0.0
+        else:
+            last_acc1 = float(val_acc1)
+
+        if best_acc1 is None:
+            best_acc1 = float(last_acc1)
+        else:
+            best_acc1 = max(float(best_acc1), float(last_acc1))
+
         stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
 
         stable_state_path = log_path.parent / "stable_hw_state.json"
