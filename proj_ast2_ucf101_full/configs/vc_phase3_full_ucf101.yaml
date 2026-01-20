@@ -1,14 +1,21 @@
+locked_acc_ref:
+  enabled: true
+  source: "manual"
+  acc_ref1: 0.0
+  acc_ref5: 0.0
+  # ★ 推荐：如果你有 dense baseline 的 metrics.json，就填这里（强锁定，最符合 v5.4）
+  # baseline_stats_path: "outputs/dense_baseline/metrics.json"
+  baseline_stats_path: null
+  # ★ 必须 >=1：否则在 baseline_stats_path 为空时永远锁不住 acc_ref
+  freeze_epoch: 1
+
+no_drift:
+  enabled: true
+  stats_path: "${out_dir}/baseline_stats.json"
+
 stable_hw:
   enabled: true
   force_disable_ok: false
-
-  locked_acc_ref:
-    enabled: true
-    # ★ 推荐：如果你有 dense baseline 的 metrics.json，就填这里（强锁定，最符合 v5.4）
-    # baseline_stats_path: "outputs/dense_baseline/metrics.json"
-    baseline_stats_path: null
-    # ★ 必须 >=1：否则在 baseline_stats_path 为空时永远锁不住 acc_ref
-    freeze_epoch: 1
 
   allow_train_ema_fallback: true
 

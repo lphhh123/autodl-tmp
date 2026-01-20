@@ -32,7 +32,9 @@ def main():
             raise AssertionError("stable_hw.no_double_scale must be True in v5.4")
 
         # ---- SPEC v5.4 LockedAccRef must be achievable ----
-        locked = getattr(cfg.stable_hw, "locked_acc_ref", None)
+        locked = getattr(cfg, "locked_acc_ref", None)
+        if locked is None:
+            locked = getattr(cfg.stable_hw, "locked_acc_ref", None)
         sched = getattr(cfg.stable_hw, "lambda_hw_schedule", None)
         if locked is not None and bool(getattr(locked, "enabled", False)):
             baseline_path = getattr(locked, "baseline_stats_path", None)
@@ -45,7 +47,10 @@ def main():
                 )
 
         # ---- v5.4 NoDrift: HW refs must be frozen unless explicitly opted out ----
-        no_drift = bool(getattr(cfg.stable_hw, "no_drift", True))
+        no_drift_cfg = getattr(cfg, "no_drift", None)
+        if no_drift_cfg is None:
+            no_drift_cfg = getattr(cfg.stable_hw, "no_drift", None)
+        no_drift = bool(getattr(no_drift_cfg, "enabled", True)) if no_drift_cfg is not None else True
         ref_update = "frozen"
         if getattr(cfg.stable_hw, "normalize", None) is not None:
             ref_update = str(getattr(cfg.stable_hw.normalize, "ref_update", "frozen") or "frozen").lower()

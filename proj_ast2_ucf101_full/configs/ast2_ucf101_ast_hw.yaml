@@ -5,6 +5,16 @@ training:
   epochs: 2
   batch_size: 2
 
+# AST2 侧做 HW-aware baseline：建议不强制 locked_acc_ref（Version-C 才要求严格锁定）
+locked_acc_ref:
+  enabled: false
+  acc_ref1: 0.0
+  acc_ref5: 0.0
+
+no_drift:
+  enabled: true
+  stats_path: "${out_dir}/baseline_stats.json"
+
 # legacy hw.lambda_hw will be ignored when stable_hw.enabled=true (NoDoubleScale)
 hw:
   mode: single_device
@@ -13,16 +23,15 @@ hw:
 stable_hw:
   enabled: true
 
-  # AST2 侧做 HW-aware baseline：建议不强制 locked_acc_ref（Version-C 才要求严格锁定）
-  locked_acc_ref:
-    enabled: false
-
   accuracy_guard:
     enabled: true
-    epsilon_drop: 0.002
-    guard_mode: hard
-    freeze_hw_on_drop: true
-    freeze_discrete_on_drop: false
+    controller:
+      enabled: true
+      metric: val_acc1
+      epsilon_drop: 0.002
+      guard_mode: hard
+      freeze_schedule_in_recovery: true
+      freeze_discrete_updates: false
 
   lambda_hw_schedule:
     enabled: true

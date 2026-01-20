@@ -24,6 +24,7 @@ from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.stable_hw import (
     apply_accuracy_guard,
+    get_accuracy_metric_key,
     init_locked_acc_ref,
     init_hw_refs_from_baseline_stats,
     stable_hw_log_fields,
@@ -134,8 +135,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_state: Dict[str, Any] = {}
     if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
-        init_locked_acc_ref(stable_hw_cfg, stable_state)
-        init_hw_refs_from_baseline_stats(stable_hw_cfg, stable_state)
+        init_locked_acc_ref(cfg, stable_state)
+        init_hw_refs_from_baseline_stats(cfg, stable_state)
         # ---- v5.4: always materialize stable_hw_state.json even if epochs==0 / early stop ----
         if out_dir is not None and stable_hw_cfg:
             out_path = Path(out_dir)
@@ -165,7 +166,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             prev_val = stable_state.get("val_acc1_last", None)
             apply_accuracy_guard(
                 epoch=epoch,
-                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
                 val_metric_or_none=prev_val,
                 has_val_this_epoch=False,
@@ -230,7 +231,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             if step % 10 == 0:
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
                 if stable_hw_enabled:
-                    metric = str(getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "metric", "val_acc1"))
+                    metric = get_accuracy_metric_key(stable_hw_cfg)
                     if metric == "train_ema":
                         update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
                 stats = {
@@ -256,7 +257,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         if stable_hw_enabled:
             apply_accuracy_guard(
                 epoch=epoch,
-                stable_hw_cfg=stable_hw_cfg,
+                stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
                 val_metric_or_none=float(last_acc) if last_acc is not None else None,
                 has_val_this_epoch=True,
@@ -265,13 +266,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 else None,
             )
 
-            # ===== v5.4 NoDrift: HW refs are frozen by default =====
-            norm = getattr(stable_hw_cfg, "normalize", None)
-            ref_update = "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen").lower()
-            no_drift = bool(getattr(stable_hw_cfg, "no_drift", True))
-
-            if (not no_drift) and (ref_update == "ema"):
-                update_hw_refs_from_stats(stable_hw_cfg, stable_state, last_hw_stats or {})
+            update_hw_refs_from_stats(cfg, stable_state, last_hw_stats or {})
         guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
         allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
         print(

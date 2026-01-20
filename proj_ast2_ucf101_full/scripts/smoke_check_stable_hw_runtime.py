@@ -27,7 +27,7 @@ def main():
 
     st = {}
     # LockedAccRef must exist (but we don't require baseline_stats file here)
-    init_locked_acc_ref(shw, st)
+    init_locked_acc_ref(cfg, st)
     if st.get("acc_ref") is None:
         # fallback for smoke: set a deterministic ref
         st["acc_ref"] = 0.80
@@ -41,7 +41,7 @@ def main():
     # violate (acc below ref - eps)
     apply_accuracy_guard(
         epoch=0,
-        stable_hw_cfg=shw,
+        stable_hw_cfg=cfg,
         stable_hw_state=st,
         val_metric_or_none=float(st["acc_ref"]) - 1.0,  # force violate
         has_val_this_epoch=True,
@@ -54,7 +54,7 @@ def main():
     # recover (acc above ref + margin)
     apply_accuracy_guard(
         epoch=1,
-        stable_hw_cfg=shw,
+        stable_hw_cfg=cfg,
         stable_hw_state=st,
         val_metric_or_none=float(st["acc_ref"]) + 1.0,  # force good acc
         has_val_this_epoch=True,
