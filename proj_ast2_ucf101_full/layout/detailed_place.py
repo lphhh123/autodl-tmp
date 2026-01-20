@@ -230,8 +230,10 @@ def run_detailed_place(
     # ---- init assign ----
     assign = np.array(assign_seed, dtype=int).copy()
     layout_state.assign = assign
-    problem_signature = signature_for_assign(assign_seed)
-    hw_signature = str(_cfg_get(cfg, "hw_signature", "layout_eval"))
+    objective_hash = evaluator.objective_hash()
+
+    def _eval_cache_key(assign_sig: str) -> str:
+        return f"obj:{objective_hash}|{assign_sig}"
 
     # ---- anti-oscillation params ----
     anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
@@ -292,18 +294,6 @@ def run_detailed_place(
     start_time = time.time()
     best_solution = None
     report = None
-    cache_key_default = hashlib.sha1(
-        json.dumps(
-            {
-                "problem_sig": problem_signature,
-                "hw_sig": hw_signature,
-                "policy": "init",
-                "seed": int(seed_id),
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
-
     try:
         # If LLM is requested but init failed, log once and continue with heuristic
         if usage_fp and planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error:
@@ -324,6 +314,7 @@ def run_detailed_place(
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
                     prev_assign = assign.copy()
     
+                    init_cache_key = _eval_cache_key(signature_for_assign(prev_assign.tolist()))
                     row = [
                         0,
                         "init",
@@ -349,7 +340,7 @@ def run_detailed_place(
                         "init",
                         0,
                         0,
-                        cache_key_default,
+                        init_cache_key,
                     ]
                     if len(row) != len(TRACE_FIELDS):
                         raise RuntimeError(
@@ -457,12 +448,13 @@ def run_detailed_place(
                             action_copy.setdefault("signature", cand.signature)
                             new_assign = _apply_action_for_candidate(base_assign, action_copy)
                             sig1 = signature_for_assign(new_assign)
-                            cached = eval_cache.get(sig1) if eval_cache is not None else None
+                            k1 = _eval_cache_key(sig1)
+                            cached = eval_cache.get(k1) if eval_cache is not None else None
                             if cached is None:
                                 layout_state.assign = new_assign
                                 eval_new = evaluator.evaluate(layout_state)
                                 if eval_cache is not None:
-                                    eval_cache.put(sig1, dict(eval_new))
+                                    eval_cache.put(k1, dict(eval_new))
                             else:
                                 eval_new = dict(cached)
                             d_total = float(eval_out["total_scalar"] - eval_new["total_scalar"])
@@ -485,12 +477,13 @@ def run_detailed_place(
                                     continue
                                 assign2 = cj["apply_fn"](ci["new_assign"])
                                 sig2 = signature_for_assign(assign2)
-                                cached2 = eval_cache.get(sig2) if eval_cache is not None else None
+                                k2 = _eval_cache_key(sig2)
+                                cached2 = eval_cache.get(k2) if eval_cache is not None else None
                                 if cached2 is None:
                                     layout_state.assign = assign2
                                     eval2 = evaluator.evaluate(layout_state)
                                     if eval_cache is not None:
-                                        eval_cache.put(sig2, dict(eval2))
+                                        eval_cache.put(k2, dict(eval2))
                                 else:
                                     eval2 = dict(cached2)
                                 d2 = float(eval_out["total_scalar"] - eval2["total_scalar"])
@@ -709,11 +702,12 @@ def run_detailed_place(
         
                     layout_state.assign = new_assign
                     sig2 = signature_for_assign(new_assign)
-                    cached = eval_cache.get(sig2) if eval_cache is not None else None
+                    k2 = _eval_cache_key(sig2)
+                    cached = eval_cache.get(k2) if eval_cache is not None else None
                     if cached is None:
                         eval_new = evaluator.evaluate(layout_state)
                         if eval_cache is not None:
-                            eval_cache.put(sig2, dict(eval_new))
+                            eval_cache.put(k2, dict(eval_new))
                     else:
                         eval_new = dict(cached)
                     delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
@@ -767,17 +761,7 @@ def run_detailed_place(
                     cache_hit = 0
                     if eval_cache is not None:
                         cache_hit = 1 if int(eval_cache.hit_count) > cache_hits_before else 0
-                    cache_key = hashlib.sha1(
-                        json.dumps(
-                            {
-                                "problem_sig": problem_signature,
-                                "hw_sig": hw_signature,
-                                "policy": str(policy_name),
-                                "seed": int(seed_id),
-                            },
-                            sort_keys=True,
-                        ).encode()
-                    ).hexdigest()
+                    cache_key = _eval_cache_key(signature_for_assign(assign))
                     row = [
                         step,
                         stage_label,
@@ -869,6 +853,7 @@ def run_detailed_place(
         "planner_type": planner_type,
         "steps": int(steps),
         "lookahead": {"enabled": bool(lookahead_enabled), "topk": int(lookahead_topk), "beta": float(lookahead_beta)},
+        "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
         "policy_switch": {
             "enabled": bool(use_ps),
             "last_action_family": getattr(controller, "last_action_family", None),

@@ -456,6 +456,7 @@ def _write_trace_and_pareto(
     max_steps: int | None,
 ) -> Tuple[Dict[str, Any], ParetoSet]:
     base_state, evaluator = _build_evaluator(layout_input, cfg)
+    objective_hash = evaluator.objective_hash()
     pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
     pareto = ParetoSet(
         eps_comm=float(pareto_cfg.get("eps_comm", 0.0)),
@@ -469,9 +470,6 @@ def _write_trace_and_pareto(
     prev_comm = float(prev_metrics["comm_norm"])
     prev_therm = float(prev_metrics["therm_norm"])
     prev_assign = _derive_initial_assign(layout_input)
-    problem_signature = signature_from_assign(prev_assign)
-    hw_signature = "layout_eval"
-
     best_eval: Dict[str, Any] | None = None
     best_assign: List[int] | None = None
     accepts = 0
@@ -487,17 +485,7 @@ def _write_trace_and_pareto(
         writer = csv.writer(f_trace)
         writer.writerow(TRACE_FIELDS)
         # ---- v5.4 required init row (even if steps=0 / no recordings) ----
-        init_cache_key = hashlib.sha1(
-            json.dumps(
-                {
-                    "problem_sig": problem_signature,
-                    "hw_sig": hw_signature,
-                    "policy": "init",
-                    "seed": int(seed),
-                },
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+        init_cache_key = f"obj:{objective_hash}|{signature_from_assign(prev_assign)}"
         row = [
             0,
             "init",
@@ -573,18 +561,6 @@ def _write_trace_and_pareto(
 
             if not isinstance(op_args, dict):
                 op_args = {"raw": str(op_args)}
-            cache_key = hashlib.sha1(
-                json.dumps(
-                    {
-                        "problem_sig": problem_signature,
-                        "hw_sig": hw_signature,
-                        "policy": str(policy_name),
-                        "seed": int(seed),
-                    },
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-
             # ---- update assign for this step ----
             assign_arr = None
             if isinstance(rec.get("assign"), list) and rec["assign"]:
@@ -601,6 +577,7 @@ def _write_trace_and_pareto(
             base_state.assign = assign_arr
             eval_out = evaluator.evaluate(base_state)
             signature = signature_from_assign(base_state.assign.tolist())
+            cache_key = f"obj:{objective_hash}|{signature}"
 
             d_total = float(eval_out["total_scalar"]) - float(prev_total)
             if accepted == 1:
@@ -711,6 +688,7 @@ def _write_trace_and_pareto(
         "seed": int(seed),
         "max_steps": int(max_steps) if max_steps is not None else None,
         "signature_version": "v5.4",
+        "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
         "run_signature": _build_run_signature(cfg),
     }
     (out_dir / "trace_meta.json").write_text(json.dumps(trace_meta, indent=2, ensure_ascii=False), encoding="utf-8")

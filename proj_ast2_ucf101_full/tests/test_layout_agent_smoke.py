@@ -94,3 +94,8 @@ def test_smoke_run_layout_agent():
         subprocess.check_call(cmd, cwd=str(proj_root))
         assert (out_dir / "layout_best.json").exists()
         assert (out_dir / "trace.csv").exists()
+        meta = json.loads((out_dir / "trace_meta.json").read_text(encoding="utf-8"))
+        assert "objective" in meta and "hash" in meta["objective"] and len(meta["objective"]["hash"]) >= 8
+        trace_text = (out_dir / "trace.csv").read_text(encoding="utf-8")
+        assert "cache_key" in trace_text.splitlines()[0]
+        assert f"obj:{meta['objective']['hash']}|" in trace_text

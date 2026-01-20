@@ -7,6 +7,7 @@ from typing import Dict
 
 import numpy as np
 
+from utils.stable_hash import stable_hash
 
 @dataclass
 class LayoutState:
@@ -26,6 +27,26 @@ class LayoutEvaluator:
         self.baseline = baseline
         self.scalar_w = scalar_w
         self.evaluator_calls = 0
+
+    def objective_cfg_dict(self) -> dict:
+        # Only include fields that affect objective value.
+        return {
+            "objective_version": "v5.4",
+            "sigma_mm": float(self.sigma_mm),
+            "baseline": {
+                "L_comm_baseline": float(self.baseline.get("L_comm_baseline", 1.0)),
+                "L_therm_baseline": float(self.baseline.get("L_therm_baseline", 1.0)),
+            },
+            "scalar_w": {
+                "w_comm": float(self.scalar_w.get("w_comm", 0.0)),
+                "w_therm": float(self.scalar_w.get("w_therm", 0.0)),
+                "w_penalty": float(self.scalar_w.get("w_penalty", 0.0)),
+            },
+            "penalty_schema": "duplicate+boundary",
+        }
+
+    def objective_hash(self) -> str:
+        return stable_hash(self.objective_cfg_dict())
 
     def _compute_comm(self, pos: np.ndarray, traffic_bytes: np.ndarray) -> float:
         t_sym = traffic_bytes + traffic_bytes.T
