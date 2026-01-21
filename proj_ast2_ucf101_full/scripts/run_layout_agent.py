@@ -17,6 +17,7 @@ import hashlib
 import json
 import random
 import time
+import uuid
 
 import numpy as np
 
@@ -74,7 +75,13 @@ def _parse_segments(raw_segments) -> list[Segment]:
     return segments
 
 
-def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Path | None = None) -> None:
+def run_layout_agent(
+    cfg,
+    out_dir: Path,
+    seed: int,
+    layout_input_path: str | Path | None = None,
+    run_id: str | None = None,
+) -> None:
     if layout_input_path is None:
         layout_input_path = getattr(cfg, "layout_input", None)
     if not layout_input_path:
@@ -88,14 +95,15 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         llm_usage_path.write_text("", encoding="utf-8")
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_events_path = out_dir / "trace_events.jsonl"
-    run_id = stable_hash(
-        {
-            "mode": "layout_agent",
-            "cfg_path": str(getattr(cfg, "cfg_path", "")),
-            "seed_id": int(seed),
-            "layout_input": str(layout_input_path),
-        }
-    )
+    if run_id is None:
+        run_id = stable_hash(
+            {
+                "mode": "layout_agent",
+                "cfg_path": str(getattr(cfg, "cfg_path", "")),
+                "seed_id": int(seed),
+                "layout_input": str(layout_input_path),
+            }
+        )
     ensure_trace_events(
         str(trace_events_path),
         run_id=run_id,
@@ -246,6 +254,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         seed_id=int(seed),
         chip_tdp=chip_tdp,
         llm_usage_path=out_dir / "llm_usage.jsonl",
+        recordings_path=out_dir / "recordings.jsonl",
     )
     assign_final = result.assign
 
@@ -276,6 +285,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     best_eval = evaluator.evaluate(layout_state)
     runtime_s = time.time() - start_time
     layout_best = {
+        "run_id": run_id,
         "best": {
             "assign": best_assign.tolist(),
             "pos_xy_mm": sites_xy[best_assign].tolist(),
@@ -315,6 +325,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
 
     report = {
+        "run_id": run_id,
         "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
         "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
         "best_total": float(best_eval.get("total_scalar", 0.0)),
@@ -342,6 +353,7 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
 
         budget = {
+            "run_id": run_id,
             "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
             "secondary_limit": {"type": "steps", "limit": step_limit},
             "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
@@ -394,6 +406,7 @@ def main():
     auto_out = Path("outputs/layout_agent") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
 
     # sync cfg.train.out_dir
     if hasattr(cfg, "train"):
@@ -452,6 +465,9 @@ def main():
                 },
             },
             extra=extra,
+            run_id=run_id,
+            spec_version="v5.4",
+            command=" ".join(sys.argv),
         )
     except Exception:
         pass
@@ -460,7 +476,13 @@ def main():
     meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    run_layout_agent(cfg, out_dir=out_dir, seed=int(args.seed), layout_input_path=args.layout_input)
+    run_layout_agent(
+        cfg,
+        out_dir=out_dir,
+        seed=int(args.seed),
+        layout_input_path=args.layout_input,
+        run_id=run_id,
+    )
     try:
         layout_best_path = out_dir / "layout_best.json"
         layout_best = json.loads(layout_best_path.read_text(encoding="utf-8")) if layout_best_path.exists() else {}
@@ -486,6 +508,9 @@ def main():
                 },
             },
             extra=extra,
+            run_id=run_id,
+            spec_version="v5.4",
+            command=" ".join(sys.argv),
         )
     except Exception:
         pass

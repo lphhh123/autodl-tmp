@@ -1328,8 +1328,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     }
     with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
-    if trace_path is not None and (early_stop_triggered or ran_epochs == 0):
-        append_trace_event(str(trace_path), {"type": "finalize", "reason": "early_stop_or_zero_step"})
+    if trace_path is not None:
+        reason = "early_stop_or_zero_step" if (early_stop_triggered or ran_epochs == 0) else "completed"
+        append_trace_event(str(trace_path), {"type": "finalize", "reason": reason})
 
     if export_layout_input:
         export_dir_path = Path(layout_export_dir or "outputs/P3")

@@ -24,6 +24,7 @@ import os
 import random
 import subprocess
 import time
+import uuid
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
@@ -363,6 +364,17 @@ def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
             yield record
 
 
+def _count_jsonl_lines(p: Path) -> int:
+    if p is None or (not p.exists()):
+        return 0
+    n = 0
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                n += 1
+    return n
+
+
 def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict[str, Any]:
     op = record.get("op", "noop")
     op_args = record.get("op_args", None)
@@ -551,12 +563,11 @@ def _write_trace_and_pareto(
             if max_steps is not None and (idx - 1) >= int(max_steps):
                 break
 
-            if "signature" not in rec:
-                try:
-                    signature = signature_from_assign(rec.get("assign", []))
-                except Exception:
-                    signature = "assign:unknown"
-                rec["signature"] = signature
+            # v5.4: always enforce canonical signature (assign signature)
+            try:
+                rec["signature"] = signature_from_assign(rec.get("assign", []))
+            except Exception:
+                rec["signature"] = "assign:unknown"
 
             step_id = int(rec.get("iter", rec.get("step", idx)))
             stage = str(rec.get("stage", "heuragenix"))
@@ -722,6 +733,7 @@ def _write_layout_best(
     cfg: Any,
     pareto: ParetoSet,
     best_assign: List[int],
+    run_id: str,
 ) -> Dict[str, Any]:
     base_state, evaluator = _build_evaluator(layout_input, cfg)
     base_state.assign = np.asarray(best_assign, dtype=int)
@@ -730,6 +742,7 @@ def _write_layout_best(
     pos_xy = sites_xy[best_assign].tolist() if len(best_assign) and len(sites_xy) else []
     best_comm, best_therm, _ = pareto.knee_point()
     layout_best = {
+        "run_id": run_id,
         "best": {
             "assign": list(best_assign),
             "pos_xy_mm": pos_xy,
@@ -986,6 +999,7 @@ def main() -> None:
     auto_out = Path("outputs/layout_heuragenix") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
     if hasattr(cfg, "train"):
         cfg.train.out_dir = str(out_dir)
 
@@ -1092,15 +1106,6 @@ def main() -> None:
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_events_path = out_dir / "trace_events.jsonl"
-    run_id = stable_hash(
-        {
-            "mode": "layout_heuragenix",
-            "cfg_hash": str(cfg_hash),
-            "layout_input_hash": str(layout_hash),
-            "seed_id": int(seed),
-            "method": str(method),
-        }
-    )
     ensure_trace_events(
         str(trace_events_path),
         run_id=run_id,
@@ -1155,6 +1160,9 @@ def main() -> None:
                 },
             },
             extra=extra,
+            run_id=run_id,
+            spec_version="v5.4",
+            command=" ".join(sys.argv),
         )
     except Exception:
         pass
@@ -1440,7 +1448,7 @@ def main() -> None:
     best_solution_path = output_dir / "best_solution.json"
     best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
     best_solution_payload = _read_best_solution_meta(best_solution_path)
-    _write_layout_best(out_dir, layout_input, cfg, pareto, best_assign)
+    _write_layout_best(out_dir, layout_input, cfg, pareto, best_assign, run_id)
 
     detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
@@ -1466,6 +1474,7 @@ def main() -> None:
         else int(max(1, round(float(iters_sf) * max(1, problem_size_eff))))
     )
     report = {
+        "run_id": run_id,
         "success": True,
         "error": "",
         "seed_id": int(seed),
@@ -1535,10 +1544,12 @@ def main() -> None:
     try:
         wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
         # effective_max_steps already computed above (based on size or user override)
+        recordings_path = out_dir / "recordings.jsonl"
         budget = {
+            "run_id": run_id,
             "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
             "secondary_limit": {"type": "max_steps", "limit": int(effective_max_steps)},
-            "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+            "actual_eval_calls": int(_count_jsonl_lines(recordings_path)),
             "seed_id": int(seed),
             "method": str(method),
             "selection_frequency": int(K),
