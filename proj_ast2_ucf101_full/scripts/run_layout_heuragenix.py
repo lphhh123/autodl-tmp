@@ -53,6 +53,14 @@ REQUIRED_RECORDING_KEYS = [
     "op",
 ]
 
+FAIRNESS_OVERRIDES = {
+    "action_families": [],
+    "moves_enabled": [],
+    "lookahead_k": 0,
+    "policy_switch_mode": "none",
+    "cache_enabled": False,
+}
+
 
 def _cfg_get(obj, key: str, default=None):
     if obj is None:
@@ -66,13 +74,7 @@ def _build_run_signature(cfg: Any, method_name: str) -> Dict[str, Any]:
     return build_signature_v54(
         cfg,
         method_name=method_name,
-        overrides={
-            "action_families": [],
-            "moves_enabled": [],
-            "lookahead_k": 0,
-            "policy_switch_mode": "none",
-            "cache_enabled": False,
-        },
+        overrides=FAIRNESS_OVERRIDES,
     )
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
@@ -700,6 +702,8 @@ def _write_trace_and_pareto(
         "best_total": float(best_eval["total_scalar"]) if best_eval else float(prev_total),
         "best_comm": float(best_eval["comm_norm"]) if best_eval else float(prev_comm),
         "best_therm": float(best_eval["therm_norm"]) if best_eval else float(prev_therm),
+        "fairness_overrides_applied": True,
+        "fairness_overrides": FAIRNESS_OVERRIDES,
     }
 
     # persist layout_best.json
@@ -1553,6 +1557,8 @@ def main() -> None:
         "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
         "evaluator_calls": int(trace_info.get("evaluator_calls", 0)),
         "evaluate_calls": int(trace_info.get("evaluator_calls", 0)),
+        "fairness_overrides_applied": True,
+        "fairness_overrides": FAIRNESS_OVERRIDES,
     }
     require_main = bool(layout_input.get("require_main_evaluator", True))
     if require_main and evaluator_source != "main_project":

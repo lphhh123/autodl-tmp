@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Smoke: v5.4 requires trace file exists even when steps=0 / early stop.
-This script generates a minimal trace_v54.csv compatible file and a minimal
+This script generates a minimal trace.csv compatible file and a minimal
 trace_events.jsonl header+finalize to validate schema contracts quickly.
 """
 
@@ -17,7 +17,7 @@ from utils.trace_signature_v54 import build_signature_v54
 
 
 def _write_trace_csv_v54(out_dir: Path, seed: int) -> Path:
-    trace_csv = out_dir / "trace_v54.csv"
+    trace_csv = out_dir / "trace.csv"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()
