@@ -695,7 +695,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         else:
             nd_enabled = False
         stable_hw_state["no_drift_enabled"] = nd_enabled
-        stable_hw_state["no_double_scale_enabled"] = bool(getattr(stable_hw_cfg, "no_double_scale", False))
+        nds_cfg = getattr(stable_hw_cfg, "no_double_scale", False)
+        if isinstance(nds_cfg, dict):
+            nds_enabled = bool(nds_cfg.get("enabled", False))
+        else:
+            nds_enabled = bool(nds_cfg)
+        stable_hw_state["no_double_scale_enabled"] = nds_enabled
     else:
         stable_hw_state["no_drift_enabled"] = False
         stable_hw_state["no_double_scale_enabled"] = False

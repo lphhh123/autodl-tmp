@@ -9,6 +9,7 @@ OUT="${1:-AST2_AND_HeurAgenix_CODE_ONLY.tar.gz}"
 tar -czvf "${OUT}" \
   --exclude='**/__pycache__' \
   --exclude='**/*.pyc' \
+  --exclude='**/*.pyo' \
   --exclude='**/.pytest_cache' \
   --exclude='**/.ipynb_checkpoints' \
   --exclude='**/rev' \
