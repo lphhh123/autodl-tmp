@@ -372,6 +372,10 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     locked.setdefault("prefer_dense_baseline", True)
     locked.setdefault("acc_margin", 0.0)
     locked.setdefault("min_acc_ref", 0.0)
+    # ---- ensure locked_acc_ref.source exists (stable_hw reads `source`, not `ref_source`) ----
+    if getattr(locked, "source", None) is None:
+        rs = getattr(locked, "ref_source", None)
+        locked.source = str(rs) if rs is not None else "warmup_best"
 
     # ---- accuracy guard (v5) ----
     if getattr(stable_hw, "accuracy_guard", None) is None:
