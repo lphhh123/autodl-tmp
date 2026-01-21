@@ -1,29 +1,34 @@
 from __future__ import annotations
+
 from typing import Any, Dict, Optional, List
 import os
+
 from .stable_hash import stable_hash
 
+# v5.4 trace signature contract (SPEC_E §6)
 REQUIRED_SIGNATURE_FIELDS: List[str] = [
     "method_name",
     "config_fingerprint",
+    "git_commit_or_version",
     "seed_global",
     "seed_problem",
-    "git_commit_or_version",
-    "acc_first_hard_gating",
-    "locked_acc_ref_enabled",
-    "no_drift_enabled",
-    "no_double_scale_enabled",
-    "action_families",
+    # Ours-B2+ knobs
     "moves_enabled",
     "lookahead_k",
     "bandit_type",
     "policy_switch_mode",
     "cache_enabled",
     "cache_key_schema_version",
+    # StableHW contracts
+    "acc_first_hard_gating_enabled",
+    "locked_acc_ref_enabled",
+    "acc_ref_source",
+    "no_drift_enabled",
+    "no_double_scale_enabled",
 ]
 
 
-def _get(obj: Any, key: str, default=None):
+def _get(obj: Any, key: str, default: Any = None) -> Any:
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -31,99 +36,136 @@ def _get(obj: Any, key: str, default=None):
     return getattr(obj, key, default)
 
 
-def _get_path(obj: Any, path: str, default=None):
+def _get_path(obj: Any, path: str, default: Any = None) -> Any:
     cur = obj
     for p in path.split("."):
+        if cur is None:
+            return default
         cur = _get(cur, p, None)
         if cur is None:
             return default
     return cur
 
 
-def compute_config_fingerprint_v54(cfg) -> str:
-    # fingerprint ONLY from stable, spec-relevant knobs
-    src = {
-        "mode": _get(cfg, "mode", None),
-        "train_seed": _get_path(cfg, "train.seed", None),
-        "stable_hw": _get(cfg, "stable_hw", None),
-        "locked_acc_ref": _get(cfg, "locked_acc_ref", None),  # legacy mirror
-        "no_drift": _get(cfg, "no_drift", None),  # legacy mirror
-        "detailed_place": _get(cfg, "detailed_place", None),
-        "policy_switch": _get(cfg, "policy_switch", None),
-        "hw": _get(cfg, "hw", None),
-        "loss": _get(cfg, "loss", None),
-    }
-    return stable_hash(src)
+def compute_config_fingerprint_v54(cfg: Any) -> str:
+    cfg_dict = cfg.to_dict() if hasattr(cfg, "to_dict") else cfg
+    return stable_hash(cfg_dict)
+
+
+def _boolish(v: Any) -> bool:
+    if v is None:
+        raise ValueError("required boolean is missing")
+    return bool(v)
+
+
+def _parse_no_double_scale(cfg: Any) -> bool:
+    nds = _get_path(cfg, "stable_hw.no_double_scale", None)
+    if isinstance(nds, dict):
+        return _boolish(nds.get("enabled", None))
+    if isinstance(nds, (bool, int)):
+        return bool(nds)
+    nds2 = _get_path(cfg, "stable_hw.no_double_scale.enabled", None)
+    if nds2 is not None:
+        return bool(nds2)
+    raise ValueError("missing cfg.stable_hw.no_double_scale (bool or {enabled: ...})")
 
 
 def build_signature_v54(
-    cfg,
-    *,
+    cfg: Any,
     method_name: str,
-    seed_problem: Optional[int] = None,
     overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if _get(cfg, "stable_hw", None) is None:
+        raise ValueError("missing cfg.stable_hw; call validate_and_fill_defaults() first")
+
     fp = compute_config_fingerprint_v54(cfg)
 
-    seed_global = int(_get_path(cfg, "train.seed", 0) or 0)
-    if seed_problem is None:
-        seed_problem = int(_get_path(cfg, "problem.seed", seed_global) or seed_global)
+    seed_global = int(_get_path(cfg, "seed", _get_path(cfg, "train.seed", 0)) or 0)
+    seed_problem = int(_get_path(cfg, "problem.seed", 0) or 0)
 
-    # StableHW flags (prefer stable_hw migrated config)
-    acc_first_hard_gating = bool(_get_path(cfg, "stable_hw.accuracy_guard.enabled", False))
-    locked_acc_ref_enabled = bool(
-        _get_path(cfg, "stable_hw.locked_acc_ref.enabled", False) or _get_path(cfg, "locked_acc_ref.enabled", False)
-    )
-    no_drift_enabled = bool(
-        _get_path(cfg, "stable_hw.no_drift.enabled", False) or _get_path(cfg, "no_drift.enabled", False)
-    )
-    no_double_scale_enabled = bool(_get_path(cfg, "stable_hw.no_double_scale.enabled", True))
-
-    # Ours-B2+ knobs (layout)
+    # -------- Ours-B2+ knobs (layout search) --------
     action_probs = _get_path(cfg, "detailed_place.action_probs", None)
-    if isinstance(action_probs, dict):
-        action_families = list(action_probs.keys())
-    else:
-        action_families = list(_get_path(cfg, "policy_switch.action_families", []) or [])
-    moves_enabled = bool(action_families)
-    lookahead_k = int(_get_path(cfg, "detailed_place.lookahead_k", _get_path(cfg, "detailed_place.lookahead.k", 0)) or 0)
-    bandit_type = str(_get_path(cfg, "policy_switch.bandit_type", "none") or "none")
-    ps_enabled = bool(_get_path(cfg, "policy_switch.enabled", False))
-    ps_mode = str(_get_path(cfg, "policy_switch.mode", "bandit" if ps_enabled else "none"))
-    if not ps_enabled:
-        ps_mode = "none"
+    if not isinstance(action_probs, dict):
+        action_probs = {}
+    moves_enabled = sorted([str(k) for k in action_probs.keys()])
 
-    cache_enabled = bool(_get_path(cfg, "detailed_place.cache_enabled", _get_path(cfg, "detailed_place.cache.enabled", True)))
-    cache_key_schema_version = int(_get_path(cfg, "detailed_place.cache_key_schema_version", 1) or 1)
+    lookahead_k = int(_get_path(cfg, "detailed_place.lookahead.k", 0) or 0)
+
+    ps_enabled = bool(_get_path(cfg, "detailed_place.policy_switch.enabled", False))
+    ps_mode = str(_get_path(cfg, "detailed_place.policy_switch.mode", "off") or "off")
+    policy_switch_mode = ps_mode if ps_enabled else "off"
+
+    bandit_type = str(
+        _get_path(
+            cfg,
+            "detailed_place.policy_switch.bandit_type",
+            _get_path(cfg, "detailed_place.policy_switch.bandit.type", "none"),
+        )
+        or "none"
+    )
+
+    cache_size = int(_get_path(cfg, "detailed_place.policy_switch.cache_size", 0) or 0)
+    cache_enabled = bool(ps_enabled and cache_size > 0)
+    cache_key_schema_version = str(
+        _get_path(cfg, "detailed_place.policy_switch.cache_key_schema_version", "v5.4") or "v5.4"
+    )
+
+    # -------- StableHW contracts --------
+    acc_first_hard_gating_enabled = _boolish(_get_path(cfg, "stable_hw.accuracy_guard.enabled", None))
+
+    locked_acc_ref_enabled = _get_path(cfg, "stable_hw.locked_acc_ref.enabled", None)
+    if locked_acc_ref_enabled is None:
+        locked_acc_ref_enabled = _get_path(cfg, "locked_acc_ref.enabled", None)
+    locked_acc_ref_enabled = _boolish(locked_acc_ref_enabled)
+
+    acc_ref_source = _get_path(cfg, "stable_hw.locked_acc_ref.source", None)
+    if acc_ref_source is None:
+        acc_ref_source = _get_path(cfg, "locked_acc_ref.source", None)
+    if acc_ref_source is None:
+        raise ValueError("missing locked_acc_ref.source (or stable_hw.locked_acc_ref.source)")
+
+    no_drift_enabled = _get_path(cfg, "stable_hw.no_drift.enabled", None)
+    if no_drift_enabled is None:
+        no_drift_enabled = _get_path(cfg, "no_drift.enabled", None)
+    no_drift_enabled = _boolish(no_drift_enabled)
+
+    no_double_scale_enabled = _parse_no_double_scale(cfg)
 
     git_commit_or_version = (
-        os.environ.get("GIT_COMMIT", None) or os.environ.get("PROJECT_VERSION", None) or "v5.4"
+        os.environ.get("GIT_COMMIT")
+        or os.environ.get("GITHUB_SHA")
+        or os.environ.get("PROJECT_GIT_SHA")
+        or "code_only"
     )
 
-    sig = {
-        "method_name": method_name,
+    sig: Dict[str, Any] = {
+        "method_name": str(method_name),
         "config_fingerprint": fp,
+        "git_commit_or_version": str(git_commit_or_version),
         "seed_global": seed_global,
-        "seed_problem": int(seed_problem),
-        "git_commit_or_version": git_commit_or_version,
-        "acc_first_hard_gating": acc_first_hard_gating,
-        "locked_acc_ref_enabled": locked_acc_ref_enabled,
-        "no_drift_enabled": no_drift_enabled,
-        "no_double_scale_enabled": no_double_scale_enabled,
-        "action_families": action_families,
+        "seed_problem": seed_problem,
         "moves_enabled": moves_enabled,
         "lookahead_k": lookahead_k,
         "bandit_type": bandit_type,
-        "policy_switch_mode": ps_mode,
+        "policy_switch_mode": policy_switch_mode,
         "cache_enabled": cache_enabled,
         "cache_key_schema_version": cache_key_schema_version,
+        "acc_first_hard_gating_enabled": acc_first_hard_gating_enabled,
+        "locked_acc_ref_enabled": locked_acc_ref_enabled,
+        "acc_ref_source": str(acc_ref_source),
+        "no_drift_enabled": no_drift_enabled,
+        "no_double_scale_enabled": no_double_scale_enabled,
+        "action_families": moves_enabled,  # optional
     }
 
     if overrides:
         sig.update(overrides)
 
-    # hard assertion here (fail fast)
     missing = [k for k in REQUIRED_SIGNATURE_FIELDS if k not in sig]
     if missing:
-        raise ValueError(f"trace signature missing required fields: {missing}")
+        raise ValueError(f"missing required signature fields: {missing}")
+    none_fields = [k for k in REQUIRED_SIGNATURE_FIELDS if sig.get(k, None) is None]
+    if none_fields:
+        raise ValueError(f"signature required fields are None: {none_fields}")
+
     return sig

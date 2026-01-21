@@ -1,3 +1,5 @@
+_base_: version_c_ucf101.yaml
+
 locked_acc_ref:
   enabled: true
   source: "warmup_best"

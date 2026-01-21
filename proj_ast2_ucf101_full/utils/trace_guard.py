@@ -53,20 +53,20 @@ def ensure_trace_events(path: Path, payload: dict):
     required = [
         "method_name",
         "config_fingerprint",
+        "git_commit_or_version",
         "seed_global",
         "seed_problem",
-        "git_commit_or_version",
-        "acc_first_hard_gating",
-        "locked_acc_ref_enabled",
-        "no_drift_enabled",
-        "no_double_scale_enabled",
-        "action_families",
         "moves_enabled",
         "lookahead_k",
         "bandit_type",
         "policy_switch_mode",
         "cache_enabled",
         "cache_key_schema_version",
+        "acc_first_hard_gating_enabled",
+        "locked_acc_ref_enabled",
+        "acc_ref_source",
+        "no_drift_enabled",
+        "no_double_scale_enabled",
     ]
     missing = [k for k in required if k not in payload["signature"]]
     if missing:
@@ -119,23 +119,26 @@ def finalize_trace_events(path: Path, payload: dict):
         payload["steps_done"] = 0
     if "best_solution_valid" not in payload:
         payload["best_solution_valid"] = False
-    append_trace_event_v54(path, "trace_finalize", payload=payload)
+    append_trace_event_v54(path, "finalize", payload=payload)
 
 
 REQUIRED_SIGNATURE_KEYS = {
-    "spec_version",
-    "experiment",
-    "seed",
-    "dataset",
-    "model",
-    "hardware",
-    "mode",
-    "acc_first_hard_gating",
-    "locked_acc_ref",
-    "no_drift",
-    "no_double_scale",
-    "proxy_negative_guard",
-    "ours_b2_plus",
+    "method_name",
+    "config_fingerprint",
+    "git_commit_or_version",
+    "seed_global",
+    "seed_problem",
+    "moves_enabled",
+    "lookahead_k",
+    "bandit_type",
+    "policy_switch_mode",
+    "cache_enabled",
+    "cache_key_schema_version",
+    "acc_first_hard_gating_enabled",
+    "locked_acc_ref_enabled",
+    "acc_ref_source",
+    "no_drift_enabled",
+    "no_double_scale_enabled",
 }
 
 

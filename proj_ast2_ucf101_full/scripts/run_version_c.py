@@ -157,10 +157,10 @@ def main():
     print("[CFG] loss.lambda_hw =", float(getattr(getattr(cfg, "loss", None), "lambda_hw", -1.0)))
     print("[CFG] hw.lambda_hw =", float(getattr(getattr(cfg, "hw", None), "lambda_hw", -1.0)))
     keypaths = [
-        "stable_hw.acc_first.enabled",
+        "stable_hw.accuracy_guard.enabled",
         "stable_hw.locked_acc_ref.enabled",
         "stable_hw.no_drift.enabled",
-        "stable_hw.no_double_scale.enabled",
+        "stable_hw.no_double_scale",
         "stable_hw.min_latency_ms",
     ]
     for kp in keypaths:

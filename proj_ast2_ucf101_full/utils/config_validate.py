@@ -89,6 +89,12 @@ def _sync_layout_to_hw(cfg: Any) -> None:
             set_nested(cfg, dst, v)
 
 
+def _ensure_namespace(cfg: Any, key: str) -> Any:
+    if not hasattr(cfg, key) or getattr(cfg, key) is None:
+        setattr(cfg, key, AttrDict({}))
+    return getattr(cfg, key)
+
+
 def _migrate_stable_hw_to_v5(cfg: Any) -> None:
     """
     v5.4 canonical:
@@ -283,6 +289,31 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             cfg.oscillation.window = 10
         if getattr(cfg.oscillation, "eps_flat", None) is None:
             cfg.oscillation.eps_flat = 1e-6
+
+        # ------------------------------------------------------------
+        # Layout-mode default: still emit StableHW signature knobs explicitly
+        # (so trace signature can be strict per SPEC_E without silent defaults).
+        # ------------------------------------------------------------
+        stable_hw = _ensure_namespace(cfg, "stable_hw")
+        stable_hw.enabled = bool(getattr(stable_hw, "enabled", False))
+
+        ag = _ensure_namespace(stable_hw, "accuracy_guard")
+        ag.enabled = bool(getattr(ag, "enabled", False))
+        if getattr(ag, "metric", None) is None:
+            ag.metric = "top1"
+        if getattr(ag, "acc_threshold_rel_to_ref", None) is None:
+            ag.acc_threshold_rel_to_ref = 1.0
+
+        lar = _ensure_namespace(stable_hw, "locked_acc_ref")
+        lar.enabled = bool(getattr(lar, "enabled", False))
+        if getattr(lar, "source", None) is None:
+            lar.source = "none"
+
+        nd = _ensure_namespace(stable_hw, "no_drift")
+        nd.enabled = bool(getattr(nd, "enabled", False))
+
+        if not hasattr(stable_hw, "no_double_scale"):
+            stable_hw.no_double_scale = False
 
         return cfg
     elif mode == "single":

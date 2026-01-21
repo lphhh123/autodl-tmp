@@ -106,5 +106,5 @@ def test_smoke_run_layout_agent():
         assert '"event_type": "trace_header"' in first
         assert '"signature"' in first
         last = lines[-1]
-        assert '"event_type": "trace_finalize"' in last
+        assert '"event_type": "finalize"' in last
         assert '"reason"' in last and '"steps_done"' in last and '"best_solution_valid"' in last
