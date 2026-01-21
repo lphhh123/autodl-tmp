@@ -68,7 +68,7 @@ def _build_run_signature(cfg: Any, method_name: str) -> Dict[str, Any]:
         method_name=method_name,
         overrides={
             "action_families": [],
-            "moves_enabled": False,
+            "moves_enabled": [],
             "lookahead_k": 0,
             "policy_switch_mode": "none",
             "cache_enabled": False,

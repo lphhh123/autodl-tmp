@@ -14,7 +14,7 @@ import json
 import time
 from typing import Union
 
-from utils.config import AttrDict, load_config
+from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from trainer.trainer_version_c import train_version_c
@@ -50,6 +50,50 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
         if cur is default:
             return default
     return cur
+
+
+def _inject_baseline_stats_path(cfg, baseline_stats_path: str):
+    from pathlib import Path
+
+    from omegaconf import OmegaConf
+
+    p = str(Path(baseline_stats_path).expanduser())
+
+    # Ensure stable_hw exists + enabled (Version-C + StableHW contract)
+    if getattr(cfg, "stable_hw", None) is None:
+        cfg.stable_hw = OmegaConf.create({})
+    if not hasattr(cfg.stable_hw, "enabled"):
+        cfg.stable_hw.enabled = True
+
+    # Find the *active* locked_acc_ref (root preferred by StableHW resolver)
+    locked_cfg = None
+    if getattr(cfg, "locked_acc_ref", None) is not None and bool(getattr(cfg.locked_acc_ref, "enabled", True)):
+        locked_cfg = cfg.locked_acc_ref
+    elif getattr(cfg.stable_hw, "locked_acc_ref", None) is not None and bool(
+        getattr(cfg.stable_hw.locked_acc_ref, "enabled", True)
+    ):
+        locked_cfg = cfg.stable_hw.locked_acc_ref
+    else:
+        # If neither exists, create under stable_hw (avoid creating both root + stable_hw)
+        cfg.stable_hw.locked_acc_ref = OmegaConf.create({"enabled": True})
+        locked_cfg = cfg.stable_hw.locked_acc_ref
+
+    # Inject where it will actually be read
+    locked_cfg.baseline_stats_path = p
+
+    # Keep a readable alias (optional, but harmless)
+    cfg.stable_hw.baseline_stats_path = p
+
+    # Also help NoDrift stats_path if it exists but unset
+    try:
+        if getattr(cfg, "no_drift", None) is not None and not getattr(cfg.no_drift, "stats_path", None):
+            cfg.no_drift.stats_path = p
+        if getattr(cfg.stable_hw, "no_drift", None) is not None and not getattr(cfg.stable_hw.no_drift, "stats_path", None):
+            cfg.stable_hw.no_drift.stats_path = p
+    except Exception:
+        pass
+
+    return cfg
 
 
 def main():
@@ -88,25 +132,7 @@ def main():
         cfg.training.seed = int(args.seed)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
     if args.baseline_stats:
-        # Auto-create minimal stable_hw structure to avoid brittle failures.
-        if not hasattr(cfg, "stable_hw") or cfg.stable_hw is None:
-            cfg.stable_hw = AttrDict({"enabled": True})
-        if not hasattr(cfg.stable_hw, "locked_acc_ref") or cfg.stable_hw.locked_acc_ref is None:
-            cfg.stable_hw.locked_acc_ref = AttrDict({"enabled": True})
-        if not hasattr(cfg.stable_hw, "accuracy_guard") or cfg.stable_hw.accuracy_guard is None:
-            cfg.stable_hw.accuracy_guard = AttrDict({})
-        if not hasattr(cfg.stable_hw, "negative_guard") or cfg.stable_hw.negative_guard is None:
-            cfg.stable_hw.negative_guard = AttrDict({})
-
-        cfg.stable_hw.locked_acc_ref.baseline_stats_path = str(args.baseline_stats)
-
-        # Optional back-compat alias (do not use as authoritative)
-        try:
-            cfg.stable_hw.baseline_stats_path = str(args.baseline_stats)
-        except Exception:
-            pass
-
-        cfg.stable_hw.locked_acc_ref.prefer_dense_baseline = True
+        cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
 
         # Enforce NoDrift: disable legacy direct-sum entrances
         try:

@@ -198,6 +198,11 @@ def main() -> None:
     if stable_state["latency_ref_ms"] != 1.0 or stable_state["memory_ref_mb"] != 2.0:
         raise AssertionError("NoDrift contract violated: refs updated while enabled")
 
+    # ---- regression: real call-path must not crash (cfg + stable_hw_cfg) ----
+    stable_state2 = {"latency_ref_ms": 1.0, "memory_ref_mb": 2.0}
+    # should be no-op under NoDrift, but must not raise
+    update_hw_refs_from_stats(cfg, stable_state2, {"latency_ms": 9.0, "mem_mb": 9.0}, stable_hw_cfg=stable_hw_cfg)
+
     # ---- sanitize negative proxy values ----
     neg_proxy = NegativeProxy()
     cfg.stable_hw.min_latency_ms = float(getattr(cfg.stable_hw, "min_latency_ms", 1e-3))
