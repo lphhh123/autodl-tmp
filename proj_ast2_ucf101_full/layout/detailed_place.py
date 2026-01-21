@@ -106,8 +106,18 @@ def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: Opti
         assign[int(slot)] = int(site)
 
 
-def signature_for_assign(assign: np.ndarray) -> str:
-    return signature_from_assign(assign.tolist())
+def signature_for_assign(assign: Any) -> str:
+    """
+    Accepts either np.ndarray or a python sequence (list/tuple).
+    Returns a stable signature string that starts with 'assign:'.
+    """
+    if assign is None:
+        return "assign:null"
+    if hasattr(assign, "tolist"):
+        assign_list = assign.tolist()
+    else:
+        assign_list = list(assign)
+    return signature_from_assign(assign_list)
 
 
 def _select_cluster_target_sites(
@@ -317,7 +327,7 @@ def run_detailed_place(
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
                     prev_assign = assign.copy()
     
-                    init_cache_key = _eval_cache_key(signature_for_assign(prev_assign.tolist()))
+                    init_cache_key = _eval_cache_key(signature_for_assign(prev_assign))
                     row = [
                         0,
                         "init",
@@ -332,7 +342,7 @@ def run_detailed_place(
                         0.0,
                         int(seed_id),
                         0,
-                        signature_for_assign(prev_assign.tolist()),
+                        signature_for_assign(prev_assign),
                         0,
                         0,
                         0,
@@ -367,7 +377,7 @@ def run_detailed_place(
                             "boundary_penalty": float(pen.get("boundary", 0.0)),
                             "seed_id": int(seed_id),
                             "time_ms": 0,
-                            "signature": signature_for_assign(prev_assign.tolist()),
+                            "signature": signature_for_assign(prev_assign),
                         }
                         recordings_fp.write(json.dumps(init_record, ensure_ascii=False) + "\n")
                         recordings_fp.flush()
@@ -881,8 +891,11 @@ def run_detailed_place(
                     fin_total = float(locals().get("prev_total", 0.0))
                     fin_comm = float(locals().get("prev_comm", 0.0))
                     fin_therm = float(locals().get("prev_therm", 0.0))
-                    fin_sig = locals().get("prev_assign", None)
-                    fin_sig = signature_for_assign(fin_sig.tolist()) if fin_sig is not None else "assign:unknown"
+                    fin_sig_arr = locals().get("prev_assign", None)
+                    if fin_sig_arr is not None:
+                        fin_sig = signature_for_assign(fin_sig_arr)
+                    else:
+                        fin_sig = "assign:unknown"
 
                     fin_row = [
                         int(steps) + 1,
