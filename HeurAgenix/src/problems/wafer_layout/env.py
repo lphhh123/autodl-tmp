@@ -331,6 +331,7 @@ class Env(BaseEnv):
                 "total_scalar": float(self.key_value),
                 "comm_norm": float(self.current_comm),
                 "therm_norm": float(self.current_therm),
+                "pareto_added": 0,
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
                 "time_ms": 0,
@@ -430,7 +431,8 @@ class Env(BaseEnv):
         op_name = op_args_full.get("op", type(operator).__name__)
         op_args = dict(op_args_full)
         op_args.pop("op", None)
-        signature = _signature_from_action(op_name, op_args)
+        op_signature = _signature_from_action(op_name, op_args)
+        assign_sig = _signature_from_assign(list(self.current_solution.assign))
         eval_for_record = self.current_eval if accept else old_eval
         penalty = eval_for_record.get("penalty", {}) if isinstance(eval_for_record.get("penalty", {}), dict) else {}
         duplicate_penalty = float(penalty.get("duplicate", 0.0))
@@ -446,17 +448,19 @@ class Env(BaseEnv):
             "op": str(op_name),
             # ---- for wrapper compatibility ----
             "op_args": op_args,
-            "op_args_json": json.dumps(op_args, ensure_ascii=False),
+            "op_args_json": json.dumps({"op": op_name, **op_args}, ensure_ascii=False),
             "assign": list(self.current_solution.assign),
             "seed_id": int(self._seed_id),
             "accepted": 1 if accept else 0,
             "total_scalar": float(new_key),
             "comm_norm": float(new_comm),
             "therm_norm": float(new_therm),
+            "pareto_added": 0,
             "duplicate_penalty": duplicate_penalty,
             "boundary_penalty": boundary_penalty,
             "time_ms": int(dt),
-            "signature": signature,
+            "signature": assign_sig,
+            "op_signature": op_signature,
             "meta": meta,
         }
         self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -518,6 +522,7 @@ class Env(BaseEnv):
                 "therm_norm": float(therm_norm),
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
+                "pareto_added": 0,
                 "time_ms": int(dt),
                 "signature": assign_sig,
                 "op_signature": op_sig,
@@ -559,6 +564,7 @@ class Env(BaseEnv):
                 "therm_norm": float(therm_norm),
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
+                "pareto_added": 0,
                 "time_ms": int(dt),
                 "signature": assign_sig,
                 "op_signature": op_sig,
