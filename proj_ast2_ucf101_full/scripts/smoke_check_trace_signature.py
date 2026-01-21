@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Smoke check for v5.4 trace signature + schema in trace_v54.csv."""
+"""Smoke check for v5.4 trace signature + schema in trace.csv."""
 
 import argparse
 import csv

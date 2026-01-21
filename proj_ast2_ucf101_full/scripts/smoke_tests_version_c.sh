@@ -62,13 +62,13 @@ echo "[SMOKE] StableHW schema check"
 python -m scripts.smoke_check_stable_hw_schema --cfg configs/smoke_version_c_ucf101.yaml
 
 echo "[SMOKE] StableHW NoDrift config check"
-python scripts/smoke_check_config_no_drift.py --cfg configs/vc_phase3_full_ucf101.yaml --mode version_c
+python -m scripts.smoke_check_config_no_drift --cfg configs/vc_phase3_full_ucf101.yaml --mode version_c
 
 echo "[SMOKE] StableHW contract check"
-python scripts/smoke_check_stable_hw_contract.py --cfg configs/vc_phase3_full_ucf101.yaml
+python -m scripts.smoke_check_stable_hw_contract --cfg configs/vc_phase3_full_ucf101.yaml
 
 echo "[SMOKE] StableHW gate check"
-python scripts/smoke_stable_hw_gate.py --cfg configs/vc_phase3_full_ucf101.yaml
+python -m scripts.smoke_stable_hw_gate --cfg configs/vc_phase3_full_ucf101.yaml
 
 echo "[SMOKE] StableHW gradient check"
 python -m scripts.smoke_check_hw_loss_grad --cfg configs/smoke_version_c_ucf101.yaml
@@ -100,10 +100,10 @@ python -m scripts.run_layout_heuragenix \
   --out_dir outputs/SMOKE/layout_B0_heuragenix_llm_hh \
   --seed 0
 
-echo "[SMOKE] Trace zero-step contract (must still write trace_v54.csv with v5.4 signature)"
+echo "[SMOKE] Trace zero-step contract (must still write trace.csv with v5.4 signature)"
 python -m scripts.smoke_trace_zero_step --out_dir outputs/SMOKE/trace_zero_step
 
 echo "[SMOKE] Trace signature check (v5.4)"
-python -m scripts.smoke_check_trace_signature --trace outputs/SMOKE/trace_zero_step/trace_v54.csv
+python -m scripts.smoke_check_trace_signature --trace outputs/SMOKE/trace_zero_step/trace.csv
 
 echo "[SMOKE DONE]"
