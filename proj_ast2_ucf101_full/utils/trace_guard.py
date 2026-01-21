@@ -92,6 +92,8 @@ def finalize_trace_dir(
     trace_dir: Path,
     *,
     summary_extra: Optional[Dict[str, Any]] = None,
+    run_id: Optional[str] = None,
+    step: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Creates trace/trace_summary.json and appends a finalize event.
@@ -110,7 +112,10 @@ def finalize_trace_dir(
     if summary_extra:
         summary.update(summary_extra)
 
-    append_trace_event(trace_dir, event_type="finalize", payload={"summary": summary})
+    if run_id is not None and step is not None:
+        append_trace_event_v54(events_path, "finalize", payload={"summary": summary}, run_id=run_id, step=step)
+    else:
+        append_trace_event(trace_dir, event_type="finalize", payload={"summary": summary})
     _write_json(trace_dir / "trace_summary.json", summary)
     return summary
 
@@ -130,9 +135,26 @@ def ensure_trace_events(path: Path, payload: dict):
     _append_jsonl(path, {"ts_ms": _now_ms(), "event_type": "trace_header", "payload": payload})
 
 
-def append_trace_event_v54(path: Path, event_type: str, payload: dict):
-    _append_jsonl(path, {"ts_ms": _now_ms(), "event_type": event_type, "payload": payload})
+def append_trace_event_v54(path: Path, event_type: str, payload: dict, *, run_id: str, step: int):
+    if run_id is None or str(run_id).strip() == "":
+        raise ValueError("trace event requires non-empty run_id (v5.4)")
+    rec = {
+        "ts_ms": _now_ms(),
+        "run_id": str(run_id),
+        "step": int(step),
+        "event_type": str(event_type),
+        "payload": payload if payload is not None else {},
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def finalize_trace_events(path: Path, payload: dict):
-    _append_jsonl(path, {"ts_ms": _now_ms(), "event_type": "finalize", "payload": payload})
+def finalize_trace_events(path: Path, payload: dict, *, run_id: str, step: int):
+    if payload is None:
+        payload = {}
+    payload.setdefault("reason", "done")
+    payload.setdefault("steps_done", 0)
+    payload.setdefault("best_solution_valid", False)
+    append_trace_event_v54(path, "finalize", payload=payload, run_id=run_id, step=step)

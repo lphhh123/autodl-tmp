@@ -40,7 +40,7 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.trace_schema import TRACE_FIELDS
 
@@ -1087,6 +1087,7 @@ def main() -> None:
         run_meta={"heuristic": method_label, "method": method, "run_id": run_id, "mode": "layout_heuragenix"},
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
     )
+    trace_events_path = trace_dir / "trace_events.jsonl"
     finalize_state = {
         "finalized": False,
         "reason": "error",
@@ -1107,6 +1108,8 @@ def main() -> None:
                 "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
                 "best_total": finalize_state.get("best_total", None),
             },
+            run_id=run_id,
+            step=int(finalize_state.get("steps_done", 0) or 0),
         )
         finalize_state["finalized"] = True
 
@@ -1117,9 +1120,9 @@ def main() -> None:
 
     sys.excepthook = _trace_excepthook
     try:
-        append_trace_event(
-            trace_dir,
-            event_type="init",
+        append_trace_event_v54(
+            trace_events_path,
+            "init",
             payload={
                 "baseline_signature": signature_from_assign(np.array(_derive_initial_assign(layout_input), dtype=int)),
                 "seed_signature": signature_from_assign(np.array(seed_assign, dtype=int)),
@@ -1128,38 +1131,39 @@ def main() -> None:
                 "num_candidate_heuristics": int(num_candidate_heuristics),
                 "rollout_budget": int(rollout_budget),
             },
+            run_id=run_id,
+            step=0,
         )
     except Exception:
         pass
     if hasattr(cfg, "train"):
         cfg.train.cfg_hash = cfg_hash
         cfg.train.cfg_path = str(args.cfg)
-    try:
-        from utils.run_manifest import write_run_manifest
+    from utils.run_manifest import write_run_manifest
 
-        write_run_manifest(
-            out_dir=out_dir,
-            cfg_path=str(args.cfg),
-            cfg_hash=str(cfg_hash),
-            run_id=run_id,
-            seed=int(args.seed),
-            command=" ".join(sys.argv),
-            stable_hw_state={
-                "guard_mode": "acc_first_hard_gating",
-                "lambda_hw_base": None,
-                "lambda_hw_effective": None,
-                "discrete_cache": {
-                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
-                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
-                },
+    write_run_manifest(
+        out_dir=str(out_dir),
+        cfg_path=str(args.cfg),
+        cfg_hash=str(cfg_hash),
+        seed=int(args.seed),
+        stable_hw_state={
+            "guard_mode": "acc_first_hard_gating",
+            "lambda_hw_base": None,
+            "lambda_hw_effective": None,
+            "discrete_cache": {
+                "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
-            extra_meta={
-                "budget_main_axis": "eval_calls",
-                "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
-            },
-        )
-    except Exception:
-        pass
+        },
+        extra={
+            "budget_main_axis": "eval_calls",
+            "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
+        },
+        run_id=run_id,
+        spec_version="v5.4",
+        command=" ".join(sys.argv),
+        code_root=str(_PROJECT_ROOT),
+    )
 
     output_root = internal_out / "output"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1584,38 +1588,35 @@ def main() -> None:
         "wall_time_s": float(time.time() - start_time),
     }
     (out_dir / "budget.json").write_text(json.dumps(budget, indent=2) + "\n", encoding="utf-8")
-    try:
-        from utils.run_manifest import write_run_manifest
-
-        meta = {
-            "mapping_signature": best_solution_payload.get("mapping_signature", "")
-            if isinstance(best_solution_payload, dict)
-            else "",
-            "layout_signature": signature_from_assign(best_assign),
-        }
-        write_run_manifest(
-            out_dir=out_dir,
-            cfg_path=str(args.cfg),
-            cfg_hash=str(cfg_hash),
-            run_id=run_id,
-            seed=int(args.seed),
-            command=" ".join(sys.argv),
-            stable_hw_state={
-                "guard_mode": "acc_first_hard_gating",
-                "lambda_hw_base": None,
-                "lambda_hw_effective": None,
-                "discrete_cache": {
-                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
-                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
-                },
+    meta = {
+        "mapping_signature": best_solution_payload.get("mapping_signature", "")
+        if isinstance(best_solution_payload, dict)
+        else "",
+        "layout_signature": signature_from_assign(best_assign),
+    }
+    write_run_manifest(
+        out_dir=str(out_dir),
+        cfg_path=str(args.cfg),
+        cfg_hash=str(cfg_hash),
+        seed=int(args.seed),
+        stable_hw_state={
+            "guard_mode": "acc_first_hard_gating",
+            "lambda_hw_base": None,
+            "lambda_hw_effective": None,
+            "discrete_cache": {
+                "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
-            extra_meta={
-                "budget_main_axis": "eval_calls",
-                "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
-            },
-        )
-    except Exception:
-        pass
+        },
+        extra={
+            "budget_main_axis": "eval_calls",
+            "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
+        },
+        run_id=run_id,
+        spec_version="v5.4",
+        command=" ".join(sys.argv),
+        code_root=str(_PROJECT_ROOT),
+    )
     # ---- v5.4: mandatory finalize event (trace_events.jsonl) ----
     try:
         steps_done = int(report.get("n_steps", 0) or 0)

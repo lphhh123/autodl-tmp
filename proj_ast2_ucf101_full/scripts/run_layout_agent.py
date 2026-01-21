@@ -40,7 +40,7 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
 
@@ -120,6 +120,7 @@ def run_layout_agent(
         run_meta={"layout_input": str(layout_input_path), "mode": "layout_agent", "run_id": run_id},
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
     )
+    trace_events_path = trace_dir / "trace_events.jsonl"
 
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
     planned_steps = int(detailed_cfg.get("max_steps", detailed_cfg.get("steps", 0)) or 0)
@@ -191,15 +192,17 @@ def run_layout_agent(
             seed_eval["therm_norm"],
             {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
         )
-        append_trace_event(
-            trace_dir,
-            event_type="init",
+        append_trace_event_v54(
+            trace_events_path,
+            "init",
             payload={
                 "baseline_signature": signature_from_assign(assign_grid),
                 "seed_signature": signature_from_assign(assign_seed),
                 "baseline_total_scalar": float(base_eval.get("total_scalar", 0.0)),
                 "seed_total_scalar": float(seed_eval.get("total_scalar", 0.0)),
             },
+            run_id=run_id,
+            step=0,
         )
 
         # Stage1: coarsen
@@ -373,11 +376,18 @@ def run_layout_agent(
             (out_dir / "budget.json").write_text(
                 json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"failed to write budget.json: {exc}") from exc
         ok = True
     except Exception as exc:
-        append_trace_event(trace_dir, event_type="error", payload={"error": str(exc)})
+        steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
+        append_trace_event_v54(
+            trace_events_path,
+            "error",
+            payload={"error": str(exc)},
+            run_id=run_id,
+            step=int(steps_done),
+        )
         raise
     finally:
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
@@ -391,6 +401,8 @@ def run_layout_agent(
                 "best_solution_valid": bool(best_solution_valid),
                 "best_total": float(best_total) if best_total is not None else None,
             },
+            run_id=run_id,
+            step=int(steps_done),
         )
 
 
@@ -453,29 +465,28 @@ def main():
     if hasattr(cfg, "train"):
         cfg.train.cfg_hash = cfg_hash
         cfg.train.cfg_path = str(args.cfg)
-    try:
-        from utils.run_manifest import write_run_manifest
+    from utils.run_manifest import write_run_manifest
 
-        write_run_manifest(
-            out_dir=out_dir,
-            cfg_path=str(args.cfg),
-            cfg_hash=str(cfg_hash),
-            run_id=run_id,
-            seed=int(args.seed),
-            command=" ".join(sys.argv),
-            stable_hw_state={
-                "guard_mode": "acc_first_hard_gating",
-                "lambda_hw_base": None,
-                "lambda_hw_effective": None,
-                "discrete_cache": {
-                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
-                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
-                },
+    write_run_manifest(
+        out_dir=str(out_dir),
+        cfg_path=str(args.cfg),
+        cfg_hash=str(cfg_hash),
+        seed=int(args.seed),
+        stable_hw_state={
+            "guard_mode": "acc_first_hard_gating",
+            "lambda_hw_base": None,
+            "lambda_hw_effective": None,
+            "discrete_cache": {
+                "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
-            extra_meta=extra_meta,
-        )
-    except Exception:
-        pass
+        },
+        extra=extra_meta,
+        run_id=run_id,
+        spec_version="v5.4",
+        command=" ".join(sys.argv),
+        code_root=str(_PROJECT_ROOT),
+    )
 
     # run meta
     meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
@@ -488,36 +499,34 @@ def main():
         layout_input_path=args.layout_input,
         run_id=run_id,
     )
-    try:
-        layout_best_path = out_dir / "layout_best.json"
-        layout_best = json.loads(layout_best_path.read_text(encoding="utf-8")) if layout_best_path.exists() else {}
-        best_assign = layout_best.get("best", {}).get("assign", []) if isinstance(layout_best, dict) else []
-        meta = {
-            "mapping_signature": "",
-            "layout_signature": signature_from_assign(best_assign) if best_assign else "",
-        }
-        from utils.run_manifest import write_run_manifest
+    layout_best_path = out_dir / "layout_best.json"
+    layout_best = json.loads(layout_best_path.read_text(encoding="utf-8")) if layout_best_path.exists() else {}
+    best_assign = layout_best.get("best", {}).get("assign", []) if isinstance(layout_best, dict) else []
+    meta = {
+        "mapping_signature": "",
+        "layout_signature": signature_from_assign(best_assign) if best_assign else "",
+    }
 
-        write_run_manifest(
-            out_dir=out_dir,
-            cfg_path=str(args.cfg),
-            cfg_hash=str(cfg_hash),
-            run_id=run_id,
-            seed=int(args.seed),
-            command=" ".join(sys.argv),
-            stable_hw_state={
-                "guard_mode": "acc_first_hard_gating",
-                "lambda_hw_base": None,
-                "lambda_hw_effective": None,
-                "discrete_cache": {
-                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
-                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
-                },
+    write_run_manifest(
+        out_dir=str(out_dir),
+        cfg_path=str(args.cfg),
+        cfg_hash=str(cfg_hash),
+        seed=int(args.seed),
+        stable_hw_state={
+            "guard_mode": "acc_first_hard_gating",
+            "lambda_hw_base": None,
+            "lambda_hw_effective": None,
+            "discrete_cache": {
+                "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
-            extra_meta=extra_meta,
-        )
-    except Exception:
-        pass
+        },
+        extra=extra_meta,
+        run_id=run_id,
+        spec_version="v5.4",
+        command=" ".join(sys.argv),
+        code_root=str(_PROJECT_ROOT),
+    )
 
 
 if __name__ == "__main__":
