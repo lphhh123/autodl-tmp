@@ -277,58 +277,63 @@ def compute_hw_loss(
     _audit_min("M", mem_mb)
     _audit_min("C", comm_ms)
 
-    # init refs using stable state (sanitize any stale/invalid refs in state)
-    def _pos_ref(state_key: str, default_val: float) -> float:
-        nonlocal extra_penalty
-        v = stable_hw_state.get(state_key, None)
-        try:
-            v = float(v) if v is not None else None
-        except Exception:
-            v = None
-        if v is None or (not (v > 0.0)) or (not np.isfinite(v)):
-            if v is not None and (not np.isfinite(v) or v <= 0):
-                extra_penalty += 1000.0
-            v = float(default_val)
-        if v <= 0:
-            extra_penalty += 1000.0
-            v = 1.0
-        v = max(eps_ratio, float(v))
-        stable_hw_state[state_key] = float(v)
-        return float(v)
+    def _as_enabled(v, default: bool = True) -> bool:
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, dict):
+            return bool(v.get("enabled", default))
+        return bool(getattr(v, "enabled", default))
 
-    ref_T = _pos_ref("ref_T", float(getattr(hw_cfg, "latency_ref_ms", 1.0)))
-    ref_E = _pos_ref("ref_E", float(getattr(hw_cfg, "energy_ref_mj", 1.0)))
-    ref_M = _pos_ref("ref_M", float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0))))
-    ref_C = _pos_ref("ref_C", float(getattr(hw_cfg, "comm_ref_ms", 1.0)))
+    stable_hw_cfg = getattr(cfg, "stable_hw", None) if cfg is not None else None
+    no_drift_cfg = getattr(stable_hw_cfg, "no_drift", None) if stable_hw_cfg is not None else None
+    no_drift_enabled = _as_enabled(no_drift_cfg, default=True)
+    stable_hw_state["no_drift_enabled"] = no_drift_enabled
 
-    # --- v5.4: persist resolved refs into stable_hw_state (NoDrift evidence) ---
-    if stable_hw_state is not None:
-        nd_cfg = getattr(cfg, "no_drift", None)
-        if nd_cfg is None:
-            nd_cfg = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
+    def _pos_ref(state_key: str, default_val: float, allow_zero: bool = False) -> float:
+        # 1) Prefer existing stable ref (critical for NoDrift + LockedRef)
+        if state_key in stable_hw_state:
+            try:
+                ex = float(stable_hw_state[state_key])
+            except Exception:
+                ex = None
+            if ex is not None and math.isfinite(ex) and (ex > 0.0 or (allow_zero and ex >= 0.0)):
+                return ex
+            if no_drift_enabled:
+                raise ValueError(f"[NoDrift] stable_hw_state[{state_key}] exists but invalid: {stable_hw_state[state_key]}")
 
-        if isinstance(nd_cfg, bool):
-            no_drift = nd_cfg
-        else:
-            no_drift = bool(getattr(nd_cfg, "enabled", False))
+        # 2) Fallback to cfg default and initialize state (only when missing)
+        v = float(default_val)
+        if not math.isfinite(v) or (v <= 0.0 and not (allow_zero and v >= 0.0)):
+            v = 1.0 if not allow_zero else 0.0
+        stable_hw_state[state_key] = v
+        return v
 
-        stable_hw_state.setdefault("ref_T", float(ref_T))
-        stable_hw_state.setdefault("ref_M", float(ref_M))
-        if ref_E is not None:
-            stable_hw_state.setdefault("ref_E", float(ref_E))
-        if ref_C is not None:
-            stable_hw_state.setdefault("ref_C", float(ref_C))
+    ref_T = _pos_ref("ref_T", getattr(hw_cfg, "latency_ref_ms", 1.0))
+    ref_M = _pos_ref("ref_M", getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0)))
+    ref_E = _pos_ref("ref_E", getattr(hw_cfg, "energy_ref_mj", 1.0))
+    ref_C = _pos_ref("ref_C", getattr(hw_cfg, "comm_ref_ms", 1.0))
+    ref_A = _pos_ref("ref_A", getattr(hw_cfg, "area_ref_mm2", 1.0))
+    ref_B = _pos_ref("ref_B", getattr(hw_cfg, "bw_ref_gbps", 1.0))
+    ref_P = _pos_ref("ref_P", getattr(hw_cfg, "power_ref_w", 1.0))
 
-        # legacy mirrors (optional but helps config/debug)
-        stable_hw_state.setdefault("latency_ref_ms", float(ref_T))
-        stable_hw_state.setdefault("memory_ref_mb", float(ref_M))
+    # Keep setdefault (does NOT overwrite), useful if other code expects these keys
+    stable_hw_state.setdefault("ref_T", ref_T)
+    stable_hw_state.setdefault("ref_M", ref_M)
+    stable_hw_state.setdefault("ref_E", ref_E)
+    stable_hw_state.setdefault("ref_C", ref_C)
+    stable_hw_state.setdefault("ref_A", ref_A)
+    stable_hw_state.setdefault("ref_B", ref_B)
+    stable_hw_state.setdefault("ref_P", ref_P)
 
-        if no_drift:
-            # strict: resolved ref must match stored ref
-            if abs(float(stable_hw_state["ref_T"]) - float(ref_T)) > 1e-9:
-                raise RuntimeError("[StableHW][NoDrift] ref_T drift detected")
-            if abs(float(stable_hw_state["ref_M"]) - float(ref_M)) > 1e-9:
-                raise RuntimeError("[StableHW][NoDrift] ref_M drift detected")
+    protect_against_negative_proxy = (
+        bool(getattr(getattr(stable_hw_cfg, "normalize", None), "protect_against_negative_proxy", True))
+        if stable_hw_cfg is not None
+        else True
+    )
 
     ref_T_t = torch.tensor(ref_T, device=device, dtype=torch.float32)
     ref_E_t = torch.tensor(ref_E, device=device, dtype=torch.float32)
