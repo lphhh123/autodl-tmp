@@ -38,6 +38,8 @@ from mapping.segments import Segment
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
+from utils.stable_hash import stable_hash
+from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
 
 
 def load_layout_input(path: Path) -> dict:
@@ -84,6 +86,28 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
     llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
     if not llm_usage_path.exists():
         llm_usage_path.write_text("", encoding="utf-8")
+    # ---- v5.4: canonical trace events (JSONL) ----
+    trace_events_path = out_dir / "trace_events.jsonl"
+    run_id = stable_hash(
+        {
+            "mode": "layout_agent",
+            "cfg_path": str(getattr(cfg, "cfg_path", "")),
+            "seed_id": int(seed),
+            "layout_input": str(layout_input_path),
+        }
+    )
+    ensure_trace_events(
+        str(trace_events_path),
+        run_id=run_id,
+        payload={
+            "version": "v5.4",
+            "mode": "layout_agent",
+            "cfg_path": str(getattr(cfg, "cfg_path", "")),
+            "seed_id": int(seed),
+            "layout_input": str(layout_input_path),
+            "out_dir": str(out_dir),
+        },
+    )
 
     start_time = time.time()
     seed_everything(int(seed))
@@ -145,6 +169,21 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         seed_eval["therm_norm"],
         {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
     )
+    try:
+        append_trace_event_v54(
+            str(trace_events_path),
+            run_id=run_id,
+            step=0,
+            event_type="init",
+            payload={
+                "baseline_signature": signature_from_assign(assign_grid),
+                "seed_signature": signature_from_assign(assign_seed),
+                "baseline_total_scalar": float(base_eval.get("total_scalar", 0.0)),
+                "seed_total_scalar": float(seed_eval.get("total_scalar", 0.0)),
+            },
+        )
+    except Exception:
+        pass
 
     # Stage1: coarsen
     clusters, W = coarsen_traffic(
@@ -314,6 +353,28 @@ def run_layout_agent(cfg, out_dir: Path, seed: int, layout_input_path: str | Pat
         )
     except Exception:
         pass
+    # ---- v5.4: mandatory finalize event (trace_events.jsonl) ----
+    try:
+        best_assign = None
+        try:
+            _, _, best_payload = pareto.knee_point()
+            best_assign = (best_payload or {}).get("assign", None)
+        except Exception:
+            best_assign = None
+
+        finalize_trace_events(
+            str(trace_events_path),
+            run_id=run_id,
+            step=int(getattr(evaluator, "evaluate_calls", 0)),
+            reason="done",
+            payload={
+                "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+                "pareto_size": int(len(pareto.points)),
+                "best_signature": signature_from_assign(best_assign) if best_assign is not None else "",
+            },
+        )
+    except Exception:
+        pass
 
 
 def main():
@@ -365,9 +426,9 @@ def main():
         "layout_input_hash": layout_hash,
         "steps": detailed_cfg.get("max_steps") if isinstance(detailed_cfg, dict) else None,
         "budget": detailed_cfg.get("budget") if isinstance(detailed_cfg, dict) else None,
+        "trace_events": str(out_dir / "trace_events.jsonl"),
     }
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
-    from utils.stable_hash import stable_hash
 
     cfg_hash = stable_hash({"cfg": resolved_text})
     if hasattr(cfg, "train"):

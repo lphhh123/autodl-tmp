@@ -625,6 +625,14 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             v = default
         if v <= 0.0:
             setattr(cfg.hw, k, float(default))
+    # ---- v5.4: ensure min_latency_ms is positive when stable_hw enabled ----
+    try:
+        if bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)):
+            v = float(getattr(cfg.stable_hw, "min_latency_ms", 0.0) or 0.0)
+            if v <= 0.0:
+                cfg.stable_hw.min_latency_ms = 1e-3
+    except Exception:
+        pass
 
     # ---- v5.4 strict contracts for Version-C mode ----
     mode = str(get_nested(cfg, "train.mode", "") or "")

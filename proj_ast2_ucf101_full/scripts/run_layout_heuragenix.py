@@ -38,6 +38,8 @@ from layout.trace_metrics import compute_trace_metrics_from_csv
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
+from utils.stable_hash import stable_hash
+from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
 from utils.trace_schema import TRACE_FIELDS
 
 # Minimal requirements for portability across HeurAgenix versions / problem envs:
@@ -1085,10 +1087,53 @@ def main() -> None:
         "seed_assign": [int(x) for x in seed_assign],
         "objective_cfg": objective_cfg,
         "baseline": baseline_payload,
+        "trace_events": str(out_dir / "trace_events.jsonl"),
     }
-    from utils.stable_hash import stable_hash
-
     cfg_hash = stable_hash({"cfg": resolved_text})
+    # ---- v5.4: canonical trace events (JSONL) ----
+    trace_events_path = out_dir / "trace_events.jsonl"
+    run_id = stable_hash(
+        {
+            "mode": "layout_heuragenix",
+            "cfg_hash": str(cfg_hash),
+            "layout_input_hash": str(layout_hash),
+            "seed_id": int(seed),
+            "method": str(method),
+        }
+    )
+    ensure_trace_events(
+        str(trace_events_path),
+        run_id=run_id,
+        payload={
+            "version": "v5.4",
+            "mode": "layout_heuragenix",
+            "cfg_hash": str(cfg_hash),
+            "cfg_path": str(args.cfg),
+            "layout_input": str(layout_input_path),
+            "layout_input_hash": str(layout_hash),
+            "seed_id": int(seed),
+            "method": str(method),
+            "run_mode": str(run_mode),
+            "baseline_method": str(baseline_method),
+        },
+    )
+    try:
+        append_trace_event_v54(
+            str(trace_events_path),
+            run_id=run_id,
+            step=0,
+            event_type="init",
+            payload={
+                "baseline_signature": signature_from_assign(np.array(_derive_initial_assign(layout_input), dtype=int)),
+                "seed_signature": signature_from_assign(np.array(seed_assign, dtype=int)),
+                "effective_max_steps": int(effective_max_steps),
+                "selection_frequency": int(selection_frequency),
+                "num_candidate_heuristics": int(num_candidate_heuristics),
+                "rollout_budget": int(rollout_budget),
+            },
+        )
+    except Exception:
+        pass
     if hasattr(cfg, "train"):
         cfg.train.cfg_hash = cfg_hash
         cfg.train.cfg_path = str(args.cfg)
@@ -1530,6 +1575,29 @@ def main() -> None:
                 },
             },
             extra=extra,
+        )
+    except Exception:
+        pass
+    # ---- v5.4: mandatory finalize event (trace_events.jsonl) ----
+    try:
+        finalize_trace_events(
+            str(trace_events_path),
+            run_id=run_id,
+            step=int(report.get("n_steps", 0)),
+            reason="done" if bool(report.get("success", True)) else "failed",
+            payload={
+                "success": bool(report.get("success", True)),
+                "error": str(report.get("error", "")),
+                "method": str(report.get("method", "")),
+                "fallback_used": bool(report.get("fallback_used", False)),
+                "baseline_signature": signature_from_assign(
+                    np.array(_derive_initial_assign(layout_input), dtype=int)
+                ),
+                "best_signature": signature_from_assign(np.array(best_assign, dtype=int)),
+                "best_total_scalar": float(report.get("best_objective", {}).get("total_scalar", 0.0)),
+                "accept_rate": float(report.get("accept_rate", 0.0)),
+                "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+            },
         )
     except Exception:
         pass
