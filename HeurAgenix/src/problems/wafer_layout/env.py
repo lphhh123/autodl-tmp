@@ -326,7 +326,7 @@ class Env(BaseEnv):
                 "stage": "init",
                 "op": "init",
                 "op_args": {},
-                "op_args_json": "{}",
+                "op_args_json": json.dumps({"op": "init"}, ensure_ascii=False),
                 "assign": assign_list,
                 "seed_id": int(self._seed_id),
                 "accepted": 1,

@@ -1260,9 +1260,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         "acc_ref": float(stable_decision.reason.get("acc_ref"))
                         if stable_decision.reason.get("acc_ref") is not None
                         else None,
-                        "acc_current": float(stable_decision.reason.get("metric"))
-                        if stable_decision.reason.get("metric") is not None
-                        else None,
+                        "acc_current": (
+                            float(stable_decision.reason.get("acc_current"))
+                            if stable_decision.reason.get("acc_current") is not None
+                            else None
+                        ),
                         "guard_mode": str(stable_decision.guard_mode),
                         "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
                         "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),

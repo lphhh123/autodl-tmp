@@ -122,26 +122,21 @@ def finalize_trace_events(path: Path, payload: dict):
     append_trace_event_v54(path, "trace_finalize", payload=payload)
 
 
-REQUIRED_SIGNATURE_KEYS = [
-    # Ours-B2+
-    "moves_enabled",
-    "lookahead_k",
-    "bandit_type",
-    "policy_switch_mode",
-    "cache_enabled",
-    "cache_key_schema_version",
-    # Acc-first / locked / stability
-    "acc_first_hard_gating_enabled",
-    "locked_acc_ref_enabled",
-    "acc_ref_source",
-    "no_drift_enabled",
-    "no_double_scale_enabled",
-    # Repro
-    "seed_global",
-    "seed_problem",
-    "config_fingerprint",
-    "git_commit_or_version",
-]
+REQUIRED_SIGNATURE_KEYS = {
+    "spec_version",
+    "experiment",
+    "seed",
+    "dataset",
+    "model",
+    "hardware",
+    "mode",
+    "acc_first_hard_gating",
+    "locked_acc_ref",
+    "no_drift",
+    "no_double_scale",
+    "proxy_negative_guard",
+    "ours_b2_plus",
+}
 
 
 def validate_required_signature(signature: dict) -> None:
