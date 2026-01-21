@@ -78,17 +78,49 @@ def append_trace_event_v54(
 def finalize_trace_events(
     path: str,
     run_id: str,
-    step: int,
-    reason: str,
+    step: Optional[int] = None,
+    reason: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
 ) -> None:
+    payload_dict = dict(payload) if isinstance(payload, dict) else {}
+    reason_value = str(reason or payload_dict.get("reason", "unknown"))
+    step_value = int(step) if step is not None else int(payload_dict.get("steps_done", payload_dict.get("step", -1)))
+    payload_dict["reason"] = reason_value
     ev = {
         "ts_ms": _now_ts_ms(),
         "run_id": str(run_id),
-        "step": int(step),
+        "step": step_value,
         "event_type": "finalize",
-        "payload": {"reason": str(reason), **(dict(payload) if isinstance(payload, dict) else {})},
+        "payload": payload_dict,
     }
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
+REQUIRED_SIGNATURE_KEYS = [
+    # Ours-B2+
+    "moves_enabled",
+    "lookahead_k",
+    "bandit_type",
+    "policy_switch_mode",
+    "cache_enabled",
+    "cache_key_schema_version",
+    # Acc-first / locked / stability
+    "acc_first_hard_gating_enabled",
+    "locked_acc_ref_enabled",
+    "acc_ref_source",
+    "no_drift_enabled",
+    "no_double_scale_enabled",
+    # Repro
+    "seed_global",
+    "seed_problem",
+    "config_fingerprint",
+    "git_commit_or_version",
+]
+
+
+def validate_required_signature(signature: dict) -> None:
+    miss = [k for k in REQUIRED_SIGNATURE_KEYS if k not in signature]
+    if miss:
+        raise RuntimeError(f"[TRACE] Missing required signature fields: {miss}")

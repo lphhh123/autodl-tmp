@@ -874,6 +874,46 @@ def run_detailed_place(
                         improved = bool(accept) and float(delta) < 0.0
                         controller.update(improved=improved, delta_total=float(delta))
             finally:
+                # --- v5.4: append finalize row (CSV) ---
+                try:
+                    # use last eval if exists; otherwise fall back to init metrics
+                    fin_total = float(locals().get("prev_total", 0.0))
+                    fin_comm = float(locals().get("prev_comm", 0.0))
+                    fin_therm = float(locals().get("prev_therm", 0.0))
+                    fin_sig = locals().get("prev_assign", None)
+                    fin_sig = signature_for_assign(fin_sig.tolist()) if fin_sig is not None else "assign:unknown"
+
+                    fin_row = [
+                        int(steps) + 1,
+                        "finalize",
+                        "finalize",
+                        json.dumps({"op": "finalize"}, ensure_ascii=False),
+                        1,
+                        fin_total,
+                        fin_comm,
+                        fin_therm,
+                        0,
+                        0.0,
+                        0.0,
+                        int(seed_id),
+                        int((time.time() - start_time) * 1000),
+                        fin_sig,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "finalize",
+                        "finalize",
+                        0,
+                        0,
+                        "",
+                    ]
+                    if len(fin_row) == len(TRACE_FIELDS):
+                        writer.writerow(fin_row)
+                except Exception:
+                    pass
                 f_trace.flush()
                 os.fsync(f_trace.fileno())
                 if recordings_fp is not None:

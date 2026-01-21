@@ -57,6 +57,12 @@ def main():
         if not str(init.get("signature", "")).startswith("assign:"):
             raise AssertionError("first row signature must start with 'assign:'")
 
+        last = rows[-1]
+        if str(last.get("stage", "")) != "finalize":
+            raise AssertionError("last row stage must be 'finalize'")
+        if str(last.get("op", "")) != "finalize":
+            raise AssertionError("last row op must be 'finalize'")
+
     print("[SMOKE] trace schema OK:", str(p))
 
 
