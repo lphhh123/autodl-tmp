@@ -233,10 +233,16 @@ def compute_hw_loss(
     norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
     if stable_hw_state is None:
         stable_hw_state = {}
-    ref_T = float(stable_hw_state.get("ref_T", float(getattr(cfg.hw, "latency_ref_ms", 1.0))))
-    ref_E = float(stable_hw_state.get("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0))))
-    ref_M = float(stable_hw_state.get("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0))))
-    ref_C = float(stable_hw_state.get("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0))))
+    hw_cfg = getattr(cfg, "hw", None)
+    ref_T = float(stable_hw_state.get("ref_T", float(getattr(hw_cfg, "latency_ref_ms", 1.0))))
+    ref_E = float(stable_hw_state.get("ref_E", float(getattr(hw_cfg, "energy_ref_mj", 1.0))))
+    ref_M = float(
+        stable_hw_state.get(
+            "ref_M",
+            float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0))),
+        )
+    )
+    ref_C = float(stable_hw_state.get("ref_C", float(getattr(hw_cfg, "comm_ref_ms", 1.0))))
 
     # ---- Non-negative guard: prevent "negative latency reward" ----
     eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9) if stable_hw_cfg is not None else 1e-9)
@@ -290,20 +296,21 @@ def compute_hw_loss(
         stable_hw_state[state_key] = float(v)
         return float(v)
 
-    ref_T = _pos_ref("ref_T", float(getattr(cfg.hw, "latency_ref_ms", 1.0)))
-    ref_E = _pos_ref("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0)))
-    ref_M = _pos_ref("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
-    ref_C = _pos_ref("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
+    ref_T = _pos_ref("ref_T", float(getattr(hw_cfg, "latency_ref_ms", 1.0)))
+    ref_E = _pos_ref("ref_E", float(getattr(hw_cfg, "energy_ref_mj", 1.0)))
+    ref_M = _pos_ref("ref_M", float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0))))
+    ref_C = _pos_ref("ref_C", float(getattr(hw_cfg, "comm_ref_ms", 1.0)))
 
     # --- v5.4: persist resolved refs into stable_hw_state (NoDrift evidence) ---
     if stable_hw_state is not None:
-        nd_cfg = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
+        nd_cfg = getattr(cfg, "no_drift", None)
+        if nd_cfg is None:
+            nd_cfg = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
+
         if isinstance(nd_cfg, bool):
-            no_drift = bool(nd_cfg)
-        elif nd_cfg is not None:
-            no_drift = bool(getattr(nd_cfg, "enabled", False))
+            no_drift = nd_cfg
         else:
-            no_drift = False
+            no_drift = bool(getattr(nd_cfg, "enabled", False))
 
         stable_hw_state.setdefault("ref_T", float(ref_T))
         stable_hw_state.setdefault("ref_M", float(ref_M))
@@ -514,10 +521,10 @@ def compute_hw_loss(
             stable_hw_state[key] = float(v)
             return float(v)
 
-        T_ref = _ref_from_state("ref_T", float(getattr(cfg.hw, "latency_ref_ms", 1.0)))
-        E_ref = _ref_from_state("ref_E", float(getattr(cfg.hw, "energy_ref_mj", 1.0)))
-        M_ref = _ref_from_state("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
-        C_ref = _ref_from_state("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
+        T_ref = _ref_from_state("ref_T", float(getattr(hw_cfg, "latency_ref_ms", 1.0)))
+        E_ref = _ref_from_state("ref_E", float(getattr(hw_cfg, "energy_ref_mj", 1.0)))
+        M_ref = _ref_from_state("ref_M", float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0))))
+        C_ref = _ref_from_state("ref_C", float(getattr(hw_cfg, "comm_ref_ms", 1.0)))
 
         # IMPORTANT: use clamped-positive tensors so negative proxy cannot be rewarded
         latency_term_t = _term_t(latency_ms_pos, T_ref, tT, do_hinge=True)
@@ -529,10 +536,10 @@ def compute_hw_loss(
             float(wC) * comm_term_t
         )
     else:
-        T_ref = float(getattr(cfg.hw, "latency_ref_ms", 1.0))
-        E_ref = float(getattr(cfg.hw, "energy_ref_mj", 1.0))
-        M_ref = float(getattr(cfg.hw, "mem_ref_mb", 1.0))
-        C_ref = float(getattr(cfg.hw, "comm_ref_ms", 1.0))
+        T_ref = float(getattr(hw_cfg, "latency_ref_ms", 1.0))
+        E_ref = float(getattr(hw_cfg, "energy_ref_mj", 1.0))
+        M_ref = float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0)))
+        C_ref = float(getattr(hw_cfg, "comm_ref_ms", 1.0))
         L_hw_norm_t = (
             latency_ms_pos / max(float(eps), T_ref)
             + energy_mj_pos / max(float(eps), E_ref)

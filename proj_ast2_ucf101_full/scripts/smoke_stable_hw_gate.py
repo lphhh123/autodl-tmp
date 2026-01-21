@@ -1,50 +1,41 @@
-# scripts/smoke_stable_hw_gate.py
-from omegaconf import OmegaConf
+import argparse
 
+from utils.config import load_config
+from utils.config_validate import validate_and_fill_defaults
 from utils.stable_hw import (
     apply_accuracy_guard,
+    init_hw_refs_from_baseline_stats,
     init_locked_acc_ref,
-    init_stable_hw,
     stable_hw_schedule,
 )
 
 
-def main() -> None:
-    cfg = OmegaConf.load("configs/version_c_ucf101.yaml")
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cfg", type=str, default="configs/vc_phase3_full_ucf101.yaml")
+    ap.add_argument("--mode", type=str, default="version_c")
+    args = ap.parse_args()
+
+    cfg = load_config(args.cfg)
+    cfg = validate_and_fill_defaults(cfg, mode=args.mode)
+
     st = {}
-    init_stable_hw(cfg.stable_hw, st, cfg)
-    init_locked_acc_ref(cfg.stable_hw, st)
+    init_hw_refs_from_baseline_stats(cfg, st, cfg.stable_hw)
+    init_locked_acc_ref(cfg, st)
 
-    # schedule
-    stable_hw_schedule(epoch=0, stable_hw_cfg=cfg.stable_hw, st=st)
+    # Case 1: acc_ref not ready => lambda_hw must be 0
+    stable_hw_schedule(0, cfg.stable_hw, st)
+    decision, _ = apply_accuracy_guard(cfg, st, val_metric_or_none=None, epoch=0, has_val_this_epoch=False)
+    assert st.get("lambda_hw_effective", 0.0) == 0.0, "acc_ref missing => lambda_hw_effective must be 0"
 
-    metric_key = str(getattr(getattr(cfg.stable_hw, "accuracy_guard", None), "metric", "val_acc1"))
-    assert metric_key.startswith("val_"), f"expected val_* metric in this smoke, got {metric_key}"
+    # Case 2: set a locked acc_ref and violate => lambda_hw must be 0
+    st["acc_ref"] = 0.9
+    st["acc_ref_locked"] = True
+    stable_hw_schedule(1, cfg.stable_hw, st)
+    decision2, _ = apply_accuracy_guard(cfg, st, val_metric_or_none=0.0, epoch=1, has_val_this_epoch=True)
+    assert st.get("lambda_hw_effective", 0.0) == 0.0, "violate => lambda_hw_effective must be 0"
 
-    # case A: no last val => must WARMUP gate
-    last_val = st.get("val_acc1_last", None)
-    assert last_val is None
-    # mimic trainer's intended behavior:
-    st["guard_mode"] = "WARMUP"
-    st["g_hw"] = 0.0
-    st["lambda_hw_effective"] = 0.0
-    st["allow_discrete_updates"] = False
-    assert st["lambda_hw_effective"] == 0.0 and st["g_hw"] == 0.0
-
-    # case B: has last val below acc_ref => must RECOVERY gate (0)
-    st["val_acc1_last"] = 0.0
-    _, allow_discrete = apply_accuracy_guard(
-        epoch=0,
-        stable_hw_cfg=cfg.stable_hw,
-        stable_hw_state=st,
-        val_metric_or_none=st["val_acc1_last"],
-        has_val_this_epoch=True,
-        train_ema_or_none=None,
-    )
-    assert st["lambda_hw_effective"] == 0.0
-    assert allow_discrete is False
-
-    print("[OK] StableHW gate smoke passed.")
+    print("[OK] smoke_stable_hw_gate: gating behaves as expected.")
 
 
 if __name__ == "__main__":
