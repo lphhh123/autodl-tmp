@@ -450,8 +450,19 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     # defaults MUST match v5.4 intent (NOT 0.0)
     sched.setdefault("warmup_epochs", 5)
     sched.setdefault("ramp_epochs", 10)
-    sched.setdefault("lambda_hw_min", 0.0)
-    sched.setdefault("lambda_hw_max", 0.2)
+
+    # ---- alias bridge: do NOT override user configs written in older keys ----
+    # If user provided max_lambda/min_lambda but not lambda_hw_max/min, map them first.
+    if getattr(sched, "lambda_hw_max", None) is None and getattr(sched, "max_lambda", None) is not None:
+        sched.lambda_hw_max = float(sched.max_lambda)
+    if getattr(sched, "lambda_hw_min", None) is None and getattr(sched, "min_lambda", None) is not None:
+        sched.lambda_hw_min = float(sched.min_lambda)
+
+    # Now apply true defaults only when still missing.
+    if getattr(sched, "lambda_hw_min", None) is None:
+        sched.lambda_hw_min = 0.0
+    if getattr(sched, "lambda_hw_max", None) is None:
+        sched.lambda_hw_max = 0.2
 
     # clamp defaults
     sched.setdefault("clamp_min", float(sched.lambda_hw_min))

@@ -299,6 +299,23 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
     st.setdefault("acc_ref_source", "warmup_best_pending")
 
 
+def _load_baseline_stats(stats_path: str | os.PathLike[str]) -> Dict[str, Any] | None:
+    p = Path(str(stats_path))
+    if not p.exists() or not p.is_file():
+        return None
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    stats = dict(obj)
+    comm_ref = stats.get("comm_ref_ms", stats.get("comm_ref_mb", stats.get("comm_ref", None)))
+    if comm_ref is not None:
+        stats["comm_ref_ms"] = comm_ref
+    return stats
+
+
 def _pick_acc_used(
     epoch: int,
     stable_hw_cfg: Any,
@@ -627,7 +644,9 @@ def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=N
     stable_hw_state["ref_T"] = float(getattr(getattr(cfg, "hw", None), "latency_ref_ms", 1.0))
     stable_hw_state["ref_E"] = float(getattr(getattr(cfg, "hw", None), "energy_ref_mj", 1.0))
     stable_hw_state["ref_M"] = float(getattr(getattr(cfg, "hw", None), "memory_ref_mb", 1.0))
-    stable_hw_state["ref_C"] = float(getattr(getattr(cfg, "hw", None), "comm_ref_mb", 1.0))
+    stable_hw_state["ref_C"] = float(
+        getattr(getattr(cfg, "hw", None), "comm_ref_ms", getattr(getattr(cfg, "hw", None), "comm_ref_mb", 1.0))
+    )
 
     nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg)
     lock_cfg = _get_locked_cfg(cfg)
@@ -659,7 +678,13 @@ def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=N
                 loaded.get("ref_M", loaded.get("memory_ref_mb", loaded.get("mem_ref_mb", stable_hw_state["ref_M"])))
             )
             stable_hw_state["ref_C"] = float(
-                loaded.get("ref_C", loaded.get("comm_ref_mb", loaded.get("comm_ref", stable_hw_state["ref_C"])))
+                loaded.get(
+                    "ref_C",
+                    loaded.get(
+                        "comm_ref_ms",
+                        loaded.get("comm_ref_mb", loaded.get("comm_ref", stable_hw_state["ref_C"])),
+                    ),
+                )
             )
             stable_hw_state["_refs_loaded_from"] = str(stats_path)
 

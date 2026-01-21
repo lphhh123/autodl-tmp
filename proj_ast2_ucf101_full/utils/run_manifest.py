@@ -52,6 +52,9 @@ def write_run_manifest(
     meta["signature"] = stable_hw_state.get("run_signature")
     if extra:
         meta["extra"] = extra
-    with open(os.path.join(out_dir, "run_manifest.json"), "w", encoding="utf-8") as f:
+    manifest_path = os.path.join(out_dir, "run_manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     return rid
