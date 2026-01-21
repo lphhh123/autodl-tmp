@@ -438,6 +438,15 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 metrics.update({k: float(v) for k, v in hw_stats.items()})
                 with metrics_path.open("w", encoding="utf-8") as f:
                     json.dump(metrics, f, indent=2)
+                hw_stats_out = dict(last_hw_stats or {})
+                hw_stats_out.update(
+                    {
+                        "cfg_hash": str(getattr(cfg.train, "cfg_hash", "")),
+                        "seed": int(getattr(cfg.train, "seed", 0)),
+                    }
+                )
+                with (out_dir / "hw_stats.json").open("w", encoding="utf-8") as f:
+                    json.dump(hw_stats_out, f, indent=2, ensure_ascii=False)
             if out_dir is not None and stable_hw_cfg:
                 with (out_dir / "stable_hw_state.json").open("w", encoding="utf-8") as f:
                     json.dump(stable_state, f, indent=2)

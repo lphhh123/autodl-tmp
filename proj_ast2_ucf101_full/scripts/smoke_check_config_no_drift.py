@@ -23,13 +23,24 @@ def main():
 
     # ---- SPEC_E: NoDoubleScale must be true and legacy lambdas must be 0 when stable_hw enabled
     stable_en = bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False))
+
+    def _enabled(v, default=True) -> bool:
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, dict):
+            return bool(v.get("enabled", default))
+        return bool(getattr(v, "enabled", default))
     if stable_en:
         if hasattr(cfg, "loss") and float(getattr(cfg.loss, "lambda_hw", 0.0) or 0.0) != 0.0:
             raise AssertionError("NoDoubleScale violated: loss.lambda_hw must be 0 when stable_hw.enabled=True")
         if hasattr(cfg, "hw") and float(getattr(cfg.hw, "lambda_hw", 0.0) or 0.0) != 0.0:
             raise AssertionError("NoDoubleScale violated: hw.lambda_hw must be 0 when stable_hw.enabled=True")
         nds = getattr(cfg.stable_hw, "no_double_scale", None)
-        nds_enabled = True if nds is None else bool(getattr(nds, "enabled", False))
+        nds_enabled = _enabled(nds, default=True)
         if not nds_enabled:
             raise AssertionError("stable_hw.no_double_scale must be True in v5.4")
 
@@ -52,7 +63,7 @@ def main():
         no_drift_cfg = getattr(cfg, "no_drift", None)
         if no_drift_cfg is None:
             no_drift_cfg = getattr(cfg.stable_hw, "no_drift", None)
-        no_drift = bool(getattr(no_drift_cfg, "enabled", True)) if no_drift_cfg is not None else True
+        no_drift = _enabled(no_drift_cfg, default=True)
         ref_update = "frozen"
         if getattr(cfg.stable_hw, "normalize", None) is not None:
             ref_update = str(getattr(cfg.stable_hw.normalize, "ref_update", "frozen") or "frozen").lower()

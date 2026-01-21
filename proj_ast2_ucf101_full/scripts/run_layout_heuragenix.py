@@ -1014,6 +1014,8 @@ def main() -> None:
     run_mode = baseline_cfg.get("run_mode", "inprocess")
     method = str(baseline_cfg.get("method", "llm_hh"))
     baseline_method = str(method)
+    method = baseline_method
+    method_label = f"heuragenix:{method}"
     baseline_name = str(baseline_cfg.get("name", baseline_method))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
@@ -1078,11 +1080,11 @@ def main() -> None:
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
-    signature = _build_run_signature(cfg, method_name=f"heuragenix:{args.heuristic}")
+    signature = _build_run_signature(cfg, method_name=method_label)
     init_trace_dir(
         trace_dir,
         signature=signature,
-        run_meta={"heuristic": str(args.heuristic), "run_id": run_id, "mode": "layout_heuragenix"},
+        run_meta={"heuristic": method_label, "method": method, "run_id": run_id, "mode": "layout_heuragenix"},
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
     )
     finalize_state = {
@@ -1430,7 +1432,7 @@ def main() -> None:
             json.dumps({"event": "recordings_missing", "path": str(recordings_path)}) + "\n",
             encoding="utf-8",
         )
-    method_label = f"heuragenix:{args.heuristic}"
+    method_label = f"heuragenix:{method}"
     pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
     objective_cfg = _build_objective_cfg(cfg)
     objective_cfg.update(
@@ -1566,7 +1568,9 @@ def main() -> None:
         raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
 
     ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
-    actual_eval_calls = int(ec.get("eval_calls_total", 0))
+    actual_eval_calls = int(trace_info.get("evaluator_calls", 0))
+    if actual_eval_calls <= 0:
+        actual_eval_calls = int(_count_jsonl_lines(recordings_path)) if recordings_path.exists() else 0
     effective_eval_calls_total = int(ec.get("effective_eval_calls_total", actual_eval_calls))
     cache_hits = int(ec.get("cache_hits", 0))
 

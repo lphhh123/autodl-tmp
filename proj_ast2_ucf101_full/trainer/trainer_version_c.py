@@ -1487,6 +1487,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     }
     with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
+    hw_stats_out = dict(last_hw_stats or {})
+    hw_stats_out.update(
+        {
+            "cfg_hash": cfg_hash,
+            "seed": seed,
+        }
+    )
+    with (out_dir / "hw_stats.json").open("w", encoding="utf-8") as f:
+        json.dump(hw_stats_out, f, indent=2, ensure_ascii=False)
     if export_layout_input:
         export_dir_path = Path(layout_export_dir or "outputs/P3")
         slot_out = chiplet_slots(hard=False)
