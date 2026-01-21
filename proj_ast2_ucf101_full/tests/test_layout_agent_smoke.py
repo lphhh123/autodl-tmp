@@ -99,3 +99,12 @@ def test_smoke_run_layout_agent():
         trace_text = (out_dir / "trace.csv").read_text(encoding="utf-8")
         assert "cache_key" in trace_text.splitlines()[0]
         assert f"obj:{meta['objective']['hash']}|" in trace_text
+        trace_events = out_dir / "trace_events.jsonl"
+        assert trace_events.exists()
+        lines = trace_events.read_text(encoding="utf-8").splitlines()
+        first = lines[0]
+        assert '"event_type": "trace_header"' in first
+        assert '"signature"' in first
+        last = lines[-1]
+        assert '"event_type": "trace_finalize"' in last
+        assert '"reason"' in last and '"steps_done"' in last and '"best_solution_valid"' in last

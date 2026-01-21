@@ -31,13 +31,8 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import (
-    ensure_trace_events,
-    append_trace_event_v54,
-    finalize_trace_events,
-    validate_required_signature,
-)
-from utils.git_version import get_git_commit_or_version
+from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
+from utils.trace_signature_v54 import build_signature_v54
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -103,74 +98,6 @@ def _cfg_get(obj, key: str, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
-
-
-def _build_run_signature(cfg) -> Dict[str, Any]:
-    detailed_cfg = _cfg_get(cfg, "detailed_place", None)
-    lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
-    policy_switch_cfg = _cfg_get(detailed_cfg, "policy_switch", _cfg_get(cfg, "policy_switch", {}))
-
-    action_families = _cfg_get(policy_switch_cfg, "action_families", None)
-    moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
-    lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
-    bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
-    policy_switch_mode = str(
-        _cfg_get(policy_switch_cfg, "mode", "enabled" if _cfg_get(policy_switch_cfg, "enabled", False) else "disabled")
-    )
-    cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
-    cache_enabled = bool(cache_size > 0)
-    cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
-
-    stable_hw_cfg = _cfg_get(cfg, "stable_hw", {}) or {}
-    locked_cfg = _cfg_get(stable_hw_cfg, "locked_acc_ref", {}) or {}
-    guard_cfg = _cfg_get(stable_hw_cfg, "accuracy_guard", {}) or {}
-    ctrl_cfg = _cfg_get(guard_cfg, "controller", {}) or {}
-
-    acc_first_hard_gating_enabled = bool(_cfg_get(ctrl_cfg, "cut_hw_loss_on_violate", False))
-    locked_acc_ref_enabled = bool(_cfg_get(locked_cfg, "enabled", False))
-    no_drift_enabled = bool(_cfg_get(stable_hw_cfg, "no_drift", False))
-    no_double_scale_enabled = bool(_cfg_get(stable_hw_cfg, "no_double_scale", False))
-
-    seed_global = int(_cfg_get(_cfg_get(cfg, "train", {}), "seed", 0))
-    seed_problem = int(_cfg_get(_cfg_get(cfg, "training", {}), "seed", seed_global))
-
-    # config_fingerprint：对关键字段做稳定 hash（不要把全量 cfg 文本塞进 trace）
-    key_cfg = {
-        "stable_hw": _cfg_get(cfg, "stable_hw", None),
-        "hw": _cfg_get(cfg, "hw", None),
-        "mapping": _cfg_get(cfg, "mapping", None),
-        "training": _cfg_get(cfg, "training", None),
-        "objective": _cfg_get(cfg, "objective", None),
-        "lookahead": lookahead_cfg,
-        "policy_switch": policy_switch_cfg,
-    }
-    config_fingerprint = stable_hash(key_cfg)
-    git_commit_or_version = get_git_commit_or_version(repo_root=str(Path(__file__).resolve().parents[1]))
-
-    sig = {
-        # Ours-B2+ required
-        "moves_enabled": bool(moves_enabled),
-        "lookahead_k": int(lookahead_k),
-        "bandit_type": str(bandit_type),
-        "policy_switch_mode": str(policy_switch_mode),
-        "cache_enabled": bool(cache_enabled),
-        "cache_key_schema_version": str(cache_key_schema_version),
-
-        # Acc-first / locked / stability required
-        "acc_first_hard_gating_enabled": bool(acc_first_hard_gating_enabled),
-        "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
-        "acc_ref_source": "locked" if locked_acc_ref_enabled else "online",
-        "no_drift_enabled": bool(no_drift_enabled),
-        "no_double_scale_enabled": bool(no_double_scale_enabled),
-
-        # Repro required
-        "seed_global": int(seed_global),
-        "seed_problem": int(seed_problem),
-        "config_fingerprint": str(config_fingerprint),
-        "git_commit_or_version": str(git_commit_or_version),
-    }
-    validate_required_signature(sig)  # 缺字段直接抛错（AC-F1）
-    return sig
 
 
 def build_dataloader(cfg):
@@ -622,18 +549,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             "seed": int(seed),
         }
     )
-    signature = _build_run_signature(cfg)
+    signature = build_signature_v54(cfg, method_name="train_version_c")
     ensure_trace_events(
-        str(trace_events_path),
-        run_id=run_id,
-        payload={
-            "version": "v5.4",
-            "mode": "version_c_train",
-            "cfg_hash": str(cfg_hash),
-            "cfg_path": str(cfg_path),
-            "seed_id": int(seed),
-            "signature": signature,
-        },
+        trace_events_path,
+        payload={"signature": signature, "run_meta": {"mode": "version_c_train", "seed_id": int(seed)}},
     )
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
     layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
@@ -682,15 +601,15 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         setattr(cfg.hw, "layout_only", True)
 
     append_trace_event_v54(
-        str(trace_events_path),
-        run_id=run_id,
-        step=0,
-        event_type="init",
+        trace_events_path,
+        "init",
         payload={
             "twostage": bool(twostage),
             "mapping_only": bool(mapping_only),
             "layout_only": bool(layout_only),
-            "stable_hw_enabled": bool(getattr(cfg, "stable_hw", None) is not None and getattr(cfg.stable_hw, "enabled", False)),
+            "stable_hw_enabled": bool(
+                getattr(cfg, "stable_hw", None) is not None and getattr(cfg.stable_hw, "enabled", False)
+            ),
         },
     )
 
@@ -803,7 +722,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     last_hw_stats = None
     ran_epochs = 0
     early_stop_triggered = False
-    reason = "normal"
+    reason = "done"
     steps_done = 0
     best_solution_valid = True
     try:
@@ -1171,10 +1090,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     hw_stats_count += 1
                     if hw_stats.get("proxy_had_invalid", False) or hw_stats.get("proxy_clamp_count", 0) > 0:
                         append_trace_event_v54(
-                            str(trace_events_path),
-                            run_id=run_id,
-                            step=int(outer),
-                            event_type="proxy_sanitize",
+                            trace_events_path,
+                            "proxy_sanitize",
                             payload={
                                 "proxy_had_invalid": bool(hw_stats.get("proxy_had_invalid", False)),
                                 "proxy_clamp_count": int(hw_stats.get("proxy_clamp_count", 0)),
@@ -1335,18 +1252,21 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 )
                 stable_hw_state = stable_decision.state
                 append_trace_event_v54(
-                    str(trace_events_path),
-                    run_id=run_id,
-                    step=int(outer),
-                    event_type="gating",
+                    trace_events_path,
+                    "gating_decision",
                     payload={
-                        "guard_mode": stable_hw_state.get("guard_mode"),
-                        "lambda_hw_base": stable_hw_state.get("lambda_hw_base"),
-                        "lambda_hw_effective": stable_hw_state.get("lambda_hw_effective"),
-                        "acc_ref": stable_hw_state.get("acc_ref"),
-                        "acc_curr": float(val_acc1) if val_acc1 is not None else None,
-                        "epsilon_drop": stable_hw_state.get("epsilon_drop"),
-                        "decision": stable_hw_state.get("last_guard_decision", None),
+                        "epoch": int(outer),
+                        "metric": str(stable_decision.reason.get("metric")),
+                        "acc_ref": float(stable_decision.reason.get("acc_ref"))
+                        if stable_decision.reason.get("acc_ref") is not None
+                        else None,
+                        "acc_current": float(stable_decision.reason.get("metric"))
+                        if stable_decision.reason.get("metric") is not None
+                        else None,
+                        "guard_mode": str(stable_decision.guard_mode),
+                        "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
+                        "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
+                        "reason": str(stable_decision.reason.get("violate", "")),
                     },
                 )
                 # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
@@ -1379,14 +1299,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     no_drift = False
                 if (not no_drift) and stable_hw_enabled:
                     before = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
-                    update_hw_refs_from_stats(stable_hw_state, last_hw_stats or {}, cfg)
+                    update_hw_refs_from_stats(cfg, stable_hw_state, last_hw_stats or {}, stable_hw_cfg)
                     after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
                     if before != after:
                         append_trace_event_v54(
-                            str(trace_events_path),
-                            run_id=run_id,
-                            step=int(outer),
-                            event_type="ref_update",
+                            trace_events_path,
+                            "ref_update",
                             payload={"before": before, "after": after, "source": "online_stats"},
                         )
                 else:
@@ -1407,6 +1325,19 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 f"acc_floor={stable_hw_state.get('acc_floor')}, "
                 f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
                 f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
+            )
+            append_trace_event_v54(
+                trace_events_path,
+                "proxy_sanitize_summary",
+                payload={
+                    "epoch": int(outer),
+                    "had_negative_latency": bool(last_hw_stats.get("sanitize", {}).get("had_negative", False))
+                    if isinstance(last_hw_stats, dict)
+                    else False,
+                    "latency_penalty": float(last_hw_stats.get("sanitize", {}).get("penalty", 0.0))
+                    if isinstance(last_hw_stats, dict)
+                    else 0.0,
+                },
             )
             # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
             if val_acc1 is None:
@@ -1446,8 +1377,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         raise
     finally:
         finalize_trace_events(
-            str(trace_events_path),
-            run_id=run_id,
+            trace_events_path,
             payload={
                 "reason": reason,
                 "steps_done": int(steps_done),

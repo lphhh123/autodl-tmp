@@ -70,11 +70,12 @@ def _build_run_signature(cfg: Any) -> Dict[str, Any]:
     cache_size = int(_cfg_get(ps_cfg, "cache_size", 0) or 0)
     cache_enabled = bool(cache_size > 0 and policy_switch_enabled)
     cache_key_schema_version = str(_cfg_get(ps_cfg, "cache_key_schema_version", "v5.4"))
+    ps_enabled = bool(_cfg_get(ps_cfg, "enabled", False))
     return {
         "moves_enabled": moves_enabled,
         "lookahead_k": lookahead_k,
         "bandit_type": bandit_type,
-        "policy_switch": policy_switch_enabled,
+        "policy_switch_mode": (str(_cfg_get(ps_cfg, "mode", "bandit")) if ps_enabled else "none"),
         "cache_enabled": cache_enabled,
         "cache_key_schema_version": cache_key_schema_version,
     }

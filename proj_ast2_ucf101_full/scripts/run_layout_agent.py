@@ -41,6 +41,7 @@ from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
+from utils.trace_signature_v54 import build_signature_v54
 
 
 def load_layout_input(path: Path) -> dict:
@@ -50,6 +51,14 @@ def load_layout_input(path: Path) -> dict:
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
+
+
+def _is_valid_assign(assign: list[int] | np.ndarray | None, S: int, Ns: int) -> bool:
+    if assign is None:
+        return False
+    if len(assign) != int(S):
+        return False
+    return all(0 <= int(x) < int(Ns) for x in assign)
 
 
 def _parse_segments(raw_segments) -> list[Segment]:
@@ -104,85 +113,85 @@ def run_layout_agent(
                 "layout_input": str(layout_input_path),
             }
         )
+    sig = build_signature_v54(cfg, method_name="ours_layout_agent")
     ensure_trace_events(
-        str(trace_events_path),
-        run_id=run_id,
-        payload={
-            "version": "v5.4",
-            "mode": "layout_agent",
-            "cfg_path": str(getattr(cfg, "cfg_path", "")),
-            "seed_id": int(seed),
-            "layout_input": str(layout_input_path),
-            "out_dir": str(out_dir),
-        },
+        trace_events_path,
+        payload={"signature": sig, "run_meta": {"layout_input": str(layout_input_path)}},
     )
+
+    detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+    planned_steps = int(detailed_cfg.get("max_steps", detailed_cfg.get("steps", 0)) or 0)
 
     start_time = time.time()
     seed_everything(int(seed))
-
-    wafer_radius = float(layout_input["wafer"]["radius_mm"])
-    sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
-    assign_grid = np.array(layout_input["baseline"]["assign_grid"], dtype=int)
-    assign_seed = np.array(layout_input["seed"]["assign_seed"], dtype=int)
-    chip_tdp = np.array(layout_input["slots"]["tdp"], dtype=float)
-    traffic = np.array(layout_input["mapping"]["traffic_matrix"], dtype=float)
-    traffic_sym = traffic + traffic.T
-    mapping_current = layout_input.get("mapping", {}).get("mapping", list(range(assign_seed.shape[0])))
-    segments = _parse_segments(layout_input.get("mapping", {}).get("segments", []))
-    S = assign_grid.shape[0]
-    evaluator = LayoutEvaluator(
-        sigma_mm=float(cfg.objective.sigma_mm),
-        baseline={
-            "L_comm_baseline": float(layout_input["baseline"].get("L_comm", 1.0)),
-            "L_therm_baseline": float(layout_input["baseline"].get("L_therm", 1.0)),
-        },
-        scalar_w={
-            "w_comm": float(cfg.objective.scalar_weights.w_comm),
-            "w_therm": float(cfg.objective.scalar_weights.w_therm),
-            "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
-        },
-    )
-    layout_state = LayoutState(
-        S=S,
-        Ns=sites_xy.shape[0],
-        wafer_radius_mm=wafer_radius,
-        sites_xy_mm=sites_xy,
-        assign=assign_seed.copy(),
-        chip_tdp_w=chip_tdp,
-        traffic_bytes=traffic,
-        meta={"stage": "seed"},
-    )
-    mapping_solver = MappingSolver(
-        strategy=str(getattr(getattr(cfg, "alt_opt", {}), "mapping_strategy", "greedy_local")),
-        mem_limit_factor=float(getattr(getattr(cfg, "alt_opt", {}), "mem_limit_factor", 1.0)),
-    )
-    pareto = ParetoSet(
-        eps_comm=float(cfg.pareto.get("eps_comm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
-        eps_therm=float(cfg.pareto.get("eps_therm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
-        max_points=int(cfg.pareto.get("max_points", 2000)) if hasattr(cfg, "pareto") else 2000,
-    )
-
-    # Stage0: baseline evaluations
-    layout_state.assign = assign_grid
-    base_eval = evaluator.evaluate(layout_state)
-    base_added = pareto.add(
-        base_eval["comm_norm"],
-        base_eval["therm_norm"],
-        {"assign": assign_grid.copy(), "total_scalar": base_eval["total_scalar"], "stage": "baseline", "iter": 0, "seed": -1},
-    )
-    layout_state.assign = assign_seed
-    seed_eval = evaluator.evaluate(layout_state)
-    seed_added = pareto.add(
-        seed_eval["comm_norm"],
-        seed_eval["therm_norm"],
-        {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
-    )
+    best_assign = None
+    best_total = None
+    evaluator = None
+    S = 0
+    Ns = 0
+    ok = False
     try:
+        wafer_radius = float(layout_input["wafer"]["radius_mm"])
+        sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
+        assign_grid = np.array(layout_input["baseline"]["assign_grid"], dtype=int)
+        assign_seed = np.array(layout_input["seed"]["assign_seed"], dtype=int)
+        chip_tdp = np.array(layout_input["slots"]["tdp"], dtype=float)
+        traffic = np.array(layout_input["mapping"]["traffic_matrix"], dtype=float)
+        traffic_sym = traffic + traffic.T
+        mapping_current = layout_input.get("mapping", {}).get("mapping", list(range(assign_seed.shape[0])))
+        segments = _parse_segments(layout_input.get("mapping", {}).get("segments", []))
+        S = assign_grid.shape[0]
+        Ns = sites_xy.shape[0]
+        evaluator = LayoutEvaluator(
+            sigma_mm=float(cfg.objective.sigma_mm),
+            baseline={
+                "L_comm_baseline": float(layout_input["baseline"].get("L_comm", 1.0)),
+                "L_therm_baseline": float(layout_input["baseline"].get("L_therm", 1.0)),
+            },
+            scalar_w={
+                "w_comm": float(cfg.objective.scalar_weights.w_comm),
+                "w_therm": float(cfg.objective.scalar_weights.w_therm),
+                "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
+            },
+        )
+        layout_state = LayoutState(
+            S=S,
+            Ns=sites_xy.shape[0],
+            wafer_radius_mm=wafer_radius,
+            sites_xy_mm=sites_xy,
+            assign=assign_seed.copy(),
+            chip_tdp_w=chip_tdp,
+            traffic_bytes=traffic,
+            meta={"stage": "seed"},
+        )
+        mapping_solver = MappingSolver(
+            strategy=str(getattr(getattr(cfg, "alt_opt", {}), "mapping_strategy", "greedy_local")),
+            mem_limit_factor=float(getattr(getattr(cfg, "alt_opt", {}), "mem_limit_factor", 1.0)),
+        )
+        pareto = ParetoSet(
+            eps_comm=float(cfg.pareto.get("eps_comm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
+            eps_therm=float(cfg.pareto.get("eps_therm", 0.0)) if hasattr(cfg, "pareto") else 0.0,
+            max_points=int(cfg.pareto.get("max_points", 2000)) if hasattr(cfg, "pareto") else 2000,
+        )
+
+        # Stage0: baseline evaluations
+        layout_state.assign = assign_grid
+        base_eval = evaluator.evaluate(layout_state)
+        pareto.add(
+            base_eval["comm_norm"],
+            base_eval["therm_norm"],
+            {"assign": assign_grid.copy(), "total_scalar": base_eval["total_scalar"], "stage": "baseline", "iter": 0, "seed": -1},
+        )
+        layout_state.assign = assign_seed
+        seed_eval = evaluator.evaluate(layout_state)
+        pareto.add(
+            seed_eval["comm_norm"],
+            seed_eval["therm_norm"],
+            {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
+        )
         append_trace_event_v54(
-            str(trace_events_path),
-            run_id=run_id,
-            step=0,
-            event_type="init",
+            trace_events_path,
+            "init",
             payload={
                 "baseline_signature": signature_from_assign(assign_grid),
                 "seed_signature": signature_from_assign(assign_seed),
@@ -190,203 +199,197 @@ def run_layout_agent(
                 "seed_total_scalar": float(seed_eval.get("total_scalar", 0.0)),
             },
         )
-    except Exception:
-        pass
 
-    # Stage1: coarsen
-    clusters, W = coarsen_traffic(
-        traffic_sym,
-        slot_tdp=chip_tdp,
-        target_num_clusters=int(cfg.coarsen.target_num_clusters),
-        min_merge_traffic=float(cfg.coarsen.min_merge_traffic),
-    )
+        # Stage1: coarsen
+        clusters, W = coarsen_traffic(
+            traffic_sym,
+            slot_tdp=chip_tdp,
+            target_num_clusters=int(cfg.coarsen.target_num_clusters),
+            min_merge_traffic=float(cfg.coarsen.min_merge_traffic),
+        )
 
-    # Stage2: regions
-    regions, site_to_region = build_regions(
-        sites_xy_mm=sites_xy,
-        wafer_radius_mm=wafer_radius,
-        ring_edges_ratio=cfg.regions.ring_edges_ratio,
-        sectors_per_ring=cfg.regions.sectors_per_ring,
-        ring_score=cfg.regions.ring_score,
-        capacity_ratio=float(cfg.regions.capacity_ratio),
-    )
-    cluster_to_region, J = assign_clusters_to_regions(
-        clusters,
-        regions,
-        W,
-        lambda_graph=float(cfg.global_place_region.lambda_graph),
-        lambda_ring=float(cfg.global_place_region.lambda_ring),
-        lambda_cap=float(cfg.global_place_region.lambda_cap),
-        refine_cfg=cfg.global_place_region.get("refine", {}),
-        py_rng=random.Random(int(seed)),
-    )
+        # Stage2: regions
+        regions, site_to_region = build_regions(
+            sites_xy_mm=sites_xy,
+            wafer_radius_mm=wafer_radius,
+            ring_edges_ratio=cfg.regions.ring_edges_ratio,
+            sectors_per_ring=cfg.regions.sectors_per_ring,
+            ring_score=cfg.regions.ring_score,
+            capacity_ratio=float(cfg.regions.capacity_ratio),
+        )
+        cluster_to_region, J = assign_clusters_to_regions(
+            clusters,
+            regions,
+            W,
+            lambda_graph=float(cfg.global_place_region.lambda_graph),
+            lambda_ring=float(cfg.global_place_region.lambda_ring),
+            lambda_cap=float(cfg.global_place_region.lambda_cap),
+            refine_cfg=cfg.global_place_region.get("refine", {}),
+            py_rng=random.Random(int(seed)),
+        )
 
-    # Stage3: expand
-    assign_expand = expand_clusters(
-        clusters=clusters,
-        cluster_to_region=cluster_to_region,
-        regions=regions,
-        base_assign=np.full_like(assign_seed, -1),
-        traffic_sym=traffic_sym,
-        sites_xy=sites_xy,
-        intra_refine_steps=int(cfg.expand.get("intra_refine_steps", 0)),
-    )
-
-    # Stage4: legalize
-    assign_leg = legalize_assign(assign_expand, sites_xy, wafer_radius)
-    layout_state.assign = assign_leg
-
-    # Stage5: detailed place
-    detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-    result = run_detailed_place(
-        sites_xy=sites_xy,
-        assign_seed=assign_leg,
-        evaluator=evaluator,
-        layout_state=layout_state,
-        traffic_sym=traffic_sym,
-        site_to_region=site_to_region,
-        regions=regions,
-        clusters=clusters,
-        cluster_to_region=cluster_to_region,
-        pareto=pareto,
-        cfg=detailed_cfg,
-        trace_path=out_dir / "trace.csv",
-        seed_id=int(seed),
-        chip_tdp=chip_tdp,
-        llm_usage_path=out_dir / "llm_usage.jsonl",
-        recordings_path=out_dir / "recordings.jsonl",
-    )
-    assign_final = result.assign
-
-    # Stage6: alt-opt (optional)
-    mapping_final = layout_input["mapping"].get("mapping") if "mapping" in layout_input else None
-    if hasattr(cfg, "alt_opt") and cfg.alt_opt.get("enabled", False):
-        assign_final, mapping_final = run_alt_opt(
-            rounds=int(cfg.alt_opt.get("rounds", 3)),
-            mapping_solver=mapping_solver,
-            segments=segments,
-            mapping_init=mapping_current,
+        # Stage3: expand
+        assign_expand = expand_clusters(
+            clusters=clusters,
+            cluster_to_region=cluster_to_region,
+            regions=regions,
+            base_assign=np.full_like(assign_seed, -1),
             traffic_sym=traffic_sym,
             sites_xy=sites_xy,
-            assign_init=assign_final,
+            intra_refine_steps=int(cfg.expand.get("intra_refine_steps", 0)),
+        )
+
+        # Stage4: legalize
+        assign_leg = legalize_assign(assign_expand, sites_xy, wafer_radius)
+        layout_state.assign = assign_leg
+
+        # Stage5: detailed place
+        detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+        result = run_detailed_place(
+            sites_xy=sites_xy,
+            assign_seed=assign_leg,
             evaluator=evaluator,
             layout_state=layout_state,
+            traffic_sym=traffic_sym,
+            site_to_region=site_to_region,
+            regions=regions,
+            clusters=clusters,
+            cluster_to_region=cluster_to_region,
             pareto=pareto,
-            cfg=cfg.alt_opt,
+            cfg=detailed_cfg,
             trace_path=out_dir / "trace.csv",
+            seed_id=int(seed),
             chip_tdp=chip_tdp,
+            llm_usage_path=out_dir / "llm_usage.jsonl",
+            recordings_path=out_dir / "recordings.jsonl",
         )
+        assign_final = result.assign
 
-    # Outputs
-    write_pareto_points_csv(pareto, out_dir / "pareto_points.csv")
-    best_comm, best_therm, best_payload = pareto.knee_point()
-    best_assign = best_payload.get("assign", assign_final)
-    layout_state.assign = np.array(best_assign, dtype=int)
-    best_eval = evaluator.evaluate(layout_state)
-    runtime_s = time.time() - start_time
-    layout_best = {
-        "run_id": run_id,
-        "best": {
-            "assign": best_assign.tolist(),
-            "pos_xy_mm": sites_xy[best_assign].tolist(),
-            "objectives": {"comm_norm": best_comm, "therm_norm": best_therm},
-            "raw": {"L_comm": best_eval["L_comm"], "L_therm": best_eval["L_therm"]},
-            "penalty": best_eval["penalty"],
-            "meta": {"stage": "knee_point"},
-        },
-        "pareto_front": [
-            {"comm_norm": p.comm_norm, "therm_norm": p.therm_norm} for p in pareto.points
-        ],
-        "selection": {
-            "method": cfg.pareto.get("selection", "knee_point_v1") if hasattr(cfg, "pareto") else "knee_point_v1",
-            "pareto_size": len(pareto.points),
-        },
-        "region_plan": {
-            "clusters": [c.slots for c in clusters],
-            "cluster_to_region": cluster_to_region,
-            "J": J,
-        },
-        "artifacts": {
-            "trace_csv": str((out_dir / "trace.csv").absolute()),
-            "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
-            "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
-        },
-        "alt_opt": {
-            "enabled": bool(cfg.alt_opt.get("enabled", False)) if hasattr(cfg, "alt_opt") else False,
-            "mapping_final": mapping_final,
-        },
-    }
-    with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
-        json.dump(layout_best, f, indent=2)
+        # Stage6: alt-opt (optional)
+        mapping_final = layout_input["mapping"].get("mapping") if "mapping" in layout_input else None
+        if hasattr(cfg, "alt_opt") and cfg.alt_opt.get("enabled", False):
+            assign_final, mapping_final = run_alt_opt(
+                rounds=int(cfg.alt_opt.get("rounds", 3)),
+                mapping_solver=mapping_solver,
+                segments=segments,
+                mapping_init=mapping_current,
+                traffic_sym=traffic_sym,
+                sites_xy=sites_xy,
+                assign_init=assign_final,
+                evaluator=evaluator,
+                layout_state=layout_state,
+                pareto=pareto,
+                cfg=cfg.alt_opt,
+                trace_path=out_dir / "trace.csv",
+                chip_tdp=chip_tdp,
+            )
 
-    detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-    metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
-    eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-    trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
-
-    report = {
-        "run_id": run_id,
-        "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
-        "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
-        "best_total": float(best_eval.get("total_scalar", 0.0)),
-        "best_comm": float(best_eval.get("comm_norm", best_comm)),
-        "best_therm": float(best_eval.get("therm_norm", best_therm)),
-        "pareto_size": len(pareto.points),
-        "pareto_front_size": len(pareto.points),
-        "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
-        "metrics_window_lastN": metrics_window,
-        "eps_flat": eps_flat,
-        "runtime_s": float(runtime_s),
-        "evaluator_calls": int(getattr(evaluator, "evaluator_calls", getattr(evaluator, "evaluate_calls", 0))),
-        "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
-        "policy_switch": result.policy_meta.get("policy_switch") if result.policy_meta else None,
-        "cache": result.policy_meta.get("cache") if result.policy_meta else None,
-        **trace_metrics,
-    }
-    with (out_dir / "report.json").open("w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-
-    # ---- v5.4: enforce budget fairness artifact (budget.json) ----
-    try:
-        detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-        step_limit = int(detailed_cfg.get("steps", 0) or detailed_cfg.get("max_steps", 0) or 0)
-        wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
-
-        budget = {
+        # Outputs
+        write_pareto_points_csv(pareto, out_dir / "pareto_points.csv")
+        best_comm, best_therm, best_payload = pareto.knee_point()
+        best_assign = best_payload.get("assign", assign_final)
+        layout_state.assign = np.array(best_assign, dtype=int)
+        best_eval = evaluator.evaluate(layout_state)
+        runtime_s = time.time() - start_time
+        best_total = float(best_eval.get("total_scalar", 0.0))
+        layout_best = {
             "run_id": run_id,
-            "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
-            "secondary_limit": {"type": "steps", "limit": step_limit},
-            "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
-            "seed_id": int(seed) if "seed" in locals() else None,
-            "method": "ours",
+            "best": {
+                "assign": best_assign.tolist(),
+                "pos_xy_mm": sites_xy[best_assign].tolist(),
+                "objectives": {"comm_norm": best_comm, "therm_norm": best_therm},
+                "raw": {"L_comm": best_eval["L_comm"], "L_therm": best_eval["L_therm"]},
+                "penalty": best_eval["penalty"],
+                "meta": {"stage": "knee_point"},
+            },
+            "pareto_front": [
+                {"comm_norm": p.comm_norm, "therm_norm": p.therm_norm} for p in pareto.points
+            ],
+            "selection": {
+                "method": cfg.pareto.get("selection", "knee_point_v1") if hasattr(cfg, "pareto") else "knee_point_v1",
+                "pareto_size": len(pareto.points),
+            },
+            "region_plan": {
+                "clusters": [c.slots for c in clusters],
+                "cluster_to_region": cluster_to_region,
+                "J": J,
+            },
+            "artifacts": {
+                "trace_csv": str((out_dir / "trace.csv").absolute()),
+                "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
+                "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
+            },
+            "alt_opt": {
+                "enabled": bool(cfg.alt_opt.get("enabled", False)) if hasattr(cfg, "alt_opt") else False,
+                "mapping_final": mapping_final,
+            },
         }
-        (out_dir / "budget.json").write_text(
-            json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-    except Exception:
-        pass
-    # ---- v5.4: mandatory finalize event (trace_events.jsonl) ----
-    try:
-        best_assign = None
-        try:
-            _, _, best_payload = pareto.knee_point()
-            best_assign = (best_payload or {}).get("assign", None)
-        except Exception:
-            best_assign = None
+        with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
+            json.dump(layout_best, f, indent=2)
 
+        detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+        metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
+        eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
+        trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
+
+        report = {
+            "run_id": run_id,
+            "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
+            "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
+            "best_total": float(best_eval.get("total_scalar", 0.0)),
+            "best_comm": float(best_eval.get("comm_norm", best_comm)),
+            "best_therm": float(best_eval.get("therm_norm", best_therm)),
+            "pareto_size": len(pareto.points),
+            "pareto_front_size": len(pareto.points),
+            "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
+            "metrics_window_lastN": metrics_window,
+            "eps_flat": eps_flat,
+            "runtime_s": float(runtime_s),
+            "evaluator_calls": int(getattr(evaluator, "evaluator_calls", getattr(evaluator, "evaluate_calls", 0))),
+            "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+            "policy_switch": result.policy_meta.get("policy_switch") if result.policy_meta else None,
+            "cache": result.policy_meta.get("cache") if result.policy_meta else None,
+            **trace_metrics,
+        }
+        with (out_dir / "report.json").open("w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+
+        # ---- v5.4: enforce budget fairness artifact (budget.json) ----
+        try:
+            detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+            step_limit = int(detailed_cfg.get("steps", 0) or detailed_cfg.get("max_steps", 0) or 0)
+            wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
+
+            budget = {
+                "run_id": run_id,
+                "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
+                "secondary_limit": {"type": "steps", "limit": step_limit},
+                "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+                "seed_id": int(seed) if "seed" in locals() else None,
+                "method": "ours",
+            }
+            (out_dir / "budget.json").write_text(
+                json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        ok = True
+    except Exception as exc:
+        append_trace_event_v54(trace_events_path, "error", payload={"error": str(exc)})
+        raise
+    finally:
+        steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
+        best_solution_valid = _is_valid_assign(best_assign, S, Ns)
+        reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
         finalize_trace_events(
-            str(trace_events_path),
-            run_id=run_id,
-            step=int(getattr(evaluator, "evaluate_calls", 0)),
-            reason="done",
+            trace_events_path,
             payload={
-                "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
-                "pareto_size": int(len(pareto.points)),
-                "best_signature": signature_from_assign(best_assign) if best_assign is not None else "",
+                "reason": reason,
+                "steps_done": int(steps_done),
+                "best_solution_valid": bool(best_solution_valid),
+                "best_total": float(best_total) if best_total is not None else None,
             },
         )
-    except Exception:
-        pass
 
 
 def main():
