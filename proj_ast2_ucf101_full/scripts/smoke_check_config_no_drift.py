@@ -28,7 +28,9 @@ def main():
             raise AssertionError("NoDoubleScale violated: loss.lambda_hw must be 0 when stable_hw.enabled=True")
         if hasattr(cfg, "hw") and float(getattr(cfg.hw, "lambda_hw", 0.0) or 0.0) != 0.0:
             raise AssertionError("NoDoubleScale violated: hw.lambda_hw must be 0 when stable_hw.enabled=True")
-        if not bool(getattr(cfg.stable_hw, "no_double_scale", True)):
+        nds = getattr(cfg.stable_hw, "no_double_scale", None)
+        nds_enabled = True if nds is None else bool(getattr(nds, "enabled", False))
+        if not nds_enabled:
             raise AssertionError("stable_hw.no_double_scale must be True in v5.4")
 
         # ---- SPEC v5.4 LockedAccRef must be achievable ----
