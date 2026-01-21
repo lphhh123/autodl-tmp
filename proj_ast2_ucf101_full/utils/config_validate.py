@@ -541,6 +541,30 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             f"{'root' if getattr(cfg, 'no_drift', None) is not None else 'stable_hw'}"
         )
 
+    # --- v5.4 contract: metric name must be consistent ---
+    try:
+        if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):
+            g = getattr(cfg.stable_hw, "accuracy_guard", None)
+            l = getattr(cfg.stable_hw, "locked_acc_ref", None)
+            eval_cfg = getattr(cfg, "eval", None)
+
+            guard_metric = None
+            if g is not None:
+                ctrl = getattr(g, "controller", None)
+                guard_metric = getattr(ctrl, "metric", None) if ctrl is not None else getattr(g, "metric_name", None)
+
+            locked_metric = getattr(l, "metric_name", None) if l is not None else None
+            eval_metric = getattr(eval_cfg, "acc_metric_name", None) if eval_cfg is not None else None
+
+            metrics = [m for m in [guard_metric, locked_metric, eval_metric] if m is not None]
+            if len(set(metrics)) > 1:
+                raise ValueError(
+                    f"[v5.4] metric mismatch: guard={guard_metric} locked_acc_ref={locked_metric} "
+                    f"eval={eval_metric}. These must be identical to satisfy LockedAccRef/NoDrift semantics."
+                )
+    except Exception:
+        raise
+
     # ---- discrete isolation defaults (v5) ----
     if getattr(stable_hw, "discrete_isolation", None) is None:
         from omegaconf import OmegaConf
