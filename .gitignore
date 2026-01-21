@@ -8,3 +8,5 @@ data/
 *.avi
 *.jpg
 *.bak_*
+__pycache__/
+*.pyc

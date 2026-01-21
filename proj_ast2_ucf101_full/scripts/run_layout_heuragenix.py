@@ -480,6 +480,7 @@ def _write_trace_and_pareto(
     layout_input: dict,
     cfg: Any,
     max_steps: int | None,
+    method_label: str,
 ) -> Tuple[Dict[str, Any], ParetoSet]:
     base_state, evaluator = _build_evaluator(layout_input, cfg)
     objective_hash = evaluator.objective_hash()
@@ -714,7 +715,8 @@ def _write_trace_and_pareto(
         "max_steps": int(max_steps) if max_steps is not None else None,
         "signature_version": "v5.4",
         "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
-        "run_signature": _build_run_signature(cfg, method_name=f"heuragenix:{args.heuristic}"),
+        "run_signature": _build_run_signature(cfg, method_name=method_label),
+        "method": method_label,
     }
     (out_dir / "trace_meta.json").write_text(json.dumps(trace_meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return report, pareto
@@ -1444,6 +1446,7 @@ def main() -> None:
             json.dumps({"event": "recordings_missing", "path": str(recordings_path)}) + "\n",
             encoding="utf-8",
         )
+    method_label = f"heuragenix:{args.heuristic}"
     trace_info, pareto = _write_trace_and_pareto(
         out_dir,
         seed,
@@ -1451,6 +1454,7 @@ def main() -> None:
         layout_input,
         cfg,
         effective_max_steps,
+        method_label,
     )
     write_pareto_points_csv(pareto, out_dir / "pareto_points.csv")
 
