@@ -1,5 +1,6 @@
-**/__pycache__/
-**/*.pyc
-output/
-result/
-data/**/tmp*
+__pycache__/
+*.pyc
+*.pyo
+*.bak_*
+*.swp
+.DS_Store

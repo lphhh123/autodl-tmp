@@ -498,7 +498,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
         # Only create nested default when root is absent AND nested is absent
         if root_no_drift is None and nested_no_drift is None:
-            cfg.stable_hw.no_drift = True
+            cfg.stable_hw.no_drift = SimpleNamespace(enabled=True)
             nested_no_drift = cfg.stable_hw.no_drift
 
         # Determine enabled flag from root (dict-style) or nested (bool/dict-style)
@@ -524,6 +524,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         # NoDrift priority: enforce frozen even if user mistakenly sets ema
         if no_drift_enabled:
             cfg.stable_hw.normalize.ref_update = "frozen"
+
+        # Canonicalize: always expose dict-style stable_hw.no_drift with .enabled for downstream code.
+        _cur_nd = getattr(cfg.stable_hw, "no_drift", None)
+        if _cur_nd is None or not hasattr(_cur_nd, "enabled"):
+            cfg.stable_hw.no_drift = SimpleNamespace(enabled=bool(no_drift_enabled))
+        else:
+            _cur_nd.enabled = bool(no_drift_enabled)
 
         v = str(cfg.stable_hw.normalize.ref_update).lower()
         if v not in ("frozen", "ema"):
