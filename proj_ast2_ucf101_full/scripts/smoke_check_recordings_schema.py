@@ -19,16 +19,25 @@ def main() -> None:
         "boundary_penalty",
         "seed_id",
         "time_ms",
+        # v5.4 required for trace/signature alignment
+        "op_args_json",
+        "signature",
     }
+    seen_any = False
     with open(path, "r", encoding="utf-8") as f:
         for ln, raw in enumerate(f, 1):
             raw = raw.strip()
             if not raw:
                 continue
+            seen_any = True
             obj = json.loads(raw)
             miss = sorted(list(required - set(obj.keys())))
             if miss:
                 raise SystemExit(f"Missing keys at line {ln}: {miss}")
+            if not isinstance(obj.get("signature"), dict):
+                raise SystemExit(f"signature must be dict at line {ln}")
+    if not seen_any:
+        raise SystemExit(f"recordings file has no valid jsonl rows: {path}")
     print(f"OK schema: {path}")
 
 

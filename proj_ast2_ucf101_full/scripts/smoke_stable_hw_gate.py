@@ -25,14 +25,30 @@ def main():
 
     # Case 1: acc_ref not ready => lambda_hw must be 0
     stable_hw_schedule(0, cfg.stable_hw, st)
-    decision, _ = apply_accuracy_guard(cfg, st, val_metric_or_none=None, epoch=0, has_val_this_epoch=False)
+    decision, _ = apply_accuracy_guard(
+        epoch=0,
+        stable_hw_cfg=cfg,
+        stable_hw_state=st,
+        val_metric_or_none=None,
+        has_val_this_epoch=False,
+        train_ema_or_none=None,
+    )
+    st = decision.state
     assert st.get("lambda_hw_effective", 0.0) == 0.0, "acc_ref missing => lambda_hw_effective must be 0"
 
     # Case 2: set a locked acc_ref and violate => lambda_hw must be 0
     st["acc_ref"] = 0.9
     st["acc_ref_locked"] = True
     stable_hw_schedule(1, cfg.stable_hw, st)
-    decision2, _ = apply_accuracy_guard(cfg, st, val_metric_or_none=0.0, epoch=1, has_val_this_epoch=True)
+    decision2, _ = apply_accuracy_guard(
+        epoch=1,
+        stable_hw_cfg=cfg,
+        stable_hw_state=st,
+        val_metric_or_none=0.0,
+        has_val_this_epoch=True,
+        train_ema_or_none=None,
+    )
+    st = decision2.state
     assert st.get("lambda_hw_effective", 0.0) == 0.0, "violate => lambda_hw_effective must be 0"
 
     print("[OK] smoke_stable_hw_gate: gating behaves as expected.")
