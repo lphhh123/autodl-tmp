@@ -169,8 +169,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_state: Dict[str, Any] = {}
     if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
-        init_locked_acc_ref(cfg, stable_state, stable_hw_cfg=stable_hw_cfg, output_dir=out_dir)
-        init_hw_refs_from_baseline_stats(cfg, stable_state, stable_hw_cfg=stable_hw_cfg, output_dir=out_dir)
+        init_locked_acc_ref(cfg, stable_state)
+        init_hw_refs_from_baseline_stats(cfg, stable_state, stable_hw_cfg=stable_hw_cfg)
         # ---- v5.4: always materialize stable_hw_state.json even if epochs==0 / early stop ----
         if out_dir is not None and stable_hw_cfg:
             out_path = Path(out_dir)
@@ -383,9 +383,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     update_hw_refs_from_stats(
                         cfg,
                         stable_state,
-                        last_hw_stats or {},
-                        stable_hw_cfg,
-                        output_dir=out_dir,
+                        latest_stats=last_hw_stats or {},
+                        stable_hw_cfg=stable_hw_cfg,
                     )
             guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
             allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True

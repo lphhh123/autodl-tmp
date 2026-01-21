@@ -715,8 +715,11 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         },
     )
     if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
-        init_locked_acc_ref(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg, output_dir=out_dir)
-        init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg, output_dir=out_dir)
+        # v5.4 stable_hw APIs: init_locked_acc_ref does NOT accept stable_hw_cfg/output_dir
+        init_locked_acc_ref(cfg, stable_hw_state)
+
+        # init_hw_refs_from_baseline_stats accepts stable_hw_cfg but NOT output_dir
+        init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
     (out_dir / "stable_hw_state.json").write_text(
         json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -753,7 +756,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
                 # make sure acc_ref exists if LockedAccRef is enabled (may still be None until set)
                 if stable_hw_state.get("acc_ref") is None:
-                    init_locked_acc_ref(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg, output_dir=out_dir)
+                    init_locked_acc_ref(cfg, stable_hw_state)
 
                 # guard based on *previous* metric (v5.4)
                 prev_val = stable_hw_state.get("val_acc1_last", None)
@@ -1322,9 +1325,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     update_hw_refs_from_stats(
                         cfg,
                         stable_hw_state,
-                        last_hw_stats or {},
-                        stable_hw_cfg,
-                        output_dir=out_dir,
+                        latest_stats=last_hw_stats or {},
+                        stable_hw_cfg=stable_hw_cfg,
                     )
                     after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
                     if before != after:
