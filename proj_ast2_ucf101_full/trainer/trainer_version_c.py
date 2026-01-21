@@ -732,11 +732,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             if stable_hw_state.get("acc_ref") is None:
                 init_locked_acc_ref(cfg, stable_hw_state)
 
-            # guard based on *previous* validation metric (if any)
-            prev_val = stable_hw_state.get(
-                f"{metric_key}_last",
-                stable_hw_state.get("val_acc1_last", None),
-            )
+            # guard based on *previous* metric (v5.4)
+            prev_val = stable_hw_state.get("val_acc1_last", None)
+            prev_train_ema = stable_hw_state.get("train_acc1_ema", None)
+
+            mk = str(metric_key).lower().strip()
+            use_train_ema = mk in ("train_acc1_ema", "train_ema")
 
             # IMPORTANT: even when prev_val is None (first epoch), apply_accuracy_guard()
             # will set guard_mode=WARMUP and allow_discrete_updates=True by contract.
@@ -744,8 +745,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 epoch=outer,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_hw_state,
-                val_metric_or_none=float(prev_val) if prev_val is not None else None,
-                has_val_this_epoch=False,
+                val_metric_or_none=float(prev_val) if (not use_train_ema and prev_val is not None) else None,
+                has_val_this_epoch=bool((not use_train_ema) and (prev_val is not None)),
+                train_ema_or_none=float(prev_train_ema) if (use_train_ema and prev_train_ema is not None) else None,
             )
             stable_hw_state = stable_decision.state
             stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
@@ -1086,7 +1088,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
                 if stable_hw_enabled:
                     metric = get_accuracy_metric_key(stable_hw_cfg)
-                    if metric == "train_ema":
+                    if metric in ("train_acc1_ema", "train_ema"):
                         update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
                 stats = {
                     "outer": outer,

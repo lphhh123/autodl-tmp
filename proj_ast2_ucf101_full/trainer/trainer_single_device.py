@@ -206,16 +206,16 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 stable_state["_legacy_lambda_warned"] = True
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
             prev_val = stable_state.get("val_acc1_last", None)
-            has_prev_val = prev_val is not None
+            prev_train_ema = stable_state.get("train_acc1_ema", None)
+            mk = str(get_accuracy_metric_key(cfg)).lower().strip()
+            use_train_ema = mk in ("train_acc1_ema", "train_ema")
             stable_decision, allow_discrete_updates = apply_accuracy_guard(
                 epoch=epoch,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
-                val_metric_or_none=float(prev_val) if has_prev_val else None,
-                has_val_this_epoch=has_prev_val,
-                train_ema_or_none=float(stable_state.get("train_acc1_ema"))
-                if stable_state.get("train_acc1_ema") is not None
-                else None,
+                val_metric_or_none=float(prev_val) if (not use_train_ema and prev_val is not None) else None,
+                has_val_this_epoch=bool((not use_train_ema) and (prev_val is not None)),
+                train_ema_or_none=float(prev_train_ema) if (use_train_ema and prev_train_ema is not None) else None,
             )
             stable_state = stable_decision.state
             stable_state["allow_discrete_updates"] = bool(allow_discrete_updates)
@@ -288,7 +288,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
                 if stable_hw_enabled:
                     metric = get_accuracy_metric_key(stable_hw_cfg)
-                    if metric == "train_ema":
+                    if metric in ("train_acc1_ema", "train_ema"):
                         update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
                 stats = {
                     "epoch": epoch,
