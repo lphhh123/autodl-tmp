@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import math
+import hashlib
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict
 
 import numpy as np
 
 from utils.stable_hash import stable_hash
+
+def _evaluator_version() -> str:
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except Exception:
+        return "unknown"
 
 @dataclass
 class LayoutState:
@@ -32,6 +40,7 @@ class LayoutEvaluator:
         # Only include fields that affect objective value.
         return {
             "objective_version": "v5.4",
+            "evaluator_version": _evaluator_version(),
             "sigma_mm": float(self.sigma_mm),
             "baseline": {
                 "L_comm_baseline": float(self.baseline.get("L_comm_baseline", 1.0)),

@@ -31,7 +31,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hw import (
     apply_accuracy_guard,
@@ -556,6 +556,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         run_meta={"mode": "version_c_train", "seed_id": int(seed), "run_id": run_id},
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
     )
+    trace_events_path = trace_dir / "trace_events.jsonl"
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
     layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
     if layout_export_dir is not None:
@@ -602,9 +603,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     if layout_only:
         setattr(cfg.hw, "layout_only", True)
 
-    append_trace_event(
-        trace_dir,
-        event_type="init",
+    append_trace_event_v54(
+        trace_events_path,
+        "init",
         payload={
             "twostage": bool(twostage),
             "mapping_only": bool(mapping_only),
@@ -613,6 +614,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 getattr(cfg, "stable_hw", None) is not None and getattr(cfg.stable_hw, "enabled", False)
             ),
         },
+        run_id=run_id,
+        step=0,
     )
 
     base_update_alpha = not layout_only
@@ -850,9 +853,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     need_update_layout = need_update_layout and (cache["layout"] is None)
 
                 if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
-                    append_trace_event(
-                        trace_dir,
-                        event_type="discrete_blocked",
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "discrete_blocked",
                         payload={
                             "epoch": int(outer),
                             "mapping_requested": bool(need_update_mapping),
@@ -862,6 +865,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                             "op": "noop",
                             "accepted": 0,
                         },
+                        run_id=run_id,
+                        step=int(outer),
                     )
                     print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
                     need_update_mapping = False
@@ -1112,15 +1117,17 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     sum_comm += float(hw_stats.get("comm_ms", 0.0))
                     hw_stats_count += 1
                     if hw_stats.get("proxy_had_invalid", False) or hw_stats.get("proxy_clamp_count", 0) > 0:
-                        append_trace_event(
-                            trace_dir,
-                            event_type="proxy_sanitize",
+                        append_trace_event_v54(
+                            trace_events_path,
+                            "proxy_sanitize",
                             payload={
                                 "proxy_had_invalid": bool(hw_stats.get("proxy_had_invalid", False)),
                                 "proxy_clamp_count": int(hw_stats.get("proxy_clamp_count", 0)),
                                 "raw": hw_stats.get("proxy_raw", {}),
                                 "used": hw_stats.get("proxy_used", {}),
                             },
+                            run_id=run_id,
+                            step=int(outer),
                         )
                     hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
                     loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
@@ -1274,9 +1281,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     else None,
                 )
                 stable_hw_state = stable_decision.state
-                append_trace_event(
-                    trace_dir,
-                    event_type="gating_decision",
+                append_trace_event_v54(
+                    trace_events_path,
+                    "gating_decision",
                     payload={
                         "epoch": int(outer),
                         "metric": str(stable_decision.reason.get("metric")),
@@ -1293,6 +1300,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
                         "reason": str(stable_decision.reason.get("violate", "")),
                     },
+                    run_id=run_id,
+                    step=int(outer),
                 )
                 # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
                 if bool(stable_decision.stop_training):
@@ -1332,10 +1341,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     )
                     after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
                     if before != after:
-                        append_trace_event(
-                            trace_dir,
-                            event_type="ref_update",
+                        append_trace_event_v54(
+                            trace_events_path,
+                            "ref_update",
                             payload={"before": before, "after": after, "source": "online_stats"},
+                            run_id=run_id,
+                            step=int(outer),
                         )
                 else:
                     pass  # NoDrift: skip any ref update
@@ -1356,9 +1367,9 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
                 f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
             )
-            append_trace_event(
-                trace_dir,
-                event_type="proxy_sanitize_summary",
+            append_trace_event_v54(
+                trace_events_path,
+                "proxy_sanitize_summary",
                 payload={
                     "epoch": int(outer),
                     "had_negative_latency": bool(last_hw_stats.get("sanitize", {}).get("had_negative", False))
@@ -1368,10 +1379,12 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     if isinstance(last_hw_stats, dict)
                     else 0.0,
                 },
+                run_id=run_id,
+                step=int(outer),
             )
-            append_trace_event(
-                trace_dir,
-                event_type="epoch_summary",
+            append_trace_event_v54(
+                trace_events_path,
+                "epoch_summary",
                 payload={
                     "outer_epoch": int(outer),
                     "acc_ref": float(stable_hw_state.get("acc_ref", 0.0)),
@@ -1393,12 +1406,14 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     "proxy_extra_penalty": float(hw_stats.get("proxy_extra_penalty", 0.0)),
                     "hw_scale_schema_version": "v5.4_hw_loss_norm",
                 },
+                run_id=run_id,
+                step=int(outer),
             )
 
             if bool(hw_stats.get("proxy_had_invalid", False)) or float(hw_stats.get("proxy_extra_penalty", 0.0)) > 0.0:
-                append_trace_event(
-                    trace_dir,
-                    event_type="proxy_sanitize",
+                append_trace_event_v54(
+                    trace_events_path,
+                    "proxy_sanitize",
                     payload={
                         "outer_epoch": int(outer),
                         "proxy_raw": hw_stats.get("proxy_raw", {}),
@@ -1406,6 +1421,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         "proxy_extra_penalty": float(hw_stats.get("proxy_extra_penalty", 0.0)),
                         "note": "raw<0 or clamped",
                     },
+                    run_id=run_id,
+                    step=int(outer),
                 )
             # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
             if val_acc1 is None:
@@ -1451,6 +1468,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 "steps_done": int(steps_done),
                 "best_solution_valid": bool(best_solution_valid),
             },
+            run_id=run_id,
+            step=int(steps_done),
         )
 
     # write run_manifest.json (auditable LockedAccRef)
@@ -1461,15 +1480,16 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
             out_dir=out_dir,
             cfg_path=str(getattr(cfg.train, "cfg_path", "")),
             cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
-            run_id=run_id,
             seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
             command=None,
             stable_hw_state=stable_hw_state,
-            extra_meta={
+            extra={
                 "budget_main_axis": "wall_time_s",
                 "dataset_id": getattr(getattr(cfg, "dataset", None), "dataset_id", None)
                 or getattr(getattr(cfg, "dataset", None), "name", "unknown"),
             },
+            run_id=run_id,
+            spec_version="v5.4",
         )
     except Exception:
         pass

@@ -14,6 +14,7 @@ class StableHWDecision:
     lambda_hw_effective: float
     allow_discrete_updates: bool
     stop_training: bool
+    request_lr_restart: bool
     reason: Dict[str, Any]
     state: Dict[str, Any]
 
@@ -165,6 +166,7 @@ def stable_hw_log_fields(st: Dict[str, Any]) -> Dict[str, Any]:
         "stable_hw/recovery_good_epochs": int(st.get("recovery_good_epochs", 0)),
         "stable_hw/freeze_schedule": bool(st.get("freeze_schedule", False)),
         "stable_hw/acc_margin_last": st.get("acc_margin_last", None),
+        "stable_hw/request_lr_restart": bool(st.get("request_lr_restart", False)),
     }
 
 
@@ -319,6 +321,31 @@ def _load_baseline_stats(stats_path: str | os.PathLike[str]) -> Dict[str, Any] |
     comm_ref = stats.get("comm_ref_ms", stats.get("comm_ref_mb", stats.get("comm_ref", None)))
     if comm_ref is not None:
         stats["comm_ref_ms"] = comm_ref
+    hw_ref = stats.get("last_hw_stats") or stats.get("hw_ref") or stats.get("baseline_hw_stats")
+    if isinstance(hw_ref, dict):
+        latency = hw_ref.get("latency_ms", hw_ref.get("total_latency_ms", None))
+        mem_peak = hw_ref.get("mem_peak_mb", hw_ref.get("peak_mem_mb", None))
+        energy = hw_ref.get("energy_mj", None)
+        if latency is not None:
+            stats.setdefault("ref_T", latency)
+            stats.setdefault("latency_ref_ms", latency)
+        if mem_peak is not None:
+            stats.setdefault("ref_M", mem_peak)
+            stats.setdefault("memory_ref_mb", mem_peak)
+        if energy is not None:
+            stats.setdefault("ref_E", energy)
+    else:
+        latency = stats.get("latency_ms", stats.get("total_latency_ms", None))
+        mem_peak = stats.get("mem_peak_mb", stats.get("peak_mem_mb", None))
+        energy = stats.get("energy_mj", None)
+        if latency is not None:
+            stats.setdefault("ref_T", latency)
+            stats.setdefault("latency_ref_ms", latency)
+        if mem_peak is not None:
+            stats.setdefault("ref_M", mem_peak)
+            stats.setdefault("memory_ref_mb", mem_peak)
+        if energy is not None:
+            stats.setdefault("ref_E", energy)
     return stats
 
 
@@ -396,6 +423,8 @@ def apply_accuracy_guard(
     """
 
     st = stable_hw_state
+    prev_guard_mode = str(st.get("guard_mode", "HW_OPT"))
+    st.setdefault("request_lr_restart", False)
     _, stable_cfg = _get_root_and_stable(stable_hw_cfg)
     gcfg = _get_accuracy_guard_cfg(stable_hw_cfg)
     ctrl = _cfg_get(gcfg, "controller", {}) or {}
@@ -468,6 +497,7 @@ def apply_accuracy_guard(
             lambda_hw_effective=float(st["lambda_hw_effective"]),
             allow_discrete_updates=bool(st["allow_discrete_updates"]),
             stop_training=False,
+            request_lr_restart=False,
             reason={
                 "acc_ref": None,
                 "metric": None,
@@ -478,6 +508,7 @@ def apply_accuracy_guard(
             },
             state=st,
         )
+        st["request_lr_restart"] = False
         return decision, True
 
     # choose metric
@@ -545,6 +576,8 @@ def apply_accuracy_guard(
     else:
         st["freeze_schedule"] = False
 
+    request_lr_restart = bool(st["guard_mode"] == "RECOVERY" and prev_guard_mode != "RECOVERY")
+
     # ---- v5.4 canonical state writeback ----
     st["lambda_hw_after_guard"] = float(after)
     st["lambda_hw_effective"] = float(after)  # trainer must ONLY use this
@@ -570,12 +603,14 @@ def apply_accuracy_guard(
     # schedule freeze flag mirrors controller intent
     st["freeze_schedule"] = bool(freeze_sched and st["in_recovery"])
     st["allow_discrete_updates"] = bool(allow_discrete_updates)
+    st["request_lr_restart"] = bool(request_lr_restart)
     decision = StableHWDecision(
         guard_mode=str(st["guard_mode"]),
         lambda_hw_base=float(base),
         lambda_hw_effective=float(after),
         allow_discrete_updates=bool(allow_discrete_updates),
         stop_training=bool(stop_training),
+        request_lr_restart=bool(request_lr_restart),
         reason={
             "acc_ref": float(acc_ref) if acc_ref is not None else None,
             "metric": float(metric) if metric is not None else None,
