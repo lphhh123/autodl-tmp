@@ -194,7 +194,7 @@ def main() -> None:
     # ---- NoDrift: enabled means refs must not update ----
     no_drift_cfg = AttrDict({"no_drift": AttrDict({"enabled": True})})
     stable_state = {"latency_ref_ms": 1.0, "memory_ref_mb": 2.0}
-    update_hw_refs_from_stats(stable_state, {"latency_ms": 9.0, "mem_mb": 9.0}, no_drift_cfg)
+    update_hw_refs_from_stats(no_drift_cfg, stable_state, {"latency_ms": 9.0, "mem_mb": 9.0})
     if stable_state["latency_ref_ms"] != 1.0 or stable_state["memory_ref_mb"] != 2.0:
         raise AssertionError("NoDrift contract violated: refs updated while enabled")
 

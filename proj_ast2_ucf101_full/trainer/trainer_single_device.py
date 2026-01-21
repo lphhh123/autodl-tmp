@@ -21,7 +21,8 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.trace_guard import ensure_trace_file, append_trace_event
+from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
+from utils.trace_signature_v54 import build_signature_v54
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -117,15 +118,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = out_dir / "metrics.json"
-        trace_path = out_dir / "trace.jsonl"
-        ensure_trace_file(
-            str(trace_path),
-            header={
-                "run_name": str(getattr(getattr(cfg, "train", None), "exp_name", None) or out_dir.name),
-                "steps_planned": int(getattr(cfg, "steps", 0)) if hasattr(cfg, "steps") else 0,
-                "run_signature": _build_run_signature(cfg),
-            },
-        )
+        trace_path = out_dir / "trace_events.jsonl"
+        sig = build_signature_v54(cfg, method_name="train_single_device")
+        ensure_trace_events(trace_path, payload={"signature": sig, "run_meta": {"mode": "train_single_device"}})
     train_loader, val_loader = build_dataloaders(cfg)
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -190,192 +185,259 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     last_acc = 0.0
     ran_epochs = 0
     early_stop_triggered = False
-    for epoch in range(cfg.train.epochs):
-        ran_epochs += 1
-        stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
-        if stable_hw_enabled:
-            legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
-            legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
-            if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_state.get(
-                "_legacy_lambda_warned", False
-            ):
-                logger.info(
-                    "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
-                    "using stable_hw_state.lambda_hw_effective."
-                )
-                stable_state["_legacy_lambda_warned"] = True
-            stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
-            prev_val = stable_state.get("val_acc1_last", None)
-            prev_train_ema = stable_state.get("train_acc1_ema", None)
-            mk = str(get_accuracy_metric_key(cfg)).lower().strip()
-            use_train_ema = mk in ("train_acc1_ema", "train_ema")
-            stable_decision, allow_discrete_updates = apply_accuracy_guard(
-                epoch=epoch,
-                stable_hw_cfg=cfg,
-                stable_hw_state=stable_state,
-                val_metric_or_none=float(prev_val) if (not use_train_ema and prev_val is not None) else None,
-                has_val_this_epoch=bool((not use_train_ema) and (prev_val is not None)),
-                train_ema_or_none=float(prev_train_ema) if (use_train_ema and prev_train_ema is not None) else None,
-            )
-            stable_state = stable_decision.state
-            stable_state["allow_discrete_updates"] = bool(allow_discrete_updates)
-
-            # v5.4: if stop_on_violation already triggered, do not proceed with training
-            if bool(stable_decision.stop_training):
-                logger.warning(
-                    f"[StableHW] stop_on_violation already triggered before epoch={epoch} training. Stop now."
-                )
-                early_stop_triggered = True
-                break
-            # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
-            if stable_hw_enabled and bool(stable_state.get("request_lr_restart", False)):
-                last_applied = int(stable_state.get("_lr_restart_applied_epoch", -999999))
-                if last_applied != int(epoch):
-                    _ctrl = getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "controller", None)
-                    if _ctrl is None:
-                        _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
-                    mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
-                    for pg in opt.param_groups:
-                        pg["lr"] = float(pg.get("lr", lr)) * mul
-                    stable_state["_lr_restart_applied_epoch"] = int(epoch)
-                stable_state["request_lr_restart"] = False
-        if stable_hw_enabled:
-            lambda_hw_eff = float(stable_state.get("lambda_hw_effective", 0.0))
-        else:
-            lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
-
-        stable_state["lambda_hw_effective"] = float(lambda_hw_eff)
-        stable_state.setdefault("lambda_hw_base", float(stable_state.get("lambda_hw_base", 0.0)))
-        model.train()
-        last_hw_stats = None
-        for step, batch in enumerate(train_loader):
-            x = batch["video"].to(device)
-            y = batch["label"].to(device)
-            if epoch == 0 and step == 0:
-                logger.info("[DEBUG] train batch video.shape=%s", tuple(x.shape))
-            opt.zero_grad()
-            with autocast(device_type, enabled=cfg.train.amp):
-                if model_type == "video_audio":
-                    logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
-                else:
-                    logits, info = model(x, return_intermediate=True)
-                L_task = F.cross_entropy(logits, y)
-
-                model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
-                L_hw, hw_stats = compute_hw_loss(
-                    cfg,
-                    hw_proxy,
-                    model_info=model_info,
-                    stable_hw_cfg=stable_hw_cfg,
+    ok = False
+    steps_done = 0
+    try:
+        for epoch in range(cfg.train.epochs):
+            ran_epochs += 1
+            steps_done = ran_epochs
+            stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+            if stable_hw_enabled:
+                legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
+                legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
+                if (legacy_loss_lambda != 0.0 or legacy_hw_lambda != 0.0) and not stable_state.get(
+                    "_legacy_lambda_warned", False
+                ):
+                    logger.info(
+                        "[StableHW] NOTE: legacy cfg.loss.lambda_hw/cfg.hw.lambda_hw will be ignored; "
+                        "using stable_hw_state.lambda_hw_effective."
+                    )
+                    stable_state["_legacy_lambda_warned"] = True
+                stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
+                prev_val = stable_state.get("val_acc1_last", None)
+                prev_train_ema = stable_state.get("train_acc1_ema", None)
+                mk = str(get_accuracy_metric_key(cfg)).lower().strip()
+                use_train_ema = mk in ("train_acc1_ema", "train_ema")
+                stable_decision, allow_discrete_updates = apply_accuracy_guard(
+                    epoch=epoch,
+                    stable_hw_cfg=cfg,
                     stable_hw_state=stable_state,
+                    val_metric_or_none=float(prev_val) if (not use_train_ema and prev_val is not None) else None,
+                    has_val_this_epoch=bool((not use_train_ema) and (prev_val is not None)),
+                    train_ema_or_none=float(prev_train_ema) if (use_train_ema and prev_train_ema is not None) else None,
                 )
-                if stable_hw_cfg:
-                    last_hw_stats = {k: float(v) for k, v in hw_stats.items()}
+                stable_state = stable_decision.state
+                stable_state["allow_discrete_updates"] = bool(allow_discrete_updates)
+                if trace_path is not None:
+                    append_trace_event_v54(
+                        trace_path,
+                        "gating_decision",
+                        payload={
+                            "epoch": int(epoch),
+                            "metric": str(stable_decision.reason.get("metric")),
+                            "acc_ref": float(stable_decision.reason.get("acc_ref"))
+                            if stable_decision.reason.get("acc_ref") is not None
+                            else None,
+                            "acc_current": float(stable_decision.reason.get("metric"))
+                            if stable_decision.reason.get("metric") is not None
+                            else None,
+                            "guard_mode": str(stable_decision.guard_mode),
+                            "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
+                            "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
+                            "reason": str(stable_decision.reason.get("violate", "")),
+                        },
+                    )
 
-                L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
+                # v5.4: if stop_on_violation already triggered, do not proceed with training
+                if bool(stable_decision.stop_training):
+                    logger.warning(
+                        f"[StableHW] stop_on_violation already triggered before epoch={epoch} training. Stop now."
+                    )
+                    early_stop_triggered = True
+                    break
+                # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
+                if stable_hw_enabled and bool(stable_state.get("request_lr_restart", False)):
+                    last_applied = int(stable_state.get("_lr_restart_applied_epoch", -999999))
+                    if last_applied != int(epoch):
+                        _ctrl = getattr(getattr(stable_hw_cfg, "accuracy_guard", None), "controller", None)
+                        if _ctrl is None:
+                            _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
+                        mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
+                        for pg in opt.param_groups:
+                            pg["lr"] = float(pg.get("lr", lr)) * mul
+                        stable_state["_lr_restart_applied_epoch"] = int(epoch)
+                    stable_state["request_lr_restart"] = False
+            if stable_hw_enabled:
+                lambda_hw_eff = float(stable_state.get("lambda_hw_effective", 0.0))
+            else:
+                lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
 
-                loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw_eff * L_hw
-                assert "hw_loss_weighted" not in (hw_stats or {}), (
-                    "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
+            stable_state["lambda_hw_effective"] = float(lambda_hw_eff)
+            stable_state.setdefault("lambda_hw_base", float(stable_state.get("lambda_hw_base", 0.0)))
+            model.train()
+            last_hw_stats = None
+            for step, batch in enumerate(train_loader):
+                x = batch["video"].to(device)
+                y = batch["label"].to(device)
+                if epoch == 0 and step == 0:
+                    logger.info("[DEBUG] train batch video.shape=%s", tuple(x.shape))
+                opt.zero_grad()
+                with autocast(device_type, enabled=cfg.train.amp):
+                    if model_type == "video_audio":
+                        logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
+                    else:
+                        logits, info = model(x, return_intermediate=True)
+                    L_task = F.cross_entropy(logits, y)
+
+                    model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                    L_hw, hw_stats = compute_hw_loss(
+                        cfg,
+                        hw_proxy,
+                        model_info=model_info,
+                        stable_hw_cfg=stable_hw_cfg,
+                        stable_hw_state=stable_state,
+                    )
+                    if stable_hw_cfg:
+                        last_hw_stats = dict(hw_stats) if isinstance(hw_stats, dict) else {}
+
+                    L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
+
+                    loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw_eff * L_hw
+                    assert "hw_loss_weighted" not in (hw_stats or {}), (
+                        "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
+                    )
+                # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
+                assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
+                assert float(lambda_hw_eff) >= 0.0
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+                if step % 10 == 0:
+                    acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
+                    if stable_hw_enabled:
+                        metric = get_accuracy_metric_key(stable_hw_cfg)
+                        if metric in ("train_acc1_ema", "train_ema"):
+                            update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
+                    stats = {
+                        "epoch": epoch,
+                        "step": step,
+                        "loss": loss.item(),
+                        "acc1": acc1.item(),
+                        "acc5": acc5.item(),
+                        "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item(),
+                        "lambda_hw": float(lambda_hw_eff),
+                        "hw_loss": float(L_hw.detach().cpu().item()),
+                    }
+                    stats.update(
+                        {
+                            "total_latency_ms": float(hw_stats.get("latency_ms", 0.0)),
+                            "peak_mem_mb": float(hw_stats.get("mem_mb", 0.0)),
+                            "comm_ms": float(hw_stats.get("comm_ms", 0.0)),
+                        }
+                    )
+                    log_stats(logger, stats)
+            last_acc = validate(model, val_loader, device, logger, epoch, cfg)
+            best_acc = max(best_acc, last_acc)
+            if stable_hw_enabled:
+                stable_decision, _ = apply_accuracy_guard(
+                    epoch=epoch,
+                    stable_hw_cfg=cfg,
+                    stable_hw_state=stable_state,
+                    val_metric_or_none=float(last_acc) if last_acc is not None else None,
+                    has_val_this_epoch=True,
+                    train_ema_or_none=float(stable_state.get("train_acc1_ema", 0.0))
+                    if stable_state.get("train_acc1_ema") is not None
+                    else None,
                 )
-            # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
-            assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
-            assert float(lambda_hw_eff) >= 0.0
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
-            if step % 10 == 0:
-                acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
-                if stable_hw_enabled:
-                    metric = get_accuracy_metric_key(stable_hw_cfg)
-                    if metric in ("train_acc1_ema", "train_ema"):
-                        update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
-                stats = {
-                    "epoch": epoch,
-                    "step": step,
-                    "loss": loss.item(),
-                    "acc1": acc1.item(),
-                    "acc5": acc5.item(),
-                    "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item(),
+                stable_state = stable_decision.state
+                if trace_path is not None:
+                    append_trace_event_v54(
+                        trace_path,
+                        "gating_decision",
+                        payload={
+                            "epoch": int(epoch),
+                            "metric": str(stable_decision.reason.get("metric")),
+                            "acc_ref": float(stable_decision.reason.get("acc_ref"))
+                            if stable_decision.reason.get("acc_ref") is not None
+                            else None,
+                            "acc_current": float(stable_decision.reason.get("metric"))
+                            if stable_decision.reason.get("metric") is not None
+                            else None,
+                            "guard_mode": str(stable_decision.guard_mode),
+                            "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
+                            "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
+                            "reason": str(stable_decision.reason.get("violate", "")),
+                        },
+                    )
+
+                # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
+                if bool(stable_decision.stop_training):
+                    val_acc1_str = f"{last_acc:.6f}" if last_acc is not None else "None"
+                    logger.warning(
+                        f"[StableHW] stop_on_violation triggered at epoch={epoch}: "
+                        f"val_acc1={val_acc1_str}, acc_ref={stable_state.get('acc_ref')}, "
+                        f"acc_floor={stable_state.get('acc_floor')}. Stop training now."
+                    )
+                    early_stop_triggered = True
+                    break
+
+                if hasattr(cfg, "stable_hw") and hasattr(cfg.stable_hw, "no_drift") and bool(
+                    getattr(cfg.stable_hw.no_drift, "enabled", False)
+                ):
+                    pass  # NoDrift: skip any ref update
+                else:
+                    update_hw_refs_from_stats(cfg, stable_state, last_hw_stats or {}, stable_hw_cfg)
+            guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
+            allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+            print(
+                f"[StableHW] epoch={epoch} mode={guard_mode} "
+                f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+            )
+            logger.info(
+                f"[StableHW][epoch={epoch}] "
+                f"lambda_base={stable_state.get('lambda_hw_base')}, "
+                f"lambda_eff={stable_state.get('lambda_hw_effective')}, "
+                f"acc_ref={stable_state.get('acc_ref')}, "
+                f"acc_floor={stable_state.get('acc_floor')}, "
+                f"locked={stable_state.get('locked_acc_ref', stable_state.get('acc_ref_locked'))}, "
+                f"allow_discrete={stable_state.get('allow_discrete_updates')}"
+            )
+            if trace_path is not None and last_hw_stats is not None:
+                append_trace_event_v54(
+                    trace_path,
+                    "proxy_sanitize_summary",
+                    payload={
+                        "epoch": int(epoch),
+                        "had_negative_latency": bool(last_hw_stats.get("sanitize", {}).get("had_negative", False))
+                        if isinstance(last_hw_stats.get("sanitize", None), dict)
+                        else False,
+                        "latency_penalty": float(last_hw_stats.get("sanitize", {}).get("penalty", 0.0))
+                        if isinstance(last_hw_stats.get("sanitize", None), dict)
+                        else 0.0,
+                    },
+                )
+            if metrics_path:
+                metrics = {
+                    "epoch": int(epoch),
+                    "acc1": float(last_acc),
+                    "best_acc1": float(best_acc),
+                    "loss": float(loss.item()),
+                    "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
+                    "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
                     "lambda_hw": float(lambda_hw_eff),
                     "hw_loss": float(L_hw.detach().cpu().item()),
+                    "stable_hw_disabled": not bool(getattr(cfg.stable_hw, "enabled", False))
+                    if getattr(cfg, "stable_hw", None)
+                    else True,
                 }
-                stats.update(
-                    {
-                        "total_latency_ms": float(hw_stats.get("latency_ms", 0.0)),
-                        "peak_mem_mb": float(hw_stats.get("mem_mb", 0.0)),
-                        "comm_ms": float(hw_stats.get("comm_ms", 0.0)),
-                    }
-                )
-                log_stats(logger, stats)
-        last_acc = validate(model, val_loader, device, logger, epoch, cfg)
-        best_acc = max(best_acc, last_acc)
-        if stable_hw_enabled:
-            stable_decision, _ = apply_accuracy_guard(
-                epoch=epoch,
-                stable_hw_cfg=cfg,
-                stable_hw_state=stable_state,
-                val_metric_or_none=float(last_acc) if last_acc is not None else None,
-                has_val_this_epoch=True,
-                train_ema_or_none=float(stable_state.get("train_acc1_ema", 0.0))
-                if stable_state.get("train_acc1_ema") is not None
-                else None,
+                metrics["stable_hw"] = stable_hw_log_fields(stable_state)
+                metrics.update({k: float(v) for k, v in hw_stats.items()})
+                with metrics_path.open("w", encoding="utf-8") as f:
+                    json.dump(metrics, f, indent=2)
+            if out_dir is not None and stable_hw_cfg:
+                with (out_dir / "stable_hw_state.json").open("w", encoding="utf-8") as f:
+                    json.dump(stable_state, f, indent=2)
+        ok = True
+    finally:
+        if trace_path is not None:
+            finalize_trace_events(
+                trace_path,
+                payload={
+                    "reason": "done" if ok else "error",
+                    "steps_done": int(steps_done),
+                    "best_solution_valid": bool(ok and not early_stop_triggered),
+                },
             )
-            stable_state = stable_decision.state
-
-            # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
-            if bool(stable_decision.stop_training):
-                val_acc1_str = f"{last_acc:.6f}" if last_acc is not None else "None"
-                logger.warning(
-                    f"[StableHW] stop_on_violation triggered at epoch={epoch}: "
-                    f"val_acc1={val_acc1_str}, acc_ref={stable_state.get('acc_ref')}, "
-                    f"acc_floor={stable_state.get('acc_floor')}. Stop training now."
-                )
-                early_stop_triggered = True
-                break
-
-            if hasattr(cfg, "stable_hw") and hasattr(cfg.stable_hw, "no_drift") and bool(
-                getattr(cfg.stable_hw.no_drift, "enabled", False)
-            ):
-                pass  # NoDrift: skip any ref update
-            else:
-                update_hw_refs_from_stats(stable_state, last_hw_stats or {}, cfg)
-        guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
-        allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
-        print(
-            f"[StableHW] epoch={epoch} mode={guard_mode} "
-            f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
-        )
-        logger.info(
-            f"[StableHW][epoch={epoch}] "
-            f"lambda_base={stable_state.get('lambda_hw_base')}, "
-            f"lambda_eff={stable_state.get('lambda_hw_effective')}, "
-            f"acc_ref={stable_state.get('acc_ref')}, "
-            f"acc_floor={stable_state.get('acc_floor')}, "
-            f"locked={stable_state.get('locked_acc_ref', stable_state.get('acc_ref_locked'))}, "
-            f"allow_discrete={stable_state.get('allow_discrete_updates')}"
-        )
-        if metrics_path:
-            metrics = {
-                "epoch": int(epoch),
-                "acc1": float(last_acc),
-                "best_acc1": float(best_acc),
-                "loss": float(loss.item()),
-                "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
-                "rho_target": float(getattr(cfg.ast, "rho_target", 0.0)),
-                "lambda_hw": float(lambda_hw_eff),
-                "hw_loss": float(L_hw.detach().cpu().item()),
-                "stable_hw_disabled": not bool(getattr(cfg.stable_hw, "enabled", False))
-                if getattr(cfg, "stable_hw", None)
-                else True,
-            }
-            metrics["stable_hw"] = stable_hw_log_fields(stable_state)
-            metrics.update({k: float(v) for k, v in hw_stats.items()})
-            with metrics_path.open("w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2)
-        if out_dir is not None and stable_hw_cfg:
-            with (out_dir / "stable_hw_state.json").open("w", encoding="utf-8") as f:
-                json.dump(stable_state, f, indent=2)
 
     if out_dir is not None:
         try:
@@ -391,8 +453,11 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         except Exception:
             pass
     if trace_path is not None:
-        reason = "early_stop_or_zero_step" if (early_stop_triggered or ran_epochs == 0) else "completed"
-        append_trace_event(str(trace_path), {"type": "finalize", "reason": reason})
+        append_trace_event_v54(
+            trace_path,
+            "training_complete",
+            payload={"early_stop": bool(early_stop_triggered), "epochs_ran": int(ran_epochs)},
+        )
 
 
 def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:

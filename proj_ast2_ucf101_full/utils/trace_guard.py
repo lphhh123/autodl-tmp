@@ -2,6 +2,7 @@ import os
 import json
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 
@@ -37,65 +38,88 @@ def _now_ts_ms() -> int:
     return int(time.time() * 1000)
 
 
-def ensure_trace_events(path: str, run_id: str, payload: Dict[str, Any], step: int = -1) -> None:
+def ensure_trace_events(path: Path, payload: dict):
     """
-    Create trace_events.jsonl with a mandatory trace_header event.
-    v5.4 schema: {ts_ms, run_id, step, event_type, payload}
+    v5.4 trace_events.jsonl:
+      first line MUST be {"event_type":"trace_header","payload":{"signature":{...}, ...},"ts_ms":...}
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.exists(path) and os.path.getsize(path) > 0:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if "signature" not in payload or not isinstance(payload["signature"], dict):
+        raise ValueError("trace_header payload must contain dict field 'signature' (v5.4)")
+
+    # required fields check (delegate to builder's hard check if present)
+    required = [
+        "method_name",
+        "config_fingerprint",
+        "seed_global",
+        "seed_problem",
+        "git_commit_or_version",
+        "acc_first_hard_gating",
+        "locked_acc_ref_enabled",
+        "no_drift_enabled",
+        "no_double_scale_enabled",
+        "action_families",
+        "moves_enabled",
+        "lookahead_k",
+        "bandit_type",
+        "policy_switch_mode",
+        "cache_enabled",
+        "cache_key_schema_version",
+    ]
+    missing = [k for k in required if k not in payload["signature"]]
+    if missing:
+        raise ValueError(f"trace signature missing required fields: {missing}")
+
+    if path.exists():
+        # validate first line
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                first = f.readline().strip()
+            if first:
+                obj = json.loads(first)
+                if obj.get("event_type") != "trace_header":
+                    raise ValueError("trace_events.jsonl first record must be event_type=trace_header")
+                hp = obj.get("payload", {})
+                if not isinstance(hp, dict) or "signature" not in hp:
+                    raise ValueError("trace_header must contain payload.signature")
+        except Exception as e:
+            raise ValueError(f"invalid existing trace_events file: {path} ({e})")
         return
-    header = {
-        "ts_ms": _now_ts_ms(),
-        "run_id": str(run_id),
-        "step": int(step),
-        "event_type": "trace_header",
-        "payload": dict(payload) if isinstance(payload, dict) else {"payload": str(payload)},
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(header, ensure_ascii=False) + "\n")
+
+    append_trace_event_v54(path, "trace_header", payload=payload)
 
 
-def append_trace_event_v54(
-    path: str,
-    run_id: str,
-    step: int,
-    event_type: str,
-    payload: Optional[Dict[str, Any]] = None,
-) -> None:
-    ev = {
-        "ts_ms": _now_ts_ms(),
-        "run_id": str(run_id),
-        "step": int(step),
+def append_trace_event_v54(path: Path, event_type: str, payload: dict):
+    import time
+    rec = {
         "event_type": str(event_type),
-        "payload": dict(payload) if isinstance(payload, dict) else {},
+        "payload": payload if payload is not None else {},
+        "ts_ms": int(time.time() * 1000),
     }
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def finalize_trace_events(
-    path: str,
-    run_id: str,
-    step: Optional[int] = None,
-    reason: Optional[str] = None,
-    payload: Optional[Dict[str, Any]] = None,
-) -> None:
-    payload_dict = dict(payload) if isinstance(payload, dict) else {}
-    reason_value = str(reason or payload_dict.get("reason", "unknown"))
-    step_value = int(step) if step is not None else int(payload_dict.get("steps_done", payload_dict.get("step", -1)))
-    payload_dict["reason"] = reason_value
-    ev = {
-        "ts_ms": _now_ts_ms(),
-        "run_id": str(run_id),
-        "step": step_value,
-        "event_type": "finalize",
-        "payload": payload_dict,
-    }
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+def finalize_trace_events(path: Path, payload: dict):
+    """
+    v5.4 requires:
+      payload.reason (steps0/early_stop/error/done)
+      payload.steps_done (int)
+      payload.best_solution_valid (bool)
+    """
+    if payload is None:
+        payload = {}
+    if "reason" not in payload:
+        payload["reason"] = "done"
+    if "steps_done" not in payload:
+        payload["steps_done"] = 0
+    if "best_solution_valid" not in payload:
+        payload["best_solution_valid"] = False
+    append_trace_event_v54(path, "trace_finalize", payload=payload)
 
 
 REQUIRED_SIGNATURE_KEYS = [

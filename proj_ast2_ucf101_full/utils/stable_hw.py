@@ -609,49 +609,95 @@ def update_train_acc1_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc1: float) -
 
 
 # ===== v5.4: Locked HW refs (NoDrift for proxy refs) =====
-def init_hw_refs_from_baseline_stats(cfg_or_stable, state: dict):
+def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=None):
     """
-    v5.4 contract:
-      no_drift is allowed at root-level (preferred) OR under stable_hw (legacy).
+    v5.4 canonical:
+      - reference keys MUST be: ref_T, ref_E, ref_M, ref_C
+      - also keep backward-compatible aliases: latency_ref_ms, energy_ref_mj, memory_ref_mb, comm_ref_ms
+      - baseline stats path can be stable_hw.no_drift.stats_path OR stable_hw.no_drift.baseline_stats_path
+        OR stable_hw.locked_acc_ref.baseline_stats_path
+      - if no baseline file, fall back to cfg.hw.* defaults BUT still write ref_* keys
     """
-    nd = _get_no_drift_cfg(cfg_or_stable)
-    if nd is None or not bool(getattr(nd, "enabled", True)):
-        return
+    if stable_hw_cfg is None:
+        stable_hw_cfg = getattr(cfg, "stable_hw", None)
 
-    stats_path = getattr(nd, "stats_path", None)
-    if not stats_path:
-        return
+    # ---- defaults from cfg.hw ----
+    hw = getattr(cfg, "hw", None)
+    def_T = float(getattr(hw, "latency_ref_ms", 1.0) if hw is not None else 1.0)
+    def_E = float(getattr(hw, "energy_ref_mj", 1.0) if hw is not None else 1.0)
+    def_M = float(getattr(hw, "memory_ref_mb", 1.0) if hw is not None else 1.0)
+    def_C = float(getattr(hw, "comm_ref_ms", 1.0) if hw is not None else 1.0)
 
-    if not os.path.exists(stats_path):
-        # baseline stats is optional in smoke; do not crash.
-        return
+    def _pos(x, fallback):
+        try:
+            v = float(x)
+            if v > 0:
+                return v
+        except Exception:
+            pass
+        return float(fallback if fallback > 0 else 1.0)
 
-    try:
-        with open(stats_path, "r", encoding="utf-8") as f:
-            stats = json.load(f)
-    except Exception:
-        return
+    # ---- choose baseline stats path (v5.4) ----
+    stats_path = None
+    if stable_hw_cfg is not None:
+        no_drift = getattr(stable_hw_cfg, "no_drift", None)
+        locked = getattr(stable_hw_cfg, "locked_acc_ref", None)
+        # accept both stats_path and baseline_stats_path naming
+        stats_path = (
+            getattr(no_drift, "stats_path", None)
+            or getattr(no_drift, "baseline_stats_path", None)
+            or getattr(locked, "baseline_stats_path", None)
+        )
 
-    # allow multiple key aliases
-    lat = stats.get("latency_ms", stats.get("lat_ms", None))
-    mem = stats.get("memory_mb", stats.get("mem_mb", None))
-    if lat is not None:
-        state["latency_ref_ms"] = float(lat)
-    if mem is not None:
-        state["memory_ref_mb"] = float(mem)
+    baseline = None
+    if stats_path:
+        try:
+            if os.path.exists(stats_path):
+                with open(stats_path, "r", encoding="utf-8") as f:
+                    baseline = json.load(f)
+        except Exception:
+            baseline = None
 
-    latency_ref_ms = state.get("latency_ref_ms")
-    memory_ref_mb = state.get("memory_ref_mb")
-    if latency_ref_ms is not None:
-        state["ref_T"] = float(state.get("ref_T", latency_ref_ms))
-    if memory_ref_mb is not None:
-        state["ref_M"] = float(state.get("ref_M", memory_ref_mb))
-    # 如果 baseline_stats 里有能量/通信，也一并写入；否则不强造
-    if "energy_ref_mj" in stats and state.get("ref_E") is None:
-        state["ref_E"] = float(stats["energy_ref_mj"])
-    if "comm_ref" in stats and state.get("ref_C") is None:
-        state["ref_C"] = float(stats["comm_ref"])
-    state["hw_ref_source"] = "baseline_stats"
+    def _pick(d: dict, keys):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return None
+
+    # ---- read baseline with tolerant key set ----
+    if isinstance(baseline, dict):
+        # tolerate multiple naming conventions
+        bT = _pick(baseline, ["ref_T", "latency_ref_ms", "latency_ms", "T_ms", "lat_ms", "latency"])
+        bE = _pick(baseline, ["ref_E", "energy_ref_mj", "energy_mj", "E_mj", "energy"])
+        bM = _pick(baseline, ["ref_M", "memory_ref_mb", "mem_mb", "M_mb", "memory"])
+        bC = _pick(baseline, ["ref_C", "comm_ref_ms", "comm_ms", "C_ms", "comm"])
+        ref_T = _pos(bT, def_T)
+        ref_E = _pos(bE, def_E)
+        ref_M = _pos(bM, def_M)
+        ref_C = _pos(bC, def_C)
+        stable_hw_state["hw_ref_source"] = "baseline_stats"
+        stable_hw_state["hw_ref_path"] = str(stats_path)
+    else:
+        ref_T = _pos(None, def_T)
+        ref_E = _pos(None, def_E)
+        ref_M = _pos(None, def_M)
+        ref_C = _pos(None, def_C)
+        stable_hw_state["hw_ref_source"] = "cfg_default"
+        stable_hw_state["hw_ref_path"] = None
+
+    # ---- canonical keys (v5.4) ----
+    stable_hw_state["ref_T"] = ref_T
+    stable_hw_state["ref_E"] = ref_E
+    stable_hw_state["ref_M"] = ref_M
+    stable_hw_state["ref_C"] = ref_C
+
+    # ---- backward-compatible aliases ----
+    stable_hw_state["latency_ref_ms"] = ref_T
+    stable_hw_state["energy_ref_mj"] = ref_E
+    stable_hw_state["memory_ref_mb"] = ref_M
+    stable_hw_state["comm_ref_ms"] = ref_C
+
+    return stable_hw_state
 
 
 def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
@@ -680,32 +726,73 @@ def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) 
     return stats
 
 
-def update_hw_refs_from_stats(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
+def update_hw_refs_from_stats(cfg, stable_hw_state: dict, latest_stats: dict, stable_hw_cfg=None):
     """
-    v5.4 NoDrift contract:
-      - no_drift.enabled == True  => DO NOT update any reference (lock refs)
-      - no_drift.enabled == False => allow update if corresponding update flags are enabled
+    v5.4:
+      - only update refs if no_drift.enabled == False
+      - update canonical ref_* keys and aliases together
+      - supported mode: ema
     """
-    # ---- v5.4: support no_drift at root-level OR under stable_hw (legacy) ----
-    nd = _get_no_drift_cfg(cfg)
+    if stable_hw_cfg is None:
+        stable_hw_cfg = getattr(cfg, "stable_hw", None)
 
-    # legacy fallback (some configs may store a bool under cfg.stable_hw.no_drift)
-    if nd is None:
+    no_drift = getattr(stable_hw_cfg, "no_drift", None) if stable_hw_cfg is not None else None
+    if bool(getattr(no_drift, "enabled", False)):
+        # frozen under NoDrift
+        stable_hw_state["_contract_ref_frozen"] = True
+        return stable_hw_state
+
+    mode = str(getattr(no_drift, "ref_update", "ema")) if no_drift is not None else "ema"
+    alpha = float(getattr(no_drift, "alpha", 0.1)) if no_drift is not None else 0.1
+    alpha = max(0.0, min(1.0, alpha))
+
+    def _pos(x, fallback):
         try:
-            nd = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
+            v = float(x)
+            if v > 0:
+                return v
         except Exception:
-            nd = None
+            pass
+        return float(fallback if fallback > 0 else 1.0)
 
-    nd_enabled = False
-    if isinstance(nd, bool):
-        nd_enabled = bool(nd)
-    elif isinstance(nd, dict):
-        nd_enabled = bool(nd.get("enabled", False))
-    elif nd is not None:
-        nd_enabled = bool(getattr(nd, "enabled", False))
+    # read latest stats (tolerant)
+    T_new = _pos(
+        latest_stats.get("latency_ms", latest_stats.get("T_ms", None)),
+        stable_hw_state.get("ref_T", 1.0),
+    )
+    E_new = _pos(
+        latest_stats.get("energy_mj", latest_stats.get("E_mj", None)),
+        stable_hw_state.get("ref_E", 1.0),
+    )
+    M_new = _pos(
+        latest_stats.get("memory_mb", latest_stats.get("M_mb", None)),
+        stable_hw_state.get("ref_M", 1.0),
+    )
+    C_new = _pos(
+        latest_stats.get("comm_ms", latest_stats.get("C_ms", None)),
+        stable_hw_state.get("ref_C", 1.0),
+    )
 
-    if nd_enabled:
-        return stats
+    if mode != "ema":
+        # v5.4 scope: only ema is supported; fall back safely
+        mode = "ema"
 
-    # ---- allow update when NoDrift disabled ----
-    return _update_hw_refs_when_allowed(stable_hw_state, stats, cfg)
+    # EMA update
+    def _ema(old, new):
+        old = _pos(old, new)
+        return (1.0 - alpha) * float(old) + alpha * float(new)
+
+    stable_hw_state["ref_T"] = _ema(stable_hw_state.get("ref_T", T_new), T_new)
+    stable_hw_state["ref_E"] = _ema(stable_hw_state.get("ref_E", E_new), E_new)
+    stable_hw_state["ref_M"] = _ema(stable_hw_state.get("ref_M", M_new), M_new)
+    stable_hw_state["ref_C"] = _ema(stable_hw_state.get("ref_C", C_new), C_new)
+
+    # keep aliases in sync
+    stable_hw_state["latency_ref_ms"] = stable_hw_state["ref_T"]
+    stable_hw_state["energy_ref_mj"] = stable_hw_state["ref_E"]
+    stable_hw_state["memory_ref_mb"] = stable_hw_state["ref_M"]
+    stable_hw_state["comm_ref_ms"] = stable_hw_state["ref_C"]
+
+    stable_hw_state["_ref_update_mode"] = mode
+    stable_hw_state["_ref_update_alpha"] = alpha
+    return stable_hw_state
