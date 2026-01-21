@@ -207,7 +207,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             stable_hw_schedule(epoch, stable_hw_cfg, stable_state)
             prev_val = stable_state.get("val_acc1_last", None)
             has_prev_val = prev_val is not None
-            stable_decision, lambda_hw_eff = apply_accuracy_guard(
+            stable_decision, allow_discrete_updates = apply_accuracy_guard(
                 epoch=epoch,
                 stable_hw_cfg=cfg,
                 stable_hw_state=stable_state,
@@ -218,6 +218,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 else None,
             )
             stable_state = stable_decision.state
+            stable_state["allow_discrete_updates"] = bool(allow_discrete_updates)
 
             # v5.4: if stop_on_violation already triggered, do not proceed with training
             if bool(stable_decision.stop_training):
