@@ -58,10 +58,11 @@ def _read_best_from_pareto(pareto_csv: Path) -> Dict[str, float]:
         return {"best_total": math.inf, "best_comm": math.inf, "best_therm": math.inf}
     with pareto_csv.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        has_total = "total_scalar" in (reader.fieldnames or [])
         for row in reader:
-            total = float(row.get("total_scalar", math.inf))
             comm = float(row.get("comm_norm", math.inf))
             therm = float(row.get("therm_norm", math.inf))
+            total = float(row.get("total_scalar", comm + therm)) if has_total else float(comm + therm)
             best_total = min(best_total, total)
             best_comm = min(best_comm, comm)
             best_therm = min(best_therm, therm)
@@ -111,6 +112,17 @@ def summarize_run(run_dir: Path, backtrack_window: int = 10, wall_time_override:
                 if str(row.get("accepted", "0")) == "1":
                     accepted_count += 1
     llm_stats = _llm_stats(run_dir / "llm_usage.jsonl")
+    budget_path = run_dir / "budget.json"
+    actual_eval_calls = None
+    budget_main_axis = None
+    if budget_path.exists():
+        try:
+            budget = json.loads(budget_path.read_text(encoding="utf-8"))
+            actual_eval_calls = int(budget.get("actual_eval_calls", 0))
+            budget_main_axis = budget.get("budget_main_axis")
+        except Exception:
+            actual_eval_calls = None
+            budget_main_axis = None
 
     wall_time = wall_time_override
     wall_path = run_dir / "wall_time.txt"
@@ -129,12 +141,13 @@ def summarize_run(run_dir: Path, backtrack_window: int = 10, wall_time_override:
         "best_comm": pareto_stats.get("best_comm", math.inf),
         "best_therm": pareto_stats.get("best_therm", math.inf),
         "hypervolume": None,
-        "n_eval": trace_lines,
+        "n_eval": actual_eval_calls if actual_eval_calls is not None else trace_lines,
         "accepted": accepted_count,
         "oscillation_rate": oscillation_rate,
         "llm_ok_rate": llm_stats.get("llm_ok_rate", 1.0),
         "fallback_rate": llm_stats.get("fallback_rate", 0.0),
         "wall_time": wall_time,
+        "budget_main_axis": budget_main_axis,
     }
 
 
@@ -219,6 +232,9 @@ def summarize_directory(root: Path, backtrack_window: int = 10) -> List[Dict[str
         rows.append(summarize_run(run_dir, backtrack_window=backtrack_window))
     rows.sort(key=lambda x: (x.get("method", ""), x.get("input", ""), x.get("seed", "")))
     if rows:
+        budget_axes = {row.get("budget_main_axis") for row in rows if row.get("budget_main_axis") is not None}
+        if len(budget_axes) > 1:
+            raise RuntimeError(f"budget_main_axis mismatch across runs: {sorted(list(budget_axes))}")
         _write_summary(rows, root / "summary.csv")
         write_grouped(rows, root)
     return rows

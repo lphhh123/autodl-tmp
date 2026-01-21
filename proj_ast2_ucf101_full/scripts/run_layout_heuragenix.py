@@ -23,6 +23,7 @@ import math
 import os
 import random
 import subprocess
+import shutil
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Tuple
@@ -34,14 +35,13 @@ project_root = Path(__file__).resolve().parents[1]
 from layout.candidate_pool import signature_from_assign
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
-from layout.pareto_io import write_pareto_points_csv
 from layout.trace_metrics import compute_trace_metrics_from_csv
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
-from utils.trace_signature_v54 import build_signature_v54
+from utils.trace_guard import init_trace_dir, append_trace_event, finalize_trace_dir
+from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.trace_schema import TRACE_FIELDS
 
 # Minimal requirements for portability across HeurAgenix versions / problem envs:
@@ -273,7 +273,11 @@ def _derive_initial_assign(layout_input: dict) -> np.ndarray:
     return init_assign
 
 
-def _build_evaluator(layout_input: dict, cfg: Any) -> Tuple[LayoutState, LayoutEvaluator]:
+def _build_state_and_evaluator(
+    layout_input: dict,
+    cfg: Any | None = None,
+    objective_cfg: dict | None = None,
+) -> Tuple[LayoutState, LayoutEvaluator]:
     wafer = layout_input.get("wafer", {})
     slots = layout_input.get("slots", {})
     sites = layout_input.get("sites", {})
@@ -287,7 +291,7 @@ def _build_evaluator(layout_input: dict, cfg: Any) -> Tuple[LayoutState, LayoutE
     if traffic.size == 0:
         traffic = np.zeros((S, S), dtype=float)
 
-    objective_cfg = _build_objective_cfg(cfg)
+    objective_cfg = objective_cfg or _build_objective_cfg(cfg)
     evaluator = LayoutEvaluator(
         sigma_mm=float(objective_cfg["sigma_mm"]),
         baseline={
@@ -313,6 +317,19 @@ def _build_evaluator(layout_input: dict, cfg: Any) -> Tuple[LayoutState, LayoutE
         meta={"margin_mm": float(wafer.get("margin_mm", 0.0))},
     )
     return base_state, evaluator
+
+
+def _build_evaluator(
+    layout_input: dict,
+    cfg: Any | None = None,
+    objective_cfg: dict | None = None,
+) -> LayoutEvaluator:
+    _base_state, evaluator = _build_state_and_evaluator(
+        layout_input=layout_input,
+        cfg=cfg,
+        objective_cfg=objective_cfg,
+    )
+    return evaluator
 
 
 def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
@@ -368,6 +385,31 @@ def _count_jsonl_lines(p: Path) -> int:
             if line.strip():
                 n += 1
     return n
+
+
+def _summarize_trace_hits(trace_path: Path) -> Dict[str, int]:
+    if not trace_path.exists():
+        return {"n_rows": 0, "tabu_hits": 0, "inverse_hits": 0, "cooldown_hits": 0}
+    n_rows = 0
+    tabu_hits = 0
+    inverse_hits = 0
+    cooldown_hits = 0
+    with trace_path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            n_rows += 1
+            try:
+                tabu_hits += int(float(row.get("tabu_hit", 0) or 0))
+                inverse_hits += int(float(row.get("inverse_hit", 0) or 0))
+                cooldown_hits += int(float(row.get("cooldown_hit", 0) or 0))
+            except Exception:
+                continue
+    return {
+        "n_rows": n_rows,
+        "tabu_hits": tabu_hits,
+        "inverse_hits": inverse_hits,
+        "cooldown_hits": cooldown_hits,
+    }
 
 
 def _action_from_record(record: Dict[str, Any], prev_assign: np.ndarray) -> Dict[str, Any]:
@@ -475,255 +517,181 @@ def _apply_action(prev_assign: np.ndarray, action: Dict[str, Any], Ns: int) -> n
     return assign
 
 
+def signature_from_action(op: str, op_args: dict | None) -> str:
+    if not isinstance(op_args, dict):
+        op_args = {"_raw": str(op_args)}
+    try:
+        payload = json.dumps(op_args, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        payload = str(op_args)
+    return f"{op}:{payload}"
+
+
 def _write_trace_and_pareto(
-    out_dir: Path,
-    seed: int,
-    recordings_path: Path,
     layout_input: dict,
-    cfg: Any,
-    max_steps: int | None,
-    method_label: str,
-) -> Tuple[Dict[str, Any], ParetoSet]:
-    base_state, evaluator = _build_evaluator(layout_input, cfg)
+    objective_cfg: dict,
+    recordings_path: Path,
+    trace_csv_path: Path,
+    pareto_csv_path: Path,
+) -> dict:
+    """
+    v5.4: do NOT replay-evaluate. Use metrics already recorded by HeurAgenix env.
+    signature column uses op_signature; cache_key uses assignment signature (with objective_hash).
+    """
+    evaluator = _build_evaluator(layout_input=layout_input, objective_cfg=objective_cfg)
     objective_hash = evaluator.objective_hash()
-    pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
+
     pareto = ParetoSet(
-        eps_comm=float(pareto_cfg.get("eps_comm", 0.0)),
-        eps_therm=float(pareto_cfg.get("eps_therm", 0.0)),
-        max_points=int(pareto_cfg.get("max_points", 2000)),
+        eps_comm=float(objective_cfg.get("eps_comm", 0.0)),
+        eps_therm=float(objective_cfg.get("eps_therm", 0.0)),
     )
 
-    trace_path = out_dir / "trace.csv"
-    prev_metrics = evaluator.evaluate(base_state)
-    prev_total = float(prev_metrics["total_scalar"])
-    prev_comm = float(prev_metrics["comm_norm"])
-    prev_therm = float(prev_metrics["therm_norm"])
-    prev_assign = _derive_initial_assign(layout_input)
-    best_eval: Dict[str, Any] | None = None
-    best_assign: List[int] | None = None
-    accepts = 0
-    best_step = -1
-    improve_cnt = 0
-    tabu_hits = 0
-    inverse_hits = 0
-    cooldown_hits = 0
-    has_records = False
+    # streaming write
+    trace_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    pareto_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # always emit a valid trace with at least one row
-    with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
-        writer = csv.writer(f_trace)
-        writer.writerow(TRACE_FIELDS)
-        # ---- v5.4 required init row (even if steps=0 / no recordings) ----
-        init_cache_key = f"obj:{objective_hash}|{signature_from_assign(prev_assign)}"
-        row = [
-            0,
-            "init",
-            "init",
-            json.dumps({"op": "init"}, ensure_ascii=False),
-            1,
-            prev_total,
-            prev_comm,
-            prev_therm,
-            0,
-            float(prev_metrics.get("penalty", {}).get("duplicate", 0.0)),
-            float(prev_metrics.get("penalty", {}).get("boundary", 0.0)),
-            int(seed),
-            0,
-            signature_from_assign(prev_assign),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            "init",
-            "init",
-            0,
-            0,
-            init_cache_key,
-        ]
-        if len(row) != len(TRACE_FIELDS):
-            raise RuntimeError(f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}")
-        writer.writerow(row)
+    best_total = None
+    best_comm = None
+    best_therm = None
+    best_step = None
+    prev_total = None
+    prev_comm = None
+    prev_therm = None
 
-        last_idx = -1
-        for idx, rec in enumerate(_iter_recordings(recordings_path), start=1):
-            # skip init record from heuragenix (we already wrote our own init row)
-            try:
-                if str(rec.get("op", "")).lower() == "init" and int(rec.get("iter", 0)) == 0:
-                    continue
-            except Exception:
-                pass
-            has_records = True
-            last_idx = idx
-            if max_steps is not None and (idx - 1) >= int(max_steps):
-                break
+    with trace_csv_path.open("w", encoding="utf-8") as f:
+        f.write(",".join(TRACE_FIELDS) + "\n")
 
-            # v5.4: always enforce canonical signature (assign signature)
-            try:
-                rec["signature"] = signature_from_assign(rec.get("assign", []))
-            except Exception:
-                rec["signature"] = "assign:unknown"
-
-            step_id = int(rec.get("iter", rec.get("step", idx)))
+        have_any = False
+        for rec in _iter_recordings(recordings_path):
+            have_any = True
+            step = int(rec.get("iter", 0))
             stage = str(rec.get("stage", "heuragenix"))
+            op = str(rec.get("op", "unknown"))
             accepted = int(rec.get("accepted", 1))
-            op = rec.get("op", "noop")
-            policy_name = rec.get("selection", stage)
-            op_args = rec.get("op_args", None)
-            if op_args is None:
-                op_args = rec.get("op_args_json", rec.get("op_args_str", {}))
 
-            # if it's a JSON string, parse it
-            if isinstance(op_args, str):
-                s = op_args.strip()
-                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-                    try:
-                        import json as _json
+            total_scalar = float(rec.get("total_scalar", 0.0))
+            comm_norm = float(rec.get("comm_norm", 0.0))
+            therm_norm = float(rec.get("therm_norm", 0.0))
 
-                        op_args = _json.loads(s)
-                    except Exception:
-                        op_args = {"raw": op_args}
-                else:
-                    op_args = {"raw": op_args}
-
+            op_args = rec.get("op_args", {}) or {}
             if not isinstance(op_args, dict):
-                op_args = {"raw": str(op_args)}
-            # ---- update assign for this step ----
-            assign_arr = None
-            if isinstance(rec.get("assign"), list) and rec["assign"]:
-                assign_arr = np.asarray(rec["assign"], dtype=int)
-            if assign_arr is None:
-                assign_arr = _assign_from_signature(rec.get("signature"))
-            if assign_arr is None:
-                if accepted == 1:
-                    action = _action_from_record(rec, prev_assign)
-                    assign_arr = _apply_action(prev_assign, action, base_state.Ns)
-                else:
-                    assign_arr = np.asarray(prev_assign, dtype=int)
+                op_args = {"_raw": str(op_args)}
 
-            base_state.assign = assign_arr
-            eval_out = evaluator.evaluate(base_state)
-            signature = signature_from_assign(base_state.assign.tolist())
-            cache_key = f"obj:{objective_hash}|{signature}"
-
-            d_total = float(eval_out["total_scalar"]) - float(prev_total)
-            if accepted == 1:
-                accepts += 1
-
-            pareto_added = 0
-            if accepted == 1:
-                pareto_added = pareto.add(
-                    float(eval_out["comm_norm"]),
-                    float(eval_out["therm_norm"]),
-                    {
-                        "assign": base_state.assign.copy(),
-                        "total_scalar": float(eval_out["total_scalar"]),
-                        "stage": stage,
-                        "iter": step_id,
-                        "seed": seed,
-                    },
-                )
-
-            if accepted == 1 and d_total < 0:
-                improve_cnt += 1
+            # HeurAgenix env provides:
+            #   rec["signature"] = assignment signature
+            #   rec["op_signature"] = op signature
+            assign_sig = str(rec.get("signature") or "")
+            op_sig = str(rec.get("op_signature") or signature_from_action(op, op_args))
+            cache_key = f"obj:{objective_hash}|{assign_sig}" if assign_sig else f"obj:{objective_hash}|"
+            cache_hit = int(rec.get("cache_hit", 0))
 
             meta = rec.get("meta", {}) or {}
             tabu_hit = int(meta.get("tabu_hit", 0))
             inverse_hit = int(meta.get("inverse_hit", 0))
             cooldown_hit = int(meta.get("cooldown_hit", 0))
-            tabu_hits += tabu_hit
-            inverse_hits += inverse_hit
-            cooldown_hits += cooldown_hit
 
-            pen = eval_out.get("penalty", {}) or {}
-            dup_pen = float(pen.get("duplicate", 0.0))
-            bnd_pen = float(pen.get("boundary", 0.0))
+            duplicate_penalty = float(rec.get("duplicate_penalty", 0.0))
+            boundary_penalty = float(rec.get("boundary_penalty", 0.0))
+            seed_id = int(rec.get("seed_id", 0))
+            time_ms = float(rec.get("time_ms", 0.0))
 
-            row = [
-                idx,
-                stage,
-                op,
-                json.dumps({"op": op, **op_args}, ensure_ascii=False, sort_keys=True),
-                accepted,
-                float(eval_out.get("total_scalar", 0.0)),
-                float(eval_out.get("comm_norm", 0.0)),
-                float(eval_out.get("therm_norm", 0.0)),
-                int(pareto_added),
-                dup_pen,
-                bnd_pen,
-                seed,
-                int(rec.get("time_ms", 0)),
-                signature,
-                float(d_total),
-                float(float(eval_out["comm_norm"]) - float(prev_comm)),
-                float(float(eval_out["therm_norm"]) - float(prev_therm)),
-                int(tabu_hit),
-                int(inverse_hit),
-                int(cooldown_hit),
-                str(policy_name),
-                str(op),
-                0,
-                int(rec.get("cache_hit", 0) or 0),
-                str(cache_key)[:64],
-            ]
-            if len(row) != len(TRACE_FIELDS):
-                raise RuntimeError(f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}")
-            writer.writerow(row)
-
-            # update prev
+            pareto_added = 0
             if accepted == 1:
-                prev_assign = base_state.assign.tolist()
-                prev_total = float(eval_out["total_scalar"])
-                prev_comm = float(eval_out["comm_norm"])
-                prev_therm = float(eval_out["therm_norm"])
+                added = pareto.add(comm_norm, therm_norm, {})
+                pareto_added = 1 if added else 0
 
-            if best_eval is None or float(eval_out["total_scalar"]) < float(best_eval["total_scalar"]):
-                best_eval = dict(eval_out)
-                best_assign = base_state.assign.tolist()
-                best_step = step_id
+            if prev_total is None:
+                delta_total = 0.0
+                delta_comm = 0.0
+                delta_therm = 0.0
+            else:
+                delta_total = float(total_scalar - prev_total)
+                delta_comm = float(comm_norm - prev_comm)
+                delta_therm = float(therm_norm - prev_therm)
 
-        if not has_records:
-            best_eval = dict(prev_metrics)
-            best_assign = list(prev_assign)
-            best_step = 0
+            if accepted == 1:
+                prev_total = total_scalar
+                prev_comm = comm_norm
+                prev_therm = therm_norm
 
-    assert trace_path.exists(), "trace.csv must exist even if steps=0"
+            row = {
+                "iter": step,
+                "stage": stage,
+                "op": op,
+                "op_args_json": json.dumps(op_args, ensure_ascii=False),
+                "accepted": accepted,
+                "total_scalar": total_scalar,
+                "comm_norm": comm_norm,
+                "therm_norm": therm_norm,
+                "pareto_added": pareto_added,
+                "duplicate_penalty": duplicate_penalty,
+                "boundary_penalty": boundary_penalty,
+                "seed_id": seed_id,
+                "time_ms": time_ms,
+                "signature": op_sig,
+                "delta_total": delta_total,
+                "delta_comm": delta_comm,
+                "delta_therm": delta_therm,
+                "tabu_hit": tabu_hit,
+                "inverse_hit": inverse_hit,
+                "cooldown_hit": cooldown_hit,
+                "policy": stage,
+                "move": op,
+                "lookahead_k": int(meta.get("lookahead_k", 0)),
+                "cache_hit": cache_hit,
+                "cache_key": cache_key,
+            }
+            f.write(",".join(str(row[k]) for k in TRACE_FIELDS) + "\n")
 
-    report = {
-        "seed": int(seed),
-        "has_records": bool(has_records),
-        "accepts": int(accepts),
-        "improve_cnt": int(improve_cnt),
-        "tabu_hits": int(tabu_hits),
-        "inverse_hits": int(inverse_hits),
-        "cooldown_hits": int(cooldown_hits),
-        "best_step": int(best_step),
-        "best_total": float(best_eval["total_scalar"]) if best_eval else float(prev_total),
-        "best_comm": float(best_eval["comm_norm"]) if best_eval else float(prev_comm),
-        "best_therm": float(best_eval["therm_norm"]) if best_eval else float(prev_therm),
-        "fairness_overrides_applied": True,
-        "fairness_overrides": FAIRNESS_OVERRIDES,
+            if best_total is None or total_scalar > best_total:
+                best_total = total_scalar
+                best_comm = comm_norm
+                best_therm = therm_norm
+                best_step = step
+
+        if not have_any:
+            raise RuntimeError(f"empty recordings: {recordings_path}")
+
+    # write pareto points
+    with pareto_csv_path.open("w", encoding="utf-8") as fp:
+        fp.write("comm_norm,therm_norm\n")
+        for p in pareto.points:
+            fp.write(f"{p.comm_norm},{p.therm_norm}\n")
+
+    return {
+        "objective_hash": objective_hash,
+        "best_total_scalar": float(best_total if best_total is not None else 0.0),
+        "best_comm_norm": float(best_comm if best_comm is not None else 0.0),
+        "best_therm_norm": float(best_therm if best_therm is not None else 0.0),
+        "best_step": int(best_step if best_step is not None else 0),
+        "n_pareto": int(len(pareto.points)),
     }
 
-    # persist layout_best.json
-    if best_assign is not None:
-        (out_dir / "layout_best.json").write_text(
-            json.dumps({"assign": best_assign, "eval": best_eval, "seed": seed}, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
 
-    (out_dir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    trace_meta = {
-        "seed": int(seed),
-        "max_steps": int(max_steps) if max_steps is not None else None,
-        "signature_version": "v5.4",
-        "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
-        "run_signature": _build_run_signature(cfg, method_name=method_label),
-        "method": method_label,
-    }
-    (out_dir / "trace_meta.json").write_text(json.dumps(trace_meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    return report, pareto
+def _load_pareto_from_csv(pareto_csv_path: Path, pareto_cfg: dict) -> ParetoSet:
+    pareto = ParetoSet(
+        eps_comm=float(pareto_cfg.get("eps_comm", 0.0)),
+        eps_therm=float(pareto_cfg.get("eps_therm", 0.0)),
+        max_points=int(pareto_cfg.get("max_points", 2000)),
+    )
+    if not pareto_csv_path.exists():
+        return pareto
+    with pareto_csv_path.open("r", encoding="utf-8") as fp:
+        header = fp.readline()
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                comm = float(parts[0])
+                therm = float(parts[1])
+            except Exception:
+                continue
+            pareto.add(comm, therm, {})
+    return pareto
 
 
 def _write_layout_best(
@@ -734,7 +702,7 @@ def _write_layout_best(
     best_assign: List[int],
     run_id: str,
 ) -> Dict[str, Any]:
-    base_state, evaluator = _build_evaluator(layout_input, cfg)
+    base_state, evaluator = _build_state_and_evaluator(layout_input, cfg)
     base_state.assign = np.asarray(best_assign, dtype=int)
     eval_out = evaluator.evaluate(base_state)
     sites_xy = np.asarray(layout_input.get("sites", {}).get("sites_xy", []), dtype=float)
@@ -981,6 +949,10 @@ def _collect_subprocess_outputs(
                 raise FileNotFoundError(f"[HeurAgenix] missing {name}: {src}")
             (mirror / name).write_text("", encoding="utf-8")
 
+    eval_counter_src = internal_base / "eval_counter.json"
+    if eval_counter_src.exists():
+        shutil.copy2(eval_counter_src, mirror / "eval_counter.json")
+
     return mirror
 
 
@@ -1101,15 +1073,17 @@ def main() -> None:
         "seed_assign": [int(x) for x in seed_assign],
         "objective_cfg": objective_cfg,
         "baseline": baseline_payload,
-        "trace_events": str(out_dir / "trace_events.jsonl"),
+        "trace_events": str(out_dir / "trace" / "trace_events.jsonl"),
     }
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
-    trace_events_path = out_dir / "trace_events.jsonl"
+    trace_dir = out_dir / "trace"
     signature = _build_run_signature(cfg, method_name=f"heuragenix:{args.heuristic}")
-    ensure_trace_events(
-        trace_events_path,
-        payload={"signature": signature, "run_meta": {"heuristic": str(args.heuristic)}},
+    init_trace_dir(
+        trace_dir,
+        signature=signature,
+        run_meta={"heuristic": str(args.heuristic), "run_id": run_id, "mode": "layout_heuragenix"},
+        required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
     )
     finalize_state = {
         "finalized": False,
@@ -1123,9 +1097,9 @@ def main() -> None:
         if finalize_state["finalized"]:
             return
         finalize_state.update({k: v for k, v in overrides.items() if v is not None})
-        finalize_trace_events(
-            trace_events_path,
-            payload={
+        finalize_trace_dir(
+            trace_dir,
+            summary_extra={
                 "reason": str(finalize_state.get("reason", "error")),
                 "steps_done": int(finalize_state.get("steps_done", 0) or 0),
                 "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
@@ -1141,9 +1115,9 @@ def main() -> None:
 
     sys.excepthook = _trace_excepthook
     try:
-        append_trace_event_v54(
-            trace_events_path,
-            "init",
+        append_trace_event(
+            trace_dir,
+            event_type="init",
             payload={
                 "baseline_signature": signature_from_assign(np.array(_derive_initial_assign(layout_input), dtype=int)),
                 "seed_signature": signature_from_assign(np.array(seed_assign, dtype=int)),
@@ -1162,10 +1136,12 @@ def main() -> None:
         from utils.run_manifest import write_run_manifest
 
         write_run_manifest(
-            out_dir=str(out_dir),
+            out_dir=out_dir,
             cfg_path=str(args.cfg),
             cfg_hash=str(cfg_hash),
+            run_id=run_id,
             seed=int(args.seed),
+            command=" ".join(sys.argv),
             stable_hw_state={
                 "guard_mode": "acc_first_hard_gating",
                 "lambda_hw_base": None,
@@ -1175,10 +1151,10 @@ def main() -> None:
                     "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
                 },
             },
-            extra=extra,
-            run_id=run_id,
-            spec_version="v5.4",
-            command=" ".join(sys.argv),
+            extra_meta={
+                "budget_main_axis": "eval_calls",
+                "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
+            },
         )
     except Exception:
         pass
@@ -1410,6 +1386,9 @@ def main() -> None:
                 {"ok": False, "reason": "missing_recordings", "engine": method},
             )
             recordings_path.write_text("", encoding="utf-8")
+    eval_counter_src = output_dir / "eval_counter.json"
+    if eval_counter_src.exists():
+        shutil.copy2(eval_counter_src, out_dir / "eval_counter.json")
     extra["recordings_found"] = bool(recordings_found)
     extra["recordings_path"] = str(recordings_path)
     # merge heuragenix internal llm_usage into wrapper llm_usage.jsonl
@@ -1452,16 +1431,22 @@ def main() -> None:
             encoding="utf-8",
         )
     method_label = f"heuragenix:{args.heuristic}"
-    trace_info, pareto = _write_trace_and_pareto(
-        out_dir,
-        seed,
-        recordings_path,
-        layout_input,
-        cfg,
-        effective_max_steps,
-        method_label,
+    pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
+    objective_cfg = _build_objective_cfg(cfg)
+    objective_cfg.update(
+        {
+            "eps_comm": float(pareto_cfg.get("eps_comm", 0.0)),
+            "eps_therm": float(pareto_cfg.get("eps_therm", 0.0)),
+        }
     )
-    write_pareto_points_csv(pareto, out_dir / "pareto_points.csv")
+    trace_info = _write_trace_and_pareto(
+        layout_input=layout_input,
+        objective_cfg=objective_cfg,
+        recordings_path=recordings_path,
+        trace_csv_path=out_dir / "trace.csv",
+        pareto_csv_path=out_dir / "pareto_points.csv",
+    )
+    pareto = _load_pareto_from_csv(out_dir / "pareto_points.csv", pareto_cfg)
 
     best_solution_path = output_dir / "best_solution.json"
     best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
@@ -1473,13 +1458,18 @@ def main() -> None:
     eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
     trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
 
-    best_eval = trace_info.get("best_eval") or {}
+    best_eval = {
+        "total_scalar": float(trace_info.get("best_total_scalar", 0.0)),
+        "comm_norm": float(trace_info.get("best_comm_norm", 0.0)),
+        "therm_norm": float(trace_info.get("best_therm_norm", 0.0)),
+    }
     best_meta = best_solution_payload.get("meta", {}) if isinstance(best_solution_payload, dict) else {}
     evaluator_source = str(best_meta.get("evaluator_source", ""))
     evaluator_import_error = str(best_meta.get("evaluator_import_error", ""))
     base_eval = trace_info.get("base_eval", {}) or {}
     knee_comm, knee_therm, _ = pareto.knee_point()
-    accept_rate = float(trace_info.get("accepts", 0)) / max(1, int(trace_info.get("num_steps", 0)))
+    trace_summary = _summarize_trace_hits(out_dir / "trace.csv")
+    accept_rate = float(trace_metrics.get("accept_rate_overall", 0.0))
     llm_summary = _summarize_llm_usage(llm_usage_path)
     if llm_summary.get("fallback_used"):
         fallback_used = True
@@ -1536,11 +1526,11 @@ def main() -> None:
         },
         "knee_point": {"comm_norm": float(knee_comm), "therm_norm": float(knee_therm)},
         "pareto_size": int(len(pareto.points)),
-        "n_steps": int(trace_info.get("num_steps", 0)),
+        "n_steps": int(trace_summary.get("n_rows", 0)),
         "accept_rate": accept_rate,
-        "tabu_hits": int(trace_info.get("tabu_hits", 0)),
-        "inverse_hits": int(trace_info.get("inverse_hits", 0)),
-        "cooldown_hits": int(trace_info.get("cooldown_hits", 0)),
+        "tabu_hits": int(trace_summary.get("tabu_hits", 0)),
+        "inverse_hits": int(trace_summary.get("inverse_hits", 0)),
+        "cooldown_hits": int(trace_summary.get("cooldown_hits", 0)),
         "oscillation_rate": float(trace_metrics.get("oscillation_rate", 0.0)),
         "repeat_signature_rate": float(trace_metrics.get("repeat_signature_rate", 0.0)),
         "objective_variance": float(trace_metrics.get("objective_variance", 0.0)),
@@ -1555,8 +1545,8 @@ def main() -> None:
         "llm_fallback_used": bool(llm_summary.get("fallback_used", False)),
         "llm_fallback_count": int(llm_summary.get("fallback_count", 0)),
         "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
-        "evaluator_calls": int(trace_info.get("evaluator_calls", 0)),
-        "evaluate_calls": int(trace_info.get("evaluator_calls", 0)),
+        "evaluator_calls": int(trace_summary.get("n_rows", 0)),
+        "evaluate_calls": int(trace_summary.get("n_rows", 0)),
         "fairness_overrides_applied": True,
         "fairness_overrides": FAIRNESS_OVERRIDES,
     }
@@ -1570,27 +1560,26 @@ def main() -> None:
     with (out_dir / "report.json").open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     # ---- v5.4: enforce budget fairness artifact (budget.json) ----
-    try:
-        wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
-        # effective_max_steps already computed above (based on size or user override)
-        recordings_path = out_dir / "recordings.jsonl"
-        budget = {
-            "run_id": run_id,
-            "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
-            "secondary_limit": {"type": "max_steps", "limit": int(effective_max_steps)},
-            "actual_eval_calls": int(_count_jsonl_lines(recordings_path)),
-            "seed_id": int(seed),
-            "method": str(method),
-            "selection_frequency": int(K),
-            "num_candidate_heuristics": int(num_cand),
-            "rollout_budget": int(rollout_budget),
-            "iterations_scale_factor": float(iters_sf),
-        }
-        (out_dir / "budget.json").write_text(
-            json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-    except Exception:
-        pass
+    wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
+    eval_counter_path = out_dir / "eval_counter.json"
+    if not eval_counter_path.exists():
+        raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
+
+    ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
+    actual_eval_calls = int(ec.get("eval_calls_total", 0))
+    effective_eval_calls_total = int(ec.get("effective_eval_calls_total", actual_eval_calls))
+    cache_hits = int(ec.get("cache_hits", 0))
+
+    budget = {
+        "budget_main_axis": "eval_calls",
+        "primary_limit": {"type": "eval_calls", "value": None},
+        "secondary_limit": {"type": "wall_time_s", "value": float(wall_limit) if wall_limit else None},
+        "actual_eval_calls": actual_eval_calls,
+        "effective_eval_calls_total": effective_eval_calls_total,
+        "cache_hits": cache_hits,
+        "wall_time_s": float(time.time() - start_time),
+    }
+    (out_dir / "budget.json").write_text(json.dumps(budget, indent=2) + "\n", encoding="utf-8")
     try:
         from utils.run_manifest import write_run_manifest
 
@@ -1601,10 +1590,12 @@ def main() -> None:
             "layout_signature": signature_from_assign(best_assign),
         }
         write_run_manifest(
-            out_dir=str(out_dir),
+            out_dir=out_dir,
             cfg_path=str(args.cfg),
             cfg_hash=str(cfg_hash),
+            run_id=run_id,
             seed=int(args.seed),
+            command=" ".join(sys.argv),
             stable_hw_state={
                 "guard_mode": "acc_first_hard_gating",
                 "lambda_hw_base": None,
@@ -1614,7 +1605,10 @@ def main() -> None:
                     "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
                 },
             },
-            extra=extra,
+            extra_meta={
+                "budget_main_axis": "eval_calls",
+                "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
+            },
         )
     except Exception:
         pass

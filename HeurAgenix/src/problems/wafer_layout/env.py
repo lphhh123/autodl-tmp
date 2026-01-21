@@ -308,6 +308,8 @@ class Env(BaseEnv):
         self.key_value = float(self.current_eval.get("total_scalar", 0.0))
         self.current_comm = float(self.current_eval.get("comm_norm", 0.0))
         self.current_therm = float(self.current_eval.get("therm_norm", 0.0))
+        if self._evaluator is not None and hasattr(self._evaluator, "objective_hash"):
+            self._objective_hash = self._evaluator.objective_hash()
         self.best_key_value = float(self.key_value)
         self.best_comm = float(self.current_comm)
         self.best_therm = float(self.current_therm)
@@ -599,4 +601,22 @@ class Env(BaseEnv):
             except Exception:
                 pass
             self._rec_fp = None
+        try:
+            from pathlib import Path
+            out_dir = Path(self._rec_path).parent if self._rec_path else Path(self.output_dir)
+            eval_counter = {
+                "eval_calls_total": int(getattr(self._evaluator, "evaluate_calls", 0)),
+                "effective_eval_calls_total": int(getattr(self._evaluator, "evaluate_calls", 0)),
+                "cache_hits": int(getattr(self._evaluator, "cache_hits", 0))
+                if hasattr(self._evaluator, "cache_hits")
+                else 0,
+                "objective_hash": getattr(self, "_objective_hash", None),
+                "seed_id": int(getattr(self, "_seed_id", 0)),
+            }
+            (out_dir / "eval_counter.json").write_text(
+                json.dumps(eval_counter, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
         super().dump_result()

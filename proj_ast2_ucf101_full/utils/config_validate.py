@@ -584,7 +584,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     iso.setdefault("track_live_segments", False)
     iso.setdefault("allow_cache_fallback", True)
 
-    # ---- v5.4 NoDoubleScale: warn THEN override (do NOT silently zero first) ----
+    # ---- v5.4 NoDoubleScale: hard error ----
     try:
         stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
 
@@ -602,20 +602,11 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 old_hw_lambda_hw = None
 
         if stable_en:
-            # warn if user provided any non-zero legacy lambda
-            if (old_loss_lambda_hw is not None and old_loss_lambda_hw != 0.0) or (
-                old_hw_lambda_hw is not None and old_hw_lambda_hw != 0.0
-            ):
-                print(
-                    "[WARN] stable_hw.enabled=True (v5.4 NoDoubleScale): legacy loss.lambda_hw / hw.lambda_hw "
-                    "are ignored and will be forced to 0. "
-                    f"(loss.lambda_hw was {old_loss_lambda_hw}, hw.lambda_hw was {old_hw_lambda_hw})"
+            if float(get_nested(cfg, "hw.lambda_hw", 0.0)) != 0.0 or float(get_nested(cfg, "loss.lambda_hw", 0.0)) != 0.0:
+                raise ValueError(
+                    "NoDoubleScale(v5.4): do NOT set hw.lambda_hw or loss.lambda_hw; "
+                    "use stable_hw.lambda_hw_effective only."
                 )
-
-            if hasattr(cfg, "loss"):
-                cfg.loss.lambda_hw = 0.0
-            if hasattr(cfg, "hw"):
-                cfg.hw.lambda_hw = 0.0
 
             if hasattr(cfg, "stable_hw") and not hasattr(cfg.stable_hw, "no_double_scale"):
                 cfg.stable_hw.no_double_scale = True
@@ -746,13 +737,11 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     legacy_loss_lam = float(getattr(getattr(cfg, "loss", {}), "lambda_hw", 0.0) or 0.0)
 
     # If stable_hw is enabled, legacy lambdas MUST be zero (NoDoubleScale).
-    if stable_en:
-        if legacy_hw_lam != 0.0:
-            print(f"[v5.4][NoDoubleScale] Forcing hw.lambda_hw -> 0.0 (was {legacy_hw_lam})")
-            cfg.hw.lambda_hw = 0.0
-        if legacy_loss_lam != 0.0:
-            print(f"[v5.4][NoDoubleScale] Forcing loss.lambda_hw -> 0.0 (was {legacy_loss_lam})")
-            cfg.loss.lambda_hw = 0.0
+    if stable_en and (legacy_hw_lam != 0.0 or legacy_loss_lam != 0.0):
+        raise ValueError(
+            "NoDoubleScale(v5.4): do NOT set hw.lambda_hw or loss.lambda_hw; "
+            "use stable_hw.lambda_hw_effective only."
+        )
 
     # If stable_hw is disabled, ANY positive legacy lambda means direct-sum HW loss -> forbidden in v5.4.
     if (not stable_en) and (legacy_hw_lam > 0.0 or legacy_loss_lam > 0.0):

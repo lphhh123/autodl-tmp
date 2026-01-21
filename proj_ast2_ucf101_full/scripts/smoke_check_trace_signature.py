@@ -6,8 +6,8 @@ import csv
 import json
 from pathlib import Path
 
-from utils.trace_guard import validate_required_signature
 from utils.trace_schema import TRACE_FIELDS
+from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS
 
 
 def _load_trace_rows(trace_path: Path):
@@ -37,21 +37,19 @@ def _check_trace_csv(trace_path: Path) -> None:
 
 
 def _check_trace_events(trace_path: Path) -> None:
-    events_path = trace_path.parent / "trace_events.jsonl"
-    if not events_path.exists():
+    trace_dir = trace_path.parent / "trace"
+    if trace_path.parent.name == "trace":
+        trace_dir = trace_path.parent
+    header_path = trace_dir / "trace_header.json"
+    if not header_path.exists():
         return
-    with events_path.open("r", encoding="utf-8") as f:
-        first = f.readline().strip()
-    if not first:
-        raise AssertionError("trace_events.jsonl is empty")
-    obj = json.loads(first)
-    if obj.get("event_type") != "trace_header":
-        raise AssertionError("trace_events.jsonl first record must be event_type=trace_header")
-    payload = obj.get("payload", {})
-    signature = payload.get("signature", {})
+    header = json.loads(header_path.read_text(encoding="utf-8"))
+    signature = header.get("signature", {})
     if not isinstance(signature, dict):
-        raise AssertionError("trace_header payload.signature must be dict")
-    validate_required_signature(signature)
+        raise AssertionError("trace_header.signature must be dict")
+    missing = [k for k in REQUIRED_SIGNATURE_FIELDS if k not in signature]
+    if missing:
+        raise AssertionError(f"trace_header signature missing required fields: {missing}")
 
 
 def main() -> None:

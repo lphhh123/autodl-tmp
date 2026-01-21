@@ -21,8 +21,8 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
-from utils.trace_signature_v54 import build_signature_v54
+from utils.trace_guard import init_trace_dir, append_trace_event, finalize_trace_dir
+from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -111,16 +111,21 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     device_type = device.type
     logger = setup_logger()
     metrics_path = None
-    trace_path = None
+    trace_dir = None
     if out_dir is None and hasattr(cfg, "train") and getattr(cfg.train, "out_dir", None):
         out_dir = Path(cfg.train.out_dir)
     if out_dir is not None:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = out_dir / "metrics.json"
-        trace_path = out_dir / "trace_events.jsonl"
+        trace_dir = out_dir / "trace"
         sig = build_signature_v54(cfg, method_name="train_single_device")
-        ensure_trace_events(trace_path, payload={"signature": sig, "run_meta": {"mode": "train_single_device"}})
+        init_trace_dir(
+            trace_dir,
+            signature=sig,
+            run_meta={"mode": "train_single_device"},
+            required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+        )
     train_loader, val_loader = build_dataloaders(cfg)
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -218,10 +223,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 )
                 stable_state = stable_decision.state
                 stable_state["allow_discrete_updates"] = bool(allow_discrete_updates)
-                if trace_path is not None:
-                    append_trace_event_v54(
-                        trace_path,
-                        "gating_decision",
+                if trace_dir is not None:
+                    append_trace_event(
+                        trace_dir,
+                        event_type="gating_decision",
                         payload={
                             "epoch": int(epoch),
                             "metric": str(stable_decision.reason.get("metric")),
@@ -342,10 +347,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     else None,
                 )
                 stable_state = stable_decision.state
-                if trace_path is not None:
-                    append_trace_event_v54(
-                        trace_path,
-                        "gating_decision",
+                if trace_dir is not None:
+                    append_trace_event(
+                        trace_dir,
+                        event_type="gating_decision",
                         payload={
                             "epoch": int(epoch),
                             "metric": str(stable_decision.reason.get("metric")),
@@ -401,10 +406,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 f"locked={stable_state.get('locked_acc_ref', stable_state.get('acc_ref_locked'))}, "
                 f"allow_discrete={stable_state.get('allow_discrete_updates')}"
             )
-            if trace_path is not None and last_hw_stats is not None:
-                append_trace_event_v54(
-                    trace_path,
-                    "proxy_sanitize_summary",
+            if trace_dir is not None and last_hw_stats is not None:
+                append_trace_event(
+                    trace_dir,
+                    event_type="proxy_sanitize_summary",
                     payload={
                         "epoch": int(epoch),
                         "had_negative_latency": bool(last_hw_stats.get("sanitize", {}).get("had_negative", False))
@@ -438,10 +443,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     json.dump(stable_state, f, indent=2)
         ok = True
     finally:
-        if trace_path is not None:
-            finalize_trace_events(
-                trace_path,
-                payload={
+        if trace_dir is not None:
+            finalize_trace_dir(
+                trace_dir,
+                summary_extra={
                     "reason": "done" if ok else "error",
                     "steps_done": int(steps_done),
                     "best_solution_valid": bool(ok and not early_stop_triggered),
@@ -453,18 +458,25 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             from utils.run_manifest import write_run_manifest
 
             write_run_manifest(
-                out_dir=str(out_dir),
+                out_dir=Path(out_dir),
                 cfg_path=str(getattr(cfg.train, "cfg_path", "")),
                 cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+                run_id=str(getattr(cfg.train, "run_id", "")) or "single_device",
                 seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
+                command=None,
                 stable_hw_state=stable_state,
+                extra_meta={
+                    "budget_main_axis": "wall_time_s",
+                    "dataset_id": getattr(getattr(cfg, "dataset", None), "dataset_id", None)
+                    or getattr(getattr(cfg, "dataset", None), "name", "unknown"),
+                },
             )
         except Exception:
             pass
-    if trace_path is not None:
-        append_trace_event_v54(
-            trace_path,
-            "training_complete",
+    if trace_dir is not None:
+        append_trace_event(
+            trace_dir,
+            event_type="training_complete",
             payload={"early_stop": bool(early_stop_triggered), "epochs_ran": int(ran_epochs)},
         )
 
