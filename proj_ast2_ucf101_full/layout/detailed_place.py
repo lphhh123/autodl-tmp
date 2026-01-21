@@ -216,6 +216,7 @@ def run_detailed_place(
     seed_id: int,
     chip_tdp: Optional[np.ndarray] = None,
     llm_usage_path: Optional[Path] = None,
+    recordings_path: Optional[Path] = None,
 ) -> DetailedPlaceResult:
     # ---- deterministic seeds ----
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
@@ -291,6 +292,7 @@ def run_detailed_place(
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     out_dir = trace_path.parent
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
+    recordings_fp = recordings_path.open("w", encoding="utf-8") if recordings_path else None
     start_time = time.time()
     best_solution = None
     report = None
@@ -347,6 +349,27 @@ def run_detailed_place(
                             f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}"
                         )
                     writer.writerow(row)
+                    if recordings_fp is not None:
+                        pen = eval_out.get("penalty", {}) or {}
+                        init_record = {
+                            "iter": 0,
+                            "stage": "init",
+                            "op": "init",
+                            "op_args": {},
+                            "op_args_json": json.dumps({"op": "init"}, ensure_ascii=False),
+                            "accepted": 1,
+                            "total_scalar": float(eval_out.get("total_scalar", 0.0)),
+                            "comm_norm": float(eval_out.get("comm_norm", 0.0)),
+                            "therm_norm": float(eval_out.get("therm_norm", 0.0)),
+                            "pareto_added": 0,
+                            "duplicate_penalty": float(pen.get("duplicate", 0.0)),
+                            "boundary_penalty": float(pen.get("boundary", 0.0)),
+                            "seed_id": int(seed_id),
+                            "time_ms": 0,
+                            "signature": signature_for_assign(prev_assign.tolist()),
+                        }
+                        recordings_fp.write(json.dumps(init_record, ensure_ascii=False) + "\n")
+                        recordings_fp.flush()
                     pareto.add(
                         eval_out["comm_norm"],
                         eval_out["therm_norm"],
@@ -794,6 +817,28 @@ def run_detailed_place(
                             f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}"
                         )
                     writer.writerow(row)
+                    if recordings_fp is not None:
+                        pen = eval_out.get("penalty", {}) or {}
+                        record = {
+                            "iter": int(step),
+                            "stage": str(stage_label),
+                            "op": str(op),
+                            "op_args": action,
+                            "op_args_json": json.dumps(action, ensure_ascii=False),
+                            "accepted": int(accept),
+                            "total_scalar": float(eval_out.get("total_scalar", 0.0)),
+                            "comm_norm": float(eval_out.get("comm_norm", 0.0)),
+                            "therm_norm": float(eval_out.get("therm_norm", 0.0)),
+                            "pareto_added": int(added),
+                            "duplicate_penalty": float(pen.get("duplicate", 0.0)),
+                            "boundary_penalty": float(pen.get("boundary", 0.0)),
+                            "seed_id": int(seed_id),
+                            "time_ms": int(time_ms),
+                            "signature": str(assign_signature),
+                        }
+                        recordings_fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
+                            recordings_fp.flush()
                     if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
                         f_trace.flush()
                     if progress_every > 0 and step % progress_every == 0:
@@ -831,6 +876,9 @@ def run_detailed_place(
             finally:
                 f_trace.flush()
                 os.fsync(f_trace.fileno())
+                if recordings_fp is not None:
+                    recordings_fp.flush()
+                    os.fsync(recordings_fp.fileno())
                 if best_solution is not None:
                     (out_dir / "layout_best.json").write_text(
                         json.dumps(best_solution, indent=2, ensure_ascii=False),
@@ -844,6 +892,8 @@ def run_detailed_place(
     finally:
         if usage_fp:
             usage_fp.close()
+        if recordings_fp is not None:
+            recordings_fp.close()
 
     cache_size = int(_cfg_get(ps_cfg, "cache_size", 0)) if ps_cfg is not None else 0
     if eval_cache is not None:

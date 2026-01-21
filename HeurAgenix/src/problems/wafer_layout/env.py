@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import numpy as np
 
-from src.problems.base.env import BaseEnv, _signature_from_assign
+from src.problems.base.env import BaseEnv
 from src.problems.wafer_layout.components import WaferLayoutSolution
 from src.problems.wafer_layout.problem_state import (
     get_instance_problem_state,
@@ -28,18 +28,20 @@ def _load_layout_evaluator():
     return module.LayoutEvaluator, module.LayoutState, ""
 
 
-def _make_signature(op: str, i: int, site_id: int, candidate_id: int) -> str:
-    from src.problems.wafer_layout.candidate_pool import inverse_signature
+def _assign_signature(assign_list: list[int]) -> str:
+    from src.problems.wafer_layout.candidate_pool import signature_from_assign
 
-    return inverse_signature(i=i, site_id=site_id, candidate_id=candidate_id, op=op)
+    return signature_from_assign(assign_list)
 
 
-def _signature_from_action(op: str, op_args: dict | None) -> str:
+def _op_signature_from_action(op: str, op_args: dict | None) -> str:
+    from src.problems.wafer_layout.candidate_pool import op_signature
+
     args = op_args or {}
     i = int(args.get("i", -1)) if isinstance(args, dict) else -1
     site_id = int(args.get("site_id", args.get("j", -1))) if isinstance(args, dict) else -1
     candidate_id = int(args.get("candidate_id", -1)) if isinstance(args, dict) else -1
-    return _make_signature(op=op, i=i, site_id=site_id, candidate_id=candidate_id)
+    return op_signature(op=op, i=i, site_id=site_id, candidate_id=candidate_id)
 
 
 def _finite(x: float) -> float:
@@ -336,9 +338,9 @@ class Env(BaseEnv):
                 "boundary_penalty": boundary_penalty,
                 "time_ms": 0,
                 # v5.4 对齐：recordings.signature 统一为 assign signature（用于 repeat/oscillation 等指标）
-                "signature": _signature_from_assign(assign_list),
+                "signature": _assign_signature(assign_list),
                 # 保留动作签名，便于动作级调试/回放
-                "op_signature": _make_signature(op="init", i=-1, site_id=-1, candidate_id=-1),
+                "op_signature": _op_signature_from_action("init", {}),
                 "meta": dict(self._meta_base),
             }
             self._write_record(init_record)
@@ -431,8 +433,8 @@ class Env(BaseEnv):
         op_name = op_args_full.get("op", type(operator).__name__)
         op_args = dict(op_args_full)
         op_args.pop("op", None)
-        op_signature = _signature_from_action(op_name, op_args)
-        assign_sig = _signature_from_assign(list(self.current_solution.assign))
+        op_signature = _op_signature_from_action(op_name, op_args)
+        assign_sig = _assign_signature(list(self.current_solution.assign))
         eval_for_record = self.current_eval if accept else old_eval
         penalty = eval_for_record.get("penalty", {}) if isinstance(eval_for_record.get("penalty", {}), dict) else {}
         duplicate_penalty = float(penalty.get("duplicate", 0.0))
@@ -501,8 +503,8 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            assign_sig = _signature_from_assign(list(self.current_solution.assign))
-            op_sig = _make_signature(op="error", i=-1, site_id=-1, candidate_id=-1)
+            assign_sig = _assign_signature(list(self.current_solution.assign))
+            op_sig = _op_signature_from_action("error", {})
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             meta.update(self._meta_base)
             if isinstance(meta_full, dict):
@@ -543,8 +545,8 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            assign_sig = _signature_from_assign(list(self.current_solution.assign))
-            op_sig = _make_signature(op="invalid_operator", i=-1, site_id=-1, candidate_id=-1)
+            assign_sig = _assign_signature(list(self.current_solution.assign))
+            op_sig = _op_signature_from_action("invalid_operator", {})
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             meta.update(self._meta_base)
             if isinstance(meta_full, dict):

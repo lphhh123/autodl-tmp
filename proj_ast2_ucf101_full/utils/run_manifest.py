@@ -1,5 +1,11 @@
+from __future__ import annotations
+
 import json
-from pathlib import Path
+import os
+import platform
+import time
+import uuid
+from typing import Any, Dict, Optional
 
 
 def write_run_manifest(
@@ -7,33 +13,33 @@ def write_run_manifest(
     cfg_path: str,
     cfg_hash: str,
     seed: int,
-    stable_hw_state: dict,
-    extra: dict | None = None,
+    stable_hw_state: Dict[str, Any],
+    extra: Optional[Dict[str, Any]] = None,
+    run_id: Optional[str] = None,
+    spec_version: str = "v5.4",
+    command: Optional[str] = None,
 ):
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    m = {
-        "cfg_path": str(cfg_path),
-        "cfg_hash": str(cfg_hash),
-        "seed": int(seed),
-        "acc_ref": stable_hw_state.get("acc_ref"),
-        "acc_ref_source": stable_hw_state.get("acc_ref_source"),
-        "warmup_acc_best": stable_hw_state.get("warmup_acc_best"),
-        "baseline_stats_path": (
-            stable_hw_state.get("baseline_stats_path")
-            or stable_hw_state.get("baseline_path")
-            or stable_hw_state.get("baseline_stats")
-        ),
-        "epsilon_drop": stable_hw_state.get("epsilon_drop"),
-        "schedule_phase": stable_hw_state.get("schedule_phase"),
-        "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
-        "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
-        "stable_hw": {
-            "guard_mode": stable_hw_state.get("guard_mode"),
-            "lambda_hw_base": stable_hw_state.get("lambda_hw_base"),
-            "lambda_hw_effective": stable_hw_state.get("lambda_hw_effective"),
+    os.makedirs(out_dir, exist_ok=True)
+    rid = str(run_id or uuid.uuid4().hex)
+    meta = {
+        "run_id": rid,
+        "spec_version": spec_version,
+        "timestamp_unix": int(time.time()),
+        "host": {
+            "hostname": platform.node(),
+            "platform": platform.platform(),
+            "python": platform.python_version(),
         },
+        "cfg": {
+            "cfg_path": str(cfg_path),
+            "cfg_hash": str(cfg_hash),
+            "seed": int(seed),
+        },
+        "command": command or "",
+        "stable_hw_state": stable_hw_state or {},
     }
     if extra:
-        m.update(extra)
-    (out / "run_manifest.json").write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
+        meta["extra"] = extra
+    with open(os.path.join(out_dir, "run_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    return rid

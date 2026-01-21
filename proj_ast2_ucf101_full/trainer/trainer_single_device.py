@@ -390,8 +390,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             )
         except Exception:
             pass
-    if trace_path is not None and (early_stop_triggered or ran_epochs == 0):
-        append_trace_event(str(trace_path), {"type": "finalize", "reason": "early_stop_or_zero_step"})
+    if trace_path is not None:
+        reason = "early_stop_or_zero_step" if (early_stop_triggered or ran_epochs == 0) else "completed"
+        append_trace_event(str(trace_path), {"type": "finalize", "reason": reason})
 
 
 def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:
