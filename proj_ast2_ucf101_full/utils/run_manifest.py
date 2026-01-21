@@ -38,6 +38,18 @@ def write_run_manifest(
         "command": command or "",
         "stable_hw_state": stable_hw_state or {},
     }
+    meta["hw_refs"] = {
+        "ref_T": stable_hw_state.get("ref_T"),
+        "ref_E": stable_hw_state.get("ref_E"),
+        "ref_M": stable_hw_state.get("ref_M"),
+        "ref_C": stable_hw_state.get("ref_C"),
+        "hw_ref_source": stable_hw_state.get("hw_ref_source"),
+    }
+    meta["stability"] = {
+        "no_drift_enabled": stable_hw_state.get("no_drift_enabled"),
+        "no_double_scale_enabled": stable_hw_state.get("no_double_scale_enabled"),
+    }
+    meta["signature"] = stable_hw_state.get("run_signature")
     if extra:
         meta["extra"] = extra
     with open(os.path.join(out_dir, "run_manifest.json"), "w", encoding="utf-8") as f:

@@ -295,6 +295,34 @@ def compute_hw_loss(
     ref_M = _pos_ref("ref_M", float(getattr(cfg.hw, "mem_ref_mb", 1.0)))
     ref_C = _pos_ref("ref_C", float(getattr(cfg.hw, "comm_ref_ms", 1.0)))
 
+    # --- v5.4: persist resolved refs into stable_hw_state (NoDrift evidence) ---
+    if stable_hw_state is not None:
+        nd_cfg = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
+        if isinstance(nd_cfg, bool):
+            no_drift = bool(nd_cfg)
+        elif nd_cfg is not None:
+            no_drift = bool(getattr(nd_cfg, "enabled", False))
+        else:
+            no_drift = False
+
+        stable_hw_state.setdefault("ref_T", float(ref_T))
+        stable_hw_state.setdefault("ref_M", float(ref_M))
+        if ref_E is not None:
+            stable_hw_state.setdefault("ref_E", float(ref_E))
+        if ref_C is not None:
+            stable_hw_state.setdefault("ref_C", float(ref_C))
+
+        # legacy mirrors (optional but helps config/debug)
+        stable_hw_state.setdefault("latency_ref_ms", float(ref_T))
+        stable_hw_state.setdefault("memory_ref_mb", float(ref_M))
+
+        if no_drift:
+            # strict: resolved ref must match stored ref
+            if abs(float(stable_hw_state["ref_T"]) - float(ref_T)) > 1e-9:
+                raise RuntimeError("[StableHW][NoDrift] ref_T drift detected")
+            if abs(float(stable_hw_state["ref_M"]) - float(ref_M)) > 1e-9:
+                raise RuntimeError("[StableHW][NoDrift] ref_M drift detected")
+
     ref_T_t = torch.tensor(ref_T, device=device, dtype=torch.float32)
     ref_E_t = torch.tensor(ref_E, device=device, dtype=torch.float32)
     ref_M_t = torch.tensor(ref_M, device=device, dtype=torch.float32)
@@ -522,6 +550,18 @@ def compute_hw_loss(
             "energy_mj": float(energy_mj_pos.detach().cpu().item()),
             "mem_mb": float(mem_mb_pos.detach().cpu().item()),
             "comm_ms": float(comm_ms_pos.detach().cpu().item()),
+            "proxy_raw": {
+                "latency_ms": float(raw_latency_ms),
+                "energy_mj": float(raw_energy_mj),
+                "memory_mb": float(raw_mem_mb),
+                "comm_ms": float(raw_comm_ms),
+            },
+            "proxy_used": {
+                "latency_ms": float(latency_ms_pos.detach().cpu().item()),
+                "energy_mj": float(energy_mj_pos.detach().cpu().item()),
+                "memory_mb": float(mem_mb_pos.detach().cpu().item()),
+                "comm_ms": float(comm_ms_pos.detach().cpu().item()),
+            },
             "raw_latency_ms": raw_latency_ms,
             "raw_energy_mj": raw_energy_mj,
             "raw_mem_mb": raw_mem_mb,

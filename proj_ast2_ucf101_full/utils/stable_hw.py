@@ -531,6 +531,18 @@ def apply_accuracy_guard(
     st["acc_used_last"] = float(acc_used) if acc_used is not None else None
     st["acc_margin_last"] = float(margin)
     st["stop_on_violation"] = bool(stop_training)
+    st["epsilon_drop"] = float(eps_drop)
+    st["last_guard_decision"] = {
+        "guard_mode": str(st["guard_mode"]),
+        "violate": bool(violate),
+        "metric": float(metric) if metric is not None else None,
+        "acc_ref": float(acc_ref) if acc_ref is not None else None,
+        "eps_drop": float(eps_drop),
+        "margin": float(margin),
+        "recovery_good_streak": int(st.get("recovery_good_streak", 0)),
+        "k_exit": int(k_exit),
+        "stop_on_violation": bool(stop_training),
+    }
 
     # schedule freeze flag mirrors controller intent
     st["freeze_schedule"] = bool(freeze_sched and st["in_recovery"])
@@ -628,6 +640,19 @@ def init_hw_refs_from_baseline_stats(cfg_or_stable, state: dict):
     if mem is not None:
         state["memory_ref_mb"] = float(mem)
 
+    latency_ref_ms = state.get("latency_ref_ms")
+    memory_ref_mb = state.get("memory_ref_mb")
+    if latency_ref_ms is not None:
+        state["ref_T"] = float(state.get("ref_T", latency_ref_ms))
+    if memory_ref_mb is not None:
+        state["ref_M"] = float(state.get("ref_M", memory_ref_mb))
+    # 如果 baseline_stats 里有能量/通信，也一并写入；否则不强造
+    if "energy_ref_mj" in stats and state.get("ref_E") is None:
+        state["ref_E"] = float(stats["energy_ref_mj"])
+    if "comm_ref" in stats and state.get("ref_C") is None:
+        state["ref_C"] = float(stats["comm_ref"])
+    state["hw_ref_source"] = "baseline_stats"
+
 
 def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
     # ====== Original update_hw_refs_from_stats logic moved here ======
@@ -635,13 +660,23 @@ def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) 
     if not stats:
         return stats
 
-    lat = stats.get("latency_ms", stats.get("lat_ms", None))
-    mem = stats.get("memory_mb", stats.get("mem_mb", None))
+    proxy_used = stats.get("proxy_used", {}) if isinstance(stats, dict) else {}
+    lat = proxy_used.get("latency_ms", stats.get("latency_ms", stats.get("lat_ms", None)))
+    mem = proxy_used.get("memory_mb", stats.get("memory_mb", stats.get("mem_mb", None)))
+    energy = proxy_used.get("energy_mj", stats.get("energy_mj", None))
+    comm = proxy_used.get("comm_ms", stats.get("comm_ms", None))
 
     if lat is not None:
+        stable_hw_state["ref_T"] = float(lat)
         stable_hw_state["latency_ref_ms"] = float(lat)
     if mem is not None:
+        stable_hw_state["ref_M"] = float(mem)
         stable_hw_state["memory_ref_mb"] = float(mem)
+    if energy is not None:
+        stable_hw_state["ref_E"] = float(energy)
+    if comm is not None:
+        stable_hw_state["ref_C"] = float(comm)
+    stable_hw_state["hw_ref_source"] = "online_stats"
     return stats
 
 

@@ -40,7 +40,8 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
+from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events, validate_required_signature
+from utils.git_version import get_git_commit_or_version
 from utils.trace_schema import TRACE_FIELDS
 
 # Minimal requirements for portability across HeurAgenix versions / problem envs:
@@ -69,18 +70,57 @@ def _build_run_signature(cfg: Any) -> Dict[str, Any]:
     moves_enabled = bool(action_families) if action_families is not None else bool(_cfg_get(cfg, "moves_enabled", False))
     lookahead_k = int(_cfg_get(lookahead_cfg, "topk", _cfg_get(lookahead_cfg, "k", 0) or 0))
     bandit_type = str(_cfg_get(policy_switch_cfg, "bandit_type", "eps_greedy"))
-    policy_switch_enabled = bool(_cfg_get(policy_switch_cfg, "enabled", False))
+    policy_switch_mode = str(
+        _cfg_get(policy_switch_cfg, "mode", "enabled" if _cfg_get(policy_switch_cfg, "enabled", False) else "disabled")
+    )
     cache_size = int(_cfg_get(policy_switch_cfg, "cache_size", 0) or 0)
     cache_enabled = bool(cache_size > 0)
     cache_key_schema_version = str(_cfg_get(policy_switch_cfg, "cache_key_schema_version", "v5.4"))
-    return {
-        "moves_enabled": moves_enabled,
-        "lookahead_k": lookahead_k,
-        "bandit_type": bandit_type,
-        "policy_switch": policy_switch_enabled,
-        "cache_enabled": cache_enabled,
-        "cache_key_schema_version": cache_key_schema_version,
+
+    stable_hw_cfg = _cfg_get(cfg, "stable_hw", {}) or {}
+    locked_cfg = _cfg_get(stable_hw_cfg, "locked_acc_ref", {}) or {}
+    guard_cfg = _cfg_get(stable_hw_cfg, "accuracy_guard", {}) or {}
+    ctrl_cfg = _cfg_get(guard_cfg, "controller", {}) or {}
+
+    acc_first_hard_gating_enabled = bool(_cfg_get(ctrl_cfg, "cut_hw_loss_on_violate", False))
+    locked_acc_ref_enabled = bool(_cfg_get(locked_cfg, "enabled", False))
+    no_drift_enabled = bool(_cfg_get(stable_hw_cfg, "no_drift", False))
+    no_double_scale_enabled = bool(_cfg_get(stable_hw_cfg, "no_double_scale", False))
+
+    seed_global = int(_cfg_get(_cfg_get(cfg, "train", {}), "seed", 0))
+    seed_problem = int(_cfg_get(_cfg_get(cfg, "training", {}), "seed", seed_global))
+
+    key_cfg = {
+        "stable_hw": _cfg_get(cfg, "stable_hw", None),
+        "hw": _cfg_get(cfg, "hw", None),
+        "mapping": _cfg_get(cfg, "mapping", None),
+        "training": _cfg_get(cfg, "training", None),
+        "objective": _cfg_get(cfg, "objective", None),
+        "lookahead": lookahead_cfg,
+        "policy_switch": policy_switch_cfg,
     }
+    config_fingerprint = stable_hash(key_cfg)
+    git_commit_or_version = get_git_commit_or_version(repo_root=str(Path(__file__).resolve().parents[1]))
+
+    sig = {
+        "moves_enabled": bool(moves_enabled),
+        "lookahead_k": int(lookahead_k),
+        "bandit_type": str(bandit_type),
+        "policy_switch_mode": str(policy_switch_mode),
+        "cache_enabled": bool(cache_enabled),
+        "cache_key_schema_version": str(cache_key_schema_version),
+        "acc_first_hard_gating_enabled": bool(acc_first_hard_gating_enabled),
+        "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
+        "acc_ref_source": "locked" if locked_acc_ref_enabled else "online",
+        "no_drift_enabled": bool(no_drift_enabled),
+        "no_double_scale_enabled": bool(no_double_scale_enabled),
+        "seed_global": int(seed_global),
+        "seed_problem": int(seed_problem),
+        "config_fingerprint": str(config_fingerprint),
+        "git_commit_or_version": str(git_commit_or_version),
+    }
+    validate_required_signature(sig)
+    return sig
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
@@ -1106,6 +1146,7 @@ def main() -> None:
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_events_path = out_dir / "trace_events.jsonl"
+    signature = _build_run_signature(cfg)
     ensure_trace_events(
         str(trace_events_path),
         run_id=run_id,
@@ -1120,6 +1161,7 @@ def main() -> None:
             "method": str(method),
             "run_mode": str(run_mode),
             "baseline_method": str(baseline_method),
+            "signature": signature,
         },
     )
     try:
