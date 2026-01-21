@@ -11,9 +11,9 @@ import json
 import time
 from pathlib import Path
 
-from utils.trace_guard import ensure_trace_events, finalize_trace_events
+from utils.trace_guard import init_trace_dir, finalize_trace_dir
 from utils.trace_schema import TRACE_FIELDS
-from utils.trace_signature_v54 import build_signature_v54
+from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
 
 def _write_trace_csv_v54(out_dir: Path, seed: int) -> Path:
@@ -124,9 +124,17 @@ def main() -> None:
 
     trace_csv = _write_trace_csv_v54(out_dir, int(args.seed))
 
-    trace_events = out_dir / "trace_events.jsonl"
-    ensure_trace_events(trace_events, payload={"signature": sig, "note": "steps0"})
-    finalize_trace_events(trace_events, payload={"reason": "steps0", "steps_done": 0, "best_solution_valid": False})
+    trace_dir = out_dir / "trace"
+    init_trace_dir(
+        trace_dir,
+        signature=sig,
+        run_meta={"note": "steps0", "mode": "smoke_trace_zero_step"},
+        required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+    )
+    finalize_trace_dir(
+        trace_dir,
+        summary_extra={"reason": "steps0", "steps_done": 0, "best_solution_valid": False},
+    )
 
     # also drop a minimal json file to help debugging
     (out_dir / "smoke_signature.json").write_text(

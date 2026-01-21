@@ -40,8 +40,8 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import ensure_trace_events, append_trace_event_v54, finalize_trace_events
-from utils.trace_signature_v54 import build_signature_v54
+from utils.trace_guard import init_trace_dir, append_trace_event, finalize_trace_dir
+from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
 
 def load_layout_input(path: Path) -> dict:
@@ -103,7 +103,7 @@ def run_layout_agent(
     if not llm_usage_path.exists():
         llm_usage_path.write_text("", encoding="utf-8")
     # ---- v5.4: canonical trace events (JSONL) ----
-    trace_events_path = out_dir / "trace_events.jsonl"
+    trace_dir = out_dir / "trace"
     if run_id is None:
         run_id = stable_hash(
             {
@@ -114,9 +114,11 @@ def run_layout_agent(
             }
         )
     sig = build_signature_v54(cfg, method_name="ours_layout_agent")
-    ensure_trace_events(
-        trace_events_path,
-        payload={"signature": sig, "run_meta": {"layout_input": str(layout_input_path)}},
+    init_trace_dir(
+        trace_dir,
+        signature=sig,
+        run_meta={"layout_input": str(layout_input_path), "mode": "layout_agent", "run_id": run_id},
+        required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
     )
 
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
@@ -189,9 +191,9 @@ def run_layout_agent(
             seed_eval["therm_norm"],
             {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
         )
-        append_trace_event_v54(
-            trace_events_path,
-            "init",
+        append_trace_event(
+            trace_dir,
+            event_type="init",
             payload={
                 "baseline_signature": signature_from_assign(assign_grid),
                 "seed_signature": signature_from_assign(assign_seed),
@@ -375,15 +377,15 @@ def run_layout_agent(
             pass
         ok = True
     except Exception as exc:
-        append_trace_event_v54(trace_events_path, "error", payload={"error": str(exc)})
+        append_trace_event(trace_dir, event_type="error", payload={"error": str(exc)})
         raise
     finally:
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
         best_solution_valid = _is_valid_assign(best_assign, S, Ns)
         reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
-        finalize_trace_events(
-            trace_events_path,
-            payload={
+        finalize_trace_dir(
+            trace_dir,
+            summary_extra={
                 "reason": reason,
                 "steps_done": int(steps_done),
                 "best_solution_valid": bool(best_solution_valid),
@@ -430,19 +432,20 @@ def main():
 
     layout_input_path = args.layout_input or getattr(cfg, "layout_input", None)
     layout_hash = None
+    layout_meta = {}
     if layout_input_path:
         try:
             layout_hash = hashlib.sha256(Path(layout_input_path).read_bytes()).hexdigest()
         except Exception:
             layout_hash = None
+        try:
+            layout_meta = load_layout_input(Path(layout_input_path)).get("meta", {}) or {}
+        except Exception:
+            layout_meta = {}
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-    extra = {
-        "repo_root": str(_PROJECT_ROOT),
-        "problem_name": "wafer_layout",
-        "layout_input_hash": layout_hash,
-        "steps": detailed_cfg.get("max_steps") if isinstance(detailed_cfg, dict) else None,
-        "budget": detailed_cfg.get("budget") if isinstance(detailed_cfg, dict) else None,
-        "trace_events": str(out_dir / "trace_events.jsonl"),
+    extra_meta = {
+        "budget_main_axis": "eval_calls",
+        "dataset_id": f"wafer_layout:{layout_meta.get('layout_id', 'unknown')}",
     }
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
 
@@ -454,10 +457,12 @@ def main():
         from utils.run_manifest import write_run_manifest
 
         write_run_manifest(
-            out_dir=str(out_dir),
+            out_dir=out_dir,
             cfg_path=str(args.cfg),
             cfg_hash=str(cfg_hash),
+            run_id=run_id,
             seed=int(args.seed),
+            command=" ".join(sys.argv),
             stable_hw_state={
                 "guard_mode": "acc_first_hard_gating",
                 "lambda_hw_base": None,
@@ -467,10 +472,7 @@ def main():
                     "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
                 },
             },
-            extra=extra,
-            run_id=run_id,
-            spec_version="v5.4",
-            command=" ".join(sys.argv),
+            extra_meta=extra_meta,
         )
     except Exception:
         pass
@@ -497,10 +499,12 @@ def main():
         from utils.run_manifest import write_run_manifest
 
         write_run_manifest(
-            out_dir=str(out_dir),
+            out_dir=out_dir,
             cfg_path=str(args.cfg),
             cfg_hash=str(cfg_hash),
+            run_id=run_id,
             seed=int(args.seed),
+            command=" ".join(sys.argv),
             stable_hw_state={
                 "guard_mode": "acc_first_hard_gating",
                 "lambda_hw_base": None,
@@ -510,10 +514,7 @@ def main():
                     "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
                 },
             },
-            extra=extra,
-            run_id=run_id,
-            spec_version="v5.4",
-            command=" ".join(sys.argv),
+            extra_meta=extra_meta,
         )
     except Exception:
         pass
