@@ -644,9 +644,21 @@ def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=N
     stable_hw_state["ref_T"] = float(getattr(getattr(cfg, "hw", None), "latency_ref_ms", 1.0))
     stable_hw_state["ref_E"] = float(getattr(getattr(cfg, "hw", None), "energy_ref_mj", 1.0))
     stable_hw_state["ref_M"] = float(getattr(getattr(cfg, "hw", None), "memory_ref_mb", 1.0))
-    stable_hw_state["ref_C"] = float(
-        getattr(getattr(cfg, "hw", None), "comm_ref_ms", getattr(getattr(cfg, "hw", None), "comm_ref_mb", 1.0))
+    base_stats = {}
+
+    # --- Comm reference (ms) ---
+    # v5.4 expects comm_ref_ms (milliseconds). Keep backward-compat with older keys.
+    comm_ref_ms = float(
+        getattr(
+            getattr(cfg, "hw", None),
+            "comm_ref_ms",
+            base_stats.get("comm_ref_ms", base_stats.get("comm_ms", base_stats.get("comm_ref_mb", 1.0))),
+        )
     )
+
+    stable_hw_state["comm_ref_ms"] = comm_ref_ms
+    # ref_C is the comm reference used by hw_loss normalization (C for comm)
+    stable_hw_state["ref_C"] = comm_ref_ms
 
     nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg)
     lock_cfg = _get_locked_cfg(cfg)
