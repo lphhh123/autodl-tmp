@@ -1,13 +1,15 @@
-base: configs/ast2_ucf101.yaml
+_base_: configs/ast2_ucf101.yaml
 
 train:
   mode: version_c
   out_dir: outputs/SMOKE/version_c
+  seed: 2024
 
 training:
   outer_epochs: 1
-  inner_steps: 1
-  seed: 2024
+  inner_steps_ast: 1
+  inner_steps_alpha: 1
+  inner_steps_layout: 0
 
 locked_acc_ref:
   enabled: true

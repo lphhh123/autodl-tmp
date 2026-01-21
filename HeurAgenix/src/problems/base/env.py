@@ -104,18 +104,37 @@ class BaseEnv:
                 sig = None
 
             seed_id = _get_env_seed_id(self)
+            key_value = self.get_key_value(self.solution)
+
+            # v5.4 unified schema init record (so schema checks do not fail on line-1)
             init_record = {
                 "iter": 0,
                 "stage": "init",
                 "op": "init",
                 "op_args": init_action,
-                "op_args_json": json.dumps(init_action, ensure_ascii=False),
+                "op_args_json": "{}",
                 "accepted": 1,
+
+                # unified scalar fields (default 0 for init)
+                "total_scalar": float(key_value) if key_value is not None else 0.0,
+                "comm_norm": 0.0,
+                "therm_norm": 0.0,
+                "pareto_added": 0,
+                "duplicate_penalty": 0.0,
+                "boundary_penalty": 0.0,
+
+                # required
                 "seed_id": int(seed_id),
-                "signature": sig,
-                "key_value": float(self.get_key_value(self.solution)),
-                "solution_value": float(self.solution.get_solution_value()) if hasattr(self.solution, "get_solution_value") else None,
-                "time_ms": 0.0,
+                "time_ms": 0,
+
+                # signature must exist even at init
+                "signature": sig if sig is not None else "init",
+
+                # keep legacy fields (harmless)
+                "key_value": float(key_value) if key_value is not None else None,
+                "solution_value": float(self.solution.get_solution_value())
+                if hasattr(self.solution, "get_solution_value")
+                else None,
                 "timestamp": float(time.time()),
             }
             self._write_record(init_record)
