@@ -61,9 +61,19 @@ def _get_locked_cfg(cfg_or_stable):
     return lock
 
 
-def _get_no_drift_cfg(cfg_or_stable):
-    root, stable = _get_root_and_stable(cfg_or_stable)
-    nd = getattr(root, "no_drift", None) if root is not None else None
+def _get_no_drift_cfg(cfg_or_stable, stable_hw_cfg=None):
+    """
+    Accept either:
+      - _get_no_drift_cfg(cfg_or_stable)  where cfg_or_stable may be root cfg or stable_hw cfg
+      - _get_no_drift_cfg(root_cfg, stable_hw_cfg)
+    """
+    if stable_hw_cfg is None:
+        root, stable = _get_root_and_stable(cfg_or_stable)
+    else:
+        root = cfg_or_stable
+        stable = stable_hw_cfg
+
+    nd = getattr(root, "no_drift", None)
     if nd is None:
         nd = getattr(stable, "no_drift", None)
     return nd

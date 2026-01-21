@@ -9,8 +9,10 @@ OUT="${1:-AST2_AND_HeurAgenix_CODE_ONLY.tar.gz}"
 tar -czvf "${OUT}" \
   --exclude='**/__pycache__' \
   --exclude='**/*.pyc' \
+  --exclude='**/.pytest_cache' \
   --exclude='**/.ipynb_checkpoints' \
   --exclude='**/rev' \
+  --exclude='**/.git' \
   --exclude='proj_ast2_ucf101_full/data' \
   --exclude='proj_ast2_ucf101_full/datasets' \
   --exclude='proj_ast2_ucf101_full/**/deprecated' \
@@ -20,6 +22,7 @@ tar -czvf "${OUT}" \
   --exclude='proj_ast2_ucf101_full/**/*.bak*' \
   --exclude='HeurAgenix/data' \
   --exclude='HeurAgenix/output' \
+  --exclude='HeurAgenix/orllm' \
   proj_ast2_ucf101_full HeurAgenix
 
 echo "[OK] wrote ${OUT}"
