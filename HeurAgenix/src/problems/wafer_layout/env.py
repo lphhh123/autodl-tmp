@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import numpy as np
 
-from src.problems.base.env import BaseEnv
+from src.problems.base.env import BaseEnv, _signature_from_assign
 from src.problems.wafer_layout.components import WaferLayoutSolution
 from src.problems.wafer_layout.problem_state import (
     get_instance_problem_state,
@@ -334,7 +334,10 @@ class Env(BaseEnv):
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
                 "time_ms": 0,
-                "signature": _make_signature(op="init", i=-1, site_id=-1, candidate_id=-1),
+                # v5.4 对齐：recordings.signature 统一为 assign signature（用于 repeat/oscillation 等指标）
+                "signature": _signature_from_assign(assign_list),
+                # 保留动作签名，便于动作级调试/回放
+                "op_signature": _make_signature(op="init", i=-1, site_id=-1, candidate_id=-1),
                 "meta": dict(self._meta_base),
             }
             self._write_record(init_record)
@@ -494,7 +497,8 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            signature = _make_signature(op="error", i=-1, site_id=-1, candidate_id=-1)
+            assign_sig = _signature_from_assign(list(self.current_solution.assign))
+            op_sig = _make_signature(op="error", i=-1, site_id=-1, candidate_id=-1)
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             meta.update(self._meta_base)
             if isinstance(meta_full, dict):
@@ -515,7 +519,8 @@ class Env(BaseEnv):
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
                 "time_ms": int(dt),
-                "signature": signature,
+                "signature": assign_sig,
+                "op_signature": op_sig,
                 "meta": meta,
             }
             self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -533,7 +538,8 @@ class Env(BaseEnv):
             penalty = metrics.get("penalty", {}) if isinstance(metrics.get("penalty", {}), dict) else {}
             duplicate_penalty = float(penalty.get("duplicate", 0.0))
             boundary_penalty = float(penalty.get("boundary", 0.0))
-            signature = _make_signature(op="invalid_operator", i=-1, site_id=-1, candidate_id=-1)
+            assign_sig = _signature_from_assign(list(self.current_solution.assign))
+            op_sig = _make_signature(op="invalid_operator", i=-1, site_id=-1, candidate_id=-1)
             meta = {"tabu_hit": 0, "inverse_hit": 0, "cooldown_hit": 0}
             meta.update(self._meta_base)
             if isinstance(meta_full, dict):
@@ -554,7 +560,8 @@ class Env(BaseEnv):
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
                 "time_ms": int(dt),
-                "signature": signature,
+                "signature": assign_sig,
+                "op_signature": op_sig,
                 "meta": meta,
             }
             self._rec_fp.write(json.dumps(line, ensure_ascii=False) + "\n")

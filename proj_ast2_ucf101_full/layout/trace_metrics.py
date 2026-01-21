@@ -22,8 +22,13 @@ def _get_float(row: dict, *keys: str, default: float = 0.0) -> float:
 def _is_undo_action(prev_action: dict, curr_action: dict, prev_sig: str, curr_sig: str) -> bool:
     if not prev_action or not curr_action:
         return False
-    if curr_sig and prev_sig and curr_sig == prev_sig and curr_sig.startswith("swap:"):
-        return True
+    # v5.4：trace.signature 是 assign signature，不应依赖 "swap:" 前缀
+    # swap 的“undo”定义：连续两次做同一对 slot 的 swap（顺序无关）即可视为撤销/反复
+    if prev_action.get("op") == "swap" and curr_action.get("op") == "swap":
+        pi, pj = prev_action.get("i", None), prev_action.get("j", None)
+        ci, cj = curr_action.get("i", None), curr_action.get("j", None)
+        if None not in (pi, pj, ci, cj):
+            return {int(pi), int(pj)} == {int(ci), int(cj)}
     if prev_action.get("op") == "relocate" and curr_action.get("op") == "relocate":
         if int(prev_action.get("i", -1)) != int(curr_action.get("i", -1)):
             return False
