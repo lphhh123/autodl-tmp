@@ -840,6 +840,19 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     need_update_layout = need_update_layout and (cache["layout"] is None)
 
                 if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "discrete_blocked",
+                        payload={
+                            "epoch": int(outer),
+                            "mapping_requested": bool(need_update_mapping),
+                            "layout_requested": bool(need_update_layout),
+                            "guard_mode": str(stable_hw_state.get("guard_mode", "")),
+                            "reason": "accuracy_guard",
+                            "op": "noop",
+                            "accepted": 0,
+                        },
+                    )
                     print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
                     need_update_mapping = False
                     need_update_layout = False

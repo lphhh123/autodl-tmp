@@ -100,4 +100,10 @@ python -m scripts.run_layout_heuragenix \
   --out_dir outputs/SMOKE/layout_B0_heuragenix_llm_hh \
   --seed 0
 
+echo "[SMOKE] Trace zero-step contract (must still write trace_v54.csv with v5.4 signature)"
+python -m scripts.smoke_trace_zero_step --out_dir outputs/SMOKE/trace_zero_step
+
+echo "[SMOKE] Trace signature check (v5.4)"
+python -m scripts.smoke_check_trace_signature --trace outputs/SMOKE/trace_zero_step/trace_v54.csv
+
 echo "[SMOKE DONE]"

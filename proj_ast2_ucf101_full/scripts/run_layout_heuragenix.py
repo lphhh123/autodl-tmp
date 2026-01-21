@@ -1038,6 +1038,7 @@ def main() -> None:
     run_mode = baseline_cfg.get("run_mode", "inprocess")
     method = str(baseline_cfg.get("method", "llm_hh"))
     baseline_method = str(method)
+    baseline_name = str(baseline_cfg.get("name", baseline_method))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
     llm_usage_path = out_dir / "llm_usage.jsonl"
@@ -1511,9 +1512,18 @@ def main() -> None:
             "evaluator_import_error": str(evaluator_import_error),
         },
         "baseline": {
-            "total_scalar": float(base_eval.get("total_scalar", 0.0)),
-            "comm_norm": float(base_eval.get("comm_norm", 0.0)),
-            "therm_norm": float(base_eval.get("therm_norm", 0.0)),
+            "name": baseline_name,
+            "method": baseline_method,
+            "heuristic_dir": heuristic_dir,
+            "selection_frequency": int(selection_frequency),
+            "num_candidate_heuristics": int(num_candidate_heuristics),
+            "rollout_budget": int(rollout_budget),
+            "iterations_scale_factor": float(iters_sf),
+            "metrics": {
+                "total_scalar": float(base_eval.get("total_scalar", 0.0)),
+                "comm_norm": float(base_eval.get("comm_norm", 0.0)),
+                "therm_norm": float(base_eval.get("therm_norm", 0.0)),
+            },
         },
         "best_objective": {
             "total_scalar": float(best_eval.get("total_scalar", 0.0)),
