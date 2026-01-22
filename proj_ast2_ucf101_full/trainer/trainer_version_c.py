@@ -434,6 +434,17 @@ def _export_layout_input(
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(layout_input, f, indent=2)
 
+    # v5.4 canonical copies for SPEC_D
+    try:
+        run_root = export_dir.parent.parent
+        (run_root / "layout_input.json").write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
+
+        canonical = Path("outputs/P3/A3")
+        canonical.mkdir(parents=True, exist_ok=True)
+        (canonical / "layout_input.json").write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
     return out_path
 
 
@@ -563,12 +574,28 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         layout_export_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "logs" / "version_c_stats.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # ---- v5.4 contract log (avoid missing-key crash) ----
+    def _boolish(x):
+        if x is None:
+            return None
+        if isinstance(x, bool):
+            return x
+        if isinstance(x, (int, float)):
+            return bool(x)
+        if isinstance(x, dict):
+            return bool(x.get("enabled", False))
+        try:
+            return bool(getattr(x, "enabled"))
+        except Exception:
+            return None
+
+    nds_en = _boolish(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None))
     logger.info(
         f"[v5.4 contract] train.mode={getattr(cfg.train, 'mode', None)} "
         f"stable_hw.enabled={getattr(cfg.stable_hw, 'enabled', None)} "
         f"locked_acc_ref.enabled={getattr(cfg.locked_acc_ref, 'enabled', None)} "
         f"no_drift.enabled={getattr(cfg.no_drift, 'enabled', None)} "
-        f"no_double_scale.enabled={getattr(cfg.no_double_scale, 'enabled', None)}"
+        f"stable_hw.no_double_scale.enabled={nds_en}"
     )
 
     loader = build_dataloader(cfg)

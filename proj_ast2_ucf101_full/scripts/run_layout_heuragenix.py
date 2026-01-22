@@ -49,9 +49,6 @@ TIME_UNIT = "ms"
 DIST_UNIT = "mm"
 
 
-def _row_to_list(row: dict) -> list:
-    return [row.get(k, "") for k in TRACE_FIELDS]
-
 # Minimal requirements for portability across HeurAgenix versions / problem envs:
 # - iter: step index
 # - op: operator name
@@ -565,8 +562,8 @@ def _write_trace_and_pareto(
     }
 
     with trace_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(TRACE_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
+        writer.writeheader()
 
         init_assign = hx_rows[0].get("assign") if hx_rows else None
         init_sig = signature_for_assign(init_assign) if init_assign is not None else "assign:unknown"
@@ -596,45 +593,39 @@ def _write_trace_and_pareto(
             "total_scalar": hx_rows[0].get("total_scalar", "") if hx_rows else "",
             "comm_norm": hx_rows[0].get("comm_norm", "") if hx_rows else "",
             "therm_norm": hx_rows[0].get("therm_norm", "") if hx_rows else "",
+            "pareto_added": 0,
             "duplicate_penalty": hx_rows[0].get("duplicate_penalty", 0.0) if hx_rows else 0.0,
             "boundary_penalty": hx_rows[0].get("boundary_penalty", 0.0) if hx_rows else 0.0,
             "signature": init_sig,
-            "assign_signature": init_sig,
-            "op_signature": stable_hash({"op": "init"}),
             "seed_id": seed_id,
-            "objective_hash": objective_hash,
-            "eval_version": EVAL_VERSION,
-            "time_unit": TIME_UNIT,
-            "dist_unit": DIST_UNIT,
-            "wall_time_ms": wall_time_ms,
-            "wall_time_ms_cum": wall_time_ms,
-            "evaluator_calls": eval_calls_cum,
-            "eval_calls_cum": eval_calls_cum,
-            "accepted_steps": accepted_steps_cum,
-            "accepted_steps_cum": accepted_steps_cum,
-            "selected_idx": -1,
+            "time_ms": wall_time_ms,
+            "delta_total": 0.0,
+            "delta_comm": 0.0,
+            "delta_therm": 0.0,
             "tabu_hit": 0,
             "inverse_hit": 0,
             "cooldown_hit": 0,
             "cache_hit": 0,
-            "cache_miss": 0,
             "cache_hit_cum": cache_hit_cum,
             "cache_miss_cum": cache_miss_cum,
-            "cache_size": cache_size,
             "cache_key": init_cache_key,
-            "move_family": move_family,
-            "selector": selector,
-            "lookahead": lookahead,
-            "budget_mode": budget_mode,
-            "budget_total": budget_total,
-            "budget_remaining": budget_total,
-            "use_llm": 0,
-            "llm_model": "",
-            "llm_prompt_tokens": 0,
-            "llm_completion_tokens": 0,
-            "llm_latency_ms": 0,
+            "policy": selector,
+            "move": move_family,
+            "lookahead_k": lookahead,
+            "objective_hash": objective_hash,
+            "eval_calls_cum": eval_calls_cum,
+            "cache_saved_eval_calls_cum": cache_hit_cum,
+            "llm_used": 0,
+            "llm_fail_count": 0,
+            "fallback_reason": "",
+            "wall_time_ms_cum": wall_time_ms,
+            "accepted_steps_cum": accepted_steps_cum,
+            "sim_eval_calls_cum": eval_calls_cum,
+            "lookahead_enabled": int(lookahead > 0),
+            "lookahead_r": 0,
+            "notes": "",
         }
-        writer.writerow(_row_to_list(init_row))
+        writer.writerow(init_row)
 
         for i, r in enumerate(hx_rows):
             accepted = int(r.get("accepted", 0))
@@ -681,45 +672,39 @@ def _write_trace_and_pareto(
                 "total_scalar": r.get("total_scalar", r.get("total", "")),
                 "comm_norm": r.get("comm_norm", r.get("comm", "")),
                 "therm_norm": r.get("therm_norm", r.get("therm", "")),
+                "pareto_added": int(r.get("pareto_added", 0)),
                 "duplicate_penalty": r.get("duplicate_penalty", r.get("dup", 0.0)),
                 "boundary_penalty": r.get("boundary_penalty", r.get("boundary", 0.0)),
                 "signature": assign_sig,
-                "assign_signature": assign_sig,
-                "op_signature": op_sig,
                 "seed_id": seed_id,
-                "objective_hash": objective_hash,
-                "eval_version": EVAL_VERSION,
-                "time_unit": TIME_UNIT,
-                "dist_unit": DIST_UNIT,
-                "wall_time_ms": wall_time_ms,
-                "wall_time_ms_cum": wall_time_ms,
-                "evaluator_calls": eval_calls_cum,
-                "eval_calls_cum": eval_calls_cum,
-                "accepted_steps": accepted_steps_cum,
-                "accepted_steps_cum": accepted_steps_cum,
-                "selected_idx": int(r.get("selected_idx", -1)),
+                "time_ms": wall_time_ms,
+                "delta_total": float(r.get("delta_total", 0.0)),
+                "delta_comm": float(r.get("delta_comm", 0.0)),
+                "delta_therm": float(r.get("delta_therm", 0.0)),
                 "tabu_hit": int(r.get("tabu_hit", 0)),
                 "inverse_hit": int(r.get("inverse_hit", 0)),
                 "cooldown_hit": int(r.get("cooldown_hit", 0)),
                 "cache_hit": 0,
-                "cache_miss": 0,
                 "cache_hit_cum": cache_hit_cum,
                 "cache_miss_cum": cache_miss_cum,
-                "cache_size": cache_size,
                 "cache_key": cache_key,
-                "move_family": move_family,
-                "selector": selector,
-                "lookahead": lookahead,
-                "budget_mode": budget_mode,
-                "budget_total": budget_total,
-                "budget_remaining": budget_remaining,
-                "use_llm": 0,
-                "llm_model": "",
-                "llm_prompt_tokens": 0,
-                "llm_completion_tokens": 0,
-                "llm_latency_ms": 0,
+                "policy": selector,
+                "move": move_family,
+                "lookahead_k": lookahead,
+                "objective_hash": objective_hash,
+                "eval_calls_cum": eval_calls_cum,
+                "cache_saved_eval_calls_cum": cache_hit_cum,
+                "llm_used": 0,
+                "llm_fail_count": 0,
+                "fallback_reason": "",
+                "wall_time_ms_cum": wall_time_ms,
+                "accepted_steps_cum": accepted_steps_cum,
+                "sim_eval_calls_cum": eval_calls_cum,
+                "lookahead_enabled": int(lookahead > 0),
+                "lookahead_r": 0,
+                "notes": "",
             }
-            writer.writerow(_row_to_list(row))
+            writer.writerow(row)
 
     return extra_report
 
@@ -1615,7 +1600,7 @@ def main() -> None:
             # ★可选：把用户是否显式指定也写清楚，方便复盘
             "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else None,
             # v5.4 fairness: count actual evaluator calls
-            "eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+            "eval_calls": int(ec.get("eval_calls", 0)),
         },
         "evaluator": {
             "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),

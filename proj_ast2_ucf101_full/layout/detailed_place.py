@@ -44,10 +44,6 @@ TIME_UNIT = "ms"
 DIST_UNIT = "mm"
 
 
-def _row_to_list(row: dict) -> list:
-    return [row.get(k, "") for k in TRACE_FIELDS]
-
-
 @dataclass
 class DetailedPlaceResult:
     assign: np.ndarray
@@ -318,6 +314,8 @@ def run_detailed_place(
         except Exception as e:
             llm_provider = None
             llm_init_error = repr(e)
+    fallback_reason = "llm_init_failed" if (planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error) else ""
+    llm_fail_count = 1 if fallback_reason else 0
 
     # ---- SA params ----
     steps = int(_cfg_get(cfg, "steps", 0))
@@ -341,8 +339,8 @@ def run_detailed_place(
             usage_fp.flush()
 
         with trace_path.open("w", encoding="utf-8", newline="") as f_trace:
-            writer = csv.writer(f_trace)
-            writer.writerow(TRACE_FIELDS)
+            writer = csv.DictWriter(f_trace, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
+            writer.writeheader()
 
             try:
                 if True:
@@ -364,6 +362,9 @@ def run_detailed_place(
                     op_signature = stable_hash(op_args_obj)
                     init_cache_key = _make_cache_key(assign_signature, objective_hash)
                     wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
+                    cache_hit_cum = int(eval_cache.hits) if eval_cache is not None else 0
+                    cache_miss_cum = int(eval_cache.misses) if eval_cache is not None else 0
+                    cache_saved_eval_calls_cum = cache_hit_cum
 
                     init_row = {
                         "iter": -1,
@@ -374,45 +375,39 @@ def run_detailed_place(
                         "total_scalar": prev_total,
                         "comm_norm": prev_comm,
                         "therm_norm": prev_therm,
+                        "pareto_added": 0,
                         "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
                         "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
-                        "signature": assign_signature,
-                        "assign_signature": assign_signature,
-                        "op_signature": op_signature,
                         "seed_id": int(seed_id),
-                        "objective_hash": objective_hash,
-                        "eval_version": EVAL_VERSION,
-                        "time_unit": TIME_UNIT,
-                        "dist_unit": DIST_UNIT,
-                        "wall_time_ms": wall_time_ms,
-                        "wall_time_ms_cum": wall_time_ms,
-                        "evaluator_calls": eval_calls_cum,
-                        "eval_calls_cum": eval_calls_cum,
-                        "accepted_steps": 0,
-                        "accepted_steps_cum": accepted_steps,
-                        "selected_idx": -1,
+                        "time_ms": wall_time_ms,
+                        "signature": assign_signature,
+                        "delta_total": 0.0,
+                        "delta_comm": 0.0,
+                        "delta_therm": 0.0,
                         "tabu_hit": 0,
                         "inverse_hit": 0,
                         "cooldown_hit": 0,
+                        "policy": "init",
+                        "move": "init",
+                        "lookahead_k": int(lookahead_topk if lookahead_enabled else 0),
                         "cache_hit": 0,
-                        "cache_miss": 0,
-                        "cache_hit_cum": int(eval_cache.hits) if eval_cache is not None else 0,
-                        "cache_miss_cum": int(eval_cache.misses) if eval_cache is not None else 0,
-                        "cache_size": int(eval_cache.size) if eval_cache is not None else 0,
                         "cache_key": init_cache_key,
-                        "move_family": "init",
-                        "selector": "init",
-                        "lookahead": 0,
-                        "budget_mode": "steps",
-                        "budget_total": int(steps),
-                        "budget_remaining": int(steps),
-                        "use_llm": 0,
-                        "llm_model": "",
-                        "llm_prompt_tokens": 0,
-                        "llm_completion_tokens": 0,
-                        "llm_latency_ms": 0,
+                        "objective_hash": objective_hash,
+                        "eval_calls_cum": eval_calls_cum,
+                        "cache_hit_cum": cache_hit_cum,
+                        "cache_miss_cum": cache_miss_cum,
+                        "cache_saved_eval_calls_cum": cache_saved_eval_calls_cum,
+                        "llm_used": 0,
+                        "llm_fail_count": llm_fail_count,
+                        "fallback_reason": fallback_reason,
+                        "wall_time_ms_cum": wall_time_ms,
+                        "accepted_steps_cum": accepted_steps,
+                        "sim_eval_calls_cum": eval_calls_cum,
+                        "lookahead_enabled": int(lookahead_enabled),
+                        "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
+                        "notes": "",
                     }
-                    writer.writerow(_row_to_list(init_row))
+                    writer.writerow(init_row)
                     if recordings_fp is not None:
                         pen = eval_out.get("penalty", {}) or {}
                         init_record = {
@@ -883,45 +878,39 @@ def run_detailed_place(
                         "total_scalar": eval_out["total_scalar"],
                         "comm_norm": eval_out["comm_norm"],
                         "therm_norm": eval_out["therm_norm"],
+                        "pareto_added": int(added),
                         "duplicate_penalty": eval_out["penalty"]["duplicate"],
                         "boundary_penalty": eval_out["penalty"]["boundary"],
-                        "signature": assign_signature,
-                        "assign_signature": assign_signature,
-                        "op_signature": op_signature,
                         "seed_id": int(seed_id),
+                        "time_ms": int(time_ms),
+                        "signature": assign_signature,
+                        "delta_total": float(delta),
+                        "delta_comm": float(delta_comm),
+                        "delta_therm": float(delta_therm),
                         "objective_hash": objective_hash,
-                        "eval_version": EVAL_VERSION,
-                        "time_unit": TIME_UNIT,
-                        "dist_unit": DIST_UNIT,
-                        "wall_time_ms": time_ms,
-                        "wall_time_ms_cum": wall_time_ms_cum,
-                        "evaluator_calls": eval_calls_step,
-                        "eval_calls_cum": eval_calls_cum,
-                        "accepted_steps": int(accept),
-                        "accepted_steps_cum": int(accepted_steps),
-                        "selected_idx": int(action.get("candidate_id", -1)) if action else -1,
                         "tabu_hit": int(tabu_hit),
                         "inverse_hit": int(inverse_hit),
                         "cooldown_hit": int(cooldown_hit),
+                        "policy": str(policy_name),
+                        "move": str(op),
+                        "lookahead_k": int(lookahead_topk if lookahead_enabled else 0),
                         "cache_hit": int(cache_hit_step),
-                        "cache_miss": int(cache_miss_step),
                         "cache_hit_cum": int(h1),
                         "cache_miss_cum": int(m1),
-                        "cache_size": int(cache_size),
+                        "cache_saved_eval_calls_cum": int(h1),
                         "cache_key": cache_key,
-                        "move_family": str(op),
-                        "selector": str(policy_name),
-                        "lookahead": int(lookahead_topk if lookahead_enabled else 0),
-                        "budget_mode": "steps",
-                        "budget_total": int(steps),
-                        "budget_remaining": max(0, int(steps) - (int(step) + 1)),
-                        "use_llm": int(use_llm),
-                        "llm_model": str(llm_model),
-                        "llm_prompt_tokens": int(llm_prompt_tokens),
-                        "llm_completion_tokens": int(llm_completion_tokens),
-                        "llm_latency_ms": int(llm_latency_ms),
+                        "eval_calls_cum": int(eval_calls_cum),
+                        "llm_used": int(use_llm),
+                        "llm_fail_count": llm_fail_count,
+                        "fallback_reason": fallback_reason,
+                        "wall_time_ms_cum": int(wall_time_ms_cum),
+                        "accepted_steps_cum": int(accepted_steps),
+                        "sim_eval_calls_cum": int(eval_calls_cum),
+                        "lookahead_enabled": int(lookahead_enabled),
+                        "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
+                        "notes": "",
                     }
-                    writer.writerow(_row_to_list(row))
+                    writer.writerow(row)
                     if recordings_fp is not None:
                         pen = eval_out.get("penalty", {}) or {}
                         record = {
@@ -991,6 +980,8 @@ def run_detailed_place(
                     else:
                         fin_sig = "assign:unknown"
                     fin_cache_key = _make_cache_key(fin_sig, objective_hash)
+                    cache_hit_cum = int(eval_cache.hits) if eval_cache is not None else 0
+                    cache_miss_cum = int(eval_cache.misses) if eval_cache is not None else 0
                     fin_row = {
                         "iter": int(steps) + 1,
                         "stage": "finalize",
@@ -1000,45 +991,39 @@ def run_detailed_place(
                         "total_scalar": fin_total,
                         "comm_norm": fin_comm,
                         "therm_norm": fin_therm,
+                        "pareto_added": 0,
                         "duplicate_penalty": 0.0,
                         "boundary_penalty": 0.0,
-                        "signature": fin_sig,
-                        "assign_signature": fin_sig,
-                        "op_signature": stable_hash({"op": "finalize"}),
                         "seed_id": int(seed_id),
-                        "objective_hash": objective_hash,
-                        "eval_version": EVAL_VERSION,
-                        "time_unit": TIME_UNIT,
-                        "dist_unit": DIST_UNIT,
-                        "wall_time_ms": int((time.time() - start_time) * 1000),
-                        "wall_time_ms_cum": int((time.perf_counter() - wall_start) * 1000),
-                        "evaluator_calls": 0,
-                        "eval_calls_cum": eval_calls_cum,
-                        "accepted_steps": 0,
-                        "accepted_steps_cum": int(accepted_steps),
-                        "selected_idx": -1,
+                        "time_ms": int((time.time() - start_time) * 1000),
+                        "signature": fin_sig,
+                        "delta_total": 0.0,
+                        "delta_comm": 0.0,
+                        "delta_therm": 0.0,
                         "tabu_hit": 0,
                         "inverse_hit": 0,
                         "cooldown_hit": 0,
+                        "policy": "finalize",
+                        "move": "finalize",
+                        "lookahead_k": 0,
                         "cache_hit": 0,
-                        "cache_miss": 0,
-                        "cache_hit_cum": int(eval_cache.hits) if eval_cache is not None else 0,
-                        "cache_miss_cum": int(eval_cache.misses) if eval_cache is not None else 0,
-                        "cache_size": int(eval_cache.size) if eval_cache is not None else 0,
                         "cache_key": fin_cache_key,
-                        "move_family": "finalize",
-                        "selector": "finalize",
-                        "lookahead": 0,
-                        "budget_mode": "steps",
-                        "budget_total": int(steps),
-                        "budget_remaining": 0,
-                        "use_llm": 0,
-                        "llm_model": "",
-                        "llm_prompt_tokens": 0,
-                        "llm_completion_tokens": 0,
-                        "llm_latency_ms": 0,
+                        "objective_hash": objective_hash,
+                        "eval_calls_cum": int(eval_calls_cum),
+                        "cache_hit_cum": cache_hit_cum,
+                        "cache_miss_cum": cache_miss_cum,
+                        "cache_saved_eval_calls_cum": cache_hit_cum,
+                        "llm_used": 0,
+                        "llm_fail_count": llm_fail_count,
+                        "fallback_reason": fallback_reason,
+                        "wall_time_ms_cum": int((time.perf_counter() - wall_start) * 1000),
+                        "accepted_steps_cum": int(accepted_steps),
+                        "sim_eval_calls_cum": int(eval_calls_cum),
+                        "lookahead_enabled": int(lookahead_enabled),
+                        "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
+                        "notes": "",
                     }
-                    writer.writerow(_row_to_list(fin_row))
+                    writer.writerow(fin_row)
                 except Exception:
                     pass
                 f_trace.flush()
