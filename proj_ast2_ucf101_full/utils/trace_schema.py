@@ -6,7 +6,6 @@ Unified trace schema for SPEC v5.4.
 - 新增 v5.4 addendum 必需的：身份/单位/预算轴/签名分离/LLM 透明度/累积统计
 """
 TRACE_FIELDS = [
-    # --- legacy core ---
     "iter",
     "stage",
     "op",
@@ -15,51 +14,36 @@ TRACE_FIELDS = [
     "total_scalar",
     "comm_norm",
     "therm_norm",
+    "pareto_added",
     "duplicate_penalty",
     "boundary_penalty",
+    "seed_id",
+    "time_ms",
     "signature",
-
-    "wall_time_ms",
-    "evaluator_calls",
-    "accepted_steps",
-    "selected_idx",
+    "delta_total",
+    "delta_comm",
+    "delta_therm",
     "tabu_hit",
     "inverse_hit",
     "cooldown_hit",
-
+    "policy",
+    "move",
+    "lookahead_k",
     "cache_hit",
-    "cache_miss",
-    "cache_size",
     "cache_key",
-
-    "move_family",
-    "selector",
-    "lookahead",
-
-    # --- v5.4 addendum required ---
-    "assign_signature",
-    "op_signature",
-
-    "seed_id",
+    # --- SPEC_B additions (v5.4) ---
     "objective_hash",
-    "eval_version",
-    "time_unit",
-    "dist_unit",
-
-    "wall_time_ms_cum",
     "eval_calls_cum",
-    "accepted_steps_cum",
-
     "cache_hit_cum",
     "cache_miss_cum",
-
-    "budget_mode",
-    "budget_total",
-    "budget_remaining",
-
-    "use_llm",
-    "llm_model",
-    "llm_prompt_tokens",
-    "llm_completion_tokens",
-    "llm_latency_ms",
+    "cache_saved_eval_calls_cum",
+    "llm_used",
+    "llm_fail_count",
+    "fallback_reason",
+    "wall_time_ms_cum",
+    "accepted_steps_cum",
+    "sim_eval_calls_cum",
+    "lookahead_enabled",
+    "lookahead_r",
+    "notes",
 ]
