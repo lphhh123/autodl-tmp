@@ -480,6 +480,19 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         ok = True
     finally:
         if trace_dir is not None:
+            # Must happen BEFORE finalize event
+            early_stop = bool(early_stop_triggered) if "early_stop_triggered" in locals() else False
+            epochs_ran = int(ran_epochs) if "ran_epochs" in locals() else 0
+            try:
+                append_trace_event_v54(
+                    trace_events_path,
+                    "training_complete",
+                    payload={"early_stop": early_stop, "epochs_ran": epochs_ran},
+                    run_id=run_id,
+                    step=int(steps_done),
+                )
+            except Exception as _exc:
+                logger.warning(f"[trace] skip training_complete event due to: {_exc}")
             update_trace_summary(
                 trace_dir,
                 {
@@ -518,14 +531,6 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "task": "single_device",
                 "out_dir": str(out_dir),
             },
-        )
-    if trace_dir is not None:
-        append_trace_event_v54(
-            trace_events_path,
-            "training_complete",
-            payload={"early_stop": bool(early_stop_triggered), "epochs_ran": int(ran_epochs)},
-            run_id=run_id,
-            step=int(steps_done),
         )
 
 

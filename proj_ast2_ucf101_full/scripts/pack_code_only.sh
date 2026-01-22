@@ -24,6 +24,8 @@ tar -czvf "${OUT}" \
   --exclude='HeurAgenix/data' \
   --exclude='HeurAgenix/output' \
   --exclude='HeurAgenix/orllm' \
+  --exclude='HeurAgenix/__pycache__' \
+  --exclude='HeurAgenix/condaenv.*' \
   proj_ast2_ucf101_full HeurAgenix
 
 echo "[OK] wrote ${OUT}"

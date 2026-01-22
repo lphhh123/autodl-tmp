@@ -122,17 +122,34 @@ def _ensure_heuragenix_syspath(heuragenix_root: Path) -> None:
             sys.path.insert(0, sp)
 
 
-def _resolve_llm_config_path(llm_config_file: str | None, heuragenix_root: Path, project_root: Path) -> Path | None:
-    if not llm_config_file:
-        return None
-    candidate = Path(llm_config_file).expanduser()
-    if candidate.is_absolute() and candidate.exists():
-        return candidate
-    for base in (heuragenix_root, project_root):
-        path = base / candidate
-        if path.exists():
-            return path
-    return None
+def _resolve_llm_config_path(baseline_cfg, heuragenix_root: Path) -> Path:
+    llm_cfg = baseline_cfg.get("llm_config_file", "")
+    if not llm_cfg:
+        return Path("")
+
+    p = Path(llm_cfg)
+    if p.is_absolute() and p.exists():
+        return p
+
+    # Accept either:
+    # 1) relative path from project root
+    # 2) relative path from HeurAgenix root
+    # 3) short name under common HeurAgenix config dirs (guide-friendly)
+    project_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        project_root / p,
+        heuragenix_root / p,
+        heuragenix_root / "data" / "llm_config" / p.name,
+        heuragenix_root / "configs" / "llm" / p.name,
+        heuragenix_root / "configs" / "llm_configs" / p.name,
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+
+    raise FileNotFoundError(
+        f"Cannot resolve llm_config_file='{llm_cfg}'. Tried: " + ", ".join(str(x) for x in candidates)
+    )
 
 
 def _build_objective_cfg(cfg: Any) -> Dict[str, Any]:
@@ -1212,10 +1229,10 @@ def main() -> None:
     log_text = ""
     llm_config = None
     if method == "llm_hh":
-        llm_config = _resolve_llm_config_path(baseline_cfg.get("llm_config_file"), heuragenix_root, project_root)
-        if llm_config is None and (not bool(baseline_cfg.get("allow_llm_missing", False))):
+        llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
+        if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
             raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
-        if llm_config is not None:
+        if llm_config:
             with open(llm_config, "r", encoding="utf-8") as f:
                 js = json.load(f)
             if "top-p" in js and "top_p" not in js:

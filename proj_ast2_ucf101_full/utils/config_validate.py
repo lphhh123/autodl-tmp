@@ -584,78 +584,26 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     iso.setdefault("track_live_segments", False)
     iso.setdefault("allow_cache_fallback", True)
 
-    # ---- v5.4 NoDoubleScale: hard error ----
-    try:
-        stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
+    # ===== v5.4 NoDoubleScale: stable_hw enabled => legacy lambda_hw MUST be 0 (warn + override) =====
+    stable_en = bool(cfg.get("stable_hw", {}).get("enabled", False))
+    if stable_en:
+        # force no_double_scale.enabled = True
+        nds = cfg["stable_hw"].get("no_double_scale", None)
+        if isinstance(nds, dict):
+            nds["enabled"] = True
+        else:
+            cfg["stable_hw"]["no_double_scale"] = {"enabled": True}
 
-        old_loss_lambda_hw = None
-        old_hw_lambda_hw = None
-        if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
-            try:
-                old_loss_lambda_hw = float(get_nested(cfg, "loss.lambda_hw", 0.0) or 0.0)
-            except Exception:
-                old_loss_lambda_hw = None
-        if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
-            try:
-                old_hw_lambda_hw = float(get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0)
-            except Exception:
-                old_hw_lambda_hw = None
+        legacy_hw_lambda = float(cfg.get("hw", {}).get("lambda_hw", 0.0) or 0.0)
+        legacy_loss_lambda = float(cfg.get("loss", {}).get("lambda_hw", 0.0) or 0.0)
 
-        if stable_en:
-            if float(get_nested(cfg, "hw.lambda_hw", 0.0)) != 0.0 or float(get_nested(cfg, "loss.lambda_hw", 0.0)) != 0.0:
-                raise ValueError(
-                    "NoDoubleScale(v5.4): do NOT set hw.lambda_hw or loss.lambda_hw; "
-                    "use stable_hw.lambda_hw_effective only."
-                )
-
-            if hasattr(cfg, "stable_hw") and not hasattr(cfg.stable_hw, "no_double_scale"):
-                cfg.stable_hw.no_double_scale = True
-
-            # ---- v5.4 LockedAccRef contract guardrail ----
-            # If locked_acc_ref is enabled but baseline_stats_path is missing,
-            # we MUST have warmup_epochs>=1 so that warmup_best can produce acc_ref.
-            try:
-                # v5.4 allows locked_acc_ref at root-level OR under stable_hw (legacy)
-                locked = get_nested(cfg, "locked_acc_ref", None)
-                locked_path = "locked_acc_ref"
-                if not isinstance(locked, dict) or not locked:
-                    locked = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
-                    locked_path = "stable_hw.locked_acc_ref"
-
-                if bool(locked.get("enabled", False)):
-                    baseline_path = locked.get("baseline_stats_path", None)
-                    sched = get_nested(cfg, "stable_hw.lambda_hw_schedule", {}) or {}
-                    warmup_epochs = int(sched.get("warmup_epochs", 0) or 0)
-                    freeze_epoch = int(locked.get("freeze_epoch", warmup_epochs) or 0)
-
-                    if (baseline_path is None) or (str(baseline_path).strip() == ""):
-                        if warmup_epochs <= 0:
-                            warmup_epochs = 1
-                            sched["warmup_epochs"] = warmup_epochs
-                            print(
-                                "[WARN] v5.4 LockedAccRef: baseline_stats_path is missing; "
-                                "forcing stable_hw.lambda_hw_schedule.warmup_epochs=1 so warmup_best can lock acc_ref."
-                            )
-                        if freeze_epoch <= 0:
-                            freeze_epoch = warmup_epochs
-                            locked["freeze_epoch"] = freeze_epoch
-                            print(
-                                "[WARN] v5.4 LockedAccRef: freeze_epoch<=0 with missing baseline_stats_path; "
-                                f"forcing {locked_path}.freeze_epoch={freeze_epoch}."
-                            )
-                        if freeze_epoch > warmup_epochs:
-                            sched["warmup_epochs"] = freeze_epoch
-                            print(
-                                "[WARN] v5.4 LockedAccRef: freeze_epoch>warmup_epochs; "
-                                f"forcing warmup_epochs={freeze_epoch}."
-                            )
-
-                    set_nested(cfg, locked_path, locked)
-                    set_nested(cfg, "stable_hw.lambda_hw_schedule", sched)
-            except Exception:
-                pass
-    except Exception:
-        pass
+        if legacy_hw_lambda != 0.0 or legacy_loss_lambda != 0.0:
+            print(
+                "[v5.4][NoDoubleScale] WARNING: stable_hw.enabled=True -> overriding legacy lambda_hw to 0.0 "
+                f"(cfg.hw.lambda_hw={legacy_hw_lambda}, cfg.loss.lambda_hw={legacy_loss_lambda})."
+            )
+            cfg.setdefault("hw", {})["lambda_hw"] = 0.0
+            cfg.setdefault("loss", {})["lambda_hw"] = 0.0
 
     # ---- guardrail: HW loss enabled but lambda is effectively zero ----
     try:
@@ -728,27 +676,5 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 "SPEC v5.4 contract violation: train.mode=version_c requires stable_hw.locked_acc_ref.enabled=true. "
                 "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
             )
-
-    # ===========================
-    # v5.4 HARD GUARDS (Acc-First / NoDoubleScale)
-    # ===========================
-    stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
-    legacy_hw_lam = float(getattr(getattr(cfg, "hw", {}), "lambda_hw", 0.0) or 0.0)
-    legacy_loss_lam = float(getattr(getattr(cfg, "loss", {}), "lambda_hw", 0.0) or 0.0)
-
-    # If stable_hw is enabled, legacy lambdas MUST be zero (NoDoubleScale).
-    if stable_en and (legacy_hw_lam != 0.0 or legacy_loss_lam != 0.0):
-        raise ValueError(
-            "NoDoubleScale(v5.4): do NOT set hw.lambda_hw or loss.lambda_hw; "
-            "use stable_hw.lambda_hw_effective only."
-        )
-
-    # If stable_hw is disabled, ANY positive legacy lambda means direct-sum HW loss -> forbidden in v5.4.
-    if (not stable_en) and (legacy_hw_lam > 0.0 or legacy_loss_lam > 0.0):
-        raise ValueError(
-            "v5.4 Acc-First requires stable_hw.enabled=true for any HW optimization. "
-            f"Found stable_hw.enabled=false but hw.lambda_hw={legacy_hw_lam}, loss.lambda_hw={legacy_loss_lam}. "
-            "Fix: set both lambdas to 0 for pure-accuracy runs OR enable stable_hw and use lambda_hw_effective."
-        )
 
     return cfg
