@@ -1321,35 +1321,27 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     ), "acc_ref drift detected"
 
             if stable_hw_enabled:
-                # last_hw_stats contains latency_ms/energy_mj/mem_mb/comm_ms
-                nd_cfg = getattr(getattr(cfg, "stable_hw", None), "no_drift", None)
-                if isinstance(nd_cfg, bool):
-                    no_drift = bool(nd_cfg)
-                elif isinstance(nd_cfg, dict):
-                    no_drift = bool(nd_cfg.get("enabled", False))
-                elif nd_cfg is not None:
-                    no_drift = bool(getattr(nd_cfg, "enabled", False))
-                else:
-                    no_drift = False
-                if (not no_drift) and stable_hw_enabled:
-                    before = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
-                    update_hw_refs_from_stats(
-                        cfg,
-                        stable_hw_state,
-                        latest_stats=last_hw_stats or {},
-                        stable_hw_cfg=stable_hw_cfg,
+                # v5.4: always call; stable_hw decides freeze vs ema-fallback internally
+                before = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
+                update_hw_refs_from_stats(
+                    cfg,
+                    stable_hw_state,
+                    latest_stats=last_hw_stats or {},
+                    stable_hw_cfg=stable_hw_cfg,
+                )
+                after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
+                if before != after:
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "ref_update",
+                        payload={
+                            "before": before,
+                            "after": after,
+                            "source": stable_hw_state.get("hw_ref_source", "unknown"),
+                        },
+                        run_id=run_id,
+                        step=int(outer),
                     )
-                    after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
-                    if before != after:
-                        append_trace_event_v54(
-                            trace_events_path,
-                            "ref_update",
-                            payload={"before": before, "after": after, "source": "online_stats"},
-                            run_id=run_id,
-                            step=int(outer),
-                        )
-                else:
-                    pass  # NoDrift: skip any ref update
             guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
             allow_discrete = (
                 bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True

@@ -69,6 +69,17 @@ def main():
             ref_update = str(getattr(cfg.stable_hw.normalize, "ref_update", "frozen") or "frozen").lower()
         if no_drift and ref_update != "frozen":
             raise AssertionError("NoDrift violated: stable_hw.no_drift=True but normalize.ref_update != 'frozen'")
+        if no_drift:
+            stats_path = None
+            if no_drift_cfg is not None:
+                stats_path = getattr(no_drift_cfg, "stats_path", None) or getattr(
+                    no_drift_cfg, "baseline_stats_path", None
+                )
+            if stats_path is None:
+                print(
+                    "[SMOKE][WARN] no_drift enabled but baseline_stats_path is missing; "
+                    "StableHW will fallback to EMA refs if configured."
+                )
 
     print("[SMOKE] config no_drift OK. stable_hw.enabled=", stable_en)
 

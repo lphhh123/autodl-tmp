@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+import sys
 import time
 import uuid
 import hashlib
@@ -8,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .git_version import get_git_commit_or_version
+from .stable_hash import stable_hash
 
 
 def _sha256_text(s: str) -> str:
@@ -60,13 +64,13 @@ def write_run_manifest(
 
     manifest_path = out_dir_p / "run_manifest.json"
 
-    rid = str(run_id or uuid.uuid4())
+    run_id = str(run_id or uuid.uuid4())
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    resolved_cfg = out_dir_p / "config_resolved.yaml"
-    if resolved_cfg.exists():
-        cfg_sha256 = _sha256_file(resolved_cfg)
-    else:
-        cfg_sha256 = _sha256_file(Path(cfg_path))
+    # ---- compute hashes ----
+    cfg_text = Path(cfg_path).read_text(encoding="utf-8")
+    cfg_sha256 = hashlib.sha256(cfg_text.encode("utf-8")).hexdigest()
+    cfg_hash_legacy = stable_hash(cfg_text)
 
     repo_root = Path(code_root).resolve() if code_root else out_dir_p.resolve()
     try:
@@ -77,33 +81,28 @@ def write_run_manifest(
     except Exception:
         pass
 
-    git_commit = get_git_commit_or_version(str(repo_root), fallback="code_only")
-    snapshot = _code_snapshot_hash(repo_root)
-
-    locked = {
-        "acc_ref_value": stable_hw_state.get("acc_ref", None),
-        "acc_ref_source": stable_hw_state.get("acc_ref_source", None),
-        "acc_ref_from_run": stable_hw_state.get("acc_ref_from_run", None),
-        "epsilon_drop": stable_hw_state.get("epsilon_drop", None),
-    }
-
-    units = (extra or {}).get("units", {"time_unit": "ms", "dist_unit": "mm"})
+    git_info = {"commit": get_git_commit_or_version(str(repo_root), fallback="code_only")}
 
     manifest: Dict[str, Any] = {
-        "schema_version": str(spec_version),
-        "run_id": rid,
-        "timestamp": int(time.time()),
-        "cfg_path": str(cfg_path),
-        "cfg_hash": str(cfg_hash),
-        "cfg_sha256": str(cfg_sha256),
+        "run_id": run_id,
+        "created_at": created_at,
+        "cmd": command or " ".join(sys.argv),
+        "cwd": os.getcwd(),
+        "git": git_info,
+        "python": sys.version,
+        "platform": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
         "seed": int(seed),
-        "git_commit": str(git_commit),
-        "code_snapshot_hash": str(snapshot),
-        "command": str(command or ""),
-        "locked_acc_ref": locked,
+        "cfg_path": str(cfg_path),
+        # v5.4 canonical: sha256 must be real sha256
+        "cfg_sha256": cfg_sha256,
+        # keep legacy stable-hash for backward compatibility
+        "cfg_hash_legacy": cfg_hash_legacy,
+        # keep explicit alias for resolved yaml content (same input here)
+        "cfg_sha256_resolved": cfg_sha256,
         "stable_hw_state": stable_hw_state or {},
-        "units": units,
-        "extra": extra or {},
+        "locked_acc_ref_value": (stable_hw_state or {}).get("acc_ref"),
+        "locked_acc_ref_source": (stable_hw_state or {}).get("acc_ref_source"),
+        "extra_meta": extra or {},
     }
 
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
