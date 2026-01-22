@@ -585,25 +585,26 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     iso.setdefault("allow_cache_fallback", True)
 
     # ===== v5.4 NoDoubleScale: stable_hw enabled => legacy lambda_hw MUST be 0 (warn + override) =====
-    stable_en = bool(cfg.get("stable_hw", {}).get("enabled", False))
-    if stable_en:
-        # force no_double_scale.enabled = True
-        nds = cfg["stable_hw"].get("no_double_scale", None)
-        if isinstance(nds, dict):
-            nds["enabled"] = True
-        else:
-            cfg["stable_hw"]["no_double_scale"] = {"enabled": True}
+    stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
+    legacy_hw_lam = float(getattr(getattr(cfg, "hw", {}), "lambda_hw", 0.0) or 0.0)
+    legacy_loss_lam = float(getattr(getattr(cfg, "loss", {}), "lambda_hw", 0.0) or 0.0)
 
-        legacy_hw_lambda = float(cfg.get("hw", {}).get("lambda_hw", 0.0) or 0.0)
-        legacy_loss_lambda = float(cfg.get("loss", {}).get("lambda_hw", 0.0) or 0.0)
+    if stable_en and (legacy_hw_lam != 0.0 or legacy_loss_lam != 0.0):
+        print(
+            f"[WARN] NoDoubleScale(v5.4): overriding legacy lambdas to 0.0 "
+            f"(hw.lambda_hw={legacy_hw_lam}, loss.lambda_hw={legacy_loss_lam})."
+        )
+        if hasattr(cfg, "hw"):
+            cfg.hw.lambda_hw = 0.0
+        if hasattr(cfg, "loss"):
+            cfg.loss.lambda_hw = 0.0
 
-        if legacy_hw_lambda != 0.0 or legacy_loss_lambda != 0.0:
-            print(
-                "[v5.4][NoDoubleScale] WARNING: stable_hw.enabled=True -> overriding legacy lambda_hw to 0.0 "
-                f"(cfg.hw.lambda_hw={legacy_hw_lambda}, cfg.loss.lambda_hw={legacy_loss_lambda})."
-            )
-            cfg.setdefault("hw", {})["lambda_hw"] = 0.0
-            cfg.setdefault("loss", {})["lambda_hw"] = 0.0
+    if (not stable_en) and (legacy_hw_lam > 0.0 or legacy_loss_lam > 0.0):
+        raise ValueError(
+            "v5.4 Acc-First requires stable_hw.enabled=true for any HW optimization. "
+            f"Found stable_hw.enabled=false but hw.lambda_hw={legacy_hw_lam}, loss.lambda_hw={legacy_loss_lam}. "
+            "Fix: set both lambdas to 0 for pure-accuracy runs OR enable stable_hw and use lambda_hw_effective."
+        )
 
     # ---- guardrail: HW loss enabled but lambda is effectively zero ----
     try:

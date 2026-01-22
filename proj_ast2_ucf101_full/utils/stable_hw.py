@@ -89,7 +89,11 @@ def _get_no_drift_cfg(cfg_or_stable, stable_hw_cfg=None):
 
 def _get_accuracy_guard_cfg(cfg_or_stable: Any) -> dict:
     _, stable_hw_cfg = _get_root_and_stable(cfg_or_stable)
-    guard = _cfg_get(stable_hw_cfg, "accuracy_guard", {}) or {}
+    # ===== v5.4 SPEC alias: support stable_hw.guard as primary (SPEC_C/D) =====
+    guard = _cfg_get(stable_hw_cfg, "accuracy_guard", None)
+    if not guard:
+        guard = _cfg_get(stable_hw_cfg, "guard", None)
+    guard = guard or {}
     if isinstance(guard, dict):
         guard_cfg = dict(guard)
     else:
@@ -99,6 +103,26 @@ def _get_accuracy_guard_cfg(cfg_or_stable: Any) -> dict:
             guard_cfg = {}
 
     ctrl = _cfg_get(guard, "controller", None)
+
+    # ===== v5.4 SPEC field alias mapping (metric_key/threshold/hysteresis/consecutive_trigger) =====
+    # NOTE: keep everything in `ctrl` so downstream uses controller.*
+    if isinstance(ctrl, dict):
+        # metric_key -> metric
+        if ("metric" not in ctrl) and ("metric_key" in ctrl):
+            ctrl["metric"] = ctrl["metric_key"]
+        # threshold -> epsilon_drop (our code uses epsilon_drop)
+        if ("epsilon_drop" not in ctrl):
+            if "threshold" in ctrl:
+                ctrl["epsilon_drop"] = ctrl["threshold"]
+            elif "tolerance" in ctrl:
+                ctrl["epsilon_drop"] = ctrl["tolerance"]
+        # consecutive_trigger -> k_exit (closest existing knob in our guard FSM)
+        # 解释：本实现用 k_exit 表示“连续好 epoch 才退出 RECOVERY”，与 spec 的连续触发/恢复最接近
+        if ("k_exit" not in ctrl) and ("consecutive_trigger" in ctrl):
+            ctrl["k_exit"] = int(ctrl["consecutive_trigger"])
+        # keep hysteresis (will be used by patch P0-1b below)
+        if ("hysteresis" not in ctrl) and ("hysteresis" in guard_cfg):
+            ctrl["hysteresis"] = guard_cfg.get("hysteresis")
 
     # --- legacy fallback: if controller missing, treat guard itself as controller ---
     if not isinstance(ctrl, dict) or len(ctrl) == 0:
@@ -473,6 +497,16 @@ def apply_accuracy_guard(
         has_val_this_epoch = False
 
     eps_drop = float(_cfg_get(ctrl, "epsilon_drop", _cfg_get(gcfg, "epsilon_drop", 0.01)))
+
+    # ===== v5.4 hysteresis: different enter/exit thresholds to avoid oscillation =====
+    hyst = float(_cfg_get(ctrl, "hysteresis", 0.0) or 0.0)
+    eps_enter = max(eps_drop, 0.0)
+    eps_exit = max(eps_enter - hyst, 0.0)
+    prev_mode = str(st.get("guard_mode", "HW_OPT")).upper()
+    eps_used = eps_enter if prev_mode in ("OK", "HW_OPT", "WARMUP") else eps_exit
+    st["guard_eps_enter"] = eps_enter
+    st["guard_eps_exit"] = eps_exit
+    st["guard_eps_used"] = eps_used
     cut_hw = bool(_cfg_get(ctrl, "cut_hw_loss_on_violate", True))
     freeze_discrete = bool(_cfg_get(ctrl, "freeze_discrete_updates", True))
     freeze_sched = bool(_cfg_get(ctrl, "freeze_schedule_in_recovery", True))
@@ -567,8 +601,8 @@ def apply_accuracy_guard(
     # threshold check
     violate = False
     if metric is not None:
-        violate = (float(acc_ref) - float(metric)) > float(eps_drop)
-    margin = float(metric) - (float(acc_ref) - float(eps_drop)) if metric is not None else 0.0
+        violate = (float(acc_ref) - float(metric)) > float(eps_used)
+    margin = float(metric) - (float(acc_ref) - float(eps_used)) if metric is not None else 0.0
     stop_on_violation = bool(_cfg_get(ctrl, "stop_on_violation", _cfg_get(gcfg, "stop_on_violation", False)))
     stop_training = bool(stop_on_violation and violate)
 
@@ -585,7 +619,7 @@ def apply_accuracy_guard(
         if st.get("guard_mode") in ("RECOVERY", "VIOLATE"):
             enter = int(st.get("recovery_enter_epoch", epoch))
             min_ok = (epoch - enter + 1) >= recovery_min_epochs
-            ok_margin = (metric is not None) and (float(metric) + margin_exit >= float(acc_ref) - float(eps_drop))
+            ok_margin = (metric is not None) and (float(metric) + margin_exit >= float(acc_ref) - float(eps_used))
             if min_ok and ok_margin:
                 st["recovery_good_streak"] = int(st.get("recovery_good_streak", 0)) + 1
             else:
