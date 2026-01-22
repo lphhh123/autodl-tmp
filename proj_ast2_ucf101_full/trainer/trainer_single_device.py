@@ -22,7 +22,6 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.stable_hash import stable_hash
 from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hw import (
@@ -177,6 +176,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_state: Dict[str, Any] = {}
+    if out_dir is not None:
+        stable_state["out_dir"] = str(out_dir)
     if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)):
         init_locked_acc_ref(cfg, stable_state)
         init_hw_refs_from_baseline_stats(cfg, stable_state, stable_hw_cfg=stable_hw_cfg)
@@ -491,10 +492,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
 
     if out_dir is not None:
         from utils.run_manifest import write_run_manifest
-        from omegaconf import OmegaConf
-
-        cfg_path = str(getattr(cfg, "cfg_path", "") or "")
-        cfg_hash = stable_hash(OmegaConf.to_container(cfg, resolve=True))
+        git_sha = None
         seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)) or 0)
 
         _metrics_summary = {
@@ -510,13 +508,16 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
 
         write_run_manifest(
             out_dir=str(out_dir),
-            cfg_path=cfg_path,
-            cfg_hash=str(cfg_hash),
+            cfg_path=str(cfg.train.cfg_path),
+            cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
             seed=seed,
+            git_sha=git_sha,
             stable_hw_state=stable_state if "stable_state" in locals() else {},
-            extra={"metrics_summary": _metrics_summary},
-            run_id=str(run_id),
-            spec_version="v5.4",
+            metrics_summary=_metrics_summary,
+            extra={
+                "task": "single_device",
+                "out_dir": str(out_dir),
+            },
         )
     if trace_dir is not None:
         append_trace_event_v54(

@@ -42,6 +42,17 @@ def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def _expand_out_dir_template(path_val: Any, out_dir: Any) -> Any:
+    if path_val is None:
+        return None
+    s = str(path_val)
+    if out_dir is None:
+        return s
+    od = str(out_dir)
+    s = s.replace("${out_dir}", od).replace("{out_dir}", od)
+    return s
+
+
 def _get_root_and_stable(cfg_or_stable):
     """
     Accept either:
@@ -307,6 +318,7 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
         return
 
     baseline_stats_path = _cfg_get(locked, "baseline_stats_path", None)
+    baseline_stats_path = _expand_out_dir_template(baseline_stats_path, st.get("out_dir"))
     if baseline_stats_path:
         p = Path(str(baseline_stats_path))
         if p.exists() and p.is_file():
@@ -737,6 +749,7 @@ def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=N
         stats_path = getattr(nd_cfg, "stats_path", None) or getattr(nd_cfg, "baseline_stats_path", None)
     if (not stats_path) and (lock_cfg is not None):
         stats_path = getattr(lock_cfg, "baseline_stats_path", None)
+    stats_path = _expand_out_dir_template(stats_path, stable_hw_state.get("out_dir"))
 
     loaded_ok = False
     if stats_path:

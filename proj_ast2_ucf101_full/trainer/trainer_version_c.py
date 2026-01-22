@@ -716,6 +716,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     last_mapping: List[int] = []
     stable_hw_state: Dict[str, Any] = {}
     stable_hw_state["run_signature"] = signature
+    stable_hw_state["out_dir"] = str(out_dir)
     if stable_hw_cfg is not None:
         nd_cfg = getattr(stable_hw_cfg, "no_drift", None)
         if isinstance(nd_cfg, bool):
@@ -1500,10 +1501,8 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
     # write run_manifest.json (auditable LockedAccRef)  -- v5.4 compliant
     from utils.run_manifest import write_run_manifest
-    from omegaconf import OmegaConf
 
-    cfg_path = str(getattr(cfg, "cfg_path", "") or "")
-    cfg_hash = stable_hash(OmegaConf.to_container(cfg, resolve=True))
+    git_sha = None
 
     _telemetry = {
         "gating_on_ratio": float(gating_epochs) / max(1, int(total_epochs)),
@@ -1520,13 +1519,16 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
     write_run_manifest(
         out_dir=str(out_dir),
-        cfg_path=cfg_path,
-        cfg_hash=str(cfg_hash),
+        cfg_path=str(cfg.train.cfg_path),
+        cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
         seed=int(seed),
+        git_sha=git_sha,
         stable_hw_state=stable_hw_state if "stable_hw_state" in locals() else {},
-        extra={"metrics_summary": _metrics_summary},
-        run_id=str(run_id),
-        spec_version="v5.4",
+        metrics_summary=_metrics_summary,
+        extra={
+            "task": "version_c",
+            "out_dir": str(out_dir),
+        },
     )
 
     stable_fields = stable_hw_log_fields(stable_hw_state, cfg)

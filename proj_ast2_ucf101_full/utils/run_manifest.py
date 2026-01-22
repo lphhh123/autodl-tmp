@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .git_version import get_git_commit_or_version
-from .stable_hash import stable_hash
 
 
 def _sha256_text(s: str) -> str:
@@ -30,8 +29,7 @@ def _sha256_file(p: Path) -> str:
 
 def _code_snapshot_hash(root: Path) -> str:
     """
-    Lightweight snapshot hash: sha256 over (relpath|size|mtime) of *.py/*.yaml/*.yml/*.json/*.md
-    Avoids reading full contents; stable enough for drift detection.
+    Lightweight snapshot hash: sha256 over (relpath|sha256(file_content)) of *.py/*.yaml/*.yml/*.json/*.md
     """
     pats = ["**/*.py", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.md"]
     items = []
@@ -41,8 +39,7 @@ def _code_snapshot_hash(root: Path) -> str:
                 continue
             if any(x in fp.parts for x in ("outputs", "output", "data", "__pycache__")):
                 continue
-            st = fp.stat()
-            items.append(f"{fp.relative_to(root)}|{st.st_size}|{int(st.st_mtime)}")
+            items.append(f"{fp.relative_to(root)}|{_sha256_file(fp)}")
     items.sort()
     return _sha256_text("\n".join(items))
 
@@ -51,26 +48,31 @@ def write_run_manifest(
     out_dir: str,
     cfg_path: str,
     cfg_hash: str,
-    seed: int,
-    stable_hw_state: Dict[str, Any],
+    seed: Optional[int] = None,
+    stable_hw_state: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
     run_id: Optional[str] = None,
     spec_version: str = "v5.4",
     command: Optional[str] = None,
     code_root: Optional[str] = None,
+    seed_id: Optional[int] = None,
+    git_sha: Optional[str] = None,
+    metrics_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     out_dir_p = Path(out_dir)
     out_dir_p.mkdir(parents=True, exist_ok=True)
-
     manifest_path = out_dir_p / "run_manifest.json"
+
+    if seed is None:
+        seed = seed_id if seed_id is not None else 0
+    if seed_id is None:
+        seed_id = int(seed)
 
     run_id = str(run_id or uuid.uuid4())
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    # ---- compute hashes ----
     cfg_text = Path(cfg_path).read_text(encoding="utf-8")
     cfg_sha256 = hashlib.sha256(cfg_text.encode("utf-8")).hexdigest()
-    cfg_hash_legacy = stable_hash(cfg_text)
 
     repo_root = Path(code_root).resolve() if code_root else out_dir_p.resolve()
     try:
@@ -81,27 +83,42 @@ def write_run_manifest(
     except Exception:
         pass
 
-    git_info = {"commit": get_git_commit_or_version(str(repo_root), fallback="code_only")}
+    commit = None
+    try:
+        commit = get_git_commit_or_version(str(repo_root), fallback="code_only")
+    except Exception:
+        commit = None
+    if (not commit) and git_sha:
+        commit = git_sha
+    if not commit:
+        commit = "unknown"
+
+    code_snapshot = None
+    try:
+        if commit in ("code_only", "unknown"):
+            code_snapshot = _code_snapshot_hash(repo_root)
+    except Exception:
+        code_snapshot = None
 
     manifest: Dict[str, Any] = {
+        "spec_version": spec_version,
         "run_id": run_id,
         "created_at": created_at,
         "cmd": command or " ".join(sys.argv),
         "cwd": os.getcwd(),
-        "git": git_info,
         "python": sys.version,
         "platform": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
+        "git": {"commit": commit},
+        "code_snapshot_hash": code_snapshot,
         "seed": int(seed),
+        "seed_id": int(seed_id),
         "cfg_path": str(cfg_path),
-        # v5.4 canonical: sha256 must be real sha256
+        "cfg_hash": str(cfg_hash),
         "cfg_sha256": cfg_sha256,
-        # keep legacy stable-hash for backward compatibility
-        "cfg_hash_legacy": cfg_hash_legacy,
-        # keep explicit alias for resolved yaml content (same input here)
-        "cfg_sha256_resolved": cfg_sha256,
         "stable_hw_state": stable_hw_state or {},
         "locked_acc_ref_value": (stable_hw_state or {}).get("acc_ref"),
         "locked_acc_ref_source": (stable_hw_state or {}).get("acc_ref_source"),
+        "metrics_summary": metrics_summary or {},
         "extra_meta": extra or {},
     }
 
