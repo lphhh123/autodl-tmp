@@ -1357,6 +1357,7 @@ def main() -> None:
                     )
 
     recordings_found = True
+    recordings_missing = False
     if run_mode == "inprocess":
         cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
         if not cands:
@@ -1370,6 +1371,7 @@ def main() -> None:
             output_dir = out_dir
             recordings_path = out_dir / "recordings.jsonl"
             recordings_found = False
+            recordings_missing = True
             _append_llm_usage(
                 llm_usage_path,
                 {"ok": False, "reason": "missing_recordings", "engine": method},
@@ -1387,6 +1389,7 @@ def main() -> None:
         recordings_path = output_dir / "recordings.jsonl"
         if not recordings_path.exists():
             recordings_found = False
+            recordings_missing = True
             _append_llm_usage(
                 llm_usage_path,
                 {"ok": False, "reason": "missing_recordings", "engine": method},
@@ -1432,9 +1435,10 @@ def main() -> None:
             {"ok": False, "reason": "missing_llm_usage", "engine": method},
         )
     if not recordings_path.exists():
-        llm_usage_path.write_text(
-            json.dumps({"event": "recordings_missing", "path": str(recordings_path)}) + "\n",
-            encoding="utf-8",
+        recordings_missing = True
+        _append_llm_usage(
+            llm_usage_path,
+            {"ok": False, "event": "recordings_missing", "path": str(recordings_path), "engine": method},
         )
     method_label = f"heuragenix:{method}"
     pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
@@ -1487,10 +1491,14 @@ def main() -> None:
         if (max_steps is not None and int(max_steps) >= 0)
         else int(max(1, round(float(iters_sf) * max(1, problem_size_eff))))
     )
+    eval_counter_path = out_dir / "eval_counter.json"
+    if not eval_counter_path.exists():
+        raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
+    ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
     report = {
         "run_id": run_id,
-        "success": True,
-        "error": "",
+        "success": (not recordings_missing),
+        "error": ("missing recordings.jsonl" if recordings_missing else ""),
         "seed_id": int(seed),
         "method": str(method),
         "run_mode": str(run_mode),
@@ -1551,8 +1559,8 @@ def main() -> None:
         "llm_fallback_used": bool(llm_summary.get("fallback_used", False)),
         "llm_fallback_count": int(llm_summary.get("fallback_count", 0)),
         "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
-        "evaluator_calls": int(trace_summary.get("n_rows", 0)),
-        "evaluate_calls": int(trace_summary.get("n_rows", 0)),
+        "evaluator_calls": int(ec.get("eval_calls_total", trace_summary.get("n_rows", 0))),
+        "evaluate_calls": int(ec.get("eval_calls_total", trace_summary.get("n_rows", 0))),
         "fairness_overrides_applied": True,
         "fairness_overrides": FAIRNESS_OVERRIDES,
     }
@@ -1567,11 +1575,6 @@ def main() -> None:
         json.dump(report, f, indent=2)
     # ---- v5.4: enforce budget fairness artifact (budget.json) ----
     wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
-    eval_counter_path = out_dir / "eval_counter.json"
-    if not eval_counter_path.exists():
-        raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
-
-    ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
     actual_eval_calls = int(trace_info.get("evaluator_calls", 0))
     if actual_eval_calls <= 0:
         actual_eval_calls = int(_count_jsonl_lines(recordings_path)) if recordings_path.exists() else 0

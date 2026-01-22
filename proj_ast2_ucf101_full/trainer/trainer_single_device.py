@@ -386,17 +386,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     early_stop_triggered = True
                     break
 
-                if hasattr(cfg, "stable_hw") and hasattr(cfg.stable_hw, "no_drift") and bool(
-                    getattr(cfg.stable_hw.no_drift, "enabled", False)
-                ):
-                    pass  # NoDrift: skip any ref update
-                else:
-                    update_hw_refs_from_stats(
-                        cfg,
-                        stable_state,
-                        latest_stats=last_hw_stats or {},
-                        stable_hw_cfg=stable_hw_cfg,
-                    )
+                # v5.4: always call; stable_hw decides freeze vs ema-fallback internally
+                update_hw_refs_from_stats(
+                    cfg,
+                    stable_state,
+                    latest_stats=last_hw_stats or {},
+                    stable_hw_cfg=stable_hw_cfg,
+                )
             guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
             allow_discrete = bool(stable_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
             print(
