@@ -39,6 +39,20 @@ def _count_jsonl_lines(path: Path) -> int:
     return n
 
 
+def update_manifest_json(trace_dir: Path, patch: dict) -> None:
+    """
+    Update trace_dir/manifest.json in-place (create if missing).
+    """
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    p = trace_dir / "manifest.json"
+    if p.exists():
+        obj = _read_json(p)
+    else:
+        obj = {"schema": "v5.4", "ts_ms": int(time.time() * 1000)}
+    obj.update(patch or {})
+    _write_json(p, obj)
+
+
 # ---------------------------
 # v5.4 trace dir API (SPEC_D/E)
 # ---------------------------
@@ -71,6 +85,28 @@ def init_trace_dir(
         }
         _write_json(header_path, header)
 
+    manifest = {
+        "schema": "v5.4",
+        "ts_ms": _now_ms(),
+        "signature": signature,
+        "run_meta": run_meta or {},
+    }
+    _write_json(trace_dir / "manifest.json", manifest)
+
+    summary = {
+        "schema": "v5.4",
+        "ts_ms": _now_ms(),
+        "last_iter": -1,
+        "accepted_steps_total": 0,
+        "eval_calls_total": 0,
+        "wall_time_ms_total": 0,
+        "cache_hit_total": 0,
+        "cache_miss_total": 0,
+        "cache_size": 0,
+    }
+    _write_json(trace_dir / "summary.json", summary)
+    _write_json(trace_dir / "trace_summary.json", summary)
+
     events_path = trace_dir / "trace_events.jsonl"
     if not events_path.exists():
         events_path.write_text("", encoding="utf-8")
@@ -88,36 +124,35 @@ def append_trace_event(
     _append_jsonl(events_path, {"ts_ms": _now_ms(), "event_type": event_type, "payload": payload})
 
 
+def update_trace_summary(trace_dir: Path, patch: dict) -> None:
+    """
+    Update both summary.json and trace_summary.json (back-compat).
+    """
+    p = trace_dir / "summary.json"
+    if p.exists():
+        obj = _read_json(p)
+    else:
+        obj = {"schema": "v5.4", "ts_ms": int(time.time() * 1000)}
+    obj.update(patch or {})
+    _write_json(p, obj)
+    _write_json(trace_dir / "trace_summary.json", obj)
+
+
 def finalize_trace_dir(
     trace_dir: Path,
-    *,
-    summary_extra: Optional[Dict[str, Any]] = None,
-    run_id: Optional[str] = None,
-    step: Optional[int] = None,
-) -> Dict[str, Any]:
+) -> None:
     """
-    Creates trace/trace_summary.json and appends a finalize event.
+    Finalize: verify required files exist.
     """
-    events_path = trace_dir / "trace_events.jsonl"
-    header_path = trace_dir / "trace_header.json"
-    if not header_path.exists():
-        raise RuntimeError("[trace] trace_header.json missing; call init_trace_dir() first")
-
-    n_events = _count_jsonl_lines(events_path)
-    summary = {
-        "ts_ms": _now_ms(),
-        "schema": "v5.4",
-        "n_events": n_events,
-    }
-    if summary_extra:
-        summary.update(summary_extra)
-
-    if run_id is not None and step is not None:
-        append_trace_event_v54(events_path, "finalize", payload={"summary": summary}, run_id=run_id, step=step)
-    else:
-        append_trace_event(trace_dir, event_type="finalize", payload={"summary": summary})
-    _write_json(trace_dir / "trace_summary.json", summary)
-    return summary
+    trace_csv = trace_dir / "trace.csv"
+    if not trace_csv.exists():
+        trace_csv = trace_dir.parent / "trace.csv"
+    if not trace_csv.exists():
+        raise FileNotFoundError(f"[trace_guard] missing required {trace_csv}")
+    for fn in ["manifest.json", "summary.json"]:
+        p = trace_dir / fn
+        if not p.exists():
+            raise FileNotFoundError(f"[trace_guard] missing required {p}")
 
 
 # ---------------------------

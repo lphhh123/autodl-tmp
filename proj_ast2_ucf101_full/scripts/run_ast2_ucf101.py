@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     cfg = load_config(args.cfg)
+    cfg.cfg_path = args.cfg
     cfg = validate_and_fill_defaults(cfg, mode="ast2")
     seed = int(args.seed)
     seed_everything(seed)

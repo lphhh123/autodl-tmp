@@ -151,7 +151,7 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return default
 
 
-def stable_hw_log_fields(st: Dict[str, Any]) -> Dict[str, Any]:
+def stable_hw_log_fields(st: Dict[str, Any], cfg: Any = None) -> Dict[str, Any]:
     """Flat dict for metrics.json / tb; include ref source for SPEC_C audit."""
     return {
         "stable_hw/lambda_hw_base": _safe_float(st.get("lambda_hw_base"), 0.0),
@@ -173,6 +173,21 @@ def stable_hw_log_fields(st: Dict[str, Any]) -> Dict[str, Any]:
         "stable_hw/ref_E": _safe_float(st.get("ref_E"), 0.0) if st.get("ref_E") is not None else None,
         "stable_hw/ref_M": _safe_float(st.get("ref_M"), 0.0) if st.get("ref_M") is not None else None,
         "stable_hw/ref_C": _safe_float(st.get("ref_C"), 0.0) if st.get("ref_C") is not None else None,
+        "schedule_phase": st.get("schedule_phase", ""),
+        "lambda_hw_base": _safe_float(st.get("lambda_hw_base", 0.0), 0.0),
+        "lambda_hw_eff": _safe_float(st.get("lambda_hw_effective", 0.0), 0.0),
+        "lambda_hw_effective": _safe_float(st.get("lambda_hw_effective", 0.0), 0.0),
+        "acc_ref": _safe_float(st.get("acc_ref", 0.0), 0.0),
+        "acc_ref_source": st.get("acc_ref_source", ""),
+        "acc_last": _safe_float(st.get("acc_last", 0.0), 0.0),
+        "acc_last_source": st.get("acc_last_source", ""),
+        "epsilon_drop": _safe_float(st.get("epsilon_drop", 0.0), 0.0),
+        "guard_triggered": bool(st.get("guard_triggered", False)),
+        "violate_streak": int(st.get("violate_streak", 0) or 0),
+        "recovery_until_epoch": int(st.get("recovery_until_epoch", -1) or -1),
+        "freeze_discrete_updates": bool(st.get("freeze_discrete_updates", False)),
+        "freeze_schedule_in_recovery": bool(st.get("freeze_schedule_in_recovery", False)),
+        "cut_hw_loss_on_violate": bool(st.get("cut_hw_loss_on_violate", False)),
     }
 
 
@@ -534,6 +549,8 @@ def apply_accuracy_guard(
         st["val_acc1_last"] = float(val_metric_or_none)
     if train_ema_or_none is not None:
         st["train_acc1_ema"] = float(train_ema_or_none)
+    st["acc_last"] = float(metric) if metric is not None else None
+    st["acc_last_source"] = str(metric_key)
 
     # threshold check
     violate = False
@@ -592,10 +609,19 @@ def apply_accuracy_guard(
     st["guard_mode"] = str(st["guard_mode"])
     st["in_recovery"] = bool(st["guard_mode"] in ("VIOLATE", "RECOVERY"))
     st["acc_violation"] = bool(violate)
+    st["guard_triggered"] = bool(violate)
+    st["violate_streak"] = int(st.get("violate_streak", 0) + 1) if violate else 0
     st["acc_used_last"] = float(acc_used) if acc_used is not None else None
     st["acc_margin_last"] = float(margin)
     st["stop_on_violation"] = bool(stop_training)
     st["epsilon_drop"] = float(eps_drop)
+    st["freeze_discrete_updates"] = bool(freeze_discrete)
+    st["freeze_schedule_in_recovery"] = bool(freeze_sched)
+    st["cut_hw_loss_on_violate"] = bool(cut_hw)
+    if st["guard_mode"] in ("VIOLATE", "RECOVERY"):
+        st["recovery_until_epoch"] = int(epoch + recovery_min_epochs)
+    else:
+        st["recovery_until_epoch"] = int(-1)
     st["last_guard_decision"] = {
         "guard_mode": str(st["guard_mode"]),
         "violate": bool(violate),

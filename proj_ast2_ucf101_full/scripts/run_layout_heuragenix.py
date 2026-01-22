@@ -32,7 +32,7 @@ import numpy as np
 
 project_root = Path(__file__).resolve().parents[1]
 
-from layout.candidate_pool import signature_from_assign
+from layout.candidate_pool import signature_from_assign, signature_for_assign
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.pareto import ParetoSet
 from layout.trace_metrics import compute_trace_metrics_from_csv
@@ -40,9 +40,17 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.trace_schema import TRACE_FIELDS
+
+EVAL_VERSION = "v5.4"
+TIME_UNIT = "ms"
+DIST_UNIT = "mm"
+
+
+def _row_to_list(row: dict) -> list:
+    return [row.get(k, "") for k in TRACE_FIELDS]
 
 # Minimal requirements for portability across HeurAgenix versions / problem envs:
 # - iter: step index
@@ -528,144 +536,192 @@ def signature_from_action(op: str, op_args: dict | None) -> str:
 
 
 def _write_trace_and_pareto(
-    layout_input: dict,
-    objective_cfg: dict,
-    recordings_path: Path,
-    trace_csv_path: Path,
-    pareto_csv_path: Path,
+    trace_dir: Path,
+    hx_rows: list,
+    objective_hash: str,
+    seed_id: int,
+    move_family: str,
+    selector: str,
+    lookahead: int,
+    budget_mode: str,
+    budget_total: int,
 ) -> dict:
     """
-    v5.4: do NOT replay-evaluate. Use metrics already recorded by HeurAgenix env.
-    signature column uses op_signature; cache_key uses assignment signature (with objective_hash).
+    Write unified trace.csv (SPEC v5.4) from HeurAgenix recordings.
+    Returns extra_report dict (pareto/undo/oscillation stats etc.) for report.json only.
     """
-    evaluator = _build_evaluator(layout_input=layout_input, objective_cfg=objective_cfg)
-    objective_hash = evaluator.objective_hash()
+    trace_csv = trace_dir / "trace.csv"
+    wall_start = time.perf_counter()
 
-    pareto = ParetoSet(
-        eps_comm=float(objective_cfg.get("eps_comm", 0.0)),
-        eps_therm=float(objective_cfg.get("eps_therm", 0.0)),
-    )
+    accepted_steps_cum = 0
+    eval_calls_cum = 0
+    cache_hit_cum = 0
+    cache_miss_cum = 0
+    cache_size = 0
 
-    # streaming write
-    trace_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    pareto_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    extra_report = {
+        "hx_rows": len(hx_rows),
+        "hx_metrics": {},
+    }
 
-    best_total = None
-    best_comm = None
-    best_therm = None
-    best_step = None
-    prev_total = None
-    prev_comm = None
-    prev_therm = None
+    with trace_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(TRACE_FIELDS)
 
-    with trace_csv_path.open("w", encoding="utf-8") as f:
-        f.write(",".join(TRACE_FIELDS) + "\n")
+        init_assign = hx_rows[0].get("assign") if hx_rows else None
+        init_sig = signature_for_assign(init_assign) if init_assign is not None else "assign:unknown"
+        cfg_hash_subset = stable_hash(
+            {
+                "source": "heuragenix",
+                "eval_version": EVAL_VERSION,
+                "objective_hash": objective_hash,
+            }
+        )
+        init_cache_key = stable_hash(
+            {
+                "assign": init_sig,
+                "objective_hash": objective_hash,
+                "eval_version": EVAL_VERSION,
+                "cfg_hash_subset": cfg_hash_subset,
+            }
+        )
+        wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
 
-        have_any = False
-        for rec in _iter_recordings(recordings_path):
-            have_any = True
-            step = int(rec.get("iter", 0))
-            stage = str(rec.get("stage", "heuragenix"))
-            op = str(rec.get("op", "unknown"))
-            accepted = int(rec.get("accepted", 1))
+        init_row = {
+            "iter": -1,
+            "stage": "init",
+            "op": "init",
+            "op_args_json": json.dumps({"op": "init"}, ensure_ascii=False),
+            "accepted": 1,
+            "total_scalar": hx_rows[0].get("total_scalar", "") if hx_rows else "",
+            "comm_norm": hx_rows[0].get("comm_norm", "") if hx_rows else "",
+            "therm_norm": hx_rows[0].get("therm_norm", "") if hx_rows else "",
+            "duplicate_penalty": hx_rows[0].get("duplicate_penalty", 0.0) if hx_rows else 0.0,
+            "boundary_penalty": hx_rows[0].get("boundary_penalty", 0.0) if hx_rows else 0.0,
+            "signature": init_sig,
+            "assign_signature": init_sig,
+            "op_signature": stable_hash({"op": "init"}),
+            "seed_id": seed_id,
+            "objective_hash": objective_hash,
+            "eval_version": EVAL_VERSION,
+            "time_unit": TIME_UNIT,
+            "dist_unit": DIST_UNIT,
+            "wall_time_ms": wall_time_ms,
+            "wall_time_ms_cum": wall_time_ms,
+            "evaluator_calls": eval_calls_cum,
+            "eval_calls_cum": eval_calls_cum,
+            "accepted_steps": accepted_steps_cum,
+            "accepted_steps_cum": accepted_steps_cum,
+            "selected_idx": -1,
+            "tabu_hit": 0,
+            "inverse_hit": 0,
+            "cooldown_hit": 0,
+            "cache_hit": 0,
+            "cache_miss": 0,
+            "cache_hit_cum": cache_hit_cum,
+            "cache_miss_cum": cache_miss_cum,
+            "cache_size": cache_size,
+            "cache_key": init_cache_key,
+            "move_family": move_family,
+            "selector": selector,
+            "lookahead": lookahead,
+            "budget_mode": budget_mode,
+            "budget_total": budget_total,
+            "budget_remaining": budget_total,
+            "use_llm": 0,
+            "llm_model": "",
+            "llm_prompt_tokens": 0,
+            "llm_completion_tokens": 0,
+            "llm_latency_ms": 0,
+        }
+        writer.writerow(_row_to_list(init_row))
 
-            total_scalar = float(rec.get("total_scalar", 0.0))
-            comm_norm = float(rec.get("comm_norm", 0.0))
-            therm_norm = float(rec.get("therm_norm", 0.0))
+        for i, r in enumerate(hx_rows):
+            accepted = int(r.get("accepted", 0))
+            if accepted:
+                accepted_steps_cum += 1
 
-            op_args = rec.get("op_args", {}) or {}
-            if not isinstance(op_args, dict):
-                op_args = {"_raw": str(op_args)}
-
-            # HeurAgenix env provides:
-            #   rec["signature"] = assignment signature
-            #   rec["op_signature"] = op signature
-            assign_sig = str(rec.get("signature") or "")
-            op_sig = str(rec.get("op_signature") or signature_from_action(op, op_args))
-            cache_key = f"obj:{objective_hash}|{assign_sig}" if assign_sig else f"obj:{objective_hash}|"
-            cache_hit = int(rec.get("cache_hit", 0))
-
-            meta = rec.get("meta", {}) or {}
-            tabu_hit = int(meta.get("tabu_hit", 0))
-            inverse_hit = int(meta.get("inverse_hit", 0))
-            cooldown_hit = int(meta.get("cooldown_hit", 0))
-
-            duplicate_penalty = float(rec.get("duplicate_penalty", 0.0))
-            boundary_penalty = float(rec.get("boundary_penalty", 0.0))
-            seed_id = int(rec.get("seed_id", 0))
-            time_ms = float(rec.get("time_ms", 0.0))
-
-            pareto_added = 0
-            if accepted == 1:
-                added = pareto.add(comm_norm, therm_norm, {})
-                pareto_added = 1 if added else 0
-
-            if prev_total is None:
-                delta_total = 0.0
-                delta_comm = 0.0
-                delta_therm = 0.0
+            assign = r.get("assign")
+            assign_sig = signature_for_assign(assign) if assign is not None else "assign:unknown"
+            op_args = r.get("op_args", r.get("op_args_json", {}))
+            if isinstance(op_args, str):
+                try:
+                    op_args_obj = json.loads(op_args)
+                except Exception:
+                    op_args_obj = {"raw": op_args}
             else:
-                delta_total = float(total_scalar - prev_total)
-                delta_comm = float(comm_norm - prev_comm)
-                delta_therm = float(therm_norm - prev_therm)
+                op_args_obj = op_args or {}
+            op_sig = stable_hash(op_args_obj)
 
-            if accepted == 1:
-                prev_total = total_scalar
-                prev_comm = comm_norm
-                prev_therm = therm_norm
+            cfg_hash_subset = stable_hash(
+                {
+                    "source": "heuragenix",
+                    "eval_version": EVAL_VERSION,
+                    "objective_hash": objective_hash,
+                }
+            )
+            cache_key = stable_hash(
+                {
+                    "assign": assign_sig,
+                    "objective_hash": objective_hash,
+                    "eval_version": EVAL_VERSION,
+                    "cfg_hash_subset": cfg_hash_subset,
+                }
+            )
+
+            wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
+            budget_remaining = max(0, budget_total - (i + 1)) if budget_mode == "steps" else ""
 
             row = {
-                "iter": step,
-                "stage": stage,
-                "op": op,
-                "op_args_json": json.dumps(op_args, ensure_ascii=False),
+                "iter": i,
+                "stage": r.get("stage", "hx"),
+                "op": r.get("op", r.get("type", "")),
+                "op_args_json": json.dumps(op_args_obj, ensure_ascii=False),
                 "accepted": accepted,
-                "total_scalar": total_scalar,
-                "comm_norm": comm_norm,
-                "therm_norm": therm_norm,
-                "pareto_added": pareto_added,
-                "duplicate_penalty": duplicate_penalty,
-                "boundary_penalty": boundary_penalty,
+                "total_scalar": r.get("total_scalar", r.get("total", "")),
+                "comm_norm": r.get("comm_norm", r.get("comm", "")),
+                "therm_norm": r.get("therm_norm", r.get("therm", "")),
+                "duplicate_penalty": r.get("duplicate_penalty", r.get("dup", 0.0)),
+                "boundary_penalty": r.get("boundary_penalty", r.get("boundary", 0.0)),
+                "signature": assign_sig,
+                "assign_signature": assign_sig,
+                "op_signature": op_sig,
                 "seed_id": seed_id,
-                "time_ms": time_ms,
-                "signature": op_sig,
-                "delta_total": delta_total,
-                "delta_comm": delta_comm,
-                "delta_therm": delta_therm,
-                "tabu_hit": tabu_hit,
-                "inverse_hit": inverse_hit,
-                "cooldown_hit": cooldown_hit,
-                "policy": stage,
-                "move": op,
-                "lookahead_k": int(meta.get("lookahead_k", 0)),
-                "cache_hit": cache_hit,
+                "objective_hash": objective_hash,
+                "eval_version": EVAL_VERSION,
+                "time_unit": TIME_UNIT,
+                "dist_unit": DIST_UNIT,
+                "wall_time_ms": wall_time_ms,
+                "wall_time_ms_cum": wall_time_ms,
+                "evaluator_calls": eval_calls_cum,
+                "eval_calls_cum": eval_calls_cum,
+                "accepted_steps": accepted_steps_cum,
+                "accepted_steps_cum": accepted_steps_cum,
+                "selected_idx": int(r.get("selected_idx", -1)),
+                "tabu_hit": int(r.get("tabu_hit", 0)),
+                "inverse_hit": int(r.get("inverse_hit", 0)),
+                "cooldown_hit": int(r.get("cooldown_hit", 0)),
+                "cache_hit": 0,
+                "cache_miss": 0,
+                "cache_hit_cum": cache_hit_cum,
+                "cache_miss_cum": cache_miss_cum,
+                "cache_size": cache_size,
                 "cache_key": cache_key,
+                "move_family": move_family,
+                "selector": selector,
+                "lookahead": lookahead,
+                "budget_mode": budget_mode,
+                "budget_total": budget_total,
+                "budget_remaining": budget_remaining,
+                "use_llm": 0,
+                "llm_model": "",
+                "llm_prompt_tokens": 0,
+                "llm_completion_tokens": 0,
+                "llm_latency_ms": 0,
             }
-            f.write(",".join(str(row[k]) for k in TRACE_FIELDS) + "\n")
+            writer.writerow(_row_to_list(row))
 
-            if best_total is None or total_scalar > best_total:
-                best_total = total_scalar
-                best_comm = comm_norm
-                best_therm = therm_norm
-                best_step = step
-
-        if not have_any:
-            raise RuntimeError(f"empty recordings: {recordings_path}")
-
-    # write pareto points
-    with pareto_csv_path.open("w", encoding="utf-8") as fp:
-        fp.write("comm_norm,therm_norm\n")
-        for p in pareto.points:
-            fp.write(f"{p.comm_norm},{p.therm_norm}\n")
-
-    return {
-        "objective_hash": objective_hash,
-        "best_total_scalar": float(best_total if best_total is not None else 0.0),
-        "best_comm_norm": float(best_comm if best_comm is not None else 0.0),
-        "best_therm_norm": float(best_therm if best_therm is not None else 0.0),
-        "best_step": int(best_step if best_step is not None else 0),
-        "n_pareto": int(len(pareto.points)),
-    }
+    return extra_report
 
 
 def _load_pareto_from_csv(pareto_csv_path: Path, pareto_cfg: dict) -> ParetoSet:
@@ -1100,17 +1156,16 @@ def main() -> None:
         if finalize_state["finalized"]:
             return
         finalize_state.update({k: v for k, v in overrides.items() if v is not None})
-        finalize_trace_dir(
+        update_trace_summary(
             trace_dir,
-            summary_extra={
+            {
                 "reason": str(finalize_state.get("reason", "error")),
                 "steps_done": int(finalize_state.get("steps_done", 0) or 0),
                 "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
                 "best_total": finalize_state.get("best_total", None),
             },
-            run_id=run_id,
-            step=int(finalize_state.get("steps_done", 0) or 0),
         )
+        finalize_trace_dir(trace_dir)
         finalize_state["finalized"] = True
 
     def _trace_excepthook(exc_type, exc, tb):
@@ -1449,14 +1504,63 @@ def main() -> None:
             "eps_therm": float(pareto_cfg.get("eps_therm", 0.0)),
         }
     )
+    evaluator = _build_evaluator(layout_input=layout_input, objective_cfg=objective_cfg)
+    objective_hash = evaluator.objective_hash()
+    hx_rows = list(_iter_recordings(recordings_path))
+    budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
     trace_info = _write_trace_and_pareto(
-        layout_input=layout_input,
-        objective_cfg=objective_cfg,
-        recordings_path=recordings_path,
-        trace_csv_path=out_dir / "trace.csv",
-        pareto_csv_path=out_dir / "pareto_points.csv",
+        trace_dir=out_dir,
+        hx_rows=hx_rows,
+        objective_hash=objective_hash,
+        seed_id=int(seed),
+        move_family=str(method_label),
+        selector=str(method_label),
+        lookahead=0,
+        budget_mode="steps",
+        budget_total=budget_total,
     )
-    pareto = _load_pareto_from_csv(out_dir / "pareto_points.csv", pareto_cfg)
+
+    pareto = ParetoSet(
+        eps_comm=float(pareto_cfg.get("eps_comm", 0.0)),
+        eps_therm=float(pareto_cfg.get("eps_therm", 0.0)),
+    )
+    best_total = None
+    best_comm = None
+    best_therm = None
+    best_assign = None
+    base_eval = {}
+    for rec in hx_rows:
+        total_scalar = float(rec.get("total_scalar", 0.0))
+        comm_norm = float(rec.get("comm_norm", 0.0))
+        therm_norm = float(rec.get("therm_norm", 0.0))
+        if not base_eval:
+            base_eval = {"total_scalar": total_scalar, "comm_norm": comm_norm, "therm_norm": therm_norm}
+        if int(rec.get("accepted", 1)) == 1:
+            pareto.add(comm_norm, therm_norm, {})
+        if best_total is None or total_scalar > best_total:
+            best_total = total_scalar
+            best_comm = comm_norm
+            best_therm = therm_norm
+            best_assign = rec.get("assign")
+
+    pareto_csv_path = out_dir / "pareto_points.csv"
+    with pareto_csv_path.open("w", encoding="utf-8") as fp:
+        fp.write("comm_norm,therm_norm\n")
+        for p in pareto.points:
+            fp.write(f"{p.comm_norm},{p.therm_norm}\n")
+    pareto = _load_pareto_from_csv(pareto_csv_path, pareto_cfg)
+
+    trace_info.update(
+        {
+            "objective_hash": objective_hash,
+            "best_total_scalar": float(best_total if best_total is not None else 0.0),
+            "best_comm_norm": float(best_comm if best_comm is not None else 0.0),
+            "best_therm_norm": float(best_therm if best_therm is not None else 0.0),
+            "best_assign": best_assign,
+            "base_eval": base_eval,
+            "evaluator_calls": int(len(hx_rows)),
+        }
+    )
 
     best_solution_path = output_dir / "best_solution.json"
     best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
@@ -1540,6 +1644,7 @@ def main() -> None:
         },
         "knee_point": {"comm_norm": float(knee_comm), "therm_norm": float(knee_therm)},
         "pareto_size": int(len(pareto.points)),
+        "trace_extra": trace_info,
         "n_steps": int(trace_summary.get("n_rows", 0)),
         "accept_rate": accept_rate,
         "tabu_hits": int(trace_summary.get("tabu_hits", 0)),

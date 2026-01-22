@@ -31,7 +31,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hw import (
     apply_accuracy_guard,
@@ -1177,7 +1177,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                             "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
                             "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
                             "lambda_hw": float(lambda_hw_eff),
-                            "stable_hw": stable_hw_log_fields(stable_hw_state),
+                            "stable_hw": stable_hw_log_fields(stable_hw_state, cfg),
                             "mapping_updated": step_mapping_updated,
                             "layout_updated": step_layout_updated,
                             "mapping_cache_hit": (not step_mapping_updated),
@@ -1453,39 +1453,36 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         best_solution_valid = False
         raise
     finally:
-        finalize_trace_dir(
+        update_trace_summary(
             trace_dir,
-            summary_extra={
+            {
                 "reason": reason,
                 "steps_done": int(steps_done),
                 "best_solution_valid": bool(best_solution_valid),
             },
-            run_id=run_id,
-            step=int(steps_done),
         )
+        finalize_trace_dir(trace_dir)
 
     # write run_manifest.json (auditable LockedAccRef)
-    try:
-        from utils.run_manifest import write_run_manifest
+    from utils.run_manifest import write_run_manifest
 
-        write_run_manifest(
-            out_dir=out_dir,
-            cfg_path=str(getattr(cfg.train, "cfg_path", "")),
-            cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
-            seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
-            command=None,
-            stable_hw_state=stable_hw_state,
-            extra={
-                "budget_main_axis": "wall_time_s",
-                "dataset_id": getattr(getattr(cfg, "dataset", None), "dataset_id", None)
-                or getattr(getattr(cfg, "dataset", None), "name", "unknown"),
-            },
-            run_id=run_id,
-            spec_version="v5.4",
-        )
-    except Exception:
-        pass
+    cfg_path = getattr(cfg, "cfg_path", "") or ""
+    cfg_hash = stable_hash(cfg)
 
+    write_run_manifest(
+        out_dir=Path(out_dir),
+        cfg_path=cfg_path,
+        cfg_hash=cfg_hash,
+        seed_id=int(seed),
+        git_sha=os.environ.get("GIT_SHA", ""),
+        stable_hw_state=stable_hw_state if "stable_hw_state" in locals() else {},
+        metrics_summary={
+            "best_acc1": float(best_acc1) if "best_acc1" in locals() else None,
+            "last_acc1": float(last_acc1) if "last_acc1" in locals() else None,
+        },
+    )
+
+    stable_fields = stable_hw_log_fields(stable_hw_state, cfg)
     metrics = {
         "run_id": run_id,
         "stable_hw_disabled": False if stable_hw_cfg and bool(getattr(stable_hw_cfg, "enabled", True)) else True,
@@ -1495,8 +1492,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         "last_hw_stats": last_hw_stats if last_hw_stats is not None else {},
         "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
         "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
-        "stable_hw": stable_hw_log_fields(stable_hw_state),
+        "stable_hw": stable_fields,
     }
+    for k, v in stable_fields.items():
+        metrics[k] = v
     with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
     hw_stats_out = dict(last_hw_stats or {})

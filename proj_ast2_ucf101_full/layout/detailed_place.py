@@ -37,6 +37,15 @@ from layout.candidate_pool import (
 )
 from layout.policy_switch import EvalCache, PolicySwitchController
 from utils.trace_schema import TRACE_FIELDS
+from utils.stable_hash import stable_hash
+
+EVAL_VERSION = "v5.4"
+TIME_UNIT = "ms"
+DIST_UNIT = "mm"
+
+
+def _row_to_list(row: dict) -> list:
+    return [row.get(k, "") for k in TRACE_FIELDS]
 
 
 @dataclass
@@ -244,8 +253,23 @@ def run_detailed_place(
     layout_state.assign = assign
     objective_hash = evaluator.objective_hash()
 
-    def _eval_cache_key(assign_sig: str) -> str:
-        return f"obj:{objective_hash}|{assign_sig}"
+    def _make_cache_key(assign_sig: str, objective_hash: str) -> str:
+        cfg_hash_subset = stable_hash(
+            {
+                "eval_version": EVAL_VERSION,
+                "objective_hash": objective_hash,
+                "objective_cfg": _cfg_get(cfg, "objective", {}),
+                "scales": _cfg_get(cfg, "scales", {}),
+            }
+        )
+        return stable_hash(
+            {
+                "assign": assign_sig,
+                "objective_hash": objective_hash,
+                "eval_version": EVAL_VERSION,
+                "cfg_hash_subset": cfg_hash_subset,
+            }
+        )
 
     # ---- anti-oscillation params ----
     anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
@@ -305,6 +329,8 @@ def run_detailed_place(
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
     recordings_fp = recordings_path.open("w", encoding="utf-8") if recordings_path else None
     start_time = time.time()
+    wall_start = time.perf_counter()
+    eval_calls_cum = 0
     best_solution = None
     report = None
     try:
@@ -321,45 +347,72 @@ def run_detailed_place(
             try:
                 if True:
                     # initial eval
-                    eval_out = evaluator.evaluate(layout_state)
+                    def _evaluate(state: LayoutState) -> Dict[str, Any]:
+                        nonlocal eval_calls_cum
+                        eval_calls_cum += 1
+                        return evaluator.evaluate(state)
+
+                    eval_out = _evaluate(layout_state)
                     prev_total = float(eval_out.get("total_scalar", 0.0))
                     prev_comm = float(eval_out.get("comm_norm", 0.0))
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
                     prev_assign = assign.copy()
-    
-                    init_cache_key = _eval_cache_key(signature_for_assign(prev_assign))
-                    row = [
-                        0,
-                        "init",
-                        "init",
-                        json.dumps({"op": "init"}, ensure_ascii=False),
-                        1,
-                        prev_total,
-                        prev_comm,
-                        prev_therm,
-                        0,
-                        0.0,
-                        0.0,
-                        int(seed_id),
-                        0,
-                        signature_for_assign(prev_assign),
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        "init",
-                        "init",
-                        0,
-                        0,
-                        init_cache_key,
-                    ]
-                    if len(row) != len(TRACE_FIELDS):
-                        raise RuntimeError(
-                            f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}"
-                        )
-                    writer.writerow(row)
+                    accepted_steps = 0
+                    assign_signature = signature_for_assign(prev_assign)
+                    op_args_obj = {"op": "init"}
+                    op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
+                    op_signature = stable_hash(op_args_obj)
+                    init_cache_key = _make_cache_key(assign_signature, objective_hash)
+                    wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
+
+                    init_row = {
+                        "iter": -1,
+                        "stage": "init",
+                        "op": "init",
+                        "op_args_json": op_args_json,
+                        "accepted": 1,
+                        "total_scalar": prev_total,
+                        "comm_norm": prev_comm,
+                        "therm_norm": prev_therm,
+                        "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
+                        "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
+                        "signature": assign_signature,
+                        "assign_signature": assign_signature,
+                        "op_signature": op_signature,
+                        "seed_id": int(seed_id),
+                        "objective_hash": objective_hash,
+                        "eval_version": EVAL_VERSION,
+                        "time_unit": TIME_UNIT,
+                        "dist_unit": DIST_UNIT,
+                        "wall_time_ms": wall_time_ms,
+                        "wall_time_ms_cum": wall_time_ms,
+                        "evaluator_calls": eval_calls_cum,
+                        "eval_calls_cum": eval_calls_cum,
+                        "accepted_steps": 0,
+                        "accepted_steps_cum": accepted_steps,
+                        "selected_idx": -1,
+                        "tabu_hit": 0,
+                        "inverse_hit": 0,
+                        "cooldown_hit": 0,
+                        "cache_hit": 0,
+                        "cache_miss": 0,
+                        "cache_hit_cum": int(eval_cache.hits) if eval_cache is not None else 0,
+                        "cache_miss_cum": int(eval_cache.misses) if eval_cache is not None else 0,
+                        "cache_size": int(eval_cache.size) if eval_cache is not None else 0,
+                        "cache_key": init_cache_key,
+                        "move_family": "init",
+                        "selector": "init",
+                        "lookahead": 0,
+                        "budget_mode": "steps",
+                        "budget_total": int(steps),
+                        "budget_remaining": int(steps),
+                        "use_llm": 0,
+                        "llm_model": "",
+                        "llm_prompt_tokens": 0,
+                        "llm_completion_tokens": 0,
+                        "llm_latency_ms": 0,
+                    }
+                    writer.writerow(_row_to_list(init_row))
                     if recordings_fp is not None:
                         pen = eval_out.get("penalty", {}) or {}
                         init_record = {
@@ -440,11 +493,12 @@ def run_detailed_place(
                 refresh_due_to_rejects = False
                 progress_every = int(_cfg_get(cfg, "progress_every", 10))
                 save_every = int(_cfg_get(cfg, "save_every", 50))
-                accepted_steps = 0
-        
+
                 for step in range(steps):
-                    cache_hits_before = int(eval_cache.hit_count) if eval_cache is not None else 0
                     step_start = time.perf_counter()
+                    eval_calls_before = eval_calls_cum
+                    h0 = eval_cache.hits if eval_cache is not None else 0
+                    m0 = eval_cache.misses if eval_cache is not None else 0
                     forced_family = None
                     forced_policy = None
                     if controller is not None:
@@ -482,11 +536,11 @@ def run_detailed_place(
                             action_copy.setdefault("signature", cand.signature)
                             new_assign = _apply_action_for_candidate(base_assign, action_copy)
                             sig1 = signature_for_assign(new_assign)
-                            k1 = _eval_cache_key(sig1)
+                            k1 = _make_cache_key(sig1, objective_hash)
                             cached = eval_cache.get(k1) if eval_cache is not None else None
                             if cached is None:
                                 layout_state.assign = new_assign
-                                eval_new = evaluator.evaluate(layout_state)
+                                eval_new = _evaluate(layout_state)
                                 if eval_cache is not None:
                                     eval_cache.put(k1, dict(eval_new))
                             else:
@@ -511,11 +565,11 @@ def run_detailed_place(
                                     continue
                                 assign2 = cj["apply_fn"](ci["new_assign"])
                                 sig2 = signature_for_assign(assign2)
-                                k2 = _eval_cache_key(sig2)
+                                k2 = _make_cache_key(sig2, objective_hash)
                                 cached2 = eval_cache.get(k2) if eval_cache is not None else None
                                 if cached2 is None:
                                     layout_state.assign = assign2
-                                    eval2 = evaluator.evaluate(layout_state)
+                                    eval2 = _evaluate(layout_state)
                                     if eval_cache is not None:
                                         eval_cache.put(k2, dict(eval2))
                                 else:
@@ -538,6 +592,12 @@ def run_detailed_place(
                     candidate_ids = [c.id for c in candidate_pool]
                     forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
         
+                    use_llm = 0
+                    llm_model = ""
+                    llm_prompt_tokens = 0
+                    llm_completion_tokens = 0
+                    llm_latency_ms = 0
+
                     use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
                     if forced_policy:
                         if forced_policy.lower() == "heuristic":
@@ -548,6 +608,9 @@ def run_detailed_place(
                     need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
                     refresh_due_to_rejects = False
         
+                    if policy_name == "llm":
+                        use_llm = 1
+                        llm_model = getattr(llm_provider, "model", "") if llm_provider is not None else ""
                     if need_refresh:
                         ss = build_state_summary(
                             step,
@@ -569,13 +632,18 @@ def run_detailed_place(
                         pick_types_count: Dict[str, int] = {}
                         best_d_total = None
                         try:
+                            t0 = time.perf_counter()
                             pick_ids = llm_provider.propose_pick(ss, k_actions) or []
+                            llm_latency_ms = int((time.perf_counter() - t0) * 1000)
                             for pid in pick_ids:
                                 cand = cand_map.get(pid)
                                 if cand:
                                     pick_types_count[cand.type] = pick_types_count.get(cand.type, 0) + 1
                                     if best_d_total is None or cand.est.get("d_total", 0) < best_d_total:
                                         best_d_total = cand.est.get("d_total", 0)
+                            usage = getattr(llm_provider, "last_usage", {}) or {}
+                            llm_prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                            llm_completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                         except Exception as e:
                             if usage_fp:
                                 json.dump(
@@ -736,10 +804,10 @@ def run_detailed_place(
         
                     layout_state.assign = new_assign
                     sig2 = signature_for_assign(new_assign)
-                    k2 = _eval_cache_key(sig2)
+                    k2 = _make_cache_key(sig2, objective_hash)
                     cached = eval_cache.get(k2) if eval_cache is not None else None
                     if cached is None:
-                        eval_new = evaluator.evaluate(layout_state)
+                        eval_new = _evaluate(layout_state)
                         if eval_cache is not None:
                             eval_cache.put(k2, dict(eval_new))
                     else:
@@ -791,43 +859,69 @@ def run_detailed_place(
                     T *= alpha
         
                     assign_signature = signature_for_assign(assign)
+                    op_args_obj = action
+                    op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
+                    op_signature = stable_hash(
+                        json.loads(op_args_json) if isinstance(op_args_json, str) else op_args_json
+                    )
                     time_ms = int((time.perf_counter() - step_start) * 1000)
-                    cache_hit = 0
-                    if eval_cache is not None:
-                        cache_hit = 1 if int(eval_cache.hit_count) > cache_hits_before else 0
-                    cache_key = _eval_cache_key(signature_for_assign(assign))
-                    row = [
-                        step,
-                        stage_label,
-                        op,
-                        json.dumps(action),
-                        int(accept),
-                        eval_out["total_scalar"],
-                        eval_out["comm_norm"],
-                        eval_out["therm_norm"],
-                        int(added),
-                        eval_out["penalty"]["duplicate"],
-                        eval_out["penalty"]["boundary"],
-                        seed_id,
-                        time_ms,
-                        assign_signature,
-                        delta,
-                        delta_comm,
-                        delta_therm,
-                        tabu_hit,
-                        inverse_hit,
-                        cooldown_hit,
-                        str(policy_name),
-                        str(op),
-                        int(lookahead_topk if lookahead_enabled else 0),
-                        int(cache_hit),
-                        str(cache_key)[:64],
-                    ]
-                    if len(row) != len(TRACE_FIELDS):
-                        raise RuntimeError(
-                            f"trace row has {len(row)} cols but TRACE_FIELDS has {len(TRACE_FIELDS)}"
-                        )
-                    writer.writerow(row)
+                    wall_time_ms_cum = int((time.perf_counter() - wall_start) * 1000)
+                    cache_key = _make_cache_key(assign_signature, objective_hash)
+                    h1 = eval_cache.hits if eval_cache is not None else 0
+                    m1 = eval_cache.misses if eval_cache is not None else 0
+                    cache_hit_step = h1 - h0
+                    cache_miss_step = m1 - m0
+                    cache_size = eval_cache.size if eval_cache is not None else 0
+                    eval_calls_step = eval_calls_cum - eval_calls_before
+
+                    row = {
+                        "iter": int(step),
+                        "stage": stage_label,
+                        "op": str(op),
+                        "op_args_json": op_args_json,
+                        "accepted": int(accept),
+                        "total_scalar": eval_out["total_scalar"],
+                        "comm_norm": eval_out["comm_norm"],
+                        "therm_norm": eval_out["therm_norm"],
+                        "duplicate_penalty": eval_out["penalty"]["duplicate"],
+                        "boundary_penalty": eval_out["penalty"]["boundary"],
+                        "signature": assign_signature,
+                        "assign_signature": assign_signature,
+                        "op_signature": op_signature,
+                        "seed_id": int(seed_id),
+                        "objective_hash": objective_hash,
+                        "eval_version": EVAL_VERSION,
+                        "time_unit": TIME_UNIT,
+                        "dist_unit": DIST_UNIT,
+                        "wall_time_ms": time_ms,
+                        "wall_time_ms_cum": wall_time_ms_cum,
+                        "evaluator_calls": eval_calls_step,
+                        "eval_calls_cum": eval_calls_cum,
+                        "accepted_steps": int(accept),
+                        "accepted_steps_cum": int(accepted_steps),
+                        "selected_idx": int(action.get("candidate_id", -1)) if action else -1,
+                        "tabu_hit": int(tabu_hit),
+                        "inverse_hit": int(inverse_hit),
+                        "cooldown_hit": int(cooldown_hit),
+                        "cache_hit": int(cache_hit_step),
+                        "cache_miss": int(cache_miss_step),
+                        "cache_hit_cum": int(h1),
+                        "cache_miss_cum": int(m1),
+                        "cache_size": int(cache_size),
+                        "cache_key": cache_key,
+                        "move_family": str(op),
+                        "selector": str(policy_name),
+                        "lookahead": int(lookahead_topk if lookahead_enabled else 0),
+                        "budget_mode": "steps",
+                        "budget_total": int(steps),
+                        "budget_remaining": max(0, int(steps) - (int(step) + 1)),
+                        "use_llm": int(use_llm),
+                        "llm_model": str(llm_model),
+                        "llm_prompt_tokens": int(llm_prompt_tokens),
+                        "llm_completion_tokens": int(llm_completion_tokens),
+                        "llm_latency_ms": int(llm_latency_ms),
+                    }
+                    writer.writerow(_row_to_list(row))
                     if recordings_fp is not None:
                         pen = eval_out.get("penalty", {}) or {}
                         record = {
@@ -896,36 +990,55 @@ def run_detailed_place(
                         fin_sig = signature_for_assign(fin_sig_arr)
                     else:
                         fin_sig = "assign:unknown"
-
-                    fin_row = [
-                        int(steps) + 1,
-                        "finalize",
-                        "finalize",
-                        json.dumps({"op": "finalize"}, ensure_ascii=False),
-                        1,
-                        fin_total,
-                        fin_comm,
-                        fin_therm,
-                        0,
-                        0.0,
-                        0.0,
-                        int(seed_id),
-                        int((time.time() - start_time) * 1000),
-                        fin_sig,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        "finalize",
-                        "finalize",
-                        0,
-                        0,
-                        "",
-                    ]
-                    if len(fin_row) == len(TRACE_FIELDS):
-                        writer.writerow(fin_row)
+                    fin_cache_key = _make_cache_key(fin_sig, objective_hash)
+                    fin_row = {
+                        "iter": int(steps) + 1,
+                        "stage": "finalize",
+                        "op": "finalize",
+                        "op_args_json": json.dumps({"op": "finalize"}, ensure_ascii=False),
+                        "accepted": 1,
+                        "total_scalar": fin_total,
+                        "comm_norm": fin_comm,
+                        "therm_norm": fin_therm,
+                        "duplicate_penalty": 0.0,
+                        "boundary_penalty": 0.0,
+                        "signature": fin_sig,
+                        "assign_signature": fin_sig,
+                        "op_signature": stable_hash({"op": "finalize"}),
+                        "seed_id": int(seed_id),
+                        "objective_hash": objective_hash,
+                        "eval_version": EVAL_VERSION,
+                        "time_unit": TIME_UNIT,
+                        "dist_unit": DIST_UNIT,
+                        "wall_time_ms": int((time.time() - start_time) * 1000),
+                        "wall_time_ms_cum": int((time.perf_counter() - wall_start) * 1000),
+                        "evaluator_calls": 0,
+                        "eval_calls_cum": eval_calls_cum,
+                        "accepted_steps": 0,
+                        "accepted_steps_cum": int(accepted_steps),
+                        "selected_idx": -1,
+                        "tabu_hit": 0,
+                        "inverse_hit": 0,
+                        "cooldown_hit": 0,
+                        "cache_hit": 0,
+                        "cache_miss": 0,
+                        "cache_hit_cum": int(eval_cache.hits) if eval_cache is not None else 0,
+                        "cache_miss_cum": int(eval_cache.misses) if eval_cache is not None else 0,
+                        "cache_size": int(eval_cache.size) if eval_cache is not None else 0,
+                        "cache_key": fin_cache_key,
+                        "move_family": "finalize",
+                        "selector": "finalize",
+                        "lookahead": 0,
+                        "budget_mode": "steps",
+                        "budget_total": int(steps),
+                        "budget_remaining": 0,
+                        "use_llm": 0,
+                        "llm_model": "",
+                        "llm_prompt_tokens": 0,
+                        "llm_completion_tokens": 0,
+                        "llm_latency_ms": 0,
+                    }
+                    writer.writerow(_row_to_list(fin_row))
                 except Exception:
                     pass
                 f_trace.flush()
