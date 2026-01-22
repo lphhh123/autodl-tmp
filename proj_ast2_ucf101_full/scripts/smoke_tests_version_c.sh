@@ -7,6 +7,27 @@ cd "$ROOT"
 echo "[SMOKE] Python compileall"
 python -m compileall -q . ../HeurAgenix
 
+echo "[SMOKE] YAML parse (all configs)"
+python - <<'PY'
+import glob
+import sys
+import yaml
+
+errs = []
+for p in glob.glob("configs/**/*.yaml", recursive=True):
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            yaml.safe_load(f)
+    except Exception as e:
+        errs.append((p, str(e)))
+if errs:
+    print("YAML errors:", len(errs))
+    for p, e in errs[:20]:
+        print("-", p, ":", e)
+    sys.exit(2)
+print("[OK] all YAML parsed")
+PY
+
 SEED="${SEED:-0}"
 BASE_OUT="outputs"
 SHARED_DIR="${BASE_OUT}/_shared"

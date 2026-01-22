@@ -32,6 +32,14 @@ run_layout () {
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
+run_layout_heuragenix () {
+  local cfg="$1"
+  local out="$2"
+  python -m scripts.run_layout_heuragenix \
+    --layout_input outputs/P3/A3/layout_input.json \
+    --cfg "$cfg" --out_dir "$out" --seed "$SEED"
+}
+
 case "$EXP_ID" in
   # -------------------------
   # Innovation A (Main/Core)
@@ -61,6 +69,8 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation B (Layout)
   # -------------------------
+  EXP-B0) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp.yaml "outputs/EXP-B0/seed${SEED}" ;;
+  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp.yaml "outputs/EXP-B0-random/seed${SEED}" ;;
   EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic.yaml "outputs/EXP-B1/seed${SEED}" ;;
   EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick.yaml "outputs/EXP-B2/seed${SEED}" ;;
   EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa.yaml "outputs/EXP-B3/seed${SEED}" ;;

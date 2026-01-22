@@ -1,18 +1,19 @@
 _base_: base_layout.yaml
 
 baseline:
-  name: heuragenix_llm_hh
-  # sibling 目录（HeurAgenix 与主项目同级）
-  heuragenix_root: ../HeurAgenix
+  name: heuragenix
+  heuragenix_root: HeurAgenix
   problem: wafer_layout
   heuristic_dir: basic_heuristics
   method: llm_hh
-llm_config_file: configs/llm/api_model_ark.json
   iterations_scale_factor: 1.0
   selection_frequency: 5
-  num_candidate_heuristics: 4
+  num_candidate_heuristics: 1
   rollout_budget: 0
-  max_steps: 8000
-  fallback_on_llm_failure: random_hh
-  llm_timeout_s: 30
-  max_llm_failures: 2
+  result_dir: result
+  max_eval_calls: 2000
+  require_main_evaluator: true
+  allow_fallback_evaluator: false
+  run_mode: inprocess
+
+llm_config_file: configs/llm/api_model_ark.json
