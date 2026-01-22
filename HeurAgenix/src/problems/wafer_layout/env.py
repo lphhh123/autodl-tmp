@@ -339,6 +339,8 @@ class Env(BaseEnv):
                 "duplicate_penalty": duplicate_penalty,
                 "boundary_penalty": boundary_penalty,
                 "time_ms": 0,
+                "eval_calls_cum": int(getattr(self._evaluator, "evaluate_calls", 0)),
+                "cache_hit_cum": int(getattr(self._evaluator, "cache_hits", 0)) if hasattr(self._evaluator, "cache_hits") else 0,
                 # v5.4 对齐：recordings.signature 统一为 assign signature（用于 repeat/oscillation 等指标）
                 "signature": _assign_signature(assign_list),
                 # 保留动作签名，便于动作级调试/回放
@@ -463,6 +465,8 @@ class Env(BaseEnv):
             "duplicate_penalty": duplicate_penalty,
             "boundary_penalty": boundary_penalty,
             "time_ms": int(dt),
+            "eval_calls_cum": int(getattr(self._evaluator, "evaluate_calls", 0)),
+            "cache_hit_cum": int(getattr(self._evaluator, "cache_hits", 0)) if hasattr(self._evaluator, "cache_hits") else 0,
             "signature": assign_sig,
             "op_signature": op_signature,
             "meta": meta,

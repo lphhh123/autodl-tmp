@@ -495,11 +495,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 logger.warning(f"[trace] skip training_complete event due to: {_exc}")
             update_trace_summary(
                 trace_dir,
-                {
-                    "reason": "done" if ok else "error",
-                    "steps_done": int(steps_done),
-                    "best_solution_valid": bool(ok and not early_stop_triggered),
-                },
+                ok=bool(ok),
+                reason="done" if ok else "error",
+                steps_done=int(steps_done),
+                best_solution_valid=bool(ok and not early_stop_triggered),
             )
             finalize_trace_dir(trace_dir)
 

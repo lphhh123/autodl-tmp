@@ -395,12 +395,10 @@ def run_layout_agent(
         reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
         update_trace_summary(
             trace_dir,
-            {
-                "reason": reason,
-                "steps_done": int(steps_done),
-                "best_solution_valid": bool(best_solution_valid),
-                "best_total": float(best_total) if best_total is not None else None,
-            },
+            ok=bool(ok),
+            reason=str(reason),
+            steps_done=int(steps_done),
+            best_solution_valid=bool(best_solution_valid),
         )
         finalize_trace_dir(trace_dir)
 

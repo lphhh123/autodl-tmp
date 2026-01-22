@@ -1491,11 +1491,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     finally:
         update_trace_summary(
             trace_dir,
-            {
-                "reason": reason,
-                "steps_done": int(steps_done),
-                "best_solution_valid": bool(best_solution_valid),
-            },
+            ok=(str(reason) != "error"),
+            reason=str(reason),
+            steps_done=int(steps_done),
+            best_solution_valid=bool(best_solution_valid),
         )
         finalize_trace_dir(trace_dir)
 
