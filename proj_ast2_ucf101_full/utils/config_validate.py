@@ -246,6 +246,16 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         _apply_defaults(cfg, REQ_VERSION_C_HW_DEFAULTS)
         _apply_defaults(cfg, REQ_VERSION_C_TRAINING_DEFAULTS)
         _apply_defaults(cfg, REQ_CHIPLET_DEFAULTS)
+        # ---- v5.4 NoDoubleScale contract (Version-C must enable) ----
+        if get_nested(cfg, "stable_hw.enabled", True):
+            nds = get_nested(cfg, "stable_hw.no_double_scale", None)
+            if nds is None:
+                set_nested(cfg, "stable_hw.no_double_scale", True)
+            elif bool(nds) is False:
+                raise ValueError(
+                    "[SPEC v5.4] stable_hw.no_double_scale must be True for Version-C runs "
+                    "(NoDoubleScale / LockedAccRef / NoDrift contract)."
+                )
     elif mode == "ast2":
         # minimal defaults for reproducibility
         if not hasattr(cfg, "train"):

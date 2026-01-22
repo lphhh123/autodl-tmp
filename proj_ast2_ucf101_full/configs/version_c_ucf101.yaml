@@ -1,3 +1,9 @@
 _base_: ./ast2_ucf101.yaml
 train:
   mode: version_c
+stable_hw:
+  enabled: true
+  no_double_scale: true
+  warmup:
+    enabled: true
+    epochs: 1

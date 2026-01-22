@@ -31,7 +31,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
+from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hw import (
     apply_accuracy_guard,
@@ -549,7 +549,6 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     # out_dir: training outputs root
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
-    trace_dir = out_dir / "trace"
     cfg_hash = getattr(getattr(cfg, "train", None), "cfg_hash", "") or ""
     cfg_path = getattr(getattr(cfg, "train", None), "cfg_path", "") or ""
     seed = int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0)
@@ -561,13 +560,21 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         }
     )
     signature = build_signature_v54(cfg, method_name="train_version_c")
-    init_trace_dir(
-        trace_dir,
+    signature_v54 = signature
+    # ---- v5.4 trace dir contract: out_dir/trace/<run_id>/... ----
+    trace_base = out_dir / "trace"
+    trace_meta = init_trace_dir_v54(
+        base_dir=trace_base,
+        run_id=str(run_id),
+        cfg=cfg,
         signature=signature,
-        run_meta={"mode": "version_c_train", "seed_id": int(seed), "run_id": run_id},
-        required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+        signature_v54=signature_v54,
+        required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
+        run_meta={"mode": "version_c_train", "seed_id": int(seed), "run_id": str(run_id)},
+        extra_manifest={"task": "version_c", "out_dir": str(out_dir)},
     )
-    trace_events_path = trace_dir / "trace_events.jsonl"
+    trace_dir = Path(trace_meta["trace_dir"])
+    trace_events_path = Path(trace_meta["trace_events"])
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
     layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
     if layout_export_dir is not None:

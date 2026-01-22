@@ -1,7 +1,6 @@
 """Entry for AST2.0-lite single device training (SPEC)."""
 import argparse
 import json
-import time
 from pathlib import Path
 
 from utils.config import load_config
@@ -27,7 +26,8 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, default="./configs/ast2_ucf101.yaml")
-    parser.add_argument("--out_dir", type=str, default=None)
+    parser.add_argument("--out_dir", type=str, default=None, help="Output directory (v5.4 contract)")
+    parser.add_argument("--out", type=str, default=None, help="Alias of --out_dir (backward compat)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -39,10 +39,11 @@ def main():
         cfg.train.seed = seed
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
-    cfg_stem = Path(args.cfg).stem
-    auto_out = Path("outputs/ast2") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
-    out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
+    cli_out = args.out_dir or args.out
+    auto_out = f"outputs/ast2_auto"
+    out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    cfg.out_dir = str(out_dir)
     if hasattr(cfg, "train"):
         cfg.train.out_dir = str(out_dir)
     with (out_dir / "config_used.yaml").open("w", encoding="utf-8") as f:

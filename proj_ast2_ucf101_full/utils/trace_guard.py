@@ -259,6 +259,35 @@ def init_trace_dir(
     }
 
 
+def init_trace_dir_v54(
+    base_dir: Path,
+    run_id: str,
+    cfg: Any,
+    signature: Dict[str, Any],
+    signature_v54: Dict[str, Any],
+    required_signature_fields: Optional[list[str]] = None,
+    run_meta: Optional[Dict[str, Any]] = None,
+    extra_manifest: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Path]:
+    trace_dir = Path(base_dir) / str(run_id)
+    meta = init_trace_dir(
+        trace_dir=trace_dir,
+        signature=signature_v54 or signature,
+        run_meta=run_meta,
+        required_signature_keys=required_signature_fields,
+        extra_manifest=extra_manifest,
+    )
+    snapshot_path = Path(meta["eval_config_snapshot"])
+    if cfg is not None:
+        try:
+            import omegaconf
+
+            snapshot_path.write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
+        except Exception:
+            snapshot_path.write_text(str(cfg), encoding="utf-8")
+    return meta
+
+
 def append_trace_event_v54(path: Path, event_type: str, payload: dict, run_id: str, step: int):
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
