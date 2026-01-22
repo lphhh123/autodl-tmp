@@ -425,6 +425,7 @@ def main():
     # sync cfg.train.out_dir
     if hasattr(cfg, "train"):
         cfg.train.out_dir = str(out_dir)
+    cfg.out_dir = str(out_dir)
 
     # dump config_used
     try:

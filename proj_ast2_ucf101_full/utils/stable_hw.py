@@ -789,6 +789,14 @@ def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=N
     if stats_path:
         loaded = _load_baseline_stats(stats_path)
         if loaded:
+            # ---- v5.4 NoDrift enforcement: baseline_stats must not change across runs ----
+            new_sha = str(loaded.get("sha256", "") or "")
+            old_sha = str(stable_hw_state.get("baseline_stats_sha256", "") or "")
+            if old_sha and new_sha and (old_sha != new_sha):
+                raise RuntimeError(
+                    f"[NoDrift] baseline_stats sha256 changed! old={old_sha} new={new_sha} path={stats_path}"
+                )
+            stable_hw_state["baseline_stats_sha256"] = new_sha
             stable_hw_state["ref_T"] = float(loaded.get("ref_T", loaded.get("latency_ref_ms", stable_hw_state["ref_T"])))
             stable_hw_state["ref_E"] = float(loaded.get("ref_E", loaded.get("energy_ref_mj", stable_hw_state["ref_E"])))
             stable_hw_state["ref_M"] = float(loaded.get("ref_M", loaded.get("memory_ref_mb", stable_hw_state["ref_M"])))

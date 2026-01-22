@@ -11,7 +11,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 import json
-import time
 from typing import Union
 
 from utils.config import load_config
@@ -104,7 +103,9 @@ def main():
         default="configs/vc_phase3_full_ucf101.yaml",
         help="v5.4 default config (explicit stable_hw + reproducible settings)",
     )
-    parser.add_argument("--out_dir", type=str, default=None)
+    # ---- argparse: v5.4 uses --out_dir; keep --out as alias ----
+    parser.add_argument("--out_dir", type=str, default=None, help="Output directory (v5.4 contract)")
+    parser.add_argument("--out", type=str, default=None, help="Alias of --out_dir (backward compat)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--export_layout_input",
@@ -122,8 +123,9 @@ def main():
     )
     parser.add_argument("--export_dir", type=str, default=None, help="Directory to write layout artifacts")
     args = parser.parse_args()
-    if args.export_dir is None and args.out_dir is not None:
-        args.export_dir = str(Path(args.out_dir) / "exports" / "layout_input")
+    cli_out = args.out_dir or args.out
+    if args.export_dir is None and cli_out is not None:
+        args.export_dir = str(Path(cli_out) / "exports" / "layout_input")
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
     seed_everything(int(args.seed))
@@ -144,11 +146,12 @@ def main():
         except Exception:
             pass
 
-    # out_dir: CLI 优先；否则 cfg.train.out_dir；否则自动生成一个
-    cfg_name = Path(args.cfg).stem
-    auto_out = Path("outputs/version_c") / f"{cfg_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-    out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(cfg.train, "out_dir", "") or auto_out)
+    # ---- out_dir resolution (CLI highest priority) ----
+    auto_out = f"outputs/version_c_auto"
+    out_dir = Path(cli_out) if cli_out else Path(getattr(cfg.train, "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # ---- v5.4 contract: BOTH cfg.out_dir and cfg.train.out_dir must be set ----
+    cfg.out_dir = str(out_dir)
     cfg.train.out_dir = str(out_dir)
 
     out_dir_path = Path(out_dir)

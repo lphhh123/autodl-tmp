@@ -22,8 +22,9 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
+from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
+from utils.stable_hash import stable_hash
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -113,22 +114,31 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     logger = setup_logger()
     metrics_path = None
     trace_dir = None
-    run_id = str(getattr(cfg.train, "run_id", "")) or "single_device"
+    seed = int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0)
     if out_dir is None and hasattr(cfg, "train") and getattr(cfg.train, "out_dir", None):
         out_dir = Path(cfg.train.out_dir)
     if out_dir is not None:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = out_dir / "metrics.json"
-        trace_dir = out_dir / "trace"
         sig = build_signature_v54(cfg, method_name="train_single_device")
-        init_trace_dir(
-            trace_dir,
-            signature=sig,
-            run_meta={"mode": "train_single_device", "run_id": run_id},
-            required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+        signature_v54 = sig
+        run_id = stable_hash(
+            {"mode": "single_device_train", "seed": int(seed), "cfg_hash": str(getattr(cfg.train, "cfg_hash", ""))}
         )
-        trace_events_path = trace_dir / "trace_events.jsonl"
+        trace_base = out_dir / "trace"
+        trace_meta = init_trace_dir_v54(
+            base_dir=trace_base,
+            run_id=str(run_id),
+            cfg=cfg,
+            signature=sig,
+            signature_v54=signature_v54,
+            required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
+            run_meta={"mode": "single_device_train", "seed_id": int(seed), "run_id": str(run_id)},
+            extra_manifest={"task": "single_device", "out_dir": str(out_dir)},
+        )
+        trace_dir = Path(trace_meta["trace_dir"])
+        trace_events_path = Path(trace_meta["trace_events"])
     train_loader, val_loader = build_dataloaders(cfg)
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
