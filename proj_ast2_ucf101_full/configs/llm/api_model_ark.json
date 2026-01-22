@@ -1,0 +1,12 @@
+{
+  "type": "api_model",
+  "name": "ark_api_model",
+  "url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+  "api_key": "YOUR_ARK_API_KEY",
+  "model": "YOUR_ARK_MODEL_OR_ENDPOINT",
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "max_tokens": 3200,
+  "max_attempts": 50,
+  "wait_time": 0.2
+}

@@ -196,10 +196,14 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     early_stop_triggered = False
     ok = False
     steps_done = 0
+    gating_epochs = 0
+    freeze_epochs = 0
+    total_epochs = 0
     try:
         for epoch in range(cfg.train.epochs):
             ran_epochs += 1
             steps_done = ran_epochs
+            total_epochs += 1
             stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
             if stable_hw_enabled:
                 legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
@@ -227,6 +231,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 )
                 stable_state = stable_decision.state
                 stable_state["allow_discrete_updates"] = bool(allow_discrete_updates)
+                if str(stable_state.get("guard_mode", "")).upper() != "HW_OPT":
+                    gating_epochs += 1
+                if not bool(stable_state.get("allow_discrete_updates", True)):
+                    freeze_epochs += 1
                 if trace_dir is not None:
                     append_trace_event_v54(
                         trace_events_path,
@@ -440,6 +448,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     "stable_hw_disabled": not bool(getattr(cfg.stable_hw, "enabled", False))
                     if getattr(cfg, "stable_hw", None)
                     else True,
+                    "telemetry": {
+                        "gating_on_ratio": float(gating_epochs) / max(1, int(total_epochs)),
+                        "freeze_epoch_ratio": float(freeze_epochs) / max(1, int(total_epochs)),
+                    },
                 }
                 metrics["last_hw_stats"] = {
                     "latency_ms": float((last_hw_stats or {}).get("latency_ms", 0.0)),
@@ -479,22 +491,32 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
 
     if out_dir is not None:
         from utils.run_manifest import write_run_manifest
+        from omegaconf import OmegaConf
 
-        cfg_path = getattr(cfg, "cfg_path", "") or ""
-        cfg_hash = stable_hash(cfg)
-        seed_id = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)) or 0)
+        cfg_path = str(getattr(cfg, "cfg_path", "") or "")
+        cfg_hash = stable_hash(OmegaConf.to_container(cfg, resolve=True))
+        seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)) or 0)
+
+        _metrics_summary = {
+            "best_acc1": float(best_acc) if ("best_acc" in locals() and best_acc is not None) else None,
+            "last_acc1": float(last_acc) if ("last_acc" in locals() and last_acc is not None) else None,
+            "early_stop": bool(early_stop_triggered),
+            "epochs_ran": int(ran_epochs),
+            "telemetry": {
+                "gating_on_ratio": float(gating_epochs) / max(1, int(total_epochs)),
+                "freeze_epoch_ratio": float(freeze_epochs) / max(1, int(total_epochs)),
+            },
+        }
 
         write_run_manifest(
-            out_dir=Path(out_dir),
+            out_dir=str(out_dir),
             cfg_path=cfg_path,
-            cfg_hash=cfg_hash,
-            seed_id=seed_id,
-            git_sha=os.environ.get("GIT_SHA", ""),
+            cfg_hash=str(cfg_hash),
+            seed=seed,
             stable_hw_state=stable_state if "stable_state" in locals() else {},
-            metrics_summary={
-                "best_acc1": float(best_acc) if "best_acc" in locals() else None,
-                "last_acc1": float(last_acc) if "last_acc" in locals() else None,
-            },
+            extra={"metrics_summary": _metrics_summary},
+            run_id=str(run_id),
+            spec_version="v5.4",
         )
     if trace_dir is not None:
         append_trace_event_v54(
