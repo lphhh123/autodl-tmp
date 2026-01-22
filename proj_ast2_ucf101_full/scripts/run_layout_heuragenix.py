@@ -551,179 +551,180 @@ def signature_from_action(op: str, op_args: dict | None) -> str:
 
 def _write_trace_and_pareto(
     trace_dir: Path,
-    hx_rows: list,
+    hx_rows: List[Dict[str, Any]],
     objective_hash: str,
-    seed_id: int,
-    move_family: str,
-    selector: str,
-    lookahead: int,
-    budget_mode: str,
-    budget_total: int,
-) -> dict:
+    cache_key: str,
+) -> Tuple[ParetoSet, Dict[str, Any]]:
     """
-    Write unified trace.csv (SPEC v5.4) from HeurAgenix recordings.
-    Returns extra_report dict (pareto/undo/oscillation stats etc.) for report.json only.
-    """
-    trace_csv = trace_dir / "trace.csv"
-    wall_start = time.perf_counter()
+    Convert HeurAgenix recordings.jsonl -> v5.4 trace.csv + pareto_points.csv.
 
+    Contract:
+    - trace.csv must be at out_dir/trace.csv (NOT out_dir/trace/trace.csv)
+    - pareto_points.csv must be at out_dir/pareto_points.csv
+    - columns in TRACE_FIELDS must be populated (esp. delta_*, tabu/repeat/undo, accepted_steps_cum, eval_calls_cum)
+    """
+    out_dir = trace_dir.parent
+    trace_csv = out_dir / "trace.csv"
+    pareto_csv = out_dir / "pareto_points.csv"
+
+    trace_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    pareto = ParetoSet()
     accepted_steps_cum = 0
-    eval_calls_cum = 0
-    cache_hit_cum = 0
-    cache_miss_cum = 0
-    cache_size = 0
+    last_eval_calls_cum = 0
+    last_cache_hit_cum = 0
 
-    extra_report = {
-        "hx_rows": len(hx_rows),
-        "hx_metrics": {},
+    def _num(x, default=0.0):
+        try:
+            if x is None:
+                return default
+            return float(x)
+        except Exception:
+            return default
+
+    def _int(x, default=0):
+        try:
+            if x is None or x == "":
+                return default
+            return int(x)
+        except Exception:
+            return default
+
+    with trace_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
+        w.writeheader()
+
+        if not hx_rows:
+            row = {k: "" for k in TRACE_FIELDS}
+            row.update(
+                {
+                    "iter": -1,
+                    "stage": "init",
+                    "op": "init",
+                    "op_args_json": json.dumps({"op": "init"}, ensure_ascii=False),
+                    "accepted": 1,
+                    "seed_id": 0,
+                    "signature": "assign:unknown",
+                    "total_scalar": 0.0,
+                    "comm_norm": 0.0,
+                    "therm_norm": 0.0,
+                    "delta_total": 0.0,
+                    "delta_comm": 0.0,
+                    "delta_therm": 0.0,
+                    "accepted_steps_cum": 0,
+                    "eval_calls_cum": 0,
+                    "cache_hit_cum": 0,
+                    "objective_hash": str(objective_hash),
+                    "cache_key": str(cache_key),
+                    "time_ms": 0.0,
+                    "time_s": 0.0,
+                    "tabu_hit": 0,
+                    "tabu_accept_override": 0,
+                    "repeat_signature": 0,
+                    "undo_signature": 0,
+                    "pareto_added": 0,
+                    "duplicate_penalty": 0.0,
+                    "boundary_penalty": 0.0,
+                    "score_lookahead": 0.0,
+                    "score_tts": 0.0,
+                    "score_llm": 0.0,
+                }
+            )
+            w.writerow(row)
+        else:
+            for idx, r in enumerate(hx_rows):
+                meta = r.get("meta") or {}
+                rec_stage = str(r.get("stage", "heuragenix"))
+                rec_iter = _int(r.get("iter", idx), idx)
+
+                if rec_stage == "init":
+                    iter_id = -1
+                else:
+                    iter_id = rec_iter - 1
+
+                accepted = 1 if bool(r.get("accepted", False)) else 0
+                if rec_stage != "init" and accepted:
+                    accepted_steps_cum += 1
+
+                eval_calls_cum = _int(r.get("eval_calls_cum", meta.get("eval_calls_cum", None)), None)
+                if eval_calls_cum is None:
+                    eval_calls_cum = max(last_eval_calls_cum, idx + 1)
+                last_eval_calls_cum = eval_calls_cum
+
+                cache_hit_cum = _int(r.get("cache_hit_cum", meta.get("cache_hit_cum", None)), None)
+                if cache_hit_cum is None:
+                    cache_hit_cum = last_cache_hit_cum
+                last_cache_hit_cum = cache_hit_cum
+
+                op = str(r.get("op", "init" if rec_stage == "init" else "unknown"))
+                op_args_json = r.get("op_args_json")
+                if not op_args_json:
+                    op_args_json = json.dumps({"op": op}, ensure_ascii=False)
+
+                row = {k: "" for k in TRACE_FIELDS}
+                row.update(
+                    {
+                        "iter": int(iter_id),
+                        "stage": rec_stage,
+                        "op": op,
+                        "op_args_json": str(op_args_json),
+                        "accepted": int(accepted),
+                        "seed_id": _int(r.get("seed_id", 0), 0),
+                        "signature": str(r.get("signature", "assign:unknown")),
+                        "total_scalar": _num(r.get("total_scalar", 0.0), 0.0),
+                        "comm_norm": _num(r.get("comm_norm", 0.0), 0.0),
+                        "therm_norm": _num(r.get("therm_norm", 0.0), 0.0),
+                        "delta_total": _num(r.get("delta_total", meta.get("delta_total", 0.0)), 0.0),
+                        "delta_comm": _num(r.get("delta_comm", meta.get("delta_comm", 0.0)), 0.0),
+                        "delta_therm": _num(r.get("delta_therm", meta.get("delta_therm", 0.0)), 0.0),
+                        "tabu_hit": _int(r.get("tabu_hit", meta.get("tabu_hit", 0)), 0),
+                        "tabu_accept_override": _int(r.get("tabu_accept_override", meta.get("tabu_accept_override", 0)), 0),
+                        "repeat_signature": _int(r.get("repeat_signature", meta.get("repeat_signature", 0)), 0),
+                        "undo_signature": _int(r.get("undo_signature", meta.get("undo_signature", 0)), 0),
+                        "pareto_added": _int(r.get("pareto_added", meta.get("pareto_added", 0)), 0),
+                        "duplicate_penalty": _num(r.get("duplicate_penalty", meta.get("duplicate_penalty", 0.0)), 0.0),
+                        "boundary_penalty": _num(r.get("boundary_penalty", meta.get("boundary_penalty", 0.0)), 0.0),
+                        "policy_switch": str(meta.get("policy_switch", "")),
+                        "cache_hit": _int(meta.get("cache_hit", 0), 0),
+                        "cache_enabled": _int(meta.get("cache_enabled", 0), 0),
+                        "accepted_steps_cum": int(accepted_steps_cum),
+                        "eval_calls_cum": int(eval_calls_cum),
+                        "cache_hit_cum": int(cache_hit_cum),
+                        "objective_hash": str(objective_hash),
+                        "cache_key": str(cache_key),
+                        "score_lookahead": _num(meta.get("score_lookahead", 0.0), 0.0),
+                        "score_tts": _num(meta.get("score_tts", 0.0), 0.0),
+                        "score_llm": _num(meta.get("score_llm", 0.0), 0.0),
+                        "time_ms": _num(r.get("time_ms", meta.get("time_ms", 0.0)), 0.0),
+                    }
+                )
+                row["time_s"] = float(row["time_ms"]) / 1000.0
+
+                if "selection_id" in r:
+                    row["selection_id"] = str(r.get("selection_id", ""))
+                if "step_id" in r:
+                    row["step_id"] = str(r.get("step_id", ""))
+                if "heuristic_name" in r:
+                    row["heuristic_name"] = str(r.get("heuristic_name", ""))
+
+                w.writerow(row)
+
+                if rec_stage != "init" and accepted:
+                    pareto.add(float(row["comm_norm"]), float(row["therm_norm"]), {})
+
+    with pareto_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["comm_norm", "therm_norm"], restval="")
+        w.writeheader()
+        for p in pareto.points:
+            w.writerow({"comm_norm": float(p.get("comm_norm", 0.0)), "therm_norm": float(p.get("therm_norm", 0.0))})
+
+    info = {
+        "steps_written": len(hx_rows),
+        "accepted_steps": int(accepted_steps_cum),
+        "last_eval_calls_cum": int(last_eval_calls_cum),
+        "last_cache_hit_cum": int(last_cache_hit_cum),
     }
-
-    with trace_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
-        writer.writeheader()
-
-        init_assign = hx_rows[0].get("assign") if hx_rows else None
-        init_sig = signature_for_assign(init_assign) if init_assign is not None else "assign:unknown"
-        cfg_hash_subset = stable_hash(
-            {
-                "source": "heuragenix",
-                "eval_version": EVAL_VERSION,
-                "objective_hash": objective_hash,
-            }
-        )
-        init_cache_key = stable_hash(
-            {
-                "assign": init_sig,
-                "objective_hash": objective_hash,
-                "eval_version": EVAL_VERSION,
-                "cfg_hash_subset": cfg_hash_subset,
-            }
-        )
-        wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
-
-        init_row = {
-            "iter": -1,
-            "stage": "init",
-            "op": "init",
-            "op_args_json": json.dumps({"op": "init"}, ensure_ascii=False),
-            "accepted": 1,
-            "total_scalar": hx_rows[0].get("total_scalar", "") if hx_rows else "",
-            "comm_norm": hx_rows[0].get("comm_norm", "") if hx_rows else "",
-            "therm_norm": hx_rows[0].get("therm_norm", "") if hx_rows else "",
-            "pareto_added": 0,
-            "duplicate_penalty": hx_rows[0].get("duplicate_penalty", 0.0) if hx_rows else 0.0,
-            "boundary_penalty": hx_rows[0].get("boundary_penalty", 0.0) if hx_rows else 0.0,
-            "signature": init_sig,
-            "seed_id": seed_id,
-            "time_ms": wall_time_ms,
-            "delta_total": 0.0,
-            "delta_comm": 0.0,
-            "delta_therm": 0.0,
-            "tabu_hit": 0,
-            "inverse_hit": 0,
-            "cooldown_hit": 0,
-            "cache_hit": 0,
-            "cache_hit_cum": cache_hit_cum,
-            "cache_miss_cum": cache_miss_cum,
-            "cache_key": init_cache_key,
-            "policy": selector,
-            "move": move_family,
-            "lookahead_k": lookahead,
-            "objective_hash": objective_hash,
-            "eval_calls_cum": eval_calls_cum,
-            "cache_saved_eval_calls_cum": cache_hit_cum,
-            "llm_used": 0,
-            "llm_fail_count": 0,
-            "fallback_reason": "",
-            "wall_time_ms_cum": wall_time_ms,
-            "accepted_steps_cum": accepted_steps_cum,
-            "sim_eval_calls_cum": eval_calls_cum,
-            "lookahead_enabled": int(lookahead > 0),
-            "lookahead_r": 0,
-            "notes": "",
-        }
-        writer.writerow(init_row)
-
-        for i, r in enumerate(hx_rows):
-            accepted = int(r.get("accepted", 0))
-            if accepted:
-                accepted_steps_cum += 1
-
-            assign = r.get("assign")
-            assign_sig = signature_for_assign(assign) if assign is not None else "assign:unknown"
-            op_args = r.get("op_args", r.get("op_args_json", {}))
-            if isinstance(op_args, str):
-                try:
-                    op_args_obj = json.loads(op_args)
-                except Exception:
-                    op_args_obj = {"raw": op_args}
-            else:
-                op_args_obj = op_args or {}
-            op_sig = stable_hash(op_args_obj)
-
-            cfg_hash_subset = stable_hash(
-                {
-                    "source": "heuragenix",
-                    "eval_version": EVAL_VERSION,
-                    "objective_hash": objective_hash,
-                }
-            )
-            cache_key = stable_hash(
-                {
-                    "assign": assign_sig,
-                    "objective_hash": objective_hash,
-                    "eval_version": EVAL_VERSION,
-                    "cfg_hash_subset": cfg_hash_subset,
-                }
-            )
-
-            wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
-            budget_remaining = max(0, budget_total - (i + 1)) if budget_mode == "steps" else ""
-
-            row = {
-                "iter": i,
-                "stage": r.get("stage", "hx"),
-                "op": r.get("op", r.get("type", "")),
-                "op_args_json": json.dumps(op_args_obj, ensure_ascii=False),
-                "accepted": accepted,
-                "total_scalar": r.get("total_scalar", r.get("total", "")),
-                "comm_norm": r.get("comm_norm", r.get("comm", "")),
-                "therm_norm": r.get("therm_norm", r.get("therm", "")),
-                "pareto_added": int(r.get("pareto_added", 0)),
-                "duplicate_penalty": r.get("duplicate_penalty", r.get("dup", 0.0)),
-                "boundary_penalty": r.get("boundary_penalty", r.get("boundary", 0.0)),
-                "signature": assign_sig,
-                "seed_id": seed_id,
-                "time_ms": wall_time_ms,
-                "delta_total": float(r.get("delta_total", 0.0)),
-                "delta_comm": float(r.get("delta_comm", 0.0)),
-                "delta_therm": float(r.get("delta_therm", 0.0)),
-                "tabu_hit": int(r.get("tabu_hit", 0)),
-                "inverse_hit": int(r.get("inverse_hit", 0)),
-                "cooldown_hit": int(r.get("cooldown_hit", 0)),
-                "cache_hit": 0,
-                "cache_hit_cum": cache_hit_cum,
-                "cache_miss_cum": cache_miss_cum,
-                "cache_key": cache_key,
-                "policy": selector,
-                "move": move_family,
-                "lookahead_k": lookahead,
-                "objective_hash": objective_hash,
-                "eval_calls_cum": eval_calls_cum,
-                "cache_saved_eval_calls_cum": cache_hit_cum,
-                "llm_used": 0,
-                "llm_fail_count": 0,
-                "fallback_reason": "",
-                "wall_time_ms_cum": wall_time_ms,
-                "accepted_steps_cum": accepted_steps_cum,
-                "sim_eval_calls_cum": eval_calls_cum,
-                "lookahead_enabled": int(lookahead > 0),
-                "lookahead_r": 0,
-                "notes": "",
-            }
-            writer.writerow(row)
-
-    return extra_report
+    return pareto, info
 
 
 def _load_pareto_from_csv(pareto_csv_path: Path, pareto_cfg: dict) -> ParetoSet:
@@ -1160,12 +1161,10 @@ def main() -> None:
         finalize_state.update({k: v for k, v in overrides.items() if v is not None})
         update_trace_summary(
             trace_dir,
-            {
-                "reason": str(finalize_state.get("reason", "error")),
-                "steps_done": int(finalize_state.get("steps_done", 0) or 0),
-                "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
-                "best_total": finalize_state.get("best_total", None),
-            },
+            ok=bool(finalize_state.get("ok", True)),
+            reason=str(finalize_state.get("reason", "error")),
+            steps_done=int(finalize_state.get("steps_done", 0) or 0),
+            best_solution_valid=bool(finalize_state.get("best_solution_valid", False)),
         )
         finalize_trace_dir(trace_dir)
         finalize_state["finalized"] = True
@@ -1510,22 +1509,16 @@ def main() -> None:
     objective_hash = evaluator.objective_hash()
     hx_rows = list(_iter_recordings(recordings_path))
     budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
-    trace_info = _write_trace_and_pareto(
-        trace_dir=out_dir,
+    trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
+    pareto, trace_info = _write_trace_and_pareto(
+        trace_dir=out_dir / "trace",
         hx_rows=hx_rows,
         objective_hash=objective_hash,
-        seed_id=int(seed),
-        move_family=str(method_label),
-        selector=str(method_label),
-        lookahead=0,
-        budget_mode="steps",
-        budget_total=budget_total,
+        cache_key=trace_cache_key,
     )
 
-    pareto = ParetoSet(
-        eps_comm=float(pareto_cfg.get("eps_comm", 0.0)),
-        eps_therm=float(pareto_cfg.get("eps_therm", 0.0)),
-    )
+    pareto.eps_comm = float(pareto_cfg.get("eps_comm", 0.0))
+    pareto.eps_therm = float(pareto_cfg.get("eps_therm", 0.0))
     best_total = None
     best_comm = None
     best_therm = None
@@ -1537,20 +1530,11 @@ def main() -> None:
         therm_norm = float(rec.get("therm_norm", 0.0))
         if not base_eval:
             base_eval = {"total_scalar": total_scalar, "comm_norm": comm_norm, "therm_norm": therm_norm}
-        if int(rec.get("accepted", 1)) == 1:
-            pareto.add(comm_norm, therm_norm, {})
         if best_total is None or total_scalar > best_total:
             best_total = total_scalar
             best_comm = comm_norm
             best_therm = therm_norm
             best_assign = rec.get("assign")
-
-    pareto_csv_path = out_dir / "pareto_points.csv"
-    with pareto_csv_path.open("w", encoding="utf-8") as fp:
-        fp.write("comm_norm,therm_norm\n")
-        for p in pareto.points:
-            fp.write(f"{p.comm_norm},{p.therm_norm}\n")
-    pareto = _load_pareto_from_csv(pareto_csv_path, pareto_cfg)
 
     trace_info.update(
         {
@@ -1601,6 +1585,7 @@ def main() -> None:
     if not eval_counter_path.exists():
         raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
     ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
+    eval_calls_total_initial = int(ec.get("eval_calls_total", 0))
     report = {
         "run_id": run_id,
         "success": (not recordings_missing),
@@ -1617,7 +1602,7 @@ def main() -> None:
             # ★可选：把用户是否显式指定也写清楚，方便复盘
             "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else None,
             # v5.4 fairness: count actual evaluator calls
-            "eval_calls": int(ec.get("eval_calls", 0)),
+            "eval_calls": eval_calls_total_initial,
         },
         "evaluator": {
             "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),
@@ -1678,26 +1663,83 @@ def main() -> None:
             f"HeurAgenix evaluator fallback detected: evaluator_source={evaluator_source}. "
             f"evaluator_import_error={evaluator_import_error}"
         )
-    with (out_dir / "report.json").open("w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-    # ---- v5.4: enforce budget fairness artifact (budget.json) ----
-    wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
-    actual_eval_calls = int(trace_info.get("evaluator_calls", 0))
-    if actual_eval_calls <= 0:
-        actual_eval_calls = int(_count_jsonl_lines(recordings_path)) if recordings_path.exists() else 0
-    effective_eval_calls_total = int(ec.get("effective_eval_calls_total", actual_eval_calls))
-    cache_hits = int(ec.get("cache_hits", 0))
+    total_wall_s = float(time.time() - start_time)
+    max_steps_done = int(trace_summary.get("n_rows", 0))
+    eval_calls_total = int(ec.get("eval_calls_total", 0))
+    effective_eval_calls_total = int(ec.get("effective_eval_calls_total", eval_calls_total))
+    cache_hits_total = int(ec.get("cache_hits_total", 0))
 
-    budget = {
-        "budget_main_axis": "eval_calls",
-        "primary_limit": {"type": "eval_calls", "value": None},
-        "secondary_limit": {"type": "wall_time_s", "value": float(wall_limit) if wall_limit else None},
-        "actual_eval_calls": actual_eval_calls,
-        "effective_eval_calls_total": effective_eval_calls_total,
-        "cache_hits": cache_hits,
-        "wall_time_s": float(time.time() - start_time),
+    selection_freq = int(baseline_cfg.get("selection_frequency", 1))
+    num_candidates = int(baseline_cfg.get("num_candidate_heuristics", 1))
+    rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
+    max_steps = int(baseline_cfg.get("budget_total", effective_max_steps))
+
+    num_selections = (max_steps + max(1, selection_freq) - 1) // max(1, selection_freq)
+    eval_limit_est = int(max_steps + num_selections * num_candidates * max(0, rollout_budget))
+
+    wall_limit = int(_cfg_get(cfg, "layout_agent.max_runtime_sec", 0) or 0)
+
+    primary_limit = {
+        "type": "wall_time_s" if wall_limit > 0 else "eval_calls",
+        "limit": int(wall_limit) if wall_limit > 0 else int(eval_limit_est),
     }
-    (out_dir / "budget.json").write_text(json.dumps(budget, indent=2) + "\n", encoding="utf-8")
+    secondary_limit = {
+        "type": "eval_calls" if wall_limit > 0 else "steps",
+        "limit": int(eval_limit_est) if wall_limit > 0 else int(max_steps),
+    }
+
+    budget_out = {
+        "primary_limit": primary_limit,
+        "secondary_limit": secondary_limit,
+        "actual_eval_calls": int(eval_calls_total),
+        "effective_eval_calls": int(effective_eval_calls_total),
+        "cache_hits_total": int(cache_hits_total),
+        "wall_time_s": float(total_wall_s),
+    }
+    (out_dir / "budget.json").write_text(
+        json.dumps(budget_out, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    report.update(
+        {
+            "method": "heuragenix",
+            "seed": int(seed_id),
+            "objective_hash": str(objective_hash),
+            "trace_dir": str(trace_dir.absolute()),
+            "artifacts": {
+                "trace_csv": str((out_dir / "trace.csv").absolute()),
+                "pareto_points_csv": str((out_dir / "pareto_points.csv").absolute()),
+                "trace_metrics_json": str((out_dir / "trace_metrics.json").absolute()),
+                "oscillation_metrics_json": str((out_dir / "oscillation_metrics.json").absolute()),
+                "budget_json": str((out_dir / "budget.json").absolute()),
+                "layout_best_json": str((out_dir / "layout_best.json").absolute()),
+                "report_json": str((out_dir / "report.json").absolute()),
+                "eval_counter_json": str((out_dir / "eval_counter.json").absolute()),
+            },
+            "budget": {
+                "primary_limit": primary_limit,
+                "secondary_limit": secondary_limit,
+                "eval_calls_total": int(eval_calls_total),
+                "effective_eval_calls_total": int(effective_eval_calls_total),
+                "cache_hits_total": int(cache_hits_total),
+                "wall_time_s": float(total_wall_s),
+                "steps_done": int(max_steps_done),
+            },
+            "trace_info": {
+                "steps_written": int(trace_info.get("steps_written", 0)),
+                "accepted_steps": int(trace_info.get("accepted_steps", 0)),
+                "eval_calls_total": int(eval_calls_total),
+                "effective_eval_calls_total": int(effective_eval_calls_total),
+            },
+            "ok": bool(ok),
+            "reason": str(reason),
+        }
+    )
+    (out_dir / "report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     meta = {
         "mapping_signature": best_solution_payload.get("mapping_signature", "")
         if isinstance(best_solution_payload, dict)

@@ -38,8 +38,14 @@ def _count_jsonl_lines(path: Path) -> int:
 
 
 def _trace_csv_candidates(trace_dir: Path) -> list[Path]:
-    # 优先 trace_dir/trace.csv，其次 out_dir(trace_dir.parent)/trace.csv
-    return [trace_dir / "trace.csv", trace_dir.parent / "trace.csv"]
+    """
+    v5.4 contract: trace.csv should live at run out_dir root (trace_dir.parent),
+    while trace_events.jsonl/trace_summary live under out_dir/trace/.
+    """
+    return [
+        trace_dir.parent / "trace.csv",
+        trace_dir / "trace.csv",
+    ]
 
 
 def _pick_trace_csv_path(trace_dir: Path) -> Path:
@@ -50,29 +56,67 @@ def _pick_trace_csv_path(trace_dir: Path) -> Path:
     return trace_dir.parent / "trace.csv"
 
 
-def _make_min_row(stage: str, op: str, seed_id: int, iter_id: int, op_args: dict, signature: str) -> dict:
+def _make_min_row(
+    stage: str,
+    op: str,
+    seed_id: int,
+    iter_id: int,
+    op_args: Dict[str, Any],
+    signature: str,
+    total_scalar: float = 0.0,
+    comm_norm: float = 0.0,
+    therm_norm: float = 0.0,
+    objective_hash: str = "",
+    time_ms: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Minimal trace row that will NOT break csv writing and downstream int/float casts.
+    Must only use keys in TRACE_FIELDS.
+    """
     row = {k: "" for k in TRACE_FIELDS}
     row["iter"] = int(iter_id)
-    row["stage"] = stage
-    row["op"] = op
-    row["op_args_json"] = json.dumps(op_args, ensure_ascii=False)
-    row["accepted"] = 1
-    row["total_scalar"] = 0.0
-    row["comm_norm"] = 0.0
-    row["therm_norm"] = 0.0
+    row["stage"] = str(stage)
+    row["op"] = str(op)
+    row["op_args_json"] = json.dumps(op_args or {}, ensure_ascii=False)
+    row["accepted"] = 1 if stage == "init" else 0
+    row["seed_id"] = int(seed_id)
+    row["signature"] = str(signature)
+
+    row["total_scalar"] = float(total_scalar)
+    row["comm_norm"] = float(comm_norm)
+    row["therm_norm"] = float(therm_norm)
+
+    row["delta_total"] = 0.0
+    row["delta_comm"] = 0.0
+    row["delta_therm"] = 0.0
+
     row["pareto_added"] = 0
     row["duplicate_penalty"] = 0.0
     row["boundary_penalty"] = 0.0
-    row["seed_id"] = int(seed_id)
-    row["time_ms"] = 0
-    row["objective_scalar"] = 0.0
-    row["signature"] = signature  # v5.4: "assign:..."
-    row["eval_version"] = "v5.4"
-    row["time_unit"] = "ms"
-    row["dist_unit"] = "mm"
-    # 这些列为可选/统计类，留空或 0 均可
-    row["objective_hash"] = stable_hash({"v": "v5.4", "stage": stage, "op": op})
-    row["cache_key"] = stable_hash({"sig": signature, "obj": row["objective_hash"]})
+
+    row["tabu_hit"] = 0
+    row["tabu_accept_override"] = 0
+    row["repeat_signature"] = 0
+    row["undo_signature"] = 0
+    row["policy_switch"] = ""
+    row["cache_hit"] = 0
+    row["cache_enabled"] = 0
+    row["eval_calls_cum"] = 0
+    row["cache_hit_cum"] = 0
+    row["accepted_steps_cum"] = 0
+    row["score_lookahead"] = 0.0
+    row["score_tts"] = 0.0
+    row["score_llm"] = 0.0
+    row["selection_id"] = ""
+    row["step_id"] = ""
+    row["heuristic_name"] = ""
+
+    row["time_ms"] = float(time_ms)
+    row["time_s"] = float(time_ms) / 1000.0
+
+    row["objective_hash"] = str(objective_hash)
+    row["cache_key"] = stable_hash({"signature": signature, "seed_id": int(seed_id), "objective_hash": str(objective_hash)})
+
     return row
 
 
@@ -87,29 +131,61 @@ def _read_last_csv_row(csv_path: Path) -> Optional[dict]:
     return last
 
 
-def _ensure_trace_csv_init(trace_dir: Path, seed_id: int):
-    csv_path = _pick_trace_csv_path(trace_dir)
-    if csv_path.exists():
-        return
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=TRACE_FIELDS)
-        w.writeheader()
-        # 最小可验 init 行：符合 smoke_trace_schema.py 的约束（signature 必须以 "assign:" 开头）
-        w.writerow(_make_min_row("init", "init", seed_id=seed_id, iter_id=0, op_args={}, signature="assign:null"))
+def _ensure_trace_csv_init(trace_dir: Path, seed_id: int) -> Path:
+    trace_csv = _pick_trace_csv_path(trace_dir)
+    trace_csv.parent.mkdir(parents=True, exist_ok=True)
+    if not trace_csv.exists():
+        with trace_csv.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
+            w.writeheader()
+            w.writerow(
+                _make_min_row(
+                    stage="init",
+                    op="init",
+                    seed_id=seed_id,
+                    iter_id=-1,
+                    op_args={"op": "init"},
+                    signature="assign:unknown",
+                    total_scalar=0.0,
+                    comm_norm=0.0,
+                    therm_norm=0.0,
+                    objective_hash="",
+                    time_ms=0.0,
+                )
+            )
+    return trace_csv
 
 
-def _ensure_trace_csv_finalize(trace_dir: Path, seed_id: int, reason: str, step_hint: int):
-    csv_path = _pick_trace_csv_path(trace_dir)
-    _ensure_trace_csv_init(trace_dir, seed_id=seed_id)
-    last = _read_last_csv_row(csv_path)
-    if last and str(last.get("stage", "")) == "finalize" and str(last.get("op", "")) == "finalize":
+def _ensure_trace_csv_finalize(trace_dir: Path) -> None:
+    trace_csv = _pick_trace_csv_path(trace_dir)
+    if not trace_csv.exists():
+        _ensure_trace_csv_init(trace_dir, seed_id=0)
+
+    last = _read_last_csv_row(trace_csv)
+    if last and last.get("stage") == "finalize":
         return
-    # iter 取一个稳定的 hint（避免 -1）
-    iter_id = max(0, int(step_hint))
-    with csv_path.open("a", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=TRACE_FIELDS)
-        w.writerow(_make_min_row("finalize", "finalize", seed_id=seed_id, iter_id=iter_id, op_args={"reason": reason}, signature="assign:null"))
+
+    iter_id = int(last.get("iter", 0)) + 1 if last else 0
+    seed_id = int(last.get("seed_id", 0)) if last else 0
+    objective_hash = str(last.get("objective_hash", "")) if last else ""
+
+    with trace_csv.open("a", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
+        w.writerow(
+            _make_min_row(
+                stage="finalize",
+                op="finalize",
+                seed_id=seed_id,
+                iter_id=iter_id,
+                op_args={"op": "finalize"},
+                signature="assign:unknown",
+                total_scalar=float(last.get("total_scalar", 0.0)) if last else 0.0,
+                comm_norm=float(last.get("comm_norm", 0.0)) if last else 0.0,
+                therm_norm=float(last.get("therm_norm", 0.0)) if last else 0.0,
+                objective_hash=objective_hash,
+                time_ms=float(last.get("time_ms", 0.0)) if last else 0.0,
+            )
+        )
 
 
 def init_trace_dir(
@@ -205,19 +281,35 @@ def finalize_trace_events(path: Path, payload: dict, run_id: str, step: int):
     append_trace_event_v54(path, "finalize", payload=payload, run_id=run_id, step=step)
 
 
-def update_trace_summary(trace_dir: Path, ok: bool, reason: str, steps_done: int, best_solution_valid: bool):
+def update_trace_summary(
+    trace_dir: Path,
+    ok: bool = True,
+    reason: str = "",
+    steps_done: int = 0,
+    best_solution_valid: bool = False,
+) -> None:
+    """
+    v5.4 contract: write trace_summary.json with {ok, reason, steps_done, best_solution_valid}.
+    Backward-compatible: if caller mistakenly passes a dict as `ok`, parse it.
+    """
+    if isinstance(ok, dict):
+        d = ok
+        ok = bool(d.get("ok", True))
+        reason = str(d.get("reason", reason))
+        steps_done = int(d.get("steps_done", steps_done))
+        best_solution_valid = bool(d.get("best_solution_valid", best_solution_valid))
+
     trace_dir = Path(trace_dir)
-    _write_json(
-        trace_dir / "summary.json",
-        {
-            "schema": "v5.4",
-            "ok": bool(ok),
-            "reason": str(reason),
-            "steps_done": int(steps_done),
-            "best_solution_valid": bool(best_solution_valid),
-            "ts_ms": int(time.time() * 1000),
-        },
-    )
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    out = {
+        "ok": bool(ok),
+        "reason": str(reason),
+        "steps_done": int(steps_done),
+        "best_solution_valid": bool(best_solution_valid),
+        "ts_unix": float(time.time()),
+    }
+    with (trace_dir / "trace_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
 
 
 def ensure_trace_events(trace_dir: Path) -> Path:
@@ -234,7 +326,7 @@ def ensure_trace_events(trace_dir: Path) -> Path:
 def finalize_trace_dir(trace_dir: Path):
     """
     v5.4 合同收尾：
-    - 确保 summary.json 存在（否则写一个最小的）
+    - 确保 trace_summary.json 存在（否则写一个最小的）
     - 确保 trace.csv 最后一行是 finalize（否则自动补一行）
     - 追加 trace_events.jsonl 的 finalize 事件，并写 finalized.flag，禁止后续再 append
     - 最后做 required files 校验
@@ -242,8 +334,8 @@ def finalize_trace_dir(trace_dir: Path):
     trace_dir = Path(trace_dir)
     required = ["trace_header.json", "manifest.json", "eval_config_snapshot.yaml", "trace_events.jsonl"]
 
-    # 0) summary.json 兜底
-    summary_path = trace_dir / "summary.json"
+    # 0) trace_summary.json 兜底
+    summary_path = trace_dir / "trace_summary.json"
     if not summary_path.exists():
         update_trace_summary(trace_dir, ok=False, reason="missing_summary_autofill", steps_done=0, best_solution_valid=False)
 
@@ -257,7 +349,7 @@ def finalize_trace_dir(trace_dir: Path):
     step_hint = max(0, int(summary.get("steps_done", 0) or 0))
 
     # 1) trace.csv finalize 行兜底
-    _ensure_trace_csv_finalize(trace_dir, seed_id=seed_id, reason=str(summary.get("reason", "done")), step_hint=step_hint)
+    _ensure_trace_csv_finalize(trace_dir)
 
     # 2) finalize 事件：只允许写一次，并且必须是最后一条
     flag = trace_dir / FINALIZED_FLAG
