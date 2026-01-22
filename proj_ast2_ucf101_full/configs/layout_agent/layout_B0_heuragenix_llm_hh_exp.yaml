@@ -7,7 +7,7 @@ baseline:
   problem: wafer_layout
   heuristic_dir: basic_heuristics
   method: llm_hh
-  llm_config_file: configs/llm/azure_gpt_4o.json
+llm_config_file: configs/llm/api_model_ark.json
   iterations_scale_factor: 1.0
   selection_frequency: 5
   num_candidate_heuristics: 4

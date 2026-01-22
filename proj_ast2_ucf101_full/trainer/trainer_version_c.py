@@ -765,9 +765,13 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
     reason = "done"
     steps_done = 0
     best_solution_valid = True
+    gating_epochs = 0
+    freeze_epochs = 0
+    total_epochs = 0
     try:
         for outer in range(cfg.training.outer_epochs):
             ran_epochs += 1
+            total_epochs += 1
             stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
             if stable_hw_enabled:
                 legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
@@ -809,6 +813,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                 )
                 stable_hw_state = stable_decision.state
                 stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
+                if str(stable_hw_state.get("guard_mode", "")).upper() != "HW_OPT":
+                    gating_epochs += 1
+                if not bool(stable_hw_state.get("allow_discrete_updates", True)):
+                    freeze_epochs += 1
                 # ---- invariants (v5.4) ----
                 if stable_hw_state.get("acc_ref") is not None:
                     stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
@@ -1490,23 +1498,35 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         )
         finalize_trace_dir(trace_dir)
 
-    # write run_manifest.json (auditable LockedAccRef)
+    # write run_manifest.json (auditable LockedAccRef)  -- v5.4 compliant
     from utils.run_manifest import write_run_manifest
+    from omegaconf import OmegaConf
 
-    cfg_path = getattr(cfg, "cfg_path", "") or ""
-    cfg_hash = stable_hash(cfg)
+    cfg_path = str(getattr(cfg, "cfg_path", "") or "")
+    cfg_hash = stable_hash(OmegaConf.to_container(cfg, resolve=True))
+
+    _telemetry = {
+        "gating_on_ratio": float(gating_epochs) / max(1, int(total_epochs)),
+        "freeze_epoch_ratio": float(freeze_epochs) / max(1, int(total_epochs)),
+    }
+    _metrics_summary = {
+        "status": str(reason),
+        "ran_epochs": int(ran_epochs),
+        "early_stop": bool(early_stop_triggered),
+        "best_acc1": float(best_acc1) if ("best_acc1" in locals() and best_acc1 is not None) else None,
+        "last_acc1": float(last_acc1) if ("last_acc1" in locals() and last_acc1 is not None) else None,
+        "telemetry": _telemetry,
+    }
 
     write_run_manifest(
-        out_dir=Path(out_dir),
+        out_dir=str(out_dir),
         cfg_path=cfg_path,
-        cfg_hash=cfg_hash,
-        seed_id=int(seed),
-        git_sha=os.environ.get("GIT_SHA", ""),
+        cfg_hash=str(cfg_hash),
+        seed=int(seed),
         stable_hw_state=stable_hw_state if "stable_hw_state" in locals() else {},
-        metrics_summary={
-            "best_acc1": float(best_acc1) if "best_acc1" in locals() else None,
-            "last_acc1": float(last_acc1) if "last_acc1" in locals() else None,
-        },
+        extra={"metrics_summary": _metrics_summary},
+        run_id=str(run_id),
+        spec_version="v5.4",
     )
 
     stable_fields = stable_hw_log_fields(stable_hw_state, cfg)
@@ -1520,6 +1540,10 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
         "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
         "stable_hw": stable_fields,
+        "telemetry": {
+            "gating_on_ratio": float(gating_epochs) / max(1, int(total_epochs)),
+            "freeze_epoch_ratio": float(freeze_epochs) / max(1, int(total_epochs)),
+        },
     }
     for k, v in stable_fields.items():
         metrics[k] = v
