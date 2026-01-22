@@ -38,6 +38,18 @@ class EvalCache:
             return 0.0
         return float(self.hit_count) / float(total)
 
+    @property
+    def hits(self) -> int:
+        return int(self.hit_count)
+
+    @property
+    def misses(self) -> int:
+        return int(self.miss_count)
+
+    @property
+    def size(self) -> int:
+        return int(len(self._d))
+
 
 @dataclass
 class BanditArm:

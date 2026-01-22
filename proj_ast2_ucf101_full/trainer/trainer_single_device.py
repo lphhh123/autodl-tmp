@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from functools import partial
 from typing import Dict, Any
@@ -21,7 +22,8 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
+from utils.stable_hash import stable_hash
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hw import (
     apply_accuracy_guard,
@@ -425,6 +427,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     step=int(epoch),
                 )
             if metrics_path:
+                stable_fields = stable_hw_log_fields(stable_state, cfg)
                 metrics = {
                     "epoch": int(epoch),
                     "acc1": float(last_acc),
@@ -443,7 +446,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     "energy_mj": float((last_hw_stats or {}).get("energy_mj", 0.0)),
                     "mem_peak_mb": float((last_hw_stats or {}).get("mem_mb", 0.0)),
                 }
-                metrics["stable_hw"] = stable_hw_log_fields(stable_state)
+                metrics["stable_hw"] = stable_fields
+                for k, v in stable_fields.items():
+                    metrics[k] = v
                 metrics.update({k: float(v) for k, v in hw_stats.items()})
                 with metrics_path.open("w", encoding="utf-8") as f:
                     json.dump(metrics, f, indent=2)
@@ -462,38 +467,35 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         ok = True
     finally:
         if trace_dir is not None:
-            finalize_trace_dir(
+            update_trace_summary(
                 trace_dir,
-                summary_extra={
+                {
                     "reason": "done" if ok else "error",
                     "steps_done": int(steps_done),
                     "best_solution_valid": bool(ok and not early_stop_triggered),
                 },
-                run_id=run_id,
-                step=int(steps_done),
             )
+            finalize_trace_dir(trace_dir)
 
     if out_dir is not None:
-        try:
-            from utils.run_manifest import write_run_manifest
+        from utils.run_manifest import write_run_manifest
 
-            write_run_manifest(
-                out_dir=str(out_dir),
-                cfg_path=str(getattr(cfg.train, "cfg_path", "")),
-                cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
-                seed=int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0),
-                stable_hw_state=stable_state,
-                extra={
-                    "budget_main_axis": "wall_time_s",
-                    "dataset_id": getattr(getattr(cfg, "dataset", None), "dataset_id", None)
-                    or getattr(getattr(cfg, "dataset", None), "name", "unknown"),
-                },
-                run_id=str(getattr(cfg.train, "run_id", "")) or "single_device",
-                spec_version="v5.4",
-                command=None,
-            )
-        except Exception:
-            pass
+        cfg_path = getattr(cfg, "cfg_path", "") or ""
+        cfg_hash = stable_hash(cfg)
+        seed_id = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)) or 0)
+
+        write_run_manifest(
+            out_dir=Path(out_dir),
+            cfg_path=cfg_path,
+            cfg_hash=cfg_hash,
+            seed_id=seed_id,
+            git_sha=os.environ.get("GIT_SHA", ""),
+            stable_hw_state=stable_state if "stable_state" in locals() else {},
+            metrics_summary={
+                "best_acc1": float(best_acc) if "best_acc" in locals() else None,
+                "last_acc1": float(last_acc) if "last_acc" in locals() else None,
+            },
+        )
     if trace_dir is not None:
         append_trace_event_v54(
             trace_events_path,

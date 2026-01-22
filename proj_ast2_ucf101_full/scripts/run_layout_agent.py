@@ -40,7 +40,7 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
 
@@ -393,17 +393,16 @@ def run_layout_agent(
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
         best_solution_valid = _is_valid_assign(best_assign, S, Ns)
         reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
-        finalize_trace_dir(
+        update_trace_summary(
             trace_dir,
-            summary_extra={
+            {
                 "reason": reason,
                 "steps_done": int(steps_done),
                 "best_solution_valid": bool(best_solution_valid),
                 "best_total": float(best_total) if best_total is not None else None,
             },
-            run_id=run_id,
-            step=int(steps_done),
         )
+        finalize_trace_dir(trace_dir)
 
 
 def main():

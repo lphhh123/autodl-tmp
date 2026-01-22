@@ -125,6 +125,7 @@ def main():
     if args.export_dir is None and args.out_dir is not None:
         args.export_dir = str(Path(args.out_dir) / "exports" / "layout_input")
     cfg = load_config(args.cfg)
+    cfg.cfg_path = args.cfg
     seed_everything(int(args.seed))
     if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)

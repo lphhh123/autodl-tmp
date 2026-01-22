@@ -1,5 +1,5 @@
 layout_agent:
-  version: v4.3.2
+  version: v5.4
   seed_list: [0]
   max_runtime_sec: 1800
   export_trace: true
