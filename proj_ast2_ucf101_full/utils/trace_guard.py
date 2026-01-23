@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -199,6 +200,7 @@ def init_trace_dir(
     extra_manifest: Optional[Dict[str, Any]] = None,
     resolved_config: Optional[Dict[str, Any]] = None,
     requested_config: Optional[Dict[str, Any]] = None,
+    requested_cfg_yaml: Optional[str] = None,
 ) -> Dict[str, Path]:
     """
     Create/initialize a trace directory with v5.4 required artifacts.
@@ -263,6 +265,18 @@ def init_trace_dir(
         "contract_overrides": overrides,
         "ts_ms": int(time.time() * 1000),
     }
+    # ---- SPEC_E header required (top-level) ----
+    header_payload["no_drift_enabled"] = bool(signature.get("no_drift_enabled", True))
+    header_payload["acc_ref_source"] = str(signature.get("acc_ref_source", "locked"))
+
+    # ---- v5.4 contract: requested vs effective must be auditable ----
+    snap_sha1 = None
+    if requested_cfg_yaml:
+        snap_path = trace_dir / "requested_config_snapshot.yaml"
+        snap_path.write_text(str(requested_cfg_yaml), encoding="utf-8")
+        snap_sha1 = hashlib.sha1(str(requested_cfg_yaml).encode("utf-8")).hexdigest()
+        header_payload["requested_config_snapshot"] = "requested_config_snapshot.yaml"
+        header_payload["requested_config_sha1"] = snap_sha1
     _write_json(header_path, header_payload)
 
     # 2) manifest.json
@@ -274,6 +288,9 @@ def init_trace_dir(
         "requested_config_path": str(requested_path),
         "created_ts_ms": int(time.time() * 1000),
     }
+    if requested_cfg_yaml:
+        manifest["requested_config_snapshot"] = "requested_config_snapshot.yaml"
+        manifest["requested_config_sha1"] = snap_sha1
     if extra_manifest:
         manifest.update(extra_manifest)
     _write_json(manifest_path, manifest)
@@ -331,6 +348,11 @@ def init_trace_dir_v54(
             resolved_config = OmegaConf.to_container(cfg, resolve=True)
         except Exception:
             resolved_config = None
+    requested_cfg_yaml = None
+    try:
+        requested_cfg_yaml = getattr(getattr(cfg, "train", None), "requested_cfg_yaml", None)
+    except Exception:
+        requested_cfg_yaml = None
     requested_config = None
     if cfg is not None:
         try:
@@ -353,6 +375,7 @@ def init_trace_dir_v54(
         extra_manifest=extra_manifest,
         resolved_config=resolved_config,
         requested_config=requested_config,
+        requested_cfg_yaml=requested_cfg_yaml,
     )
     snapshot_path = Path(meta["eval_config_snapshot"])
     if cfg is not None:
@@ -396,7 +419,20 @@ def append_trace_event_v54(
         _require_keys(
             event_type,
             payload,
-            ["acc_ref", "acc_now", "acc_drop", "acc_drop_max", "gate", "hw_loss_raw", "hw_loss_used", "total_loss"],
+            [
+                "gate",
+                "guard_mode",
+                "acc_ref",
+                "acc_now",
+                "acc_drop",
+                "acc_drop_max",
+                "lambda_hw_effective",
+                "hw_loss_raw",
+                "hw_loss_used",
+                "total_loss_acc_part",
+                "total_loss_hw_part",
+                "total_loss",
+            ],
         )
         if payload["gate"] not in ("allow_hw", "reject_hw"):
             raise ValueError(

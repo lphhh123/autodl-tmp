@@ -563,6 +563,8 @@ def _write_trace_and_pareto(
     hx_rows: List[Dict[str, Any]],
     objective_hash: str,
     cache_key: str,
+    requested_method: str,
+    effective_method: str,
 ) -> Tuple[ParetoSet, Dict[str, Any]]:
     """
     Convert HeurAgenix recordings.jsonl -> v5.4 trace.csv + pareto_points.csv.
@@ -599,6 +601,11 @@ def _write_trace_and_pareto(
             return int(x)
         except Exception:
             return default
+
+    method_note = f"heuragenix_method:{effective_method}"
+    fallback_note = ""
+    if str(requested_method) != str(effective_method):
+        fallback_note = f"method_fallback:{requested_method}->{effective_method}"
 
     with trace_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
@@ -640,6 +647,8 @@ def _write_trace_and_pareto(
                     "score_llm": 0.0,
                 }
             )
+            row["policy_switch"] = method_note
+            row["fallback_reason"] = fallback_note
             w.writerow(row)
         else:
             for idx, r in enumerate(hx_rows):
@@ -709,6 +718,8 @@ def _write_trace_and_pareto(
                     }
                 )
                 row["time_s"] = float(row["time_ms"]) / 1000.0
+                row["policy_switch"] = method_note
+                row["fallback_reason"] = fallback_note
 
                 if "selection_id" in r:
                     row["selection_id"] = str(r.get("selection_id", ""))
@@ -1085,6 +1096,17 @@ def main() -> None:
             "Tip: run with --heuragenix_dir /ABS/PATH/TO/HeurAgenix"
         )
     _ensure_heuragenix_syspath(heuragenix_root)
+    (out_dir / "heuragenix_resolution.json").write_text(
+        json.dumps(
+            {
+                "heuragenix_root": str(heuragenix_root.resolve()),
+                "requested_root": str(baseline_cfg.get("heuragenix_root", "")),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     run_mode = baseline_cfg.get("run_mode", "subprocess")
     method = str(baseline_cfg.get("method", "llm_hh"))
@@ -1601,6 +1623,8 @@ def main() -> None:
         hx_rows=hx_rows,
         objective_hash=objective_hash,
         cache_key=trace_cache_key,
+        requested_method=str(baseline_method),
+        effective_method=str(method),
     )
 
     pareto.eps_comm = float(pareto_cfg.get("eps_comm", 0.0))

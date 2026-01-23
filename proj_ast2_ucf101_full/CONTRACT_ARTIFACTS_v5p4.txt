@@ -1,0 +1,15 @@
+# v5.4 Contract Artifacts (minimum required outputs)
+# Paths are relative to the run output directory unless noted.
+
+trace/trace.csv
+trace/trace_events.jsonl
+trace/trace_header.json
+trace/manifest.json
+trace/eval_config_snapshot.yaml
+trace/config_requested.yaml
+trace/requested_config_snapshot.yaml
+trace/finalized.flag
+finalize.json
+run_manifest.json
+heuragenix_resolution.json
+pareto_points.csv
