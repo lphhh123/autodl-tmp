@@ -513,6 +513,8 @@ def apply_accuracy_guard(
         has_val_this_epoch = False
 
     eps_drop = float(_cfg_get(ctrl, "epsilon_drop", _cfg_get(gcfg, "epsilon_drop", 0.01)))
+    st["acc_drop_max"] = float(eps_drop)
+    st["epsilon_drop"] = float(eps_drop)
 
     # ===== v5.4 hysteresis: different enter/exit thresholds to avoid oscillation =====
     hyst = float(_cfg_get(ctrl, "hysteresis", 0.0) or 0.0)

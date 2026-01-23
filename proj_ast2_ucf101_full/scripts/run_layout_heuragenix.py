@@ -79,7 +79,9 @@ def _cfg_get(obj, key: str, default=None):
 def _build_run_signature(cfg: Any, method_name: str, seed_global: int) -> Dict[str, Any]:
     ov = dict(FAIRNESS_OVERRIDES)
     ov.update({"seed_global": int(seed_global), "seed_problem": int(seed_global)})
-    return build_signature_v54(cfg, method_name=method_name, overrides=ov)
+    signature = build_signature_v54(cfg, method_name=method_name, overrides=ov)
+    signature.setdefault("cwd", os.getcwd())
+    return signature
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
