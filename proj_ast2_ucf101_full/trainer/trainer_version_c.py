@@ -1357,6 +1357,10 @@ def train_version_c(
                                     "raw_value": raw_v,
                                     "used_value": used_v,
                                     "penalty_added": penalty_added,
+                                    "clamp_min": None,
+                                    "clamp_max": None,
+                                    "note": "sanitize" if changed else "no_change",
+                                    "source": "hw_loss",
                                     # 允许保留额外字段用于 debug（不影响合同审计）
                                     "outer_iter": int(outer),
                                     "epoch": int(epoch),
@@ -1582,19 +1586,26 @@ def train_version_c(
                     if float(lambda_hw_eff) != 0.0:
                         hw_part = float(lambda_hw_eff) * float(hw_loss_used)
 
+                    acc_used_source = str(stable_hw_state.get("acc_used_source", "") or "")
+                    acc_used_value = stable_hw_state.get("acc_used_value", acc_now)
                     payload = {
                         "candidate_id": int(outer),
                         "gate": gate,
                         "acc_ref": float(acc_ref_val),
-                        "acc_used": float(stable_hw_state.get("acc_now", 0.0)),
+                        "acc_now": float(acc_now),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
                         "acc_drop_max": float(acc_drop_max),
+                        "acc_used_source": acc_used_source,
+                        "acc_used_value": float(acc_used_value if acc_used_value is not None else acc_now),
                         "reason_code": reason_code,
                         "lambda_hw_effective": float(lambda_hw_eff),
                         "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
                         "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
                         "hw_loss_raw": float(hw_loss_norm or 0.0),
                         "hw_loss_used": float(hw_loss_used or 0.0),
+                        "total_loss_scalar": float(total_loss.item())
+                        if hasattr(total_loss, "item")
+                        else float(total_loss or 0.0),
                         "total_loss_acc_part": float(acc_loss.item())
                         if hasattr(acc_loss, "item")
                         else float(acc_loss or 0.0),
@@ -1607,7 +1618,6 @@ def train_version_c(
                         "hw_metric_raw": hw_stats.get("proxy_raw", {}),
                         "hw_metric_normed": hw_stats.get("proxy_used", {}),
                         "hw_scale_schema_version": "v5.4_hw_loss_norm",
-                        "acc_used_source": str(stable_hw_state.get("acc_used_source", "") or ""),
                         "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
                         "epoch": int(epoch),
                         "outer_iter": int(outer_iter),
@@ -1670,11 +1680,12 @@ def train_version_c(
                                     trace_events_path,
                                     "ref_update",
                                     payload={
-                                        "outer_iter": int(outer),
-                                        "key": ref_name,
+                                        "ref_name": str(ref_name),
                                         "old_value": _maybe_float(before.get(ref_name)),
                                         "new_value": _maybe_float(after.get(ref_name)),
-                                        "reason": "hw_ref_update",
+                                        "reason": "ema_ref_update",
+                                        "key": str(ref_name),
+                                        "outer_iter": int(outer),
                                     },
                                     run_id=run_id,
                                     step=int(outer),
@@ -1907,6 +1918,12 @@ def train_version_c(
                     "signature": signature,
                     "requested_config": requested_cfg,
                     "effective_config": effective_cfg,
+                    "no_drift_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+                    ),
+                    "acc_ref_source": str(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
+                    ),
                     "stable_hw_state": {
                         "init_status": "failed_before_full_init",
                     },
@@ -1916,24 +1933,6 @@ def train_version_c(
 
         finalize_flag = trace_dir / "finalized.flag"
         if not finalize_flag.exists():
-            append_trace_event_v54(
-                trace_events_path=trace_events_path,
-                event_type="finalize",
-                payload={
-                    "run_status": "error",
-                    "reason": "exception",
-                    "steps_done": int(steps_done_for_finalize),
-                    "best_acc1": None,
-                    "final_acc1": None,
-                    "final_loss_scalar": None,
-                    "final_lambda_hw_effective": None,
-                    "final_hw_loss": None,
-                    "final_acc_ref": None,
-                    "ref_update_count": 0,
-                    "proxy_sanitize_count": 0,
-                },
-            )
-
             finalize_trace_dir(
                 trace_events_path,
                 reason="exception",

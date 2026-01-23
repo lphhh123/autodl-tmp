@@ -785,6 +785,10 @@ def _write_trace_and_pareto(
                             "raw_value": float(row["comm_norm"]),
                             "used_value": float(row["comm_norm"]),
                             "penalty_added": 0.0,
+                            "clamp_min": None,
+                            "clamp_max": None,
+                            "note": "from_recordings",
+                            "source": "heuragenix_recordings",
                         },
                         run_id=str(run_id),
                         step=int(iter_id),
@@ -797,6 +801,10 @@ def _write_trace_and_pareto(
                             "raw_value": float(row["therm_norm"]),
                             "used_value": float(row["therm_norm"]),
                             "penalty_added": 0.0,
+                            "clamp_min": None,
+                            "clamp_max": None,
+                            "note": "from_recordings",
+                            "source": "heuragenix_recordings",
                         },
                         run_id=str(run_id),
                         step=int(iter_id),
@@ -1974,6 +1982,29 @@ def main() -> None:
             else:
                 tgt.parent.mkdir(parents=True, exist_ok=True)
                 tgt.write_bytes(p.read_bytes())
+        readme_path = guide_root / "wafer_layout" / "README_WRAPPER_PATHS.md"
+        readme_path.parent.mkdir(parents=True, exist_ok=True)
+        readme_path.write_text(
+            "\n".join(
+                [
+                    "# HeurAgenix wrapper output paths",
+                    "",
+                    "This wrapper runs HeurAgenix with a private working root, then mirrors the",
+                    "result tree into this `out_dir/output/...` folder for convenience.",
+                    "",
+                    "## Key paths",
+                    f"- HeurAgenix cwd/root: `{(internal_out / 'output').resolve()}`",
+                    f"- Internal data root: `{internal_out / 'data'}`",
+                    f"- Mirror root (this tree): `{guide_root}`",
+                    "",
+                    "## Why the split?",
+                    "- `heuragenix_internal/` keeps raw runs isolated from wrapper metadata.",
+                    "- `output/` mirrors the guide-style tree expected by HeurAgenix docs.",
+                    "- This avoids mixing test_data/previous_operations with wrapper outputs.",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     (out_dir / "HEURAGENIX_OUTPUT_LOCATION.txt").write_text(
         f"Internal: {src_root}\nGuide-mirror: {guide_root}\n",

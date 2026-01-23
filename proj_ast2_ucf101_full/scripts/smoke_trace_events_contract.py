@@ -52,11 +52,11 @@ def _validate_payload(event_type: str, payload: dict) -> list[str]:
             if key not in payload:
                 errors.append(f"proxy_sanitize missing {key}")
     elif event_type == "ref_update":
-        for key in ("key", "old_value", "new_value", "reason"):
+        for key in REQUIRED_EVENT_PAYLOAD_KEYS_V54["ref_update"]:
             if key not in payload:
                 errors.append(f"ref_update missing {key}")
     elif event_type == "finalize":
-        for key in ("status", "summary"):
+        for key in REQUIRED_EVENT_PAYLOAD_KEYS_V54["finalize"]:
             if key not in payload:
                 errors.append(f"finalize missing {key}")
     return errors
@@ -119,6 +119,22 @@ def main() -> int:
             "boundary_penalty": 0.0,
             "seed_id": 0,
             "time_ms": 0,
+        },
+        run_id=str(run_id),
+        step=1,
+    )
+    append_trace_event_v54(
+        trace_events_path,
+        "proxy_sanitize",
+        payload={
+            "metric": "comm",
+            "raw_value": 0.0,
+            "used_value": 0.0,
+            "penalty_added": 0.0,
+            "clamp_min": None,
+            "clamp_max": None,
+            "note": "smoke",
+            "source": "smoke_trace_events_contract",
         },
         run_id=str(run_id),
         step=1,

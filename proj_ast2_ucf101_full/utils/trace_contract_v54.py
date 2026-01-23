@@ -13,11 +13,46 @@ ALLOWED_EVENT_TYPES_V54 = (
 )
 
 # ---- payload required keys (SPEC_E) ----
-REQUIRED_TRACE_HEADER_KEYS = ("signature", "requested_config", "effective_config")
-REQUIRED_GATING_KEYS = ("candidate_id", "gate", "acc_drop", "acc_drop_max")
-REQUIRED_PROXY_SANITIZE_KEYS = ("metric", "raw_value", "used_value", "penalty_added")
-REQUIRED_REF_UPDATE_KEYS = ("key", "old_value", "new_value", "reason")
-REQUIRED_FINALIZE_KEYS = ("status", "summary")
+REQUIRED_TRACE_HEADER_KEYS = (
+    "signature",
+    "requested_config",
+    "effective_config",
+    "no_drift_enabled",
+    "acc_ref_source",
+)
+REQUIRED_GATING_KEYS = (
+    "candidate_id",
+    "gate",
+    "acc_ref",
+    "acc_now",
+    "acc_drop",
+    "acc_drop_max",
+    "acc_used_source",
+    "acc_used_value",
+    "lambda_hw_base",
+    "lambda_hw_effective",
+    "hw_loss_raw",
+    "hw_loss_used",
+    "total_loss_scalar",
+    "total_loss_acc_part",
+    "total_loss_hw_part",
+    "hw_metric_ref",
+    "hw_metric_raw",
+    "hw_metric_normed",
+    "hw_scale_schema_version",
+)
+REQUIRED_PROXY_SANITIZE_KEYS = (
+    "metric",
+    "raw_value",
+    "used_value",
+    "penalty_added",
+    "clamp_min",
+    "clamp_max",
+    "note",
+    "source",
+)
+REQUIRED_REF_UPDATE_KEYS = ("ref_name", "old_value", "new_value", "reason")
+REQUIRED_FINALIZE_KEYS = ("reason", "steps_done", "best_solution_valid")
 
 # v5.4 layout/HeurAgenix step evidence (anti-loop legal record)
 REQUIRED_STEP_KEYS = (

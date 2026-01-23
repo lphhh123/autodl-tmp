@@ -327,6 +327,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     if acc_drop_max is None:
                         acc_drop_max = stable_state.get("epsilon_drop", 0.0)
                     acc_drop_max = float(acc_drop_max or 0.0)
+                    loss_value = locals().get("loss", None)
+                    if hasattr(loss_value, "detach"):
+                        loss_scalar = float(loss_value.detach().cpu().item())
+                    elif isinstance(loss_value, (int, float)):
+                        loss_scalar = float(loss_value)
+                    else:
+                        loss_scalar = 0.0
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -334,16 +341,27 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             # ===== REQUIRED BY CONTRACT =====
                             "candidate_id": int(epoch),
                             "gate": gate,
+                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
+                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "acc_drop": acc_drop,
                             "acc_drop_max": acc_drop_max,
+                            "acc_used_source": str(stable_state.get("acc_used_source", "val") or "val"),
+                            "acc_used_value": float(stable_state.get("acc_used_value", 0.0) or 0.0),
+                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
+                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
+                            "hw_loss_raw": 0.0,
+                            "hw_loss_used": 0.0,
+                            "total_loss_scalar": float(loss_scalar),
+                            "total_loss_acc_part": float(loss_scalar),
+                            "total_loss_hw_part": 0.0,
+                            "hw_metric_ref": {},
+                            "hw_metric_raw": {},
+                            "hw_metric_normed": {},
+                            "hw_scale_schema_version": "v1",
 
                             # ===== STRONGLY RECOMMENDED (auditable) =====
                             "epoch": int(epoch),
-                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
-                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "guard_mode": str(stable_state.get("guard_mode", "")),
-                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
-                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
                             "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
                             "reason_code": "hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery",
                             "reason": dict(getattr(stable_decision, "reason", {}) or {}),
@@ -467,6 +485,13 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     if acc_drop_max is None:
                         acc_drop_max = stable_state.get("epsilon_drop", 0.0)
                     acc_drop_max = float(acc_drop_max or 0.0)
+                    loss_value = locals().get("loss", None)
+                    if hasattr(loss_value, "detach"):
+                        loss_scalar = float(loss_value.detach().cpu().item())
+                    elif isinstance(loss_value, (int, float)):
+                        loss_scalar = float(loss_value)
+                    else:
+                        loss_scalar = 0.0
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -474,16 +499,27 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             # ===== REQUIRED BY CONTRACT =====
                             "candidate_id": int(epoch),
                             "gate": gate,
+                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
+                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "acc_drop": acc_drop,
                             "acc_drop_max": acc_drop_max,
+                            "acc_used_source": str(stable_state.get("acc_used_source", "val") or "val"),
+                            "acc_used_value": float(stable_state.get("acc_used_value", 0.0) or 0.0),
+                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
+                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
+                            "hw_loss_raw": 0.0,
+                            "hw_loss_used": 0.0,
+                            "total_loss_scalar": float(loss_scalar),
+                            "total_loss_acc_part": float(loss_scalar),
+                            "total_loss_hw_part": 0.0,
+                            "hw_metric_ref": {},
+                            "hw_metric_raw": {},
+                            "hw_metric_normed": {},
+                            "hw_scale_schema_version": "v1",
 
                             # ===== STRONGLY RECOMMENDED (auditable) =====
                             "epoch": int(epoch),
-                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
-                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "guard_mode": str(stable_state.get("guard_mode", "")),
-                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
-                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
                             "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
                             "reason_code": "hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery",
                             "reason": dict(getattr(stable_decision, "reason", {}) or {}),
