@@ -404,6 +404,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         float(get_nested(cfg, "stable_hw.locked_acc_ref.expected_acc1", float(get_nested(cfg, "train.expected_acc1", 0.0)))),
     )
     _ensure(stable_hw.locked_acc_ref, "path", get_nested(cfg, "stable_hw.locked_acc_ref.path", get_nested(cfg, "train.acc_ref_path", None)))
+    _ensure(stable_hw.locked_acc_ref, "allow_placeholder", False)
 
     # --- no drift ---
     _ensure(stable_hw, "no_drift", {})

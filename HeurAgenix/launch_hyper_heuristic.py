@@ -9,7 +9,6 @@ from src.pipeline.hyper_heuristics.llm_selection import LLMSelectionHyperHeurist
 from src.pipeline.hyper_heuristics.random import RandomHyperHeuristic
 from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.heuristic_only import HeuristicOnlyHyperHeuristic
-from src.util.paths import default_llm_config_path
 from src.util.util import load_function
 
 
@@ -129,7 +128,13 @@ def parse_arguments():
     parser.add_argument("-d", "--heuristic_dir", type=str, default="basic_heuristics")
     parser.add_argument("-t", "--test_data", type=str, default=None,
                         help="Comma-separated test file names. Default: all in test_data dir.")
-    parser.add_argument("-l", "--llm_config_file", type=str, default=None)
+    parser.add_argument(
+        "-l",
+        "--llm_config_file",
+        type=str,
+        required=True,
+        help="Path to the language model configuration file (REQUIRED by v5.4 contract).",
+    )
     parser.add_argument("-n", "--iterations_scale_factor", type=float, default=2.0)
     parser.add_argument("-m", "--selection_frequency", type=int, default=5)
     parser.add_argument("-c", "--num_candidate_heuristics", type=int, default=1)
@@ -153,8 +158,6 @@ def parse_arguments():
     parser.add_argument("-exp", "--experiment_name", type=str, default=None)
 
     args = parser.parse_args()
-    if args.llm_config_file is None:
-        args.llm_config_file = default_llm_config_path("azure_gpt_4o.json")
     return args
 
 

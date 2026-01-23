@@ -362,6 +362,15 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
             return
         try:
             obj = json.loads(p.read_text(encoding="utf-8"))
+            allow_placeholder = bool(_cfg_get(locked, "allow_placeholder", False))
+            if bool(obj.get("is_placeholder", False)) and not allow_placeholder:
+                raise RuntimeError(
+                    "[P0][v5.4] Refusing placeholder baseline_stats.json for LockedAccRef.\n"
+                    f"baseline_stats_path={baseline_stats_path}\n"
+                    "If you REALLY want to use placeholder for smoke only, set:\n"
+                    "  stable_hw.locked_acc_ref.allow_placeholder: true\n"
+                    "and accept it will invalidate paper-grade results."
+                )
             # accept a few common keys
             cand = None
             for k in ("val_acc1", "acc1", "best_val_acc1", "best_acc1"):

@@ -32,7 +32,14 @@ def main():
     parser.add_argument("--out_dir", type=str, default=None, help="Output directory (v5.4 contract)")
     parser.add_argument("--out", type=str, default=None, help="Alias of --out_dir (backward compat)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--allow_legacy", action="store_true", help="Allow running legacy AST2 script.")
     args = parser.parse_args()
+    if not args.allow_legacy:
+        raise SystemExit(
+            "[v5.4] This script is LEGACY (AST2). Refusing to run by default.\n"
+            "Use scripts/run_version_c.py for v5.4 experiments.\n"
+            "If you really want legacy, pass --allow_legacy."
+        )
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
     cfg = validate_and_fill_defaults(cfg, mode="ast2")
