@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import yaml
 from omegaconf import OmegaConf
 
+from .trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
 from .trace_schema import TRACE_FIELDS
 from .stable_hash import stable_hash
 
@@ -401,28 +402,11 @@ def _assert_event(event_type: str, payload: dict) -> None:
         return
 
     if event_type == "gating":
-        required = [
-            "gate",
-            "acc_ref",
-            "acc_used",
-            "acc_drop",
-            "acc_drop_max",
-            "guard_mode",
-            "lambda_hw_base",
-            "lambda_hw_effective",
-            "total_loss",
-            "total_loss_hw_part",
-        ]
-        for k in required:
-            if k not in payload:
-                raise KeyError(f"gating.payload missing '{k}'")
+        _assert_gating_event(payload)
         return
 
     if event_type == "proxy_sanitize":
-        required = ["metric", "raw_value", "used_value", "penalty_added"]
-        for k in required:
-            if k not in payload:
-                raise KeyError(f"proxy_sanitize.payload missing '{k}'")
+        _assert_proxy_sanitize_event(payload)
         return
 
     if event_type == "ref_update":
@@ -438,6 +422,25 @@ def _assert_event(event_type: str, payload: dict) -> None:
             if k not in payload:
                 raise KeyError(f"finalize.payload missing '{k}'")
         return
+
+
+def _assert_gating_event(payload: Dict[str, Any]) -> None:
+    req = set(REQUIRED_GATING_KEYS)
+    missing = [k for k in req if k not in payload]
+    assert not missing, f"gating payload missing keys: {missing}"
+    assert payload["gate"] in ("allow_hw", "reject_hw"), f"bad gate={payload['gate']}"
+    float(payload["acc_drop"])
+    float(payload["acc_drop_max"])
+
+
+def _assert_proxy_sanitize_event(payload: Dict[str, Any]) -> None:
+    req = set(REQUIRED_PROXY_SANITIZE_KEYS)
+    missing = [k for k in req if k not in payload]
+    assert not missing, f"proxy_sanitize payload missing keys: {missing}"
+    assert isinstance(payload["metric"], str) and payload["metric"], "metric must be non-empty str"
+    float(payload["raw_value"])
+    float(payload["used_value"])
+    float(payload["penalty_added"])
 
 
 def append_trace_event_v54(

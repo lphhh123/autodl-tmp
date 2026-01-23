@@ -13,6 +13,7 @@ from pathlib import Path
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.stable_hash import stable_hash
+from utils.trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
 from utils.trace_guard import append_trace_event_v54, finalize_trace_dir, init_trace_dir_v54
 from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS, build_signature_v54
 
@@ -35,23 +36,11 @@ def _validate_payload(event_type: str, payload: dict) -> list[str]:
             if key not in payload:
                 errors.append(f"trace_header missing {key}")
     elif event_type == "gating":
-        required = [
-            "gate",
-            "acc_ref",
-            "acc_used",
-            "acc_drop",
-            "acc_drop_max",
-            "guard_mode",
-            "lambda_hw_base",
-            "lambda_hw_effective",
-            "total_loss",
-            "total_loss_hw_part",
-        ]
-        for key in required:
+        for key in REQUIRED_GATING_KEYS:
             if key not in payload:
                 errors.append(f"gating missing {key}")
     elif event_type == "proxy_sanitize":
-        for key in ("metric", "raw_value", "used_value", "penalty_added"):
+        for key in REQUIRED_PROXY_SANITIZE_KEYS:
             if key not in payload:
                 errors.append(f"proxy_sanitize missing {key}")
     elif event_type == "ref_update":

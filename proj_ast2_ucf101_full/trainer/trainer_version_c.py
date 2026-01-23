@@ -31,6 +31,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
+from utils.trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
 from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.config import AttrDict
@@ -881,7 +882,9 @@ def train_version_c(
             },
             "stable_hw_effective": {
                 "enabled": bool(stable_hw_state.get("stable_hw_enabled", False)),
-                "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", False)),
+                "no_drift_effective": bool(
+                    stable_hw_state.get("no_drift_effective", stable_hw_state.get("no_drift_enabled", True))
+                ),
                 "acc_ref_source": stable_hw_state.get("acc_ref_source", ""),
                 "hw_ref_source": stable_hw_state.get("hw_ref_source", ""),
                 "lambda_hw_base": float(stable_hw_state.get("lambda_hw_base", 0.0)),
@@ -1295,45 +1298,39 @@ def train_version_c(
                     sum_comm += float(hw_stats.get("comm_ms", 0.0))
                     hw_stats_count += 1
                     # v5.4 trace: proxy sanitize events (SPEC_E)
-                    # 合同要求：被 sanitize 的 proxy 必须可追溯 raw_value / used_value / penalty_added
-                    sanitize_specs = [
-                        ("latency_ms", "T", "proxy_raw_latency_ms", "proxy_used_latency_ms", "proxy_penalty_latency_ms", "proxy_clamp_count_T", "proxy_clamp_min_T"),
-                        ("energy_mj",  "E", "proxy_raw_energy_mj",  "proxy_used_energy_mj",  "proxy_penalty_energy_mj",  "proxy_clamp_count_E", "proxy_clamp_min_E"),
-                        ("mem_mb",     "M", "proxy_raw_mem_mb",     "proxy_used_mem_mb",     "proxy_penalty_mem_mb",     "proxy_clamp_count_M", "proxy_clamp_min_M"),
-                        ("comm_norm",  "C", "proxy_raw_comm_norm",  "proxy_used_comm_norm",  "proxy_penalty_comm_norm",  "proxy_clamp_count_C", "proxy_clamp_min_C"),
-                    ]
-                    for metric, tag, k_raw, k_used, k_pen, k_cnt, k_min in sanitize_specs:
-                        raw_v = float(hw_stats.get(k_raw, float("nan")))
-                        used_v = float(hw_stats.get(k_used, float("nan")))
-                        pen_v = float(hw_stats.get(k_pen, 0.0))
-                        cnt_v = int(hw_stats.get(k_cnt, 0))
-                        min_v = float(hw_stats.get(k_min, float("nan")))
-
-                        changed = False
-                        if cnt_v > 0:
-                            changed = True
-                        if pen_v > 0.0:
-                            changed = True
-                        if math.isfinite(raw_v) and math.isfinite(used_v) and abs(raw_v - used_v) > 1e-12:
-                            changed = True
-
-                        if changed:
+                    # 合同要求：每个被 sanitize 的 metric 都必须单独记录 raw_value / used_value / penalty_added
+                    hw_proxy_raw = hw_stats.get("proxy_raw", {}) or {}
+                    hw_proxy_used = hw_stats.get("proxy_used", {}) or {}
+                    changed = bool(hw_stats.get("proxy_had_invalid", False))
+                    if not changed:
+                        for metric_name in hw_proxy_used:
+                            raw_v = float(hw_proxy_raw.get(metric_name, hw_proxy_used[metric_name]))
+                            used_v = float(hw_proxy_used[metric_name])
+                            if abs(raw_v - used_v) > 1e-12:
+                                changed = True
+                                break
+                    if changed:
+                        for metric in sorted(hw_proxy_used.keys()):
+                            raw_v = float(hw_proxy_raw.get(metric, hw_proxy_used[metric]))
+                            used_v = float(hw_proxy_used[metric])
+                            penalty_added = float(max(0.0, used_v - raw_v))
+                            payload = {
+                                "metric": str(metric),
+                                "raw_value": raw_v,
+                                "used_value": used_v,
+                                "penalty_added": penalty_added,
+                                # 允许保留额外字段用于 debug（不影响合同审计）
+                                "outer_iter": int(outer),
+                                "epoch": int(epoch),
+                                "global_step": int(global_step),
+                            }
+                            missing_keys = [k for k in REQUIRED_PROXY_SANITIZE_KEYS if k not in payload]
+                            if missing_keys:
+                                raise KeyError(f"proxy_sanitize payload missing keys: {missing_keys}")
                             append_trace_event_v54(
                                 trace_events_path,
                                 "proxy_sanitize",
-                                payload={
-                                    "outer_iter": int(outer),
-                                    "metric": metric,
-                                    "hw_metric_raw": hw_stats.get("proxy_raw", {}),
-                                    "hw_metric_used": hw_stats.get("proxy_used", {}),
-                                    "raw_value": raw_v,
-                                    "used_value": used_v,
-                                    "penalty_added": float(pen_v),
-                                    "had_invalid": bool(hw_stats.get("proxy_had_invalid", False) or cnt_v > 0),
-                                    "clamp_count": cnt_v,
-                                    "clamp_min_value": min_v,
-                                    "reason": "invalid_proxy_or_clamp",
-                                },
+                                payload=payload,
                                 run_id=run_id,
                                 step=int(outer),
                             )
@@ -1532,47 +1529,58 @@ def train_version_c(
                 reason_code = str(stable_hw_state.get("gating_reason_code", "") or "")
                 if not reason_code:
                     reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
-                gate = "allow_hw" if decision == "accept_hw" else "reject_hw"
-                epsilon_drop = float(stable_hw_state.get("epsilon_drop", 0.0))
-                acc_drop_max = float(epsilon_drop)
+                gate = "reject_hw" if decision == "reject_hw" else "allow_hw"
+                acc_drop_max = float(
+                    stable_hw_state.get(
+                        "acc_drop_max",
+                        stable_hw_state.get(
+                            "guard_eps_used",
+                            stable_hw_state.get("epsilon_drop", 0.0),
+                        ),
+                    )
+                )
                 lambda_hw_eff = float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0)
                 hw_part = 0.0
                 if float(lambda_hw_eff) != 0.0:
                     hw_part = float(lambda_hw_eff) * float(hw_loss_used)
 
+                payload = {
+                    "gate": gate,
+                    "acc_ref": float(acc_ref_val),
+                    "acc_used": float(stable_hw_state.get("acc_now", 0.0)),
+                    "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
+                    "acc_drop_max": float(acc_drop_max),
+                    "reason_code": reason_code,
+                    "lambda_hw_effective": float(lambda_hw_eff),
+                    "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
+                    "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
+                    "hw_loss_raw": float(hw_loss_norm or 0.0),
+                    "hw_loss_used": float(hw_loss_used or 0.0),
+                    "total_loss_acc_part": float(acc_loss.item())
+                    if hasattr(acc_loss, "item")
+                    else float(acc_loss or 0.0),
+                    "total_loss_hw_part": float(hw_part),
+                    "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
+                    "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
+                    "reason": dict(getattr(stable_decision, "reason", {}) or {}),
+                    "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
+                    "hw_metric_ref": hw_stats.get("proxy_refs", {}),
+                    "hw_metric_raw": hw_stats.get("proxy_raw", {}),
+                    "hw_metric_normed": hw_stats.get("proxy_used", {}),
+                    "hw_scale_schema_version": "v5.4_hw_loss_norm",
+                    "acc_used_source": str(stable_hw_state.get("acc_used_source", "") or ""),
+                    "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
+                    "epoch": int(epoch),
+                    "outer_iter": int(outer_iter),
+                    "global_step": int(global_step),
+                }
+                missing_keys = [k for k in REQUIRED_GATING_KEYS if k not in payload]
+                if missing_keys:
+                    raise KeyError(f"gating payload missing keys: {missing_keys}")
                 append_trace_event_v54(
                     trace_events_path,
                     "gating",
-                    payload={
-                        "gate": gate,
-                        "acc_ref": float(acc_ref_val),
-                        "acc_used": float(stable_hw_state.get("acc_now", 0.0)),
-                        "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
-                        "acc_drop_max": float(acc_drop_max),
-                        "reason_code": reason_code,
-                        "lambda_hw_effective": float(lambda_hw_eff),
-                        "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
-                        "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
-                        "hw_loss_raw": float(hw_loss_norm or 0.0),
-                        "hw_loss_used": float(hw_loss_used or 0.0),
-                        "total_loss_acc_part": float(acc_loss.item())
-                        if hasattr(acc_loss, "item")
-                        else float(acc_loss or 0.0),
-                        "total_loss_hw_part": float(hw_part),
-                        "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
-                        "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
-                        "reason": dict(getattr(stable_decision, "reason", {}) or {}),
-                        "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
-                        "hw_metric_ref": hw_stats.get("proxy_refs", {}),
-                        "hw_metric_raw": hw_stats.get("proxy_raw", {}),
-                        "hw_metric_normed": hw_stats.get("proxy_used", {}),
-                        "hw_scale_schema_version": "v5.4_hw_loss_norm",
-                        "acc_used_source": str(stable_hw_state.get("acc_used_source", "") or ""),
-                        "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
-                        "epoch": int(epoch),
-                        "outer_iter": int(outer_iter),
-                        "global_step": int(global_step),
-                    },
+                    payload=payload,
                     run_id=run_id,
                     step=int(outer),
                 )
