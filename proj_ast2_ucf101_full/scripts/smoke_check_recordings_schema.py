@@ -34,8 +34,11 @@ def main() -> None:
             miss = sorted(list(required - set(obj.keys())))
             if miss:
                 raise SystemExit(f"Missing keys at line {ln}: {miss}")
-            if not isinstance(obj.get("signature"), dict):
-                raise SystemExit(f"signature must be dict at line {ln}")
+            signature = obj.get("signature")
+            if not isinstance(signature, str):
+                raise SystemExit(f"signature must be string (assign:...) at line {ln}")
+            if not signature.startswith("assign:"):
+                raise SystemExit(f"signature must start with 'assign:' at line {ln}")
     if not seen_any:
         raise SystemExit(f"recordings file has no valid jsonl rows: {path}")
     print(f"OK schema: {path}")

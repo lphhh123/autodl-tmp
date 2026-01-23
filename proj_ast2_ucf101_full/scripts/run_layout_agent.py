@@ -115,10 +115,12 @@ def _append_trace_events_from_csv(trace_events_path: Path, trace_csv: Path, run_
                     "total_scalar": _num(row.get("total_scalar", 0.0), 0.0),
                     "comm_norm": comm_norm,
                     "therm_norm": therm_norm,
+                    "pareto_added": _int(row.get("pareto_added", 0), 0),
                     "duplicate_penalty": _num(row.get("duplicate_penalty", 0.0), 0.0),
                     "boundary_penalty": _num(row.get("boundary_penalty", 0.0), 0.0),
                     "seed_id": _int(row.get("seed_id", 0), 0),
-                    "time_ms": _int(row.get("time_ms", 0), 0),
+                    "time_ms": _int(row.get("time_ms", 0.0), 0),
+                    "signature": str(row.get("signature", "")),
                 },
                 run_id=str(run_id),
                 step=int(iter_id),
@@ -187,12 +189,13 @@ def run_layout_agent(
     layout_input = load_layout_input(Path(layout_input_path))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    llm_usage_path = out_dir / "llm_usage.jsonl"
-    llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
-    if not llm_usage_path.exists():
-        llm_usage_path.write_text("", encoding="utf-8")
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    llm_usage_path = trace_dir / "llm_usage.jsonl"
+    llm_usage_path_compat = out_dir / "llm_usage.jsonl"
+    if not llm_usage_path.exists():
+        llm_usage_path.write_text("", encoding="utf-8")
     trace_path = trace_dir / "trace.csv"
     trace_path_compat = out_dir / "trace.csv"
     if run_id is None:
@@ -385,8 +388,9 @@ def run_layout_agent(
         # Stage5: detailed place
         detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
         budget_exhausted = False
-        try:
-            result = run_detailed_place(
+    convert_error = None
+    try:
+        result = run_detailed_place(
                 sites_xy=sites_xy,
                 assign_seed=assign_leg,
                 evaluator=evaluator,
@@ -401,7 +405,7 @@ def run_layout_agent(
                 trace_path=trace_path,
                 seed_id=int(seed),
                 chip_tdp=chip_tdp,
-                llm_usage_path=out_dir / "llm_usage.jsonl",
+                llm_usage_path=llm_usage_path,
                 recordings_path=out_dir / "recordings.jsonl",
             )
         except _BudgetExceeded:
@@ -471,7 +475,7 @@ def run_layout_agent(
                 "trace_csv": str(trace_path.absolute()),
                 "trace_csv_compat": str(trace_path_compat.absolute()),
                 "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
-                "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
+                "llm_usage_jsonl": str(llm_usage_path.absolute()),
             },
             "alt_opt": {
                 "enabled": bool(cfg.alt_opt.get("enabled", False)) if hasattr(cfg, "alt_opt") else False,
@@ -536,9 +540,25 @@ def run_layout_agent(
         best_solution_valid = _is_valid_assign(best_assign, S, Ns)
         reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
         try:
-            _append_trace_events_from_csv(trace_events_path, trace_path, run_id)
-        except Exception:
-            pass
+            _append_trace_events_from_csv(
+                trace_events_path=trace_events_path,
+                trace_csv=trace_path,
+                run_id=str(run_id),
+            )
+        except Exception as e:
+            convert_error = e
+            append_trace_event_v54(
+                trace_events_path,
+                "ref_update",
+                payload={
+                    "key": "trace_events_build_status",
+                    "old_value": "ok",
+                    "new_value": "failed",
+                    "reason": f"csv_to_trace_events_failed: {type(e).__name__}: {e}",
+                },
+                run_id=str(run_id),
+                step=int(steps_done or 0),
+            )
         update_trace_summary(
             trace_dir,
             {
@@ -551,12 +571,24 @@ def run_layout_agent(
         )
         if trace_path.exists():
             shutil.copy2(trace_path, trace_path_compat)
+        try:
+            if llm_usage_path.exists():
+                llm_usage_path_compat.write_text(
+                    llm_usage_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
         finalize_trace_dir(
             trace_events_path,
             reason=str(reason),
             steps_done=int(steps_done),
             best_solution_valid=bool(best_solution_valid),
         )
+        if convert_error is not None:
+            raise RuntimeError(
+                f"[v5.4 P0] trace_events missing step evidence: {convert_error}"
+            ) from convert_error
 
 
 def main():
