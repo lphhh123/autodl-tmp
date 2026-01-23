@@ -778,6 +778,38 @@ def train_version_c(
     stable_hw_state["run_signature"] = signature
     stable_hw_state["out_dir"] = str(out_dir)
     stable_hw_state["stable_hw_enabled"] = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+    if stable_hw_cfg is None:
+        locked_cfg = {}
+        no_drift_cfg = {}
+        guard_cfg = {}
+        guard_ctrl_cfg = {}
+    else:
+        locked_cfg = stable_hw_cfg.get("locked_acc_ref", {}) if isinstance(stable_hw_cfg, dict) else getattr(
+            stable_hw_cfg, "locked_acc_ref", {}
+        )
+        no_drift_cfg = stable_hw_cfg.get("no_drift", {}) if isinstance(stable_hw_cfg, dict) else getattr(
+            stable_hw_cfg, "no_drift", {}
+        )
+        guard_cfg = stable_hw_cfg.get("accuracy_guard", {}) if isinstance(stable_hw_cfg, dict) else getattr(
+            stable_hw_cfg, "accuracy_guard", {}
+        )
+        guard_ctrl_cfg = guard_cfg.get("controller", {}) if isinstance(guard_cfg, dict) else getattr(
+            guard_cfg, "controller", {}
+        )
+    lar_source = (
+        locked_cfg.get("source", None) if isinstance(locked_cfg, dict) else getattr(locked_cfg, "source", None)
+    ) or "unknown"
+    locked_acc_ref_enabled = bool(
+        (locked_cfg.get("enabled", True) if isinstance(locked_cfg, dict) else getattr(locked_cfg, "enabled", True))
+    )
+    no_drift_enabled = bool(
+        (no_drift_cfg.get("enabled", True) if isinstance(no_drift_cfg, dict) else getattr(no_drift_cfg, "enabled", True))
+    )
+    allow_train_ema_fallback = (
+        guard_ctrl_cfg.get("allow_train_ema_fallback", None)
+        if isinstance(guard_ctrl_cfg, dict)
+        else getattr(guard_ctrl_cfg, "allow_train_ema_fallback", None)
+    )
     if stable_hw_cfg is not None:
         nd_cfg = getattr(stable_hw_cfg, "no_drift", None)
         if isinstance(nd_cfg, bool):
@@ -826,20 +858,26 @@ def train_version_c(
             "requested": {
                 "mode": "version_c",
                 "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
-                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
+                "no_drift_enabled": bool(no_drift_enabled),
                 "no_double_scale_enabled": bool(
                     getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
                 ),
+                "allow_train_ema_fallback": bool(allow_train_ema_fallback)
+                if allow_train_ema_fallback is not None
+                else None,
             },
             "effective": {
                 "mode": "version_c",
                 "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
-                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
+                "no_drift_enabled": bool(no_drift_enabled),
                 "no_double_scale_enabled": bool(
                     getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
                 ),
+                "allow_train_ema_fallback": bool(allow_train_ema_fallback)
+                if allow_train_ema_fallback is not None
+                else None,
             },
             "stable_hw_effective": {
                 "enabled": bool(stable_hw_state.get("stable_hw_enabled", False)),
@@ -860,6 +898,8 @@ def train_version_c(
                 "hard_gating": bool(getattr(getattr(cfg, "accuracy_guard", AttrDict({})), "hard_gating", False)),
             },
             "signature": signature,
+            "no_drift_enabled": bool(no_drift_enabled),
+            "acc_ref_source": str(lar_source),
         },
         run_id=run_id,
         step=0,
@@ -1288,7 +1328,7 @@ def train_version_c(
                                     "hw_metric_used": hw_stats.get("proxy_used", {}),
                                     "raw_value": raw_v,
                                     "used_value": used_v,
-                                    "penalty": float(pen_v),
+                                    "penalty_added": float(pen_v),
                                     "had_invalid": bool(hw_stats.get("proxy_had_invalid", False) or cnt_v > 0),
                                     "clamp_count": cnt_v,
                                     "clamp_min_value": min_v,
@@ -1492,27 +1532,33 @@ def train_version_c(
                 reason_code = str(stable_hw_state.get("gating_reason_code", "") or "")
                 if not reason_code:
                     reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
+                gate = "allow_hw" if decision == "accept_hw" else "reject_hw"
+                epsilon_drop = float(stable_hw_state.get("epsilon_drop", 0.0))
+                acc_drop_max = float(epsilon_drop)
+                lambda_hw_eff = float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0)
+                hw_part = 0.0
+                if float(lambda_hw_eff) != 0.0:
+                    hw_part = float(lambda_hw_eff) * float(hw_loss_used)
 
                 append_trace_event_v54(
                     trace_events_path,
                     "gating",
                     payload={
+                        "gate": gate,
                         "acc_ref": float(acc_ref_val),
-                        "acc_now": float(stable_hw_state.get("acc_now", 0.0)),
+                        "acc_used": float(stable_hw_state.get("acc_now", 0.0)),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
-                        "epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0)),
-                        "decision": decision,
+                        "acc_drop_max": float(acc_drop_max),
                         "reason_code": reason_code,
-                        "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
+                        "lambda_hw_effective": float(lambda_hw_eff),
                         "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
-                        "threshold_drop": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
                         "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
                         "hw_loss_raw": float(hw_loss_norm or 0.0),
                         "hw_loss_used": float(hw_loss_used or 0.0),
                         "total_loss_acc_part": float(acc_loss.item())
                         if hasattr(acc_loss, "item")
                         else float(acc_loss or 0.0),
-                        "total_loss_hw_part": float(hw_loss_used or 0.0),
+                        "total_loss_hw_part": float(hw_part),
                         "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
                         "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
                         "reason": dict(getattr(stable_decision, "reason", {}) or {}),
@@ -1521,6 +1567,11 @@ def train_version_c(
                         "hw_metric_raw": hw_stats.get("proxy_raw", {}),
                         "hw_metric_normed": hw_stats.get("proxy_used", {}),
                         "hw_scale_schema_version": "v5.4_hw_loss_norm",
+                        "acc_used_source": str(stable_hw_state.get("acc_used_source", "") or ""),
+                        "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
+                        "epoch": int(epoch),
+                        "outer_iter": int(outer_iter),
+                        "global_step": int(global_step),
                     },
                     run_id=run_id,
                     step=int(outer),

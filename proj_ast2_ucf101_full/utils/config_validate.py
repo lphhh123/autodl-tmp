@@ -999,6 +999,36 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 if not Path(p).exists():
                     raise ValueError(f"SPEC v5.4 violation: baseline_stats_path not found: {p}")
 
+    # === v5.4 contract enforcement (P0 hard fail) ===
+    mode_value = str(get_nested(cfg, "train.mode", "") or "")
+    if mode_value in ("version_c", "version_c_train", "vc_train"):
+        shw = get_nested(cfg, "stable_hw", None)
+        if shw is None:
+            raise ValueError("v5.4 contract: missing stable_hw section (would silently degrade)")
+        if get_nested(cfg, "stable_hw.enabled", True) is False:
+            raise ValueError("v5.4 contract: stable_hw.enabled must not be False in version_c mode")
+
+        if get_nested(cfg, "stable_hw.locked_acc_ref", None) is None:
+            raise ValueError("v5.4 contract: missing stable_hw.locked_acc_ref")
+        if get_nested(cfg, "stable_hw.locked_acc_ref.enabled", True) is False:
+            raise ValueError("v5.4 contract: locked_acc_ref must not be disabled")
+
+        if get_nested(cfg, "stable_hw.no_drift", None) is None:
+            raise ValueError("v5.4 contract: missing stable_hw.no_drift")
+        if get_nested(cfg, "stable_hw.no_drift.enabled", True) is False:
+            raise ValueError("v5.4 contract: no_drift must not be disabled")
+
+        if get_nested(cfg, "stable_hw.accuracy_guard", None) is None and get_nested(cfg, "stable_hw.guard", None) is None:
+            raise ValueError("v5.4 contract: missing stable_hw.accuracy_guard/guard")
+
+        if get_nested(cfg, "stable_hw.lambda_hw_schedule", None) is None:
+            raise ValueError("v5.4 contract: missing stable_hw.lambda_hw_schedule (avoid silent hw-loss=0)")
+
+        if float(get_nested(cfg, "hw.lambda_hw", 0.0) or 0.0) != 0.0:
+            raise ValueError("v5.4 contract: hw.lambda_hw must be 0 (use stable_hw.lambda_hw_schedule)")
+        if float(get_nested(cfg, "loss.lambda_hw", 0.0) or 0.0) != 0.0:
+            raise ValueError("v5.4 contract: loss.lambda_hw must be 0 (use stable_hw.lambda_hw_schedule)")
+
     # ---- v5.4 Addendum: signature must be assign-only ----
     if bool(get_nested(cfg, "signature.allow_pos_signature", False)):
         raise ValueError(

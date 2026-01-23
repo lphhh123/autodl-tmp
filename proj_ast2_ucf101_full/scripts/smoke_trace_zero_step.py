@@ -196,6 +196,8 @@ def main() -> None:
             "requested": {"mode": "smoke_steps0"},
             "effective": {"mode": "smoke_steps0"},
             "signature": sig,
+            "no_drift_enabled": True,
+            "acc_ref_source": "manual",
         },
         run_id=run_id,
         step=0,
