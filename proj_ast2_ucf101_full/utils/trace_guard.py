@@ -35,6 +35,18 @@ def _append_jsonl(path: Path, obj: dict):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+def write_exception_json(trace_dir: Path, exc: Exception, stage: str = "") -> None:
+    trace_dir = Path(trace_dir)
+    payload = {
+        "stage": str(stage),
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "repr": repr(exc),
+        "timestamp": float(time.time()),
+    }
+    _write_json(trace_dir / "exception.json", payload)
+
+
 def _count_jsonl_lines(path: Path) -> int:
     if not path.exists():
         return 0

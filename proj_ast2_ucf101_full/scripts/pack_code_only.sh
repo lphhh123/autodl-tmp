@@ -7,6 +7,10 @@ cd "${ROOT_DIR}"
 OUT="${1:-AST2_AND_HeurAgenix_CODE_ONLY.tar.gz}"
 
 tar -czvf "${OUT}" \
+  --exclude="**/*.bak*" \
+  --exclude="**/.git/**" \
+  --exclude="**/__pycache__/**" \
+  --exclude="**/*.pyc" \
   --exclude='**/__pycache__' \
   --exclude='**/*.pyc' \
   --exclude='**/*.pyo' \
