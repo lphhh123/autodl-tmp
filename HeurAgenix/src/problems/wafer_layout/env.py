@@ -19,14 +19,63 @@ from src.problems.wafer_layout.problem_state import (
 
 
 def _load_layout_evaluator():
+    """
+    Load LayoutEvaluator from the sibling proj_ast2 repository.
+
+    v5.4 project integration requirement:
+    - Must NOT hard-code the sibling directory name.
+    - Allow override via env var to support relocation / renaming.
+    """
     try:
         import sys
         from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parents[3]
-        sibling = repo_root.parent / "proj_ast2_ucf101_full"
-        if sibling.exists() and str(sibling) not in sys.path:
-            sys.path.insert(0, str(sibling))
+        repo_root = Path(__file__).resolve().parents[3]  # HeurAgenix/
+        sibling_root = repo_root.parent
+
+        env_override = (
+            os.environ.get("PROJ_AST2_ROOT")
+            or os.environ.get("AST2_PROJECT_ROOT")
+            or os.environ.get("PROJ_AST2_UCF101_ROOT")
+        )
+
+        candidates = []
+        if env_override:
+            candidates.append(Path(env_override).expanduser())
+
+        # common sibling names
+        candidates.extend(
+            [
+                sibling_root / "proj_ast2_ucf101_full",
+                sibling_root / "proj_ast2_ucf101_full_CODE_ONLY",
+            ]
+        )
+
+        # fallback: any sibling that matches prefix
+        try:
+            for p in sibling_root.iterdir():
+                if p.is_dir() and p.name.startswith("proj_ast2_ucf101_full"):
+                    candidates.append(p)
+        except Exception:
+            pass
+
+        proj_root = None
+        for c in candidates:
+            c = c.resolve()
+            if (c / "layout" / "evaluator.py").exists():
+                proj_root = c
+                break
+
+        if proj_root is None:
+            msg = (
+                "Cannot locate proj_ast2 repository for wafer_layout integration.\n"
+                f"Tried candidates:\n  - " + "\n  - ".join([str(x) for x in candidates]) + "\n"
+                "Set env PROJ_AST2_ROOT (or AST2_PROJECT_ROOT) to the correct path."
+            )
+            raise RuntimeError(msg)
+
+        if str(proj_root) not in sys.path:
+            sys.path.insert(0, str(proj_root))
 
         if importlib.util.find_spec("layout.evaluator") is None:
             return None, None, "layout.evaluator not found"

@@ -164,7 +164,10 @@ def main():
     out_dir_path = Path(out_dir)
 
     export_layout_input = bool(args.export_layout_input)
-    export_dir = args.export_dir or str(out_dir / "exports" / "layout_input")
+    # IMPORTANT:
+    # - CLI --export_dir only takes effect when explicitly provided.
+    # - If CLI is not provided, DO NOT synthesize a default here; let trainer read cfg.export_dir.
+    export_dir = args.export_dir  # may be None
 
     # ---- dump resolved config ----
     try:
@@ -215,7 +218,15 @@ def main():
     }
     with open(out_dir_path / "run_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    train_version_c(cfg, export_layout_input=export_layout_input, layout_export_dir=export_dir)
+    # NOTE: keep export_layout_input decision logic in trainer:
+    #   trainer will use (cli flag) OR (cfg.export_layout_input) as source of truth.
+    train_version_c(
+        cfg,
+        out_dir=str(out_dir),
+        export_layout_input=export_layout_input,
+        layout_export_dir=export_dir,  # None -> trainer uses cfg.export_dir (and then fallback)
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":

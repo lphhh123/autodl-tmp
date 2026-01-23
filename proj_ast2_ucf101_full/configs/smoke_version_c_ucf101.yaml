@@ -27,7 +27,12 @@ stable_hw:
   no_double_scale:
     enabled: true
 
+  normalize:
+    enabled: true
+    mode: hinge_log_ratio
+
   lambda_hw_schedule:
+    enabled: true
     warmup_epochs: 0
     ramp_epochs: 1
     lambda_hw_max: 0.1

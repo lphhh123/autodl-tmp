@@ -269,6 +269,7 @@ def _micro_place_seed(
 def _export_layout_input(
     cfg,
     export_dir: Path,
+    out_dir: Path,
     chiplet_slots: ChipletSlots,
     mapping_solver: MappingSolver,
     segments: List,
@@ -434,16 +435,22 @@ def _export_layout_input(
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(layout_input, f, indent=2)
 
-    # v5.4 canonical copies for SPEC_D
-    try:
-        run_root = export_dir.parent.parent
-        (run_root / "layout_input.json").write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
+    # === v5.4 contract: ALWAYS materialize canonical copies (no silent failure) ===
+    project_root = Path(__file__).resolve().parents[1]  # proj_ast2_ucf101_full/
+    canonical_a3_dir = project_root / "outputs" / "P3" / "A3"
+    canonical_a3_path = canonical_a3_dir / "layout_input.json"
 
-        canonical = Path("outputs/P3/A3")
-        canonical.mkdir(parents=True, exist_ok=True)
-        (canonical / "layout_input.json").write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    # run_root is the training out_dir
+    run_root_dir = Path(out_dir).resolve()
+    run_root_path = run_root_dir / "layout_input.json"
+
+    # Ensure parents exist
+    canonical_a3_dir.mkdir(parents=True, exist_ok=True)
+    run_root_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write canonical copies deterministically
+    canonical_a3_path.write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
+    run_root_path.write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
 
     return out_path
 
@@ -535,10 +542,21 @@ def _solve_layout_for_cache(
     return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
-def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: Optional[str] = None):
+def train_version_c(
+    cfg,
+    out_dir: Optional[str] = None,
+    export_layout_input: bool = False,
+    layout_export_dir: Optional[str] = None,
+    seed: Optional[int] = None,
+):
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
+    if out_dir:
+        cfg.out_dir = str(out_dir)
+        cfg.train.out_dir = str(out_dir)
+    if seed is not None:
+        cfg.train.seed = int(seed)
     # ---- v5.4: allow config-driven export (OneCommand) ----
     if not export_layout_input:
         export_layout_input = bool(getattr(cfg, "export_layout_input", False))
@@ -760,6 +778,20 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
 
         # init_hw_refs_from_baseline_stats accepts stable_hw_cfg but NOT output_dir
         init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
+        append_trace_event_v54(
+            trace_events_path,
+            "stable_hw_init",
+            payload={
+                "no_drift_requested": bool(stable_hw_state.get("no_drift_enabled", False)),
+                "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", False)),
+                "ref_update_mode": str(stable_hw_state.get("_force_ref_update_mode", "baseline_or_freeze")),
+                "hw_ref_source": str(stable_hw_state.get("hw_ref_source", "unknown")),
+                "acc_ref_source": str(stable_hw_state.get("acc_ref_source", "unknown")),
+                "baseline_stats_path": str(getattr(getattr(cfg, "stable_hw", {}), "baseline_stats", "") or ""),
+            },
+            run_id=run_id,
+            step=int(0),
+        )
     (out_dir / "stable_hw_state.json").write_text(
         json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -1174,6 +1206,24 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         )
                     hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
                     loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
+                    # ---- v5.4 audit: capture the exact loss components used ----
+                    try:
+                        ast_loss_val = info["L_AST"]
+                    except Exception:
+                        ast_loss_val = 0.0
+
+                    def _to_f(x):
+                        if hasattr(x, "detach"):
+                            return float(x.detach().cpu().item())
+                        return float(x)
+
+                    run_state["last_loss_components"] = {
+                        "acc_loss": _to_f(L_task),
+                        "ast_loss": _to_f(ast_loss_val),
+                        "hw_loss_raw": _to_f(L_hw),
+                        "hw_loss_used": _to_f(hw_term),
+                        "total_loss": _to_f(loss),
+                    }
                     assert "hw_loss_weighted" not in (hw_stats or {}), (
                         "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
                     )
@@ -1324,24 +1374,40 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     else None,
                 )
                 stable_hw_state = stable_decision.state
+                # ---- v5.4 contract: gating event must be auditable & schema-stable ----
+                last_loss = run_state.get("last_loss_components", {}) or {}
+                acc_ref = stable_decision.reason.get("acc_ref", stable_hw_state.get("acc_ref", None))
+                acc_now = stable_decision.reason.get("metric", stable_hw_state.get("acc_last", None))
+                try:
+                    acc_drop = (float(acc_ref) - float(acc_now)) if (acc_ref is not None and acc_now is not None) else None
+                except Exception:
+                    acc_drop = None
+
+                gate = "reject_hw" if float(stable_decision.lambda_hw_effective) <= 0.0 else "allow_hw"
+
                 append_trace_event_v54(
                     trace_events_path,
-                    "gating_decision",
+                    "gating",
                     payload={
-                        "epoch": int(outer),
-                        "metric": str(stable_decision.reason.get("metric")),
-                        "acc_ref": float(stable_decision.reason.get("acc_ref"))
-                        if stable_decision.reason.get("acc_ref") is not None
-                        else None,
-                        "acc_current": (
-                            float(stable_decision.reason.get("acc_current"))
-                            if stable_decision.reason.get("acc_current") is not None
-                            else None
-                        ),
+                        "gate": gate,
                         "guard_mode": str(stable_decision.guard_mode),
-                        "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
-                        "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
-                        "reason": str(stable_decision.reason.get("violate", "")),
+                        "acc_ref": (float(acc_ref) if acc_ref is not None else None),
+                        "acc_now": (float(acc_now) if acc_now is not None else None),
+                        "acc_drop": (float(acc_drop) if acc_drop is not None else None),
+                        "epsilon_drop": float(stable_hw_state.get("epsilon_drop", stable_decision.reason.get("eps_drop", 0.0))),
+
+                        # minimal audit set (SPEC_E)
+                        "hw_loss_raw": last_loss.get("hw_loss_raw", None),
+                        "hw_loss_used": last_loss.get("hw_loss_used", None),
+                        "acc_loss": last_loss.get("acc_loss", None),
+                        "total_loss": last_loss.get("total_loss", None),
+
+                        # schedule + discrete isolation observability
+                        "lambda_hw_base": float(stable_decision.lambda_hw_base),
+                        "lambda_hw_eff": float(stable_decision.lambda_hw_effective),
+                        "allow_discrete_updates": bool(stable_decision.allow_discrete_updates),
+                        "mapping_signature": cache.get("mapping_signature", None),
+                        "layout_signature": cache.get("layout_signature", None),
                     },
                     run_id=run_id,
                     step=int(outer),
@@ -1378,9 +1444,13 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                         trace_events_path,
                         "ref_update",
                         payload={
+                            "epoch": int(outer),
                             "before": before,
-                            "after": after,
-                            "source": stable_hw_state.get("hw_ref_source", "unknown"),
+                            "after": stable_hw_state.get("hw_refs", {}),
+                            "hw_ref_source": stable_hw_state.get("hw_ref_source", "unknown"),
+                            "no_drift_requested": bool(stable_hw_state.get("no_drift_enabled", False)),
+                            "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", False)),
+                            "ref_update_mode": str(stable_hw_state.get("_force_ref_update_mode", "baseline_or_freeze")),
                         },
                         run_id=run_id,
                         step=int(outer),
@@ -1430,16 +1500,18 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
                     "guard_mode": str(stable_hw_state.get("guard_mode", "")),
                     "in_recovery": bool(stable_hw_state.get("in_recovery", False)),
                     "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
-                    "hw_loss_raw": float(hw_stats.get("L_hw_norm", float(L_hw.detach().cpu())) if isinstance(L_hw, torch.Tensor) else float(L_hw)),
-                    "hw_loss_used": float((lambda_hw_eff * (L_hw.detach().cpu() if isinstance(L_hw, torch.Tensor) else L_hw))),
                     "total_loss_acc_part": float(L_task.detach().cpu()) if hasattr(L_task, "detach") else float(L_task),
                     "total_loss_hw_part": float((lambda_hw_eff * (L_hw.detach().cpu() if hasattr(L_hw, "detach") else L_hw))),
-                    "total_loss": float(loss.detach().cpu()) if hasattr(loss, "detach") else float(loss),
                     "hw_metric_ref": hw_stats.get("proxy_refs", {}),
                     "hw_metric_raw": hw_stats.get("proxy_raw", {}),
                     "hw_metric_used": hw_stats.get("proxy_used", {}),
                     "proxy_extra_penalty": float(hw_stats.get("proxy_extra_penalty", 0.0)),
                     "hw_scale_schema_version": "v5.4_hw_loss_norm",
+                    # v5.4 minimal audit set (repeat at epoch granularity)
+                    "acc_loss": (run_state.get("last_loss_components", {}) or {}).get("acc_loss", None),
+                    "hw_loss_raw": (run_state.get("last_loss_components", {}) or {}).get("hw_loss_raw", None),
+                    "hw_loss_used": (run_state.get("last_loss_components", {}) or {}).get("hw_loss_used", None),
+                    "total_loss": (run_state.get("last_loss_components", {}) or {}).get("total_loss", None),
                 },
                 run_id=run_id,
                 step=int(outer),
@@ -1591,6 +1663,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         _export_layout_input(
             cfg=cfg,
             export_dir=export_dir_path,
+            out_dir=out_dir,
             chiplet_slots=chiplet_slots,
             mapping_solver=mapping_solver,
             segments=canonical_segments,

@@ -32,6 +32,7 @@ stable_hw:
     lambda_hw_max: 0.08
 
   normalize:
+    enabled: true
     mode: hinge_log_ratio
     eps: 1.0e-6
     wT: 0.4

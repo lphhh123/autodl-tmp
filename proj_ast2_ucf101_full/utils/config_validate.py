@@ -283,13 +283,14 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _ensure("stable_hw.no_drift.freeze_baseline_stats", False)
 
     # normalize + schedule required by signature
-    _ensure("stable_hw.normalize.enabled", False)
+    # stable_hw signature: submodules default ENABLED (v5.4 expects normalize + schedule to work unless explicitly disabled)
+    _ensure("stable_hw.normalize.enabled", True)
     _ensure("stable_hw.normalize.use_baseline_stats", False)
     _ensure("stable_hw.normalize.baseline_stats_path", "")
     _ensure("stable_hw.normalize.scheme", "none")
     _ensure("stable_hw.normalize.ref_update", "frozen")
 
-    _ensure("stable_hw.lambda_hw_schedule.enabled", False)
+    _ensure("stable_hw.lambda_hw_schedule.enabled", True)
     _ensure("stable_hw.lambda_hw_schedule.start_epoch", 0)
     _ensure("stable_hw.lambda_hw_schedule.end_epoch", 0)
     _ensure("stable_hw.lambda_hw_schedule.warmup_epochs", 0)

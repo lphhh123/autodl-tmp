@@ -24,29 +24,44 @@ def _list_problems():
 
 def _resolve_test_data_dir(problem: str) -> Path:
     """
-    Wrapper sets AMLT_DATA_DIR=<work_dir>/data and writes:
-      <AMLT_DATA_DIR>/{problem}/test_data/*.json
-    But some HeurAgenix utilities also use .../{problem}/data/test_data.
-    We support both.
+    v5.4 integration rule:
+    - If AMLT_DATA_DIR is NOT set, data root must default to HeurAgenix repo_root/data,
+      NOT the current working directory.
+    - If AMLT_DATA_DIR is set and is relative, interpret it relative to repo_root.
     """
-    data_root = Path(os.environ.get("AMLT_DATA_DIR", "data")).resolve()
-    cand1 = data_root / problem / "test_data"
-    cand2 = data_root / problem / "data" / "test_data"
-    if cand1.exists():
-        return cand1
-    if cand2.exists():
-        return cand2
-    cand1.mkdir(parents=True, exist_ok=True)
-    return cand1
+    repo_root = Path(__file__).resolve().parent
+    env = os.environ.get("AMLT_DATA_DIR", None)
+    if env:
+        p = Path(env).expanduser()
+        if not p.is_absolute():
+            p = (repo_root / p).resolve()
+        else:
+            p = p.resolve()
+        data_root = p
+    else:
+        data_root = (repo_root / "data").resolve()
+
+    # data/{problem}/test_data
+    test_dir = data_root / problem / "test_data"
+    return test_dir
 
 
 def _resolve_output_base() -> Path:
     """
-    Wrapper sets AMLT_OUTPUT_DIR=<out_dir>/heuragenix_internal.
-    We must write into <AMLT_OUTPUT_DIR>/output/... (NOT ../../output).
+    v5.4 integration rule:
+    - If AMLT_OUTPUT_DIR is NOT set, output base must default to HeurAgenix repo_root/output.
+    - If AMLT_OUTPUT_DIR is set and is relative, interpret it relative to repo_root.
     """
-    base = Path(os.environ.get("AMLT_OUTPUT_DIR", ".")).resolve()
-    return base / "output"
+    repo_root = Path(__file__).resolve().parent
+    env = os.environ.get("AMLT_OUTPUT_DIR", None)
+    if env:
+        p = Path(env).expanduser()
+        if not p.is_absolute():
+            p = (repo_root / p).resolve()
+        else:
+            p = p.resolve()
+        return p / "output"
+    return (repo_root / "output").resolve()
 
 
 def _import_env(problem: str):
