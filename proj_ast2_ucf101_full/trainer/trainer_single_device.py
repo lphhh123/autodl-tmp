@@ -411,7 +411,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 update_hw_refs_from_stats(
                     cfg,
                     stable_state,
-                    latest_stats=last_hw_stats or {},
+                    latest_hw_stats=last_hw_stats or {},
                     stable_hw_cfg=stable_hw_cfg,
                 )
             guard_mode = str(stable_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"

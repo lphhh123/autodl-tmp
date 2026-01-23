@@ -1286,8 +1286,14 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    env["AMLT_OUTPUT_DIR"] = str(output_root)
-    env["AMLT_DATA_DIR"] = str(internal_data_root)
+    # ---- v5.4 bridge: do not forcibly override user-provided AMLT_*; make roots explicit ----
+    if not str(env.get("AMLT_OUTPUT_DIR", "")).strip():
+        env["AMLT_OUTPUT_DIR"] = str(internal_out)
+    if not str(env.get("AMLT_DATA_DIR", "")).strip():
+        env["AMLT_DATA_DIR"] = str(internal_data_root)
+
+    print(f"[bridge] AMLT_DATA_DIR={env['AMLT_DATA_DIR']}")
+    print(f"[bridge] AMLT_OUTPUT_DIR={env['AMLT_OUTPUT_DIR']}")
     timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
     result = None
     if run_mode == "inprocess":

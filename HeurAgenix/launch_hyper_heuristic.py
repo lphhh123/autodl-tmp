@@ -60,6 +60,39 @@ def _resolve_output_base(repo_root: Path) -> Path:
     return repo_root / "output"
 
 
+def _resolve_roots(repo_root):
+    import os
+    import json
+    from pathlib import Path
+
+    amlt_data = (os.environ.get("AMLT_DATA_DIR") or "").strip()
+    amlt_out = (os.environ.get("AMLT_OUTPUT_DIR") or "").strip()
+
+    data_root = Path(amlt_data).resolve() if amlt_data else (Path(repo_root) / "data").resolve()
+    output_root = Path(amlt_out).resolve() if amlt_out else (Path(repo_root) / "output").resolve()
+
+    data_src = "AMLT_DATA_DIR" if amlt_data else "default_repo_root/data"
+    out_src = "AMLT_OUTPUT_DIR" if amlt_out else "default_repo_root/output"
+
+    # Make auditable: print + write a small meta file into output_root
+    output_root.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "data_root": str(data_root),
+        "output_root": str(output_root),
+        "data_root_source": data_src,
+        "output_root_source": out_src,
+    }
+    try:
+        (output_root / "heuragenix_roots.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    print(f"[HeurAgenix] data_root={data_root} (source={data_src})")
+    print(f"[HeurAgenix] output_root={output_root} (source={out_src})")
+
+    return data_root, output_root
+
+
 def _import_env(problem: str):
     mod = __import__(f"src.problems.{problem}.env", fromlist=["Env"])
     return getattr(mod, "Env")
@@ -120,8 +153,8 @@ def main():
     np.random.seed(args.seed)
 
     repo_root = Path(__file__).resolve().parent
-    test_data_dir = _resolve_test_data_dir(args.problem)
-    output_base = _resolve_output_base(repo_root)
+    data_root, output_base = _resolve_roots(repo_root)
+    test_data_dir = data_root / args.problem / "test_data"
 
     if args.test_data is None or args.test_data.strip() == "":
         data_name_list = sorted([p.name for p in test_data_dir.iterdir() if p.is_file()])

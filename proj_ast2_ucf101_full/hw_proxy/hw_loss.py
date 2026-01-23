@@ -257,26 +257,6 @@ def compute_hw_loss(
     raw_comm_ms = float(comm_ms.detach().cpu().item())
     sanitized_latency_ms, latency_penalty = sanitize_latency(raw_latency_ms, min_ms=min_latency_ms)
 
-    # v5.4: clamp audit (counts + min raw values)
-    clamp_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
-    clamp_mins = {"T": None, "E": None, "M": None, "C": None}
-    invalid_counts = {"T": 0, "E": 0, "M": 0, "C": 0}
-    hw_stats: Dict[str, float] = {}
-    extra_penalty = float(latency_penalty)
-
-    def _audit_min(tag: str, x):
-        try:
-            x_item = float(x.detach().cpu().item())
-        except Exception:
-            return
-        if clamp_mins[tag] is None or x_item < float(clamp_mins[tag]):
-            clamp_mins[tag] = x_item
-
-    _audit_min("T", latency_ms)
-    _audit_min("E", energy_mj)
-    _audit_min("M", mem_mb)
-    _audit_min("C", comm_ms)
-
     def _as_enabled(v, default: bool = True) -> bool:
         if v is None:
             return default
@@ -340,67 +320,114 @@ def compute_hw_loss(
     ref_M_t = torch.tensor(ref_M, device=device, dtype=torch.float32)
     ref_C_t = torch.tensor(ref_C, device=device, dtype=torch.float32)
 
-    def _sanitize_no_reward(
-        tag: str,
-        name: str,
-        x: torch.Tensor,
-        ref_t: torch.Tensor,
-        min_value: float = 0.0,
-    ) -> torch.Tensor:
+    def _sanitize_no_reward(x: torch.Tensor, ref_t: torch.Tensor) -> torch.Tensor:
         # invalid = negative or non-finite -> replace with ref (NO reward)
-        invalid = (x < 0) | (~torch.isfinite(x))
-        try:
-            # invalid can be a tensor mask; count elements robustly
-            invalid_counts[tag] = int(invalid.detach().to("cpu").sum().item())
-        except Exception:
-            invalid_counts[tag] = 1
-        neg_mask = x < 0
-        if torch.any(neg_mask):
-            try:
-                neg_count = int(neg_mask.detach().sum().cpu().item())
-            except Exception:
-                neg_count = 1
-            hw_stats[name + "_neg_clamped"] = float(hw_stats.get(name + "_neg_clamped", 0.0)) + float(neg_count)
-            if hw_stats.get("_neg_proxy_warned", 0.0) == 0.0:
-                try:
-                    x_val = float(torch.min(x).detach().cpu().item())
-                except Exception:
-                    x_val = None
-                if x_val is None:
-                    print(f"[WARN] Negative proxy detected and clamped: {name}.")
-                else:
-                    print(f"[WARN] Negative proxy detected and clamped: {name}={x_val}.")
-                hw_stats["_neg_proxy_warned"] = 1.0
+        invalid = (x <= 0) | (~torch.isfinite(x))
         y = torch.where(invalid, ref_t, x)
-        # non-negative clamp (contract I4)
-        y = torch.clamp(y, min=float(min_value))
-        if torch.any(y < 0):
-            raise AssertionError(f"[I4] negative {tag} remains after clamp")
         return y
 
-    latency_ms_safe = _sanitize_no_reward(
-        "T",
-        "latency_ms",
-        latency_ms,
-        ref_T_t,
-        min_value=max(float(min_latency_ms), 0.0),
-    )
-    energy_mj_safe = _sanitize_no_reward("E", "energy_mj", energy_mj, ref_E_t)
-    mem_mb_safe = _sanitize_no_reward("M", "mem_mb", mem_mb, ref_M_t)
-    comm_ms_safe = _sanitize_no_reward("C", "comm_ms", comm_ms, ref_C_t)
+    # Track invalid clamps for audit/trace
+    clamp_counts = {
+        "T": int((latency_ms <= 0).sum().detach().cpu().item()),
+        "E": int((energy_mj <= 0).sum().detach().cpu().item()),
+        "M": int((mem_mb <= 0).sum().detach().cpu().item()),
+        "C": int((comm_ms <= 0).sum().detach().cpu().item()),
+    }
+    clamp_mins = {
+        "T": float(latency_ms.min().detach().cpu().item()),
+        "E": float(energy_mj.min().detach().cpu().item()),
+        "M": float(mem_mb.min().detach().cpu().item()),
+        "C": float(comm_ms.min().detach().cpu().item()),
+    }
 
-    # strictly-positive tensors for ratios/logs (numerical), but NOTE:
-    # invalid negatives were already mapped to ref => no artificial reward
-    latency_ms_pos = torch.clamp(latency_ms_safe, min=max(float(eps_ratio), float(min_latency_ms)))
-    energy_mj_pos = torch.clamp(energy_mj_safe, min=eps_ratio)
-    mem_mb_pos = torch.clamp(mem_mb_safe, min=eps_ratio)
-    comm_ms_pos = torch.clamp(comm_ms_safe, min=eps_ratio)
+    raw_latency_ms = float(latency_ms.detach().cpu().item())
+    raw_energy_mj = float(energy_mj.detach().cpu().item())
+    raw_mem_mb = float(mem_mb.detach().cpu().item())
+    raw_comm_norm = float(comm_ms.detach().cpu().item())
 
-    # count “clamps” for audit (invalid -> ref is considered a clamp event)
-    clamp_counts["T"] = int(invalid_counts["T"])
-    clamp_counts["E"] = int(invalid_counts["E"])
-    clamp_counts["M"] = int(invalid_counts["M"])
-    clamp_counts["C"] = int(invalid_counts["C"])
+    def _penalty_from_raw(x: float) -> float:
+        # 合同审计：sanitize 发生时必须能追溯 penalty_added（即便 used 被 ref 替代）
+        if not math.isfinite(x):
+            return 10.0
+        if x < 0.0:
+            return abs(x) * 10.0
+        return 0.0
+
+    penalty_T = _penalty_from_raw(raw_latency_ms)
+    penalty_E = _penalty_from_raw(raw_energy_mj)
+    penalty_M = _penalty_from_raw(raw_mem_mb)
+    penalty_C = _penalty_from_raw(raw_comm_norm)
+    extra_penalty = float(penalty_T + penalty_E + penalty_M + penalty_C)
+
+    # sanitize (no reward for invalid; used becomes ref when invalid)
+    latency_ms_pos = _sanitize_no_reward(latency_ms, ref_T_t)
+    energy_mj_pos = _sanitize_no_reward(energy_mj, ref_E_t)
+    mem_mb_pos = _sanitize_no_reward(mem_mb, ref_M_t)
+    comm_ms_pos = _sanitize_no_reward(comm_ms, ref_C_t)
+
+    latency_ms_pos = torch.clamp(latency_ms_pos, min=max(float(eps_ratio), float(min_latency_ms)))
+    energy_mj_pos = torch.clamp(energy_mj_pos, min=eps_ratio)
+    mem_mb_pos = torch.clamp(mem_mb_pos, min=eps_ratio)
+    comm_ms_pos = torch.clamp(comm_ms_pos, min=eps_ratio)
+
+    used_latency_ms = float(latency_ms_pos.detach().cpu().item())
+    used_energy_mj = float(energy_mj_pos.detach().cpu().item())
+    used_mem_mb = float(mem_mb_pos.detach().cpu().item())
+    used_comm_norm = float(comm_ms_pos.detach().cpu().item())
+
+    proxy_raw = {
+        "latency_ms": raw_latency_ms,
+        "energy_mj": raw_energy_mj,
+        "mem_mb": raw_mem_mb,
+        "comm_norm": raw_comm_norm,
+    }
+    proxy_used = {
+        "latency_ms": used_latency_ms,
+        "energy_mj": used_energy_mj,
+        "mem_mb": used_mem_mb,
+        "comm_norm": used_comm_norm,
+    }
+
+    hw_stats: Dict[str, float] = {
+        # legacy raw/used (keep)
+        "raw_latency_ms": raw_latency_ms,
+        "raw_energy_mj": raw_energy_mj,
+        "raw_mem_mb": raw_mem_mb,
+        "raw_comm_norm": raw_comm_norm,
+        "latency_ms": used_latency_ms,
+        "energy_mj": used_energy_mj,
+        "mem_mb": used_mem_mb,
+        "comm_norm": used_comm_norm,
+
+        # v5.4 audit keys (write-stable, used by trainer trace)
+        "proxy_raw_latency_ms": raw_latency_ms,
+        "proxy_raw_energy_mj": raw_energy_mj,
+        "proxy_raw_mem_mb": raw_mem_mb,
+        "proxy_raw_comm_norm": raw_comm_norm,
+        "proxy_used_latency_ms": used_latency_ms,
+        "proxy_used_energy_mj": used_energy_mj,
+        "proxy_used_mem_mb": used_mem_mb,
+        "proxy_used_comm_norm": used_comm_norm,
+
+        "proxy_penalty_latency_ms": float(penalty_T),
+        "proxy_penalty_energy_mj": float(penalty_E),
+        "proxy_penalty_mem_mb": float(penalty_M),
+        "proxy_penalty_comm_norm": float(penalty_C),
+        "proxy_penalty_total": float(extra_penalty),
+
+        "proxy_clamp_count_T": int(clamp_counts["T"]),
+        "proxy_clamp_count_E": int(clamp_counts["E"]),
+        "proxy_clamp_count_M": int(clamp_counts["M"]),
+        "proxy_clamp_count_C": int(clamp_counts["C"]),
+        "proxy_clamp_min_T": float(clamp_mins["T"]),
+        "proxy_clamp_min_E": float(clamp_mins["E"]),
+        "proxy_clamp_min_M": float(clamp_mins["M"]),
+        "proxy_clamp_min_C": float(clamp_mins["C"]),
+
+        "proxy_raw": proxy_raw,
+        "proxy_used": proxy_used,
+        "proxy_extra_penalty": float(extra_penalty),  # backward compat
+    }
 
     lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0))
     L_chip = torch.zeros((), device=device)
@@ -558,28 +585,10 @@ def compute_hw_loss(
 
     hw_stats.update(
         {
-            "latency_ms": float(latency_ms_pos.detach().cpu().item()),
-            "energy_mj": float(energy_mj_pos.detach().cpu().item()),
-            "mem_mb": float(mem_mb_pos.detach().cpu().item()),
             "comm_ms": float(comm_ms_pos.detach().cpu().item()),
-            "proxy_raw": {
-                "latency_ms": float(raw_latency_ms),
-                "energy_mj": float(raw_energy_mj),
-                "memory_mb": float(raw_mem_mb),
-                "comm_ms": float(raw_comm_ms),
-            },
-            "proxy_used": {
-                "latency_ms": float(latency_ms_pos.detach().cpu().item()),
-                "energy_mj": float(energy_mj_pos.detach().cpu().item()),
-                "memory_mb": float(mem_mb_pos.detach().cpu().item()),
-                "comm_ms": float(comm_ms_pos.detach().cpu().item()),
-            },
-            "raw_latency_ms": raw_latency_ms,
-            "raw_energy_mj": raw_energy_mj,
-            "raw_mem_mb": raw_mem_mb,
-            "raw_comm_ms": raw_comm_ms,
+            "raw_comm_ms": raw_comm_norm,
             "latency_ms_sanitized": float(sanitized_latency_ms),
-            "comm_ms_sanitized": _sanitize_scalar(raw_comm_ms, fallback=0.0),
+            "comm_ms_sanitized": _sanitize_scalar(raw_comm_norm, fallback=0.0),
             "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
             "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
             "clamped_mem_mb": float(mem_mb_pos.detach().cpu().item()),
@@ -590,11 +599,9 @@ def compute_hw_loss(
             "ref_comm_ms": float(ref_C),
             "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
             "proxy_clamp_min_values": clamp_mins,
-            "proxy_invalid_counts": invalid_counts,
             "proxy_had_invalid": bool(
-                (invalid_counts["T"] + invalid_counts["E"] + invalid_counts["M"] + invalid_counts["C"]) > 0
+                (clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]) > 0
             ),
-            "proxy_extra_penalty": float(extra_penalty),
         }
     )
     if chip_used_expected is not None:

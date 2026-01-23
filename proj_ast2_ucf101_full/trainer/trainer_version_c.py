@@ -560,10 +560,17 @@ def train_version_c(
     # ---- v5.4: allow config-driven export (OneCommand) ----
     if not export_layout_input:
         export_layout_input = bool(getattr(cfg, "export_layout_input", False))
+
+    layout_export_dir_source = "cli"
     if layout_export_dir is None:
-        layout_export_dir = str(getattr(cfg, "export_dir", "") or "")
-        if not layout_export_dir:
-            layout_export_dir = str(Path(cfg.train.out_dir) / "exports" / "layout_input")
+        cfg_export_dir = str(getattr(cfg, "export_dir", "") or "").strip()
+        if cfg_export_dir:
+            layout_export_dir = cfg_export_dir
+            layout_export_dir_source = "cfg"
+        else:
+            # legacy fallback (kept) — but must be auditable
+            layout_export_dir = str(Path(cfg.out_dir) / "exports" / "layout_input")
+            layout_export_dir_source = "default_out_dir_exports"
     # out_dir: training outputs root
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -589,7 +596,12 @@ def train_version_c(
         signature_v54=signature_v54,
         required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
         run_meta={"mode": "version_c_train", "seed_id": int(seed), "run_id": str(run_id)},
-        extra_manifest={"task": "version_c", "out_dir": str(out_dir)},
+        extra_manifest={
+            "task": "version_c",
+            "out_dir": str(out_dir),
+            "layout_export_dir_resolved": str(layout_export_dir),
+            "layout_export_dir_source": str(layout_export_dir_source),
+        },
     )
     trace_dir = Path(trace_meta["trace_dir"])
     trace_events_path = Path(trace_meta["trace_events"])
@@ -1191,32 +1203,41 @@ def train_version_c(
                     sum_mem += float(hw_stats.get("mem_mb", 0.0))
                     sum_comm += float(hw_stats.get("comm_ms", 0.0))
                     hw_stats_count += 1
-                    # SPEC_E: proxy sanitize audit must be verifiable (raw_value/used_value/penalty_added).
-                    if hw_stats.get("proxy_had_invalid", False) or hw_stats.get("proxy_clamp_count", 0) > 0:
-                        raw = hw_stats.get("proxy_raw", {}) or {}
-                        used = hw_stats.get("proxy_used", {}) or {}
-                        invalid_counts = hw_stats.get("proxy_invalid_counts", {}) or {}
-                        extra_penalty = float(hw_stats.get("proxy_extra_penalty", 0.0) or 0.0)
+                    # v5.4 trace: proxy sanitize events (SPEC_E)
+                    # 合同要求：被 sanitize 的 proxy 必须可追溯 raw_value / used_value / penalty_added
+                    sanitize_specs = [
+                        ("latency_ms", "T", "proxy_raw_latency_ms", "proxy_used_latency_ms", "proxy_penalty_latency_ms", "proxy_clamp_count_T", "proxy_clamp_min_T"),
+                        ("energy_mj",  "E", "proxy_raw_energy_mj",  "proxy_used_energy_mj",  "proxy_penalty_energy_mj",  "proxy_clamp_count_E", "proxy_clamp_min_E"),
+                        ("mem_mb",     "M", "proxy_raw_mem_mb",     "proxy_used_mem_mb",     "proxy_penalty_mem_mb",     "proxy_clamp_count_M", "proxy_clamp_min_M"),
+                        ("comm_norm",  "C", "proxy_raw_comm_norm",  "proxy_used_comm_norm",  "proxy_penalty_comm_norm",  "proxy_clamp_count_C", "proxy_clamp_min_C"),
+                    ]
+                    for metric, tag, k_raw, k_used, k_pen, k_cnt, k_min in sanitize_specs:
+                        raw_v = float(hw_stats.get(k_raw, float("nan")))
+                        used_v = float(hw_stats.get(k_used, float("nan")))
+                        pen_v = float(hw_stats.get(k_pen, 0.0))
+                        cnt_v = int(hw_stats.get(k_cnt, 0))
+                        min_v = float(hw_stats.get(k_min, float("nan")))
 
-                        keys = set(raw.keys()) | set(used.keys()) | set(invalid_counts.keys())
-                        for metric in sorted(keys):
-                            raw_v = raw.get(metric, None)
-                            used_v = used.get(metric, None)
-                            cnt = int(invalid_counts.get(metric, 0) or 0)
+                        changed = False
+                        if cnt_v > 0:
+                            changed = True
+                        if pen_v > 0.0:
+                            changed = True
+                        if math.isfinite(raw_v) and math.isfinite(used_v) and abs(raw_v - used_v) > 1e-12:
+                            changed = True
 
-                            # Emit only if something happened (invalid/clamp or changed value)
-                            if cnt <= 0 and raw_v == used_v:
-                                continue
-
-                            penalty_added = extra_penalty if metric == "latency_ms" else 0.0
+                        if changed:
                             append_trace_event_v54(
                                 trace_events_path,
                                 "proxy_sanitize",
                                 payload={
-                                    "metric": str(metric),
-                                    "raw_value": (float(raw_v) if raw_v is not None else None),
-                                    "used_value": (float(used_v) if used_v is not None else None),
-                                    "penalty_added": float(penalty_added),
+                                    "metric": metric,
+                                    "raw_value": raw_v,
+                                    "used_value": used_v,
+                                    "penalty_added": pen_v,
+                                    "clamp_count": cnt_v,
+                                    "clamp_min_value": min_v,
+                                    "reason": "invalid_proxy_or_clamp",
                                 },
                                 run_id=run_id,
                                 step=int(outer),
@@ -1391,39 +1412,50 @@ def train_version_c(
                     else None,
                 )
                 stable_hw_state = stable_decision.state
-                if str(stable_hw_state.get("guard_mode", "")).upper() != "HW_OPT":
-                    epoch = int(outer)
-                    outer_iter = int(outer)
-                    last_loss = run_state.get("last_loss_components", {}) or {}
-                    acc_ref = stable_hw_state.get("acc_ref", None)
-                    acc_now = stable_hw_state.get("acc_now", None)
-                    acc_drop = stable_hw_state.get("acc_drop", None)
-                    append_trace_event_v54(
-                        trace_events_path,
-                        "gating",
-                        payload={
-                            "gate": "reject_hw" if (stable_hw_state.get("guard_mode") in ("RECOVERY", "GUARD")) else "allow_hw",
-                            "acc_ref": (float(acc_ref) if acc_ref is not None else None),
-                            "acc_now": (float(acc_now) if acc_now is not None else None),
-                            "acc_drop": (float(acc_drop) if acc_drop is not None else None),
-                            "acc_drop_max": float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0),
-                            "epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0),
-                            "guard_mode": str(stable_hw_state.get("guard_mode")),
-                            "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
-                            "lambda_hw_base": float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0),
-                            "lambda_hw_effective": float(stable_hw_state.get("lambda_hw_effective", 0.0) or 0.0),
-                            "acc_loss": last_loss.get("acc_loss", None),
-                            "ast_loss": last_loss.get("ast_loss", None),
-                            "hw_loss_raw": last_loss.get("hw_loss_raw", None),
-                            "hw_loss_used": last_loss.get("hw_loss_used", None),
-                            "total_loss_acc_part": last_loss.get("total_loss_acc_part", None),
-                            "total_loss_hw_part": last_loss.get("total_loss_hw_part", None),
-                            "total_loss": last_loss.get("total_loss", None),
-                            "reason": stable_decision.reason,
-                        },
-                        epoch=epoch,
-                        outer_iter=outer_iter,
-                    )
+                epoch = int(outer)
+                outer_iter = int(outer)
+                last_loss = run_state.get("last_loss_components", {}) or {}
+                acc_ref = stable_hw_state.get("acc_ref", None)
+                acc_now = stable_hw_state.get("acc_now", None)
+                acc_drop = stable_hw_state.get("acc_drop", None)
+                acc_ref_val = float(acc_ref) if acc_ref is not None else 0.0
+                acc_now = float(acc_now) if acc_now is not None else 0.0
+                acc_drop = float(acc_drop) if acc_drop is not None else 0.0
+                acc_loss = last_loss.get("acc_loss", 0.0)
+                total_loss = last_loss.get("total_loss", 0.0)
+                hw_loss_norm = last_loss.get("hw_loss_raw", 0.0)
+                hw_loss_used = last_loss.get("hw_loss_used", 0.0)
+                # v5.4 trace: gating event (spec_e)
+                # 合同要求：每个 outer step 都必须产出 gating 证据（allow_hw / reject_hw），不能只在触发时记录
+                gate = "allow_hw"
+                if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
+                    gate = "reject_hw"
+                if float(hw_loss_used or 0.0) <= 0.0:
+                    gate = "reject_hw"
+                if str(getattr(stable_decision, "guard_mode", "")) in ("VIOLATE", "RECOVERY", "WARMUP"):
+                    gate = "reject_hw"
+
+                append_trace_event_v54(
+                    trace_events_path,
+                    "gating",
+                    payload={
+                        "gate": gate,  # allow_hw / reject_hw
+                        "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
+                        "acc_ref": float(acc_ref_val),
+                        "acc_now": float(acc_now),
+                        "acc_drop": float(acc_drop),
+                        "threshold_drop": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
+                        "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
+                        "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
+                        "hw_loss_raw": float(hw_loss_norm or 0.0),
+                        "hw_loss_used": float(hw_loss_used or 0.0),
+                        "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
+                        "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
+                        "reason": dict(getattr(stable_decision, "reason", {}) or {}),
+                    },
+                    run_id=run_id,
+                    step=int(outer),
+                )
                 # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
                 if bool(stable_decision.stop_training):
                     val_acc1_str = f"{val_acc1:.6f}" if val_acc1 is not None else "None"
@@ -1447,10 +1479,16 @@ def train_version_c(
                 update_hw_refs_from_stats(
                     cfg,
                     stable_hw_state,
-                    latest_stats=last_hw_stats or {},
+                    latest_hw_stats=last_hw_stats or {},
                     stable_hw_cfg=stable_hw_cfg,
                 )
                 after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
+                # v5.4 contract: NoDrift requested => never allow ref_update
+                if bool(stable_hw_state.get("no_drift_enabled", False)) and before != after:
+                    raise RuntimeError(
+                        "v5.4 contract violation: no_drift.enabled=true but hw_refs changed (ref_update would occur). "
+                        "This must never happen under SPEC_E NoDrift."
+                    )
                 if before != after:
                     append_trace_event_v54(
                         trace_events_path,
