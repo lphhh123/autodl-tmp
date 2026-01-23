@@ -12,6 +12,33 @@ if [[ -z "$EXP_ID" ]]; then
   exit 1
 fi
 
+# ---- ensure A3 middleware exists: outputs/P3/A3/layout_input.json ----
+ensure_layout_input() {
+  local LI="outputs/P3/A3/layout_input.json"
+  if [[ -f "${LI}" ]]; then
+    echo "[ensure_layout_input] OK: ${LI}"
+    return 0
+  fi
+
+  echo "[ensure_layout_input] MISSING: ${LI}"
+  echo "[ensure_layout_input] Generating via Version-C Phase3 export (A3)..."
+
+  mkdir -p outputs/P3/A3
+
+  python -m scripts.run_version_c \
+    --cfg configs/vc_phase3_full_ucf101.yaml \
+    --out_dir outputs/P3/A3 \
+    --seed "${SEED}" \
+    --export_layout_input \
+    --export_dir outputs/P3/A3/layout_input_export
+
+  if [[ ! -f "${LI}" ]]; then
+    echo "[ensure_layout_input] FAILED: still missing ${LI}"
+    exit 3
+  fi
+  echo "[ensure_layout_input] GENERATED: ${LI}"
+}
+
 run_ast () {
   local cfg="$1"
   local out="$2"
@@ -27,6 +54,7 @@ run_vc () {
 run_layout () {
   local cfg="$1"
   local out="$2"
+  ensure_layout_input
   python -m scripts.run_layout_agent \
     --layout_input outputs/P3/A3/layout_input.json \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
@@ -35,6 +63,7 @@ run_layout () {
 run_layout_heuragenix () {
   local cfg="$1"
   local out="$2"
+  ensure_layout_input
   python -m scripts.run_layout_heuragenix \
     --layout_input outputs/P3/A3/layout_input.json \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"

@@ -116,7 +116,8 @@ def main():
     else:
         data_name_list = [x.strip() for x in args.test_data.split(",") if x.strip()]
 
-    heur_dir = Path("src") / "problems" / args.problem / "heuristics" / args.heuristic_dir
+    repo_root = Path(__file__).resolve().parent
+    heur_dir = repo_root / "src" / "problems" / args.problem / "heuristics" / args.heuristic_dir
     if not heur_dir.exists():
         raise FileNotFoundError(f"heuristic_dir not found: {heur_dir.resolve()}")
 

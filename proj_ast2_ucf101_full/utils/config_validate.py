@@ -123,6 +123,14 @@ def _migrate_stable_hw_to_v5(cfg: Any) -> None:
     if not isinstance(guard, mapping_types):
         guard = {}
 
+    nds = stable_hw.get("no_double_scale", None)
+    if isinstance(nds, bool):
+        stable_hw["no_double_scale"] = {"enabled": bool(nds)}
+    elif nds is None:
+        stable_hw["no_double_scale"] = {"enabled": True}
+    elif isinstance(nds, dict) and "enabled" not in nds:
+        nds["enabled"] = True
+
     # old: stable_hw.controller -> new: stable_hw.accuracy_guard.controller
     old_ctrl = stable_hw.get("controller", {}) or {}
     if not isinstance(old_ctrl, mapping_types):
@@ -230,6 +238,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     # compat: layout.* -> hw.*
     _sync_layout_to_hw(cfg)
+    # ---- promote export keys: cfg.version_c.export_* -> cfg.export_* ----
+    vc = getattr(cfg, "version_c", None)
+    if vc is not None:
+        if getattr(cfg, "export_layout_input", None) is None and getattr(vc, "export_layout_input", None) is not None:
+            cfg.export_layout_input = bool(vc.export_layout_input)
+        if getattr(cfg, "export_dir", None) is None and getattr(vc, "export_dir", None) is not None:
+            cfg.export_dir = str(vc.export_dir)
     # ---- legacy compat: layout.optimize_layout -> hw.optimize_layout ----
     try:
         layout_opt = get_nested(cfg, "layout.optimize_layout", None)
@@ -368,6 +383,31 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
         if not hasattr(stable_hw, "no_double_scale"):
             stable_hw.no_double_scale = False
+
+        # ---- v5.4: unify budget fields for layout pipelines ----
+        if not hasattr(cfg, "budget") or cfg.budget is None:
+            cfg.budget = AttrDict({})
+        budget = cfg.budget
+
+        if getattr(budget, "total_eval_budget", None) is None:
+            max_eval_calls = getattr(getattr(cfg, "baseline", None), "max_eval_calls", None)
+            steps = getattr(getattr(cfg, "detailed_place", None), "steps", None)
+            if max_eval_calls is not None:
+                budget.total_eval_budget = int(max_eval_calls)
+            elif steps is not None:
+                budget.total_eval_budget = int(steps) + 2
+            else:
+                budget.total_eval_budget = 0
+
+        if getattr(budget, "max_wallclock_sec", None) is None:
+            mw = getattr(getattr(cfg, "baseline", None), "max_wallclock_sec", None)
+            mr = getattr(getattr(cfg, "detailed_place", None), "max_runtime_sec", None)
+            if mw is not None:
+                budget.max_wallclock_sec = float(mw)
+            elif mr is not None:
+                budget.max_wallclock_sec = float(mr)
+            else:
+                budget.max_wallclock_sec = 0.0
 
         return cfg
     elif mode == "single":

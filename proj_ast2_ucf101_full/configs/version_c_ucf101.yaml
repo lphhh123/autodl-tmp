@@ -3,7 +3,8 @@ train:
   mode: version_c
 stable_hw:
   enabled: true
-  no_double_scale: true
+  no_double_scale:
+    enabled: true
   warmup:
     enabled: true
     epochs: 1

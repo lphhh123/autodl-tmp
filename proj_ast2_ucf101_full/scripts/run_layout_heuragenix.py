@@ -1071,7 +1071,7 @@ def main() -> None:
         )
     _ensure_heuragenix_syspath(heuragenix_root)
 
-    run_mode = baseline_cfg.get("run_mode", "inprocess")
+    run_mode = baseline_cfg.get("run_mode", "subprocess")
     method = str(baseline_cfg.get("method", "llm_hh"))
     baseline_method = str(method)
     method = baseline_method
@@ -1089,15 +1089,6 @@ def main() -> None:
     (internal_data_root / problem / "test_data").mkdir(parents=True, exist_ok=True)
     (internal_out / problem).mkdir(parents=True, exist_ok=True)
     internal_data_base = internal_data_root
-    work_dir, case_name, case_file = _prepare_work_dir(
-        out_dir,
-        heuragenix_root,
-        layout_input,
-        seed,
-        internal_data_base,
-        seed_assign,
-        baseline_cfg,
-    )
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
     num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
@@ -1114,6 +1105,34 @@ def main() -> None:
         int(max_steps)
         if max_steps is not None and int(max_steps) >= 0
         else int(max(1, round(float(iters_sf) * max(1, S))))
+    )
+    budget_cfg = getattr(cfg, "budget", None) or {}
+    total_eval_budget = int(getattr(budget_cfg, "total_eval_budget", 0) or 0)
+    max_wallclock_sec = float(getattr(budget_cfg, "max_wallclock_sec", 0.0) or 0.0)
+
+    if total_eval_budget and effective_max_steps:
+        effective_max_steps = int(min(effective_max_steps, total_eval_budget))
+    if effective_max_steps:
+        max_steps = int(effective_max_steps)
+
+    layout_input["max_eval_calls"] = int(total_eval_budget)
+    layout_input["max_steps"] = int(effective_max_steps)
+    seed_payload = layout_input.get("seed", {})
+    if isinstance(seed_payload, dict):
+        seed_payload["seed_id"] = int(args.seed)
+        seed_payload["rng_seed"] = int(args.seed)
+        layout_input["seed"] = seed_payload
+    else:
+        layout_input["seed"] = int(args.seed)
+
+    work_dir, case_name, case_file = _prepare_work_dir(
+        out_dir,
+        heuragenix_root,
+        layout_input,
+        seed,
+        internal_data_base,
+        seed_assign,
+        baseline_cfg,
     )
 
     layout_hash = None
@@ -1140,6 +1159,16 @@ def main() -> None:
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
+    # ---- v5.4 seed must be signature-visible (SPEC_E) ----
+    try:
+        cfg.seed = int(args.seed)
+    except Exception:
+        pass
+    try:
+        if hasattr(cfg, "train"):
+            cfg.train.seed = int(args.seed)
+    except Exception:
+        pass
     signature = _build_run_signature(cfg, method_name=method_label)
     init_trace_dir(
         trace_dir,
@@ -1257,7 +1286,7 @@ def main() -> None:
     ).strip(os.pathsep)
     env["AMLT_OUTPUT_DIR"] = str(internal_out)
     env["AMLT_DATA_DIR"] = str(internal_data_root)
-    timeout_s = int(baseline_cfg.get("subprocess_timeout_s", 1800))
+    timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
     result = None
     if run_mode == "inprocess":
         try:
@@ -1538,7 +1567,7 @@ def main() -> None:
         therm_norm = float(rec.get("therm_norm", 0.0))
         if not base_eval:
             base_eval = {"total_scalar": total_scalar, "comm_norm": comm_norm, "therm_norm": therm_norm}
-        if best_total is None or total_scalar > best_total:
+        if best_total is None or total_scalar < best_total:
             best_total = total_scalar
             best_comm = comm_norm
             best_therm = therm_norm
@@ -1706,6 +1735,23 @@ def main() -> None:
     }
     (out_dir / "budget.json").write_text(
         json.dumps(budget_out, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    # ---- mirror outputs to HeurAgenix-guide-style tree under out_dir/output/... ----
+    guide_root = Path(out_dir) / "output"
+    src_root = Path(out_dir) / "heuragenix_internal" / "output"
+    if src_root.exists():
+        for p in src_root.rglob("*"):
+            rel = p.relative_to(src_root)
+            tgt = guide_root / rel
+            if p.is_dir():
+                tgt.mkdir(parents=True, exist_ok=True)
+            else:
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                tgt.write_bytes(p.read_bytes())
+
+    (out_dir / "HEURAGENIX_OUTPUT_LOCATION.txt").write_text(
+        f"Internal: {src_root}\nGuide-mirror: {guide_root}\n",
         encoding="utf-8",
     )
 
