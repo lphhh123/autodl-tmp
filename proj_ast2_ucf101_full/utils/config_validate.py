@@ -732,4 +732,11 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
             )
 
+    # ---- v5.4 Addendum: signature must be assign-only ----
+    if bool(get_nested(cfg, "signature.allow_pos_signature", False)):
+        raise ValueError(
+            "SPEC v5.4 signature must be assign-only. "
+            "Please set signature.allow_pos_signature=false."
+        )
+
     return cfg
