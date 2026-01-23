@@ -165,7 +165,7 @@ def main():
     export_layout_input = bool(args.export_layout_input)
     # IMPORTANT: export_dir is where we write layout_input payloads for downstream layout solver.
     # If not provided, trainer will fall back to (out_dir/layout_input) internally.
-    export_dir = Path(args.export_dir).expanduser().resolve() if args.export_dir else None
+    export_dir = args.export_dir if args.export_dir is not None else None
 
     # ---- dump resolved config ----
     try:

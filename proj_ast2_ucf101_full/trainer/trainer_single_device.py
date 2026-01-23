@@ -247,23 +247,26 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if not bool(stable_state.get("allow_discrete_updates", True)):
                     freeze_epochs += 1
                 if trace_dir is not None:
+                    gate = "allow_hw"
+                    if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
+                        gate = "reject_hw"
+                    if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
+                        gate = "reject_hw"
                     append_trace_event_v54(
                         trace_events_path,
-                        "gating_decision",
+                        "gating",
                         payload={
                             "epoch": int(epoch),
-                            "metric": str(stable_decision.reason.get("metric")),
-                            "acc_ref": float(stable_decision.reason.get("acc_ref"))
-                            if stable_decision.reason.get("acc_ref") is not None
-                            else None,
-                            "acc_current": (
-                                float(stable_decision.reason.get("acc_current"))
-                                if stable_decision.reason.get("acc_current") is not None
-                                else None
-                            ),
+                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
+                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
+                            "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
+                            "acc_drop_max": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
+                            "gate": gate,
+                            "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
+                            "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
+                            "total_loss": float(stable_state.get("total_loss", 0.0) or 0.0),
                             "guard_mode": str(stable_decision.guard_mode),
                             "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
-                            "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
                             "reason": str(stable_decision.reason.get("violate", "")),
                         },
                         run_id=run_id,
@@ -373,23 +376,26 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 )
                 stable_state = stable_decision.state
                 if trace_dir is not None:
+                    gate = "allow_hw"
+                    if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
+                        gate = "reject_hw"
+                    if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
+                        gate = "reject_hw"
                     append_trace_event_v54(
                         trace_events_path,
-                        "gating_decision",
+                        "gating",
                         payload={
                             "epoch": int(epoch),
-                            "metric": str(stable_decision.reason.get("metric")),
-                            "acc_ref": float(stable_decision.reason.get("acc_ref"))
-                            if stable_decision.reason.get("acc_ref") is not None
-                            else None,
-                            "acc_current": (
-                                float(stable_decision.reason.get("acc_current"))
-                                if stable_decision.reason.get("acc_current") is not None
-                                else None
-                            ),
+                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
+                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
+                            "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
+                            "acc_drop_max": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
+                            "gate": gate,
+                            "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
+                            "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
+                            "total_loss": float(stable_state.get("total_loss", 0.0) or 0.0),
                             "guard_mode": str(stable_decision.guard_mode),
                             "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
-                            "gated": bool(stable_decision.guard_mode in ("VIOLATE", "RECOVERY")),
                             "reason": str(stable_decision.reason.get("violate", "")),
                         },
                         run_id=run_id,

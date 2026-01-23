@@ -336,15 +336,47 @@ def init_trace_dir_v54(
 _DEFAULT_RUN_ID: Optional[str] = None
 
 
+def _require_keys(event_type: str, payload: dict, keys: list) -> None:
+    missing = [k for k in keys if k not in payload]
+    if missing:
+        raise ValueError(f"[SPEC_E v5.4] trace event '{event_type}' missing keys: {missing}")
+
+
 def append_trace_event_v54(
     path: Path,
     event_type: str,
-    payload: dict,
+    payload: Optional[dict] = None,
     run_id: Optional[str] = None,
     step: Optional[int] = None,
     epoch: Optional[int] = None,
     outer_iter: Optional[int] = None,
 ):
+    if payload is None:
+        payload = {}
+
+    # hard forbid legacy / ambiguous event_type aliases
+    if event_type in {"gating_decision", "gatingDecision", "gate_decision"}:
+        raise ValueError(
+            "[SPEC_E v5.4] Illegal trace event_type alias. Use event_type='gating' with payload.gate in "
+            "{'allow_hw','reject_hw'}."
+        )
+
+    # schema enforcement for contract-critical events
+    if event_type == "gating":
+        _require_keys(
+            event_type,
+            payload,
+            ["acc_ref", "acc_now", "acc_drop", "acc_drop_max", "gate", "hw_loss_raw", "hw_loss_used", "total_loss"],
+        )
+        if payload["gate"] not in ("allow_hw", "reject_hw"):
+            raise ValueError(
+                f"[SPEC_E v5.4] gating.gate must be 'allow_hw' or 'reject_hw', got: {payload['gate']}"
+            )
+    elif event_type == "proxy_sanitize":
+        _require_keys(event_type, payload, ["metric", "raw_value", "used_value", "penalty_added"])
+    elif event_type == "ref_update":
+        _require_keys(event_type, payload, ["ref_name", "old_value", "new_value", "reason"])
+
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
     if flag.exists() and event_type != "finalize":

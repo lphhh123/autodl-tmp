@@ -873,14 +873,21 @@ def update_hw_refs_from_stats(
     """
     stable_hw_cfg = stable_hw_cfg if stable_hw_cfg is not None else getattr(cfg, "stable_hw", None)
     nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
-    requested_no_drift = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
+    no_drift_enabled = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
+    ref_update_mode = str(stable_hw_state.get("_force_ref_update_mode", "ema")).lower().strip()
 
-    forced = str(stable_hw_state.get("_force_ref_update_mode", "baseline_or_freeze"))
-    if requested_no_drift and forced == "ema":
-        raise RuntimeError("v5.4 contract violation: NoDrift requested but ref_update_mode='ema' (silent downgrade not allowed).")
+    # CONTRACT SEAL: NoDrift requested => MUST NOT update refs (no hidden fallback)
+    if no_drift_enabled and ref_update_mode != "frozen":
+        raise RuntimeError(
+            f"[SPEC v5.4] no_drift.enabled=True requires ref_update_mode='frozen'. "
+            f"Got ref_update_mode='{ref_update_mode}'. Ref updates would violate NoDrift."
+        )
 
-    # If no_drift is requested, always freeze
-    if requested_no_drift or forced == "frozen":
+    effective_no_drift = bool(no_drift_enabled)  # once requested, it's effectively enforced (or we crash above)
+
+    if effective_no_drift:
+        # guarantee: no ref update happens
+        stable_hw_state["no_drift_enabled"] = True
         stable_hw_state["no_drift_effective"] = True
         return
 
