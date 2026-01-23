@@ -1,3 +1,4 @@
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 # SPEC_E S3 entrypoint: delegates to smoke_check_hw_grad.main
 import sys
 from pathlib import Path

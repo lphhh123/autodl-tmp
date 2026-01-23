@@ -1348,33 +1348,31 @@ def train_version_c(
                                     changed = True
                                     break
                         if changed:
-                            for metric in sorted(hw_proxy_used.keys()):
-                                raw_v = float(hw_proxy_raw.get(metric, hw_proxy_used[metric]))
-                                used_v = float(hw_proxy_used[metric])
-                                penalty_added = float(max(0.0, used_v - raw_v))
-                                payload = {
-                                    "metric": str(metric),
-                                    "raw_value": raw_v,
-                                    "used_value": used_v,
-                                    "penalty_added": penalty_added,
-                                    "clamp_min": None,
-                                    "clamp_max": None,
-                                    "note": "sanitize" if changed else "no_change",
-                                    "source": "hw_loss",
-                                    # 允许保留额外字段用于 debug（不影响合同审计）
-                                    "outer_iter": int(outer),
-                                    "epoch": int(epoch),
-                                    "global_step": int(global_step),
-                                }
-                                missing_keys = [k for k in REQUIRED_PROXY_SANITIZE_KEYS if k not in payload]
-                                if missing_keys:
-                                    raise KeyError(f"proxy_sanitize payload missing keys: {missing_keys}")
+                            hw_metrics = hw_proxy_raw
+                            hw_used = hw_proxy_used
+                            # ---- v5.4: trace proxy sanitize evidence (SPEC_E) ----
+                            for metric in sorted(hw_metrics.keys()):
+                                raw = float(hw_metrics[metric])
+                                used = float(hw_used.get(metric, raw))
+                                # IMPORTANT: penalty_added must reflect the actual penalty used in loss,
+                                # not a derived (used-raw) heuristic.
+                                pen_key = f"proxy_penalty_{metric}"
+                                penalty_added = float(hw_stats.get(pen_key, 0.0) or 0.0)
+
                                 append_trace_event_v54(
                                     trace_events_path,
                                     "proxy_sanitize",
-                                    payload=payload,
+                                    payload={
+                                        "candidate_id": int(outer),  # v5.4: candidate id for audit (epoch-level candidate)
+                                        "outer_iter": int(outer),
+                                        "inner_step": int(step),
+                                        "metric": str(metric),
+                                        "raw_value": raw,
+                                        "used_value": used,
+                                        "penalty_added": penalty_added,
+                                    },
                                     run_id=run_id,
-                                    step=int(outer),
+                                    step=int(step),
                                 )
                         hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
                         loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
@@ -1674,18 +1672,25 @@ def train_version_c(
                                 return None
                             return float(val)
 
+                        requested_mode = str(getattr(getattr(stable_hw_cfg, "normalize", None), "ref_update", "ema"))
+                        effective_mode = str(stable_hw_state.get("_force_ref_update_mode", requested_mode))
+                        no_drift_enabled = bool(stable_hw_state.get("no_drift_enabled", False))
+
                         for ref_name in ("ref_T", "ref_E", "ref_M", "ref_C"):
                             if before.get(ref_name) != after.get(ref_name):
                                 append_trace_event_v54(
                                     trace_events_path,
                                     "ref_update",
                                     payload={
+                                        "outer_iter": int(outer),
                                         "ref_name": str(ref_name),
                                         "old_value": _maybe_float(before.get(ref_name)),
                                         "new_value": _maybe_float(after.get(ref_name)),
-                                        "reason": "ema_ref_update",
-                                        "key": str(ref_name),
-                                        "outer_iter": int(outer),
+                                        "update_type": "hw_ref_update",
+                                        "allowed_by_no_drift": (not no_drift_enabled),
+                                        "requested_mode": requested_mode,
+                                        "effective_mode": effective_mode,
+                                        "reason": "hw_ref_update",
                                     },
                                     run_id=run_id,
                                     step=int(outer),

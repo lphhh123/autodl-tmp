@@ -1,3 +1,4 @@
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 """
 Runtime smoke check for v5.4 StableHW controller semantics.
 Goal: verify schedule->guard->effective is a single closed loop.

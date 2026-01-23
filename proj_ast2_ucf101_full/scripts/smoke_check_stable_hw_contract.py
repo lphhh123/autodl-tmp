@@ -1,3 +1,4 @@
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 """Smoke check for StableHW contract invariants (SPEC v5.4)."""
 import sys
 from pathlib import Path
