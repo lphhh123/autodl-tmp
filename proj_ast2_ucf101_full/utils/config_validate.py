@@ -478,6 +478,18 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             else:
                 budget.max_wallclock_sec = 0.0
 
+        # ---- v5.4 contract: make cache_key_schema_version explicit in resolved_config ----
+        if get_nested(cfg, "detailed_place.policy_switch.cache_key_schema_version", None) is None:
+            set_nested(cfg, "detailed_place.policy_switch.cache_key_schema_version", "v5.4")
+            cfg._contract.overrides.append(
+                {
+                    "path": "detailed_place.policy_switch.cache_key_schema_version",
+                    "requested": None,
+                    "effective": "v5.4",
+                    "reason": "default_for_auditability_v5.4",
+                }
+            )
+
         return cfg
     elif mode == "single":
         # single-device baseline: only need hw.device_name/gpu_yaml/proxy_weight_dir/lambda_hw
