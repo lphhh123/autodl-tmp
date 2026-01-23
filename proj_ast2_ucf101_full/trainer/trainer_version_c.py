@@ -1686,33 +1686,45 @@ def train_version_c(
                 f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
             )
             # ---- v5.4: auditable acc source for gating / locked ref (SPEC_C) ----
-            acc_used_source = None
-            acc_used_value = None
+            acc_used_source = stable_hw_state.get("acc_used_source", None)
+            acc_used_value = stable_hw_state.get(
+                "acc_used_value",
+                stable_hw_state.get("acc_used_last", None),
+            )
 
-            if val_acc1 is not None:
-                acc_used_source = "val"
-                acc_used_value = float(val_acc1)
+            if acc_used_source and acc_used_value is not None:
+                acc_used_source = str(acc_used_source)
+                acc_used_value = float(acc_used_value)
             else:
-                # 1) try last known val
-                prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
-                if prev_last is not None:
-                    acc_used_source = "val_last"
-                    acc_used_value = float(prev_last)
+                if val_acc1 is not None:
+                    acc_used_source = "val"
+                    acc_used_value = float(val_acc1)
                 else:
-                    # 2) fall back to EMA train acc (SPEC_C)
-                    ema = stable_hw_state.get("train_acc1_ema", None)
-                    if ema is not None:
-                        acc_used_source = "train_ema"
-                        acc_used_value = float(ema)
+                    # 1) try last known val
+                    prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
+                    if prev_last is not None:
+                        acc_used_source = "val_last"
+                        acc_used_value = float(prev_last)
                     else:
-                        # contract: cannot decide gating without any auditable accuracy signal
-                        raise RuntimeError("[V5.4 CONTRACT] val_acc1 missing and no val_last/train_ema available")
+                        # 2) fall back to EMA train acc (SPEC_C)
+                        ema = stable_hw_state.get("train_acc1_ema", None)
+                        allow_ema_fb = bool(getattr(stable_hw_cfg, "allow_train_ema_fallback", False))
+                        if allow_ema_fb and (ema is not None):
+                            acc_used_source = "train_ema"
+                            acc_used_value = float(ema)
+                        else:
+                            # contract: cannot decide gating without any auditable accuracy signal
+                            raise RuntimeError(
+                                "[V5.4 CONTRACT] val_acc1 missing and train_ema fallback is disabled or unavailable. "
+                                "Set stable_hw.allow_train_ema_fallback=True explicitly if you want this fallback."
+                            )
+
+                if acc_used_source is not None:
+                    stable_hw_state.setdefault("acc_used_source", str(acc_used_source))
+                if acc_used_value is not None:
+                    stable_hw_state.setdefault("acc_used_value", float(acc_used_value))
 
             last_acc1 = float(acc_used_value)
-
-            # record for audit
-            stable_hw_state["acc_used_source"] = str(acc_used_source)
-            stable_hw_state["acc_used_value"] = float(acc_used_value)
 
             if best_acc1 is None:
                 best_acc1 = float(last_acc1)
