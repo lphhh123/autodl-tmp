@@ -1299,6 +1299,12 @@ def main() -> None:
         nonlocal trace_header_written
         if trace_header_written:
             return
+        def _req_bool(path: str):
+            value = get_nested(requested_config, path, None)
+            if value is None:
+                return None
+            return bool(value)
+
         append_trace_event_v54(
             trace_events_path,
             "trace_header",
@@ -1313,6 +1319,10 @@ def main() -> None:
                     "heuragenix_root": str(get_nested(requested_config, "baseline.heuragenix_root", "")),
                     "heuristic_dir": str(get_nested(requested_config, "baseline.heuristic_dir", "")),
                     "llm_config_file": str(get_nested(requested_config, "baseline.llm_config_file", "")),
+                    "stable_hw_enabled": _req_bool("stable_hw.enabled"),
+                    "no_drift_enabled": _req_bool("stable_hw.no_drift.enabled"),
+                    "no_double_scale_enabled": _req_bool("stable_hw.no_double_scale.enabled"),
+                    "locked_acc_ref_enabled": _req_bool("stable_hw.locked_acc_ref.enabled"),
                 },
                 "effective": {
                     "mode": "layout_heuragenix",
@@ -1321,6 +1331,16 @@ def main() -> None:
                     "heuragenix_root": str(heuragenix_root.resolve()),
                     "heuristic_dir": str(heuristic_dir),
                     "llm_config_file": str(llm_eff),
+                    "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                    "no_drift_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+                    ),
+                    "no_double_scale_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                    ),
+                    "locked_acc_ref_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "enabled", False)
+                    ),
                 },
                 "heuragenix_root": str(heuragenix_root.resolve()),
                 "llm_config_file": {"requested": str(llm_req), "effective": str(llm_eff)},

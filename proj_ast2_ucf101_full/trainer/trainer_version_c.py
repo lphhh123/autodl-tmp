@@ -1579,6 +1579,7 @@ def train_version_c(
                     hw_part = float(lambda_hw_eff) * float(hw_loss_used)
 
                 payload = {
+                    "candidate_id": int(outer),
                     "gate": gate,
                     "acc_ref": float(acc_ref_val),
                     "acc_used": float(stable_hw_state.get("acc_now", 0.0)),
@@ -1666,7 +1667,7 @@ def train_version_c(
                                 "ref_update",
                                 payload={
                                     "outer_iter": int(outer),
-                                    "ref_name": ref_name,
+                                    "key": ref_name,
                                     "old_value": _maybe_float(before.get(ref_name)),
                                     "new_value": _maybe_float(after.get(ref_name)),
                                     "reason": "hw_ref_update",

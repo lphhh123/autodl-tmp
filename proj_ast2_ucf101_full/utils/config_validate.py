@@ -444,7 +444,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if getattr(cfg.train, "seed", None) is None:
             cfg.train.seed = 2024
         return _stamp_contract(cfg)
-    elif mode == "layout":
+    elif mode in ("layout", "layout_heuragenix"):
         _apply_defaults(
             cfg,
             {
@@ -486,7 +486,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         # (so trace signature can be strict per SPEC_E without silent defaults).
         # ------------------------------------------------------------
         stable_hw = _ensure_namespace(cfg, "stable_hw")
-        stable_hw.enabled = bool(getattr(stable_hw, "enabled", False))
+        stable_hw.enabled = bool(getattr(stable_hw, "enabled", True))
 
         ag = _ensure_namespace(stable_hw, "accuracy_guard")
         ag.enabled = bool(getattr(ag, "enabled", False))
@@ -501,10 +501,10 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             lar.source = "none"
 
         nd = _ensure_namespace(stable_hw, "no_drift")
-        nd.enabled = bool(getattr(nd, "enabled", False))
+        nd.enabled = bool(getattr(nd, "enabled", True))
 
         if not hasattr(stable_hw, "no_double_scale"):
-            stable_hw.no_double_scale = False
+            stable_hw.no_double_scale = True
 
         # ---- v5.4: unify budget fields for layout pipelines ----
         if not hasattr(cfg, "budget") or cfg.budget is None:

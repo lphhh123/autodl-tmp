@@ -111,4 +111,4 @@ def test_smoke_run_layout_agent():
         lines = trace_events.read_text(encoding="utf-8").splitlines()
         assert lines
         last = lines[-1]
-        assert '"event_type":"trace_finalize"' in last
+        assert '"event_type":"finalize"' in last
