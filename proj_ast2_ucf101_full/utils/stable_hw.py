@@ -576,6 +576,22 @@ def apply_accuracy_guard(
         st["lambda_hw_after_guard"] = 0.0
         st["allow_discrete_updates"] = True
         st["stop_on_violation"] = False
+        # --- [v5.4 CONTRACT] Fill auditable gating fields for SPEC_E ---
+        # metric is current measured accuracy (or whatever metric configured)
+        # acc_ref is the reference accuracy (may be None during warmup)
+        metric_now = acc_used
+        if metric_now is None and has_val_this_epoch and val_metric_or_none is not None:
+            metric_now = float(val_metric_or_none)
+        st["acc_ref"] = float(acc_ref) if acc_ref is not None else None
+        st["acc_now"] = float(metric_now) if metric_now is not None else 0.0
+
+        if acc_ref is not None and metric_now is not None:
+            st["acc_drop"] = float(max(0.0, float(acc_ref) - float(metric_now)))
+        else:
+            st["acc_drop"] = 0.0
+
+        # eps_used is the effective drop threshold (after any hysteresis)
+        st["acc_drop_max"] = float(eps_used)
         decision = StableHWDecision(
             guard_mode=str(st["guard_mode"]),
             lambda_hw_base=float(st.get("lambda_hw_base", 0.0)),
@@ -684,6 +700,19 @@ def apply_accuracy_guard(
         st["recovery_until_epoch"] = int(epoch + recovery_min_epochs)
     else:
         st["recovery_until_epoch"] = int(-1)
+    # --- [v5.4 CONTRACT] Fill auditable gating fields for SPEC_E ---
+    # metric is current measured accuracy (or whatever metric configured)
+    # acc_ref is the reference accuracy (may be None during warmup)
+    st["acc_ref"] = float(acc_ref) if acc_ref is not None else None
+    st["acc_now"] = float(metric) if metric is not None else 0.0
+
+    if acc_ref is not None and metric is not None:
+        st["acc_drop"] = float(max(0.0, float(acc_ref) - float(metric)))
+    else:
+        st["acc_drop"] = 0.0
+
+    # eps_used is the effective drop threshold (after any hysteresis)
+    st["acc_drop_max"] = float(eps_used)
     st["last_guard_decision"] = {
         "guard_mode": str(st["guard_mode"]),
         "violate": bool(violate),

@@ -1469,9 +1469,11 @@ def train_version_c(
                         "gate": gate,  # allow_hw / reject_hw
                         "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
                         "acc_ref": float(acc_ref_val),
-                        "acc_now": float(acc_now),
-                        "acc_drop": float(acc_drop),
-                        "acc_drop_max": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
+                        "acc_now": float(stable_hw_state.get("acc_now", 0.0)),
+                        "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
+                        "acc_drop_max": float(
+                            stable_hw_state.get("acc_drop_max", stable_hw_state.get("epsilon_drop", 0.0))
+                        ),
                         "threshold_drop": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
                         "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
                         "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
