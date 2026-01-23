@@ -44,13 +44,13 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation A (Main/Core)
   # -------------------------
-  EXP-A1) run_ast configs/ast2_ucf101_dense.yaml           "outputs/EXP-A1/seed${SEED}" ;;
-  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml        "outputs/EXP-A2/seed${SEED}" ;;
-  EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml          "outputs/EXP-A3/seed${SEED}" ;;
-  EXP-A4) run_vc  configs/vc_phase3_full_ucf101.yaml       "outputs/EXP-A4/seed${SEED}" ;;
-  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101.yaml   "outputs/EXP-A5_twostage/seed${SEED}" ;;
-  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml "outputs/EXP-A6_mappingonly/seed${SEED}" ;;
-  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml  "outputs/EXP-A7_layoutonly/seed${SEED}" ;;
+  EXP-A1) run_ast configs/ast2_ucf101_dense.yaml                 "outputs/EXP-A1/seed${SEED}" ;;
+  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "outputs/EXP-A2/seed${SEED}" ;;
+  EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml                "outputs/EXP-A3/seed${SEED}" ;;
+  EXP-A4) run_vc  configs/vc_phase3_full_ucf101.yaml             "outputs/EXP-A4/seed${SEED}" ;;
+  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101.yaml         "outputs/EXP-A5_twostage/seed${SEED}" ;;
+  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml     "outputs/EXP-A6_mappingonly/seed${SEED}" ;;
+  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml      "outputs/EXP-A7_layoutonly/seed${SEED}" ;;
 
   # A-G2 fairness (same rho_target)
   EXP-A-G2-uniform) run_ast configs/ablations/ast_uniform_keep.yaml "outputs/EXP-A-G2-uniform/seed${SEED}" ;;
@@ -69,8 +69,9 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation B (Layout)
   # -------------------------
-  EXP-B0) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp.yaml "outputs/EXP-B0/seed${SEED}" ;;
-  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp.yaml "outputs/EXP-B0-random/seed${SEED}" ;;
+  EXP-B0)        run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh.yaml      "outputs/EXP-B0/seed${SEED}" ;;
+  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh.yaml   "outputs/EXP-B0-random/seed${SEED}" ;;
+
   EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic.yaml "outputs/EXP-B1/seed${SEED}" ;;
   EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick.yaml "outputs/EXP-B2/seed${SEED}" ;;
   EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa.yaml "outputs/EXP-B3/seed${SEED}" ;;
