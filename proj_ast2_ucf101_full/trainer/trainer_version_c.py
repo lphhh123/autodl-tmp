@@ -35,6 +35,7 @@ from utils.trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITI
 from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.config import AttrDict
+from utils.config_utils import get_nested
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -852,21 +853,42 @@ def train_version_c(
         encoding="utf-8",
     )
     stable_hw_state.setdefault("gating_reason_code", "")
+    requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+    effective_cfg = OmegaConf.to_container(cfg, resolve=True)
+    contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+
+    def _get_req(path, default=None):
+        cur = requested_cfg
+        for key in path.split("."):
+            if not isinstance(cur, dict) or key not in cur:
+                return default
+            cur = cur[key]
+        return cur
+
     append_trace_event_v54(
         trace_events_path,
         "trace_header",
         payload={
+            "requested_config": requested_cfg,
+            "effective_config": effective_cfg,
+            "contract_overrides": contract_overrides,
             "requested": {
                 "mode": "version_c",
-                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
-                "no_drift_enabled": bool(no_drift_enabled),
-                "no_double_scale_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                ),
-                "allow_train_ema_fallback": bool(allow_train_ema_fallback)
-                if allow_train_ema_fallback is not None
+                "stable_hw_enabled": bool(_get_req("stable_hw.enabled", None))
+                if _get_req("stable_hw.enabled", None) is not None
                 else None,
+                "locked_acc_ref_enabled": bool(_get_req("stable_hw.locked_acc_ref.enabled", None))
+                if _get_req("stable_hw.locked_acc_ref.enabled", None) is not None
+                else None,
+                "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
+                if _get_req("stable_hw.no_drift.enabled", None) is not None
+                else None,
+                "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
+                if _get_req("stable_hw.no_double_scale.enabled", None) is not None
+                else None,
+                "allow_train_ema_fallback": _get_req(
+                    "stable_hw.accuracy_guard.controller.allow_train_ema_fallback", None
+                ),
             },
             "effective": {
                 "mode": "version_c",
@@ -893,12 +915,18 @@ def train_version_c(
                 "gating_reason_code": stable_hw_state.get("gating_reason_code", ""),
             },
             "stable_hw_requested": {
-                "enabled": bool(getattr(cfg, "stable_hw", AttrDict({})).get("enabled", False)),
-                "no_drift_enabled": bool(
-                    getattr(getattr(cfg, "stable_hw", AttrDict({})), "no_drift", AttrDict({})).get("enabled", False)
-                ),
-                "lambda_hw": float(getattr(getattr(cfg, "hw", AttrDict({})), "lambda_hw", 0.0)),
-                "hard_gating": bool(getattr(getattr(cfg, "accuracy_guard", AttrDict({})), "hard_gating", False)),
+                "enabled": bool(_get_req("stable_hw.enabled", None))
+                if _get_req("stable_hw.enabled", None) is not None
+                else None,
+                "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
+                if _get_req("stable_hw.no_drift.enabled", None) is not None
+                else None,
+                "lambda_hw": float(_get_req("hw.lambda_hw", 0.0))
+                if _get_req("hw.lambda_hw", None) is not None
+                else None,
+                "hard_gating": bool(_get_req("accuracy_guard.hard_gating", None))
+                if _get_req("accuracy_guard.hard_gating", None) is not None
+                else None,
             },
             "signature": signature,
             "no_drift_enabled": bool(no_drift_enabled),

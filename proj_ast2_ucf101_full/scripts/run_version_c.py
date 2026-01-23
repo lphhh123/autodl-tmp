@@ -17,6 +17,7 @@ from typing import Union
 from omegaconf import OmegaConf
 
 from utils.config import load_config
+from utils.config_utils import get_nested, set_nested
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
 from trainer.trainer_version_c import train_version_c
@@ -54,6 +55,21 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
     return cur
 
 
+def _record_override(cfg, key_path, old, new, reason):
+    overrides = get_nested(cfg, "_contract.overrides", None)
+    if overrides is None:
+        set_nested(cfg, "_contract.overrides", [])
+        overrides = get_nested(cfg, "_contract.overrides", [])
+    overrides.append(
+        {
+            "key_path": key_path,
+            "old": old,
+            "new": new,
+            "reason": reason,
+        }
+    )
+
+
 def _inject_baseline_stats_path(cfg, baseline_stats_path: str):
     from pathlib import Path
 
@@ -81,17 +97,30 @@ def _inject_baseline_stats_path(cfg, baseline_stats_path: str):
         locked_cfg = cfg.stable_hw.locked_acc_ref
 
     # Inject where it will actually be read
-    locked_cfg.baseline_stats_path = p
+    locked_key_path = "stable_hw.locked_acc_ref.baseline_stats_path"
+    if getattr(cfg, "locked_acc_ref", None) is locked_cfg:
+        locked_key_path = "locked_acc_ref.baseline_stats_path"
+    if getattr(locked_cfg, "baseline_stats_path", None) != p:
+        old_val = getattr(locked_cfg, "baseline_stats_path", None)
+        locked_cfg.baseline_stats_path = p
+        _record_override(cfg, locked_key_path, old_val, p, "cli_inject_baseline_stats")
 
     # Keep a readable alias (optional, but harmless)
-    cfg.stable_hw.baseline_stats_path = p
+    if getattr(cfg.stable_hw, "baseline_stats_path", None) != p:
+        old_val = getattr(cfg.stable_hw, "baseline_stats_path", None)
+        cfg.stable_hw.baseline_stats_path = p
+        _record_override(cfg, "stable_hw.baseline_stats_path", old_val, p, "cli_inject_baseline_stats")
 
     # Also help NoDrift stats_path if it exists but unset
     try:
         if getattr(cfg, "no_drift", None) is not None and not getattr(cfg.no_drift, "stats_path", None):
+            old_val = getattr(cfg.no_drift, "stats_path", None)
             cfg.no_drift.stats_path = p
+            _record_override(cfg, "no_drift.stats_path", old_val, p, "cli_inject_baseline_stats")
         if getattr(cfg.stable_hw, "no_drift", None) is not None and not getattr(cfg.stable_hw.no_drift, "stats_path", None):
+            old_val = getattr(cfg.stable_hw.no_drift, "stats_path", None)
             cfg.stable_hw.no_drift.stats_path = p
+            _record_override(cfg, "stable_hw.no_drift.stats_path", old_val, p, "cli_inject_baseline_stats")
     except Exception:
         pass
 

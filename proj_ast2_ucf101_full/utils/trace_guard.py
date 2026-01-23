@@ -397,6 +397,9 @@ def _assert_event(event_type: str, payload: dict) -> None:
         for k in ("signature", "no_drift_enabled", "acc_ref_source"):
             if k not in payload:
                 raise KeyError(f"trace_header.payload missing '{k}'")
+        for k in ("requested_config", "effective_config", "contract_overrides", "requested", "effective"):
+            if k not in payload:
+                raise KeyError(f"trace_header.payload missing contract key '{k}'")
         if not isinstance(payload["signature"], dict):
             raise TypeError("trace_header.payload.signature must be dict")
         return
