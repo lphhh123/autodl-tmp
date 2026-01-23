@@ -315,35 +315,38 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if not bool(stable_state.get("allow_discrete_updates", True)):
                     freeze_epochs += 1
                 if trace_dir is not None:
-                    decision = "accept_hw"
-                    if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
-                        decision = "reject_hw"
-                    if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
-                        decision = "reject_hw"
-                    acc_loss = stable_state.get("acc_loss", 0.0)
-                    hw_loss_used = stable_state.get("hw_loss_used", 0.0)
-                    reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
+                    # ---- v5.4 gating contract fields (SPEC_E) ----
+                    gate = "allow_hw"
+                    if float(stable_state.get("lambda_hw_effective", 0.0) or 0.0) <= 0.0:
+                        gate = "reject_hw"
+                    if str(stable_state.get("guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
+                        gate = "reject_hw"
+
+                    acc_drop = float(stable_state.get("acc_drop", 0.0) or 0.0)
+                    acc_drop_max = stable_state.get("acc_drop_max", None)
+                    if acc_drop_max is None:
+                        acc_drop_max = stable_state.get("epsilon_drop", 0.0)
+                    acc_drop_max = float(acc_drop_max or 0.0)
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
                         payload={
+                            # ===== REQUIRED BY CONTRACT =====
+                            "candidate_id": int(epoch),
+                            "gate": gate,
+                            "acc_drop": acc_drop,
+                            "acc_drop_max": acc_drop_max,
+
+                            # ===== STRONGLY RECOMMENDED (auditable) =====
                             "epoch": int(epoch),
                             "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
                             "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
-                            "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
-                            "epsilon_drop": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
-                            "decision": decision,
-                            "reason_code": reason_code,
-                            "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
-                            "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
-                            "total_loss_acc_part": float(acc_loss.item())
-                            if hasattr(acc_loss, "item")
-                            else float(acc_loss or 0.0),
-                            "total_loss_hw_part": float(hw_loss_used or 0.0),
-                            "total_loss": float(stable_state.get("total_loss", 0.0) or 0.0),
-                            "guard_mode": str(stable_decision.guard_mode),
-                            "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
-                            "reason": str(stable_decision.reason.get("violate", "")),
+                            "guard_mode": str(stable_state.get("guard_mode", "")),
+                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
+                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
+                            "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
+                            "reason_code": "hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery",
+                            "reason": dict(getattr(stable_decision, "reason", {}) or {}),
                         },
                         run_id=run_id,
                         step=int(epoch),
@@ -452,35 +455,38 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 )
                 stable_state = stable_decision.state
                 if trace_dir is not None:
-                    decision = "accept_hw"
-                    if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
-                        decision = "reject_hw"
-                    if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
-                        decision = "reject_hw"
-                    acc_loss = stable_state.get("acc_loss", 0.0)
-                    hw_loss_used = stable_state.get("hw_loss_used", 0.0)
-                    reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
+                    # ---- v5.4 gating contract fields (SPEC_E) ----
+                    gate = "allow_hw"
+                    if float(stable_state.get("lambda_hw_effective", 0.0) or 0.0) <= 0.0:
+                        gate = "reject_hw"
+                    if str(stable_state.get("guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
+                        gate = "reject_hw"
+
+                    acc_drop = float(stable_state.get("acc_drop", 0.0) or 0.0)
+                    acc_drop_max = stable_state.get("acc_drop_max", None)
+                    if acc_drop_max is None:
+                        acc_drop_max = stable_state.get("epsilon_drop", 0.0)
+                    acc_drop_max = float(acc_drop_max or 0.0)
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
                         payload={
+                            # ===== REQUIRED BY CONTRACT =====
+                            "candidate_id": int(epoch),
+                            "gate": gate,
+                            "acc_drop": acc_drop,
+                            "acc_drop_max": acc_drop_max,
+
+                            # ===== STRONGLY RECOMMENDED (auditable) =====
                             "epoch": int(epoch),
                             "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
                             "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
-                            "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
-                            "epsilon_drop": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
-                            "decision": decision,
-                            "reason_code": reason_code,
-                            "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
-                            "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
-                            "total_loss_acc_part": float(acc_loss.item())
-                            if hasattr(acc_loss, "item")
-                            else float(acc_loss or 0.0),
-                            "total_loss_hw_part": float(hw_loss_used or 0.0),
-                            "total_loss": float(stable_state.get("total_loss", 0.0) or 0.0),
-                            "guard_mode": str(stable_decision.guard_mode),
-                            "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
-                            "reason": str(stable_decision.reason.get("violate", "")),
+                            "guard_mode": str(stable_state.get("guard_mode", "")),
+                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
+                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
+                            "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
+                            "reason_code": "hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery",
+                            "reason": dict(getattr(stable_decision, "reason", {}) or {}),
                         },
                         run_id=run_id,
                         step=int(epoch),

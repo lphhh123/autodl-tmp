@@ -30,14 +30,14 @@ python -m scripts.run_layout_agent \
   --out_dir outputs/SMOKE/layout_L0_heuristic \
   --seed 0
 
-echo "[SMOKE] Layout agent L4 pick-ID (fallback if no key)"
+echo "[SMOKE] Layout agent L4 pick-ID (requires baseline.llm_config_file + valid API key; no silent fallback)"
 python -m scripts.run_layout_agent \
   --layout_input outputs/P3/A3/layout_input.json \
   --cfg configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick.yaml \
   --out_dir outputs/SMOKE/layout_L4_pick \
   --seed 0
 
-echo "[SMOKE] HeurAgenix baseline llm_hh (auto-fallback if no key)"
+echo "[SMOKE] HeurAgenix baseline llm_hh (requires baseline.llm_config_file + valid API key; no silent fallback)"
 python -m scripts.run_layout_heuragenix \
   --layout_input outputs/P3/A3/layout_input.json \
   --cfg configs/layout_agent/layout_B0_heuragenix_llm_hh.yaml \

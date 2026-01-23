@@ -388,9 +388,8 @@ def run_layout_agent(
         # Stage5: detailed place
         detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
         budget_exhausted = False
-    convert_error = None
-    try:
-        result = run_detailed_place(
+        try:
+            result = run_detailed_place(
                 sites_xy=sites_xy,
                 assign_seed=assign_leg,
                 evaluator=evaluator,
@@ -538,7 +537,7 @@ def run_layout_agent(
     finally:
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
         best_solution_valid = _is_valid_assign(best_assign, S, Ns)
-        reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
+        trace_append_err = None
         try:
             _append_trace_events_from_csv(
                 trace_events_path=trace_events_path,
@@ -546,49 +545,35 @@ def run_layout_agent(
                 run_id=str(run_id),
             )
         except Exception as e:
-            convert_error = e
-            append_trace_event_v54(
-                trace_events_path,
-                "ref_update",
-                payload={
-                    "key": "trace_events_build_status",
-                    "old_value": "ok",
-                    "new_value": "failed",
-                    "reason": f"csv_to_trace_events_failed: {type(e).__name__}: {e}",
-                },
-                run_id=str(run_id),
-                step=int(steps_done or 0),
-            )
-        update_trace_summary(
-            trace_dir,
-            {
-                "ok": bool(ok),
-                "reason": str(reason),
-                "steps_done": int(steps_done),
-                "best_solution_valid": bool(best_solution_valid),
-                **build_baseline_trace_summary(cfg, {}),
-            },
-        )
-        if trace_path.exists():
-            shutil.copy2(trace_path, trace_path_compat)
-        try:
-            if llm_usage_path.exists():
-                llm_usage_path_compat.write_text(
-                    llm_usage_path.read_text(encoding="utf-8"),
-                    encoding="utf-8",
+            trace_append_err = repr(e)
+            ok = False
+            raise
+        finally:
+            reason = "ok" if (ok and trace_append_err is None) else f"trace_append_error:{trace_append_err}"
+            if trace_dir is not None:
+                update_trace_summary(
+                    trace_dir,
+                    ok=bool(ok and trace_append_err is None),
+                    reason=reason,
+                    steps_done=int(planned_steps or steps_done),
+                    best_solution_valid=bool(ok and best_assign is not None),
                 )
-        except Exception:
-            pass
-        finalize_trace_dir(
-            trace_events_path,
-            reason=str(reason),
-            steps_done=int(steps_done),
-            best_solution_valid=bool(best_solution_valid),
-        )
-        if convert_error is not None:
-            raise RuntimeError(
-                f"[v5.4 P0] trace_events missing step evidence: {convert_error}"
-            ) from convert_error
+                finalize_trace_dir(
+                    trace_events_path,
+                    reason=reason,
+                    steps_done=int(planned_steps or steps_done),
+                    best_solution_valid=bool(ok and best_assign is not None),
+                )
+            if trace_path.exists():
+                shutil.copy2(trace_path, trace_path_compat)
+            try:
+                if llm_usage_path.exists():
+                    llm_usage_path_compat.write_text(
+                        llm_usage_path.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+            except Exception:
+                pass
 
 
 def main():

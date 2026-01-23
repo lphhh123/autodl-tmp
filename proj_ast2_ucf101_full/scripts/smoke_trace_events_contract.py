@@ -13,7 +13,11 @@ from pathlib import Path
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.stable_hash import stable_hash
-from utils.trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
+from utils.trace_contract_v54 import (
+    REQUIRED_EVENT_PAYLOAD_KEYS_V54,
+    REQUIRED_GATING_KEYS,
+    REQUIRED_PROXY_SANITIZE_KEYS,
+)
 from utils.trace_guard import append_trace_event_v54, finalize_trace_dir, init_trace_dir_v54
 from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS, build_signature_v54
 
@@ -32,16 +36,17 @@ def _load_jsonl(path: Path) -> list[dict]:
 def _validate_payload(event_type: str, payload: dict) -> list[str]:
     errors = []
     if event_type == "trace_header":
-        for key in ("signature", "no_drift_enabled", "acc_ref_source"):
-            if key not in payload:
-                errors.append(f"trace_header missing {key}")
-        for key in ("requested_config", "effective_config", "contract_overrides", "requested", "effective"):
+        for key in REQUIRED_EVENT_PAYLOAD_KEYS_V54["trace_header"]:
             if key not in payload:
                 errors.append(f"trace_header missing {key}")
     elif event_type == "gating":
         for key in REQUIRED_GATING_KEYS:
             if key not in payload:
                 errors.append(f"gating missing {key}")
+    elif event_type == "step":
+        for key in REQUIRED_EVENT_PAYLOAD_KEYS_V54["step"]:
+            if key not in payload:
+                errors.append(f"step missing {key}")
     elif event_type == "proxy_sanitize":
         for key in REQUIRED_PROXY_SANITIZE_KEYS:
             if key not in payload:
@@ -96,6 +101,27 @@ def main() -> int:
         },
         run_id=str(run_id),
         step=0,
+    )
+
+    append_trace_event_v54(
+        trace_events_path,
+        "step",
+        payload={
+            "iter": 1,
+            "stage": "search",
+            "op": "noop",
+            "op_args_json": "{}",
+            "accepted": 1,
+            "total_scalar": 1.0,
+            "comm_norm": 0.0,
+            "therm_norm": 0.0,
+            "duplicate_penalty": 0.0,
+            "boundary_penalty": 0.0,
+            "seed_id": 0,
+            "time_ms": 0,
+        },
+        run_id=str(run_id),
+        step=1,
     )
 
     finalize_trace_dir(

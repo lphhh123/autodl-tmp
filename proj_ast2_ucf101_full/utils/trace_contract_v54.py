@@ -29,12 +29,10 @@ REQUIRED_STEP_KEYS = (
     "total_scalar",
     "comm_norm",
     "therm_norm",
-    "pareto_added",
     "duplicate_penalty",
     "boundary_penalty",
     "seed_id",
     "time_ms",
-    "signature",
 )
 
 REQUIRED_EVENT_PAYLOAD_KEYS_V54 = {
