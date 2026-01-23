@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 """Smoke check for v5.4 gating evidence fields in trace_events.jsonl."""
 
 import argparse
@@ -29,7 +30,8 @@ def _check_gating_event(event: dict) -> None:
     payload = event.get("payload", {}) if isinstance(event, dict) else {}
     guard_mode = str(payload.get("guard_mode", "")).upper()
     acc_ref = _as_float(payload.get("acc_ref", 0.0), 0.0)
-    acc_now = _as_float(payload.get("acc_now", 0.0), 0.0)
+    acc_now = payload.get("acc_used", payload.get("acc_now", 0.0))
+    acc_now = _as_float(acc_now or 0.0, 0.0)
     acc_drop = _as_float(payload.get("acc_drop", 0.0), 0.0)
     acc_drop_max = _as_float(payload.get("acc_drop_max", 0.0), 0.0)
 
@@ -40,7 +42,7 @@ def _check_gating_event(event: dict) -> None:
         if acc_ref <= 0.0:
             raise AssertionError("gating acc_ref must be > 0 outside warmup")
         if acc_now <= 0.0:
-            raise AssertionError("gating acc_now must be > 0 outside warmup")
+            raise AssertionError("gating acc_used must be > 0 outside warmup")
 
     if acc_ref > 0.0 or acc_now > 0.0:
         expected_drop = max(0.0, acc_ref - acc_now)

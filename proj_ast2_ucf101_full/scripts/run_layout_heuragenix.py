@@ -781,14 +781,13 @@ def _write_trace_and_pareto(
                         trace_events_path,
                         "proxy_sanitize",
                         payload={
+                            "candidate_id": int(iter_id),
+                            "outer_iter": int(iter_id),
+                            "inner_step": int(iter_id),
                             "metric": "comm",
                             "raw_value": float(row["comm_norm"]),
                             "used_value": float(row["comm_norm"]),
                             "penalty_added": 0.0,
-                            "clamp_min": None,
-                            "clamp_max": None,
-                            "note": "from_recordings",
-                            "source": "heuragenix_recordings",
                         },
                         run_id=str(run_id),
                         step=int(iter_id),
@@ -797,14 +796,13 @@ def _write_trace_and_pareto(
                         trace_events_path,
                         "proxy_sanitize",
                         payload={
+                            "candidate_id": int(iter_id),
+                            "outer_iter": int(iter_id),
+                            "inner_step": int(iter_id),
                             "metric": "therm",
                             "raw_value": float(row["therm_norm"]),
                             "used_value": float(row["therm_norm"]),
                             "penalty_added": 0.0,
-                            "clamp_min": None,
-                            "clamp_max": None,
-                            "note": "from_recordings",
-                            "source": "heuragenix_recordings",
                         },
                         run_id=str(run_id),
                         step=int(iter_id),
@@ -1460,6 +1458,8 @@ def main() -> None:
     llm_config_effective = ""
     if method == "llm_hh":
         llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
+        if str(method).lower() == "llm_hh" and not llm_config:
+            raise SystemExit("[v5.4] llm_hh requires an explicit --llm_config_file (no implicit fallback).")
         if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
             raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
         if llm_config:

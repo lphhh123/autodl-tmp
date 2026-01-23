@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 """
 Smoke: v5.4 trace_events.jsonl must start with trace_header and end with finalize.
 This script writes a minimal trace_header + finalize (steps0) and validates the contract.

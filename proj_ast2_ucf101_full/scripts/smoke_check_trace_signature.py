@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 """Smoke check for v5.4 trace signature + schema in trace.csv."""
 
 import argparse

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 """
 Smoke: v5.4 requires trace file exists even when steps=0 / early stop.
 This script generates a minimal trace.csv compatible file and a minimal
