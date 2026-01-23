@@ -50,6 +50,7 @@ def write_run_manifest(
     cfg_hash: str,
     seed: Optional[int] = None,
     stable_hw_state: Optional[Dict[str, Any]] = None,
+    cfg: Optional[Any] = None,
     extra: Optional[Dict[str, Any]] = None,
     run_id: Optional[str] = None,
     spec_version: str = "v5.4",
@@ -126,8 +127,14 @@ def write_run_manifest(
     manifest["stable_hw_acc_ref_source"] = st.get("acc_ref_source", None)
     manifest["stable_hw_acc_ref_locked"] = bool(st.get("acc_ref_locked", False))
     manifest["stable_hw_epsilon_drop"] = float(st.get("epsilon_drop", 0.0) or 0.0)
-    manifest["stable_hw_no_drift_requested"] = bool(st.get("no_drift_requested", True))
-    manifest["stable_hw_no_drift_effective"] = bool(st.get("no_drift_effective", True))
+    no_drift_requested = bool(st.get("no_drift_requested", False))
+    no_drift_effective = bool(st.get("no_drift_effective", False))
+    if "no_drift_requested" not in st and cfg is not None:
+        no_drift_requested = bool(getattr(getattr(cfg, "no_drift", None), "enabled", False))
+    if "no_drift_effective" not in st and cfg is not None:
+        no_drift_effective = bool(getattr(getattr(cfg, "no_drift", None), "enabled", False))
+    manifest["stable_hw_no_drift_requested"] = no_drift_requested
+    manifest["stable_hw_no_drift_effective"] = no_drift_effective
     manifest["stable_hw_ref_update_mode"] = st.get("ref_update_mode", "DISABLED")
     manifest["stable_hw_hw_ref_source"] = st.get("hw_ref_source", None)
 

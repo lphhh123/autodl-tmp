@@ -1235,6 +1235,7 @@ def main() -> None:
         requested_config=requested_config,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
+    trace_header_written = False
     finalize_state = {
         "finalized": False,
         "reason": "error",
@@ -1243,10 +1244,41 @@ def main() -> None:
         "best_total": None,
     }
 
+    def _ensure_trace_header(requested_method: str, effective_method: str, llm_req: str, llm_eff: str):
+        nonlocal trace_header_written
+        if trace_header_written:
+            return
+        append_trace_event_v54(
+            trace_events_path,
+            "trace_header",
+            payload={
+                "requested": {
+                    "mode": "layout_heuragenix",
+                    "method": str(requested_method),
+                    "llm_config": str(llm_req),
+                },
+                "effective": {
+                    "mode": "layout_heuragenix",
+                    "method": str(effective_method),
+                    "llm_config": str(llm_eff),
+                },
+                "signature": signature,
+            },
+            run_id=run_id,
+            step=0,
+        )
+        trace_header_written = True
+
     def _finalize_trace(**overrides):
         if finalize_state["finalized"]:
             return
         finalize_state.update({k: v for k, v in overrides.items() if v is not None})
+        _ensure_trace_header(
+            requested_method=str(baseline_method),
+            effective_method=str(method),
+            llm_req=str(llm_config_requested),
+            llm_eff=str(llm_config_effective),
+        )
         update_trace_summary(
             trace_dir,
             ok=bool(finalize_state.get("ok", True)),
@@ -1254,7 +1286,12 @@ def main() -> None:
             steps_done=int(finalize_state.get("steps_done", 0) or 0),
             best_solution_valid=bool(finalize_state.get("best_solution_valid", False)),
         )
-        finalize_trace_dir(trace_dir)
+        finalize_trace_dir(
+            trace_events_path,
+            reason=str(finalize_state.get("reason", "error")),
+            steps_done=int(finalize_state.get("steps_done", 0) or 0),
+            best_solution_valid=bool(finalize_state.get("best_solution_valid", False)),
+        )
         finalize_state["finalized"] = True
 
     def _trace_excepthook(exc_type, exc, tb):
@@ -1263,20 +1300,6 @@ def main() -> None:
         sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = _trace_excepthook
-    append_trace_event_v54(
-        trace_events_path,
-        "init",
-        payload={
-            "baseline_signature": signature_from_assign(np.array(_derive_initial_assign(layout_input), dtype=int)),
-            "seed_signature": signature_from_assign(np.array(seed_assign, dtype=int)),
-            "effective_max_steps": int(effective_max_steps),
-            "selection_frequency": int(selection_frequency),
-            "num_candidate_heuristics": int(num_candidate_heuristics),
-            "rollout_budget": int(rollout_budget),
-        },
-        run_id=run_id,
-        step=0,
-    )
     if hasattr(cfg, "train"):
         cfg.train.cfg_hash = cfg_hash
         cfg.train.cfg_path = str(args.cfg)
@@ -1296,6 +1319,7 @@ def main() -> None:
                 "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
         },
+        cfg=cfg,
         extra={
             "budget_main_axis": "eval_calls",
             "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
@@ -1330,13 +1354,6 @@ def main() -> None:
                 json.dump(js, f, indent=2, ensure_ascii=False)
             llm_config = adapted
         llm_config_effective = str(llm_config) if llm_config else ""
-        append_trace_event_v54(
-            trace_events_path,
-            "llm_config_resolved",
-            payload={"requested": llm_config_requested, "effective": llm_config_effective},
-            run_id=run_id,
-            step=0,
-        )
     output_dir = output_root / problem / case_name / "result" / method
     case_stem = case_name
 
@@ -1614,22 +1631,6 @@ def main() -> None:
     budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
     trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
     # ---- v5.4 contract: auditable method fallback (requested vs effective) ----
-    if str(baseline_method) != str(method):
-        try:
-            append_trace_event_v54(
-                trace_events_path,
-                "fallback",
-                payload={
-                    "name": "heuragenix.method",
-                    "requested": str(baseline_method),
-                    "effective": str(method),
-                    "reason": "heuragenix_llm_failed_or_unavailable",
-                },
-                run_id=str(run_id),
-                step=0,
-            )
-        except Exception as _e:
-            logger.warning(f"[HeurAgenix] failed to append method fallback trace event: {_e}")
     pareto, trace_info = _write_trace_and_pareto(
         trace_dir=out_dir / "trace",
         hx_rows=hx_rows,
@@ -1903,6 +1904,7 @@ def main() -> None:
                 "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
         },
+        cfg=cfg,
         extra={
             "budget_main_axis": "eval_calls",
             "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
