@@ -305,6 +305,46 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _ensure(cfg, "stable_hw", {})
     stable_hw = cfg.stable_hw
 
+    # ============================
+    # v5.4 Contract: SINGLE SOURCE OF TRUTH
+    # - locked_acc_ref / no_drift / no_double_scale MUST exist in ONLY ONE place
+    # - If user provides legacy top-level, migrate -> cfg.stable_hw and DELETE top-level
+    # - If both provided, HARD FAIL (P0)
+    # ============================
+    for k in ("locked_acc_ref", "no_drift", "no_double_scale"):
+        root_obj = None
+        try:
+            root_obj = cfg.get(k, None)
+        except Exception:
+            root_obj = getattr(cfg, k, None)
+        nested_obj = None
+        if getattr(cfg, "stable_hw", None) is not None:
+            try:
+                nested_obj = cfg.stable_hw.get(k, None)
+            except Exception:
+                nested_obj = getattr(cfg.stable_hw, k, None)
+
+        if root_obj is not None and nested_obj is not None:
+            raise ValueError(
+                f"v5.4 contract violation: both '{k}' and 'stable_hw.{k}' are set. "
+                f"Keep ONLY one. (SPEC_E smoke requires this)"
+            )
+
+        if root_obj is not None and nested_obj is None:
+            # migrate legacy -> stable_hw
+            try:
+                cfg.stable_hw[k] = root_obj
+            except Exception:
+                setattr(cfg.stable_hw, k, root_obj)
+            # delete top-level to avoid ambiguity
+            try:
+                del cfg[k]
+            except Exception:
+                try:
+                    cfg.pop(k)
+                except Exception:
+                    pass
+
     # v5.4 is holistic semantics: missing enabled MUST NOT silently disable.
     # Default policy: version_c => enabled defaults True; otherwise => defaults False.
     stable_hw_enabled = bool(get_nested(cfg, "stable_hw.enabled", (mode == "version_c")))
@@ -757,42 +797,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     # v5.4 CONTRACT ENFORCEMENT
     # =========================
     # v5.4 原则：未显式写 enabled ≠ False；并且在 version_c 训练语义下，不允许悄悄退化
-    # 统一以 cfg.stable_hw.* 为单一事实源，并同步 root-level shim，避免“读到不同开关”的漂移
-
-    # ---- mirror stable_hw -> root-level shims (single source of truth) ----
-    if hasattr(cfg, "stable_hw") and cfg.stable_hw is not None:
-        _nd = getattr(cfg.stable_hw, "no_drift", None)
-        _nds = getattr(cfg.stable_hw, "no_double_scale", None)
-        _lar = getattr(cfg.stable_hw, "locked_acc_ref", None)
-
-        # keep shims present + consistent
-        if not hasattr(cfg, "no_drift") or cfg.no_drift is None:
-            cfg.no_drift = OmegaConf.create({})
-        cfg.no_drift.enabled = bool(getattr(_nd, "enabled", bool(_nd)) if _nd is not None else False)
-
-        if not hasattr(cfg, "no_double_scale") or cfg.no_double_scale is None:
-            cfg.no_double_scale = OmegaConf.create({})
-        cfg.no_double_scale.enabled = bool(getattr(_nds, "enabled", bool(_nds)) if _nds is not None else False)
-
-        if not hasattr(cfg, "locked_acc_ref") or cfg.locked_acc_ref is None:
-            cfg.locked_acc_ref = OmegaConf.create({})
-        cfg.locked_acc_ref.enabled = bool(getattr(_lar, "enabled", bool(_lar)) if _lar is not None else False)
-        if hasattr(_lar, "source"):
-            cfg.locked_acc_ref.source = str(getattr(_lar, "source", ""))
-
-        # root-level shim must only expose enabled/source to avoid ambiguous reads
-        try:
-            allowed = {"enabled", "source"}
-            if hasattr(cfg.locked_acc_ref, "keys"):
-                for key in list(cfg.locked_acc_ref.keys()):
-                    if key not in allowed:
-                        del cfg.locked_acc_ref[key]
-            elif isinstance(cfg.locked_acc_ref, dict):
-                for key in list(cfg.locked_acc_ref.keys()):
-                    if key not in allowed:
-                        cfg.locked_acc_ref.pop(key, None)
-        except Exception:
-            pass
+    # 统一以 cfg.stable_hw.* 为单一事实源
 
     # ---- hard contract: version_c + stable_hw.enabled => all core submodules must be enabled
     #      unless stable_hw.force_disable_ok=true (explicit ablation escape hatch)

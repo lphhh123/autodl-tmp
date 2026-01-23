@@ -83,23 +83,11 @@ def _inject_baseline_stats_path(cfg, baseline_stats_path: str):
     if not hasattr(cfg.stable_hw, "enabled"):
         cfg.stable_hw.enabled = True
 
-    # Find the *active* locked_acc_ref (root preferred by StableHW resolver)
-    locked_cfg = None
-    if getattr(cfg, "locked_acc_ref", None) is not None and bool(getattr(cfg.locked_acc_ref, "enabled", True)):
-        locked_cfg = cfg.locked_acc_ref
-    elif getattr(cfg.stable_hw, "locked_acc_ref", None) is not None and bool(
-        getattr(cfg.stable_hw.locked_acc_ref, "enabled", True)
-    ):
-        locked_cfg = cfg.stable_hw.locked_acc_ref
-    else:
-        # If neither exists, create under stable_hw (avoid creating both root + stable_hw)
-        cfg.stable_hw.locked_acc_ref = OmegaConf.create({"enabled": True})
-        locked_cfg = cfg.stable_hw.locked_acc_ref
-
-    # Inject where it will actually be read
+    # Replace the whole locked_cfg selection with a single-source read
+    if getattr(cfg, "stable_hw", None) is None or getattr(cfg.stable_hw, "locked_acc_ref", None) is None:
+        raise ValueError("v5.4 requires stable_hw.locked_acc_ref to exist after validation/migration.")
+    locked_cfg = cfg.stable_hw.locked_acc_ref
     locked_key_path = "stable_hw.locked_acc_ref.baseline_stats_path"
-    if getattr(cfg, "locked_acc_ref", None) is locked_cfg:
-        locked_key_path = "locked_acc_ref.baseline_stats_path"
     if getattr(locked_cfg, "baseline_stats_path", None) != p:
         old_val = getattr(locked_cfg, "baseline_stats_path", None)
         locked_cfg.baseline_stats_path = p

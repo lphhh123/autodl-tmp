@@ -1269,6 +1269,11 @@ def main() -> None:
     except Exception:
         requested_config = {}
     effective_config = OmegaConf.to_container(cfg, resolve=True)
+    effective_config["heuragenix_runtime"] = {
+        "internal_data_root": str(internal_data_root),
+        "internal_out_root": str(internal_out),
+        "llm_config_path": None,
+    }
     contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
     init_trace_dir(
         trace_dir,
@@ -1447,6 +1452,10 @@ def main() -> None:
                 json.dump(js, f, indent=2, ensure_ascii=False)
             llm_config = adapted
         llm_config_effective = str(llm_config) if llm_config else ""
+    if isinstance(effective_config, dict):
+        heur_runtime = effective_config.get("heuragenix_runtime", {})
+        heur_runtime["llm_config_path"] = str(llm_config) if llm_config else None
+        effective_config["heuragenix_runtime"] = heur_runtime
     heuragenix_path_map = {
         "heuragenix_root": str(heuragenix_root.resolve()),
         "effective_data_root": str(internal_data_root.resolve()),
