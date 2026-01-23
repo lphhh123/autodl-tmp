@@ -33,6 +33,7 @@ from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
+from utils.config import AttrDict
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -549,6 +550,18 @@ def train_version_c(
     layout_export_dir: Optional[str] = None,
     seed: Optional[int] = None,
 ):
+    # ===== v5.4 contract gate: forbid running with unvalidated cfg =====
+    if (
+        (not hasattr(cfg, "contract"))
+        or (not bool(getattr(cfg.contract, "validated", False)))
+        or (getattr(cfg.contract, "version", None) != "v5.4")
+    ):
+        raise RuntimeError(
+            "[P0][v5.4] cfg is not validated/stamped by validate_and_fill_defaults(). "
+            "Do NOT call train_version_c() with raw load_config(); use scripts/run_version_c.py "
+            "or call validate_and_fill_defaults(cfg) explicitly."
+        )
+
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
@@ -607,33 +620,6 @@ def train_version_c(
     )
     trace_dir = Path(trace_meta["trace_dir"])
     trace_events_path = Path(trace_meta["trace_events"])
-    append_trace_event_v54(
-        trace_events_path,
-        "trace_header",
-        payload={
-            "requested": {
-                "mode": "version_c",
-                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
-                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
-                "no_double_scale_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                ),
-            },
-            "effective": {
-                "mode": "version_c",
-                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
-                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
-                "no_double_scale_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                ),
-            },
-            "signature": signature,
-        },
-        run_id=run_id,
-        step=0,
-    )
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
     layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
     if layout_export_dir is not None:
@@ -663,6 +649,29 @@ def train_version_c(
         f"no_drift.enabled={getattr(cfg.no_drift, 'enabled', None)} "
         f"stable_hw.no_double_scale.enabled={nds_en}"
     )
+
+    def _update_manifest_gating_summary(trace_dir: Path, cfg_obj, stable_state: Dict[str, Any]) -> None:
+        manifest_path = trace_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+        stable_cfg = getattr(cfg_obj, "stable_hw", None)
+        no_drift_cfg = _cfg_get(stable_cfg, "no_drift", None)
+        gating_summary = {
+            "requested": {
+                "stable_hw_enabled": bool(_cfg_get(stable_cfg, "enabled", False)),
+                "no_drift_enabled": bool(_cfg_get(no_drift_cfg, "enabled", False)),
+                "hard_gating": bool(_cfg_get(getattr(cfg_obj, "accuracy_guard", None), "hard_gating", False)),
+            },
+            "effective": {
+                "stable_hw_enabled": bool(stable_state.get("stable_hw_enabled", _cfg_get(stable_cfg, "enabled", False))),
+                "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
+                "gating_reason_code": str(stable_state.get("gating_reason_code", "") or ""),
+            },
+        }
+        manifest["gating_policy_summary"] = gating_summary
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
     loader = build_dataloader(cfg)
     # ---- build val/test loader for stable_hw accuracy_guard ----
@@ -768,6 +777,7 @@ def train_version_c(
     stable_hw_state: Dict[str, Any] = {}
     stable_hw_state["run_signature"] = signature
     stable_hw_state["out_dir"] = str(out_dir)
+    stable_hw_state["stable_hw_enabled"] = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
     if stable_hw_cfg is not None:
         nd_cfg = getattr(stable_hw_cfg, "no_drift", None)
         if isinstance(nd_cfg, bool):
@@ -809,6 +819,51 @@ def train_version_c(
         encoding="utf-8",
     )
     stable_hw_state.setdefault("gating_reason_code", "")
+    append_trace_event_v54(
+        trace_events_path,
+        "trace_header",
+        payload={
+            "requested": {
+                "mode": "version_c",
+                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
+                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "no_double_scale_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                ),
+            },
+            "effective": {
+                "mode": "version_c",
+                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
+                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "no_double_scale_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                ),
+            },
+            "stable_hw_effective": {
+                "enabled": bool(stable_hw_state.get("stable_hw_enabled", False)),
+                "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", False)),
+                "acc_ref_source": stable_hw_state.get("acc_ref_source", ""),
+                "hw_ref_source": stable_hw_state.get("hw_ref_source", ""),
+                "lambda_hw_base": float(stable_hw_state.get("lambda_hw_base", 0.0)),
+                "lambda_hw_effective": float(stable_hw_state.get("lambda_hw_effective", 0.0)),
+                "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", False)),
+                "gating_reason_code": stable_hw_state.get("gating_reason_code", ""),
+            },
+            "stable_hw_requested": {
+                "enabled": bool(getattr(cfg, "stable_hw", AttrDict({})).get("enabled", False)),
+                "no_drift_enabled": bool(
+                    getattr(getattr(cfg, "stable_hw", AttrDict({})), "no_drift", AttrDict({})).get("enabled", False)
+                ),
+                "lambda_hw": float(getattr(getattr(cfg, "hw", AttrDict({})), "lambda_hw", 0.0)),
+                "hard_gating": bool(getattr(getattr(cfg, "accuracy_guard", AttrDict({})), "hard_gating", False)),
+            },
+            "signature": signature,
+        },
+        run_id=run_id,
+        step=0,
+    )
     run_state: Dict[str, Any] = {"last_model_info": None}
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None
@@ -1601,6 +1656,11 @@ def train_version_c(
         best_solution_valid = False
         raise
     finally:
+        _update_manifest_gating_summary(
+            trace_dir,
+            cfg,
+            stable_hw_state if "stable_hw_state" in locals() else {},
+        )
         update_trace_summary(
             trace_dir,
             ok=(str(reason) != "error"),

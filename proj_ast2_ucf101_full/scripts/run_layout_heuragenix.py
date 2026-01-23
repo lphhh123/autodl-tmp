@@ -138,15 +138,9 @@ def _ensure_heuragenix_syspath(heuragenix_root: Path) -> None:
 def _resolve_llm_config_path(baseline_cfg, heuragenix_root: Path) -> Path:
     llm_cfg = baseline_cfg.get("llm_config_file", "")
     if not llm_cfg:
-        default_candidates = [
-            heuragenix_root / "data" / "llm_config" / "azure_gpt_4o.json",
-            heuragenix_root / "configs" / "llm" / "azure_gpt_4o.json",
-            heuragenix_root / "configs" / "llm_configs" / "azure_gpt_4o.json",
-        ]
-        for c in default_candidates:
-            if c.exists():
-                return c
-        return Path("")
+        raise RuntimeError(
+            "[v5.4 P1][HeurAgenix] baseline.llm_config_file must be explicitly set for llm_hh runs."
+        )
 
     p = Path(llm_cfg)
     if p.is_absolute() and p.exists():
@@ -164,12 +158,17 @@ def _resolve_llm_config_path(baseline_cfg, heuragenix_root: Path) -> Path:
         heuragenix_root / "configs" / "llm" / p.name,
         heuragenix_root / "configs" / "llm_configs" / p.name,
     ]
-    for c in candidates:
-        if c.exists():
-            return c
-
-    raise FileNotFoundError(
-        f"Cannot resolve llm_config_file='{llm_cfg}'. Tried: " + ", ".join(str(x) for x in candidates)
+    existing = [c for c in candidates if c.exists()]
+    if len(existing) == 1:
+        return existing[0]
+    if len(existing) == 0:
+        raise FileNotFoundError(
+            f"Cannot resolve llm_config_file='{llm_cfg}'. Tried: " + ", ".join(str(x) for x in candidates)
+        )
+    raise RuntimeError(
+        "[P0][HeurAgenix] ambiguous llm_config resolution: multiple candidates exist:\n"
+        + "\n".join([f"  - {str(x)}" for x in existing])
+        + "\nPlease set baseline_cfg.llm_config_file explicitly to avoid silent fallback."
     )
 
 
