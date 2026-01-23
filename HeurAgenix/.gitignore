@@ -8,4 +8,6 @@
 output/
 result/
 data/**/tmp*
+data/output/
+data/cache/
 condaenv.*.requirements.txt

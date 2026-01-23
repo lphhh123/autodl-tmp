@@ -92,14 +92,13 @@ def main() -> None:
         )
 
     placeholder = {
+        "schema_version": "v5.4_baseline_stats_v1",
         "is_placeholder": True,
-        "placeholder_reason": str(args.placeholder_reason),
-        "dataset": str(getattr(cfg, "dataset", "")),
-        "note": "SMOKE_ONLY. This file must NOT be used for paper results.",
-        "best_epoch": 0,
-        "best_acc": float(args.placeholder_acc),
-        "best_loss": float("inf"),
-        "timestamp": int(time.time()),
+        "placeholder_reason": "auto_created_by_ensure_baseline_stats_when_missing",
+        "val_acc1": 0.0,
+        "last_hw_stats": {"lat_ms": 1.0, "power_mw": 1.0, "mem_mb": 1.0},
+        "acc_ref": 0.0,
+        "note": "placeholder baseline_stats (NOT real). Replace with a real baseline run.",
     }
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

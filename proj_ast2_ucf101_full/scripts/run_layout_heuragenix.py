@@ -42,7 +42,13 @@ from utils.config_validate import validate_and_fill_defaults
 from utils.config_utils import get_nested
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
+from utils.trace_guard import (
+    init_trace_dir,
+    append_trace_event_v54,
+    finalize_trace_dir,
+    update_trace_summary,
+    build_baseline_trace_summary,
+)
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.trace_schema import TRACE_FIELDS
 
@@ -1287,6 +1293,7 @@ def main() -> None:
         "best_solution_valid": False,
         "best_total": None,
     }
+    stable_hw_state: Dict[str, Any] = {}
 
     def _ensure_trace_header(requested_method: str, effective_method: str, llm_req: str, llm_eff: str):
         nonlocal trace_header_written
@@ -1344,13 +1351,14 @@ def main() -> None:
             llm_req=str(llm_config_requested),
             llm_eff=str(llm_config_effective),
         )
-        update_trace_summary(
-            trace_dir,
-            ok=bool(finalize_state.get("ok", True)),
-            reason=str(finalize_state.get("reason", "error")),
-            steps_done=int(finalize_state.get("steps_done", 0) or 0),
-            best_solution_valid=bool(finalize_state.get("best_solution_valid", False)),
-        )
+        summary_payload = {
+            "ok": bool(finalize_state.get("ok", True)),
+            "reason": str(finalize_state.get("reason", "error")),
+            "steps_done": int(finalize_state.get("steps_done", 0) or 0),
+            "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
+        }
+        summary_payload.update(build_baseline_trace_summary(cfg, stable_hw_state))
+        update_trace_summary(trace_dir, summary_payload)
         finalize_trace_dir(
             trace_events_path,
             reason=str(finalize_state.get("reason", "error")),

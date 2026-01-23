@@ -1,0 +1,7 @@
+# Ignore generated datasets/caches under data.
+output/
+cache/
+*.pt
+*.pth
+*.npz
+*.npy

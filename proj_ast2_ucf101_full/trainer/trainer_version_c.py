@@ -32,7 +32,13 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
-from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
+from utils.trace_guard import (
+    init_trace_dir_v54,
+    append_trace_event_v54,
+    finalize_trace_dir,
+    update_trace_summary,
+    build_baseline_trace_summary,
+)
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.config import AttrDict
 from utils.config_utils import get_nested
@@ -1760,13 +1766,19 @@ def train_version_c(
             cfg,
             stable_hw_state if "stable_hw_state" in locals() else {},
         )
-        update_trace_summary(
-            trace_dir,
-            ok=(str(reason) != "error"),
-            reason=str(reason),
-            steps_done=int(steps_done),
-            best_solution_valid=bool(best_solution_valid),
+        summary_payload = {
+            "ok": (str(reason) != "error"),
+            "reason": str(reason),
+            "steps_done": int(steps_done),
+            "best_solution_valid": bool(best_solution_valid),
+        }
+        summary_payload.update(
+            build_baseline_trace_summary(
+                cfg,
+                stable_hw_state if "stable_hw_state" in locals() else {},
+            )
         )
+        update_trace_summary(trace_dir, summary_payload)
         finalize_trace_dir(
             trace_events_path,
             reason=str(reason),

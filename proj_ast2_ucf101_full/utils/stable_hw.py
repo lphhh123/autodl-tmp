@@ -831,12 +831,33 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
     nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
     requested_no_drift = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
 
-    baseline_path = ""
-    if stable_hw_cfg is not None:
-        baseline_path = str(getattr(stable_hw_cfg, "baseline_stats", "") or "")
+    # v5.4 canonical key is baseline_stats_path; keep baseline_stats as legacy alias.
+    baseline_path = (
+        getattr(stable_hw_cfg, "baseline_stats_path", "")
+        or getattr(stable_hw_cfg, "baseline_stats", "")
+        or getattr(cfg, "baseline_stats_path", "")
+        or ""
+    ).strip()
 
     baseline_stats = None
-    if baseline_path:
+    hw_ref_source = ""
+    if stable_hw_cfg is not None:
+        hw_ref_source = str(getattr(stable_hw_cfg, "hw_ref_source", "") or "").strip()
+
+    if hw_ref_source == "baseline_stats":
+        if not baseline_path:
+            if getattr(stable_hw_cfg, "strict", True):
+                raise RuntimeError(
+                    "[v5.4 P0] hw_ref_source=baseline_stats but baseline_stats_path is empty. "
+                    "This would silently fallback and violate NoDrift/LockedAccRef auditability."
+                )
+            baseline_stats = None
+        else:
+            try:
+                baseline_stats = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+            except Exception:
+                baseline_stats = None
+    elif baseline_path:
         try:
             baseline_stats = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
         except Exception:
