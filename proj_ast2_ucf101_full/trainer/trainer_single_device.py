@@ -186,14 +186,20 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 "effective": {
                     "mode": "single_device",
                     "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                    "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
-                    "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                    "locked_acc_ref_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "enabled", False)
+                    ),
+                    "no_drift_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+                    ),
                     "no_double_scale_enabled": bool(
                         getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
                     ),
                 },
                 "signature": sig,
-                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "no_drift_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+                ),
                 "acc_ref_source": str(
                     getattr(getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})), "source", "unknown")
                 ),

@@ -1,5 +1,27 @@
-"""Shared contract constants for v5.4 trace events (SPEC_E)."""
-from __future__ import annotations
+# proj_ast2_ucf101_full/utils/trace_contract_v54.py
+# v5.4 Anti-Loop Trace Contract (SPEC_E authoritative)
 
-REQUIRED_GATING_KEYS = {"gate", "acc_drop", "acc_drop_max"}
-REQUIRED_PROXY_SANITIZE_KEYS = {"metric", "raw_value", "used_value", "penalty_added"}
+SCHEMA_VERSION_V54 = "5.4"
+
+ALLOWED_EVENT_TYPES_V54 = (
+    "trace_header",
+    "gating",
+    "proxy_sanitize",
+    "ref_update",
+    "finalize",
+)
+
+# ---- payload required keys (SPEC_E) ----
+REQUIRED_TRACE_HEADER_KEYS = ("signature", "requested_config", "effective_config")
+REQUIRED_GATING_KEYS = ("candidate_id", "gate", "acc_drop", "acc_drop_max")
+REQUIRED_PROXY_SANITIZE_KEYS = ("metric", "raw_value", "used_value", "penalty_added")
+REQUIRED_REF_UPDATE_KEYS = ("key", "old_value", "new_value", "reason")
+REQUIRED_FINALIZE_KEYS = ("status", "summary")
+
+REQUIRED_EVENT_PAYLOAD_KEYS_V54 = {
+    "trace_header": REQUIRED_TRACE_HEADER_KEYS,
+    "gating": REQUIRED_GATING_KEYS,
+    "proxy_sanitize": REQUIRED_PROXY_SANITIZE_KEYS,
+    "ref_update": REQUIRED_REF_UPDATE_KEYS,
+    "finalize": REQUIRED_FINALIZE_KEYS,
+}

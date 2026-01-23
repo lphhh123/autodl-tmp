@@ -130,9 +130,13 @@ def write_run_manifest(
     no_drift_requested = bool(st.get("no_drift_requested", False))
     no_drift_effective = bool(st.get("no_drift_effective", False))
     if "no_drift_requested" not in st and cfg is not None:
-        no_drift_requested = bool(getattr(getattr(cfg, "no_drift", None), "enabled", False))
+        no_drift_requested = bool(
+            getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+        )
     if "no_drift_effective" not in st and cfg is not None:
-        no_drift_effective = bool(getattr(getattr(cfg, "no_drift", None), "enabled", False))
+        no_drift_effective = bool(
+            getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+        )
     manifest["stable_hw_no_drift_requested"] = no_drift_requested
     manifest["stable_hw_no_drift_effective"] = no_drift_effective
     manifest["stable_hw_ref_update_mode"] = st.get("ref_update_mode", "DISABLED")

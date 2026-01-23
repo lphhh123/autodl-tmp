@@ -8,21 +8,15 @@ from typing import Any, Dict, Optional
 import yaml
 from omegaconf import OmegaConf
 
-from .trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
+from utils.trace_contract_v54 import (
+    ALLOWED_EVENT_TYPES_V54,
+    REQUIRED_EVENT_PAYLOAD_KEYS_V54,
+    SCHEMA_VERSION_V54,
+)
 from .trace_schema import TRACE_FIELDS
 from .stable_hash import stable_hash
 
 FINALIZED_FLAG = "finalized.flag"
-
-ALLOWED_EVENT_TYPES_V54 = {
-    "trace_header",
-    "step",
-    "gating",
-    "proxy_sanitize",
-    "ref_update",
-    "trace_finalize",
-}
-
 
 def _write_json(path: Path, obj: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,7 +265,7 @@ def init_trace_dir(
         contract = resolved_cfg_obj.get("_contract", {}) or {}
         overrides = contract.get("overrides", []) or []
     header_payload = {
-        "schema": "v5.4",
+        "schema": SCHEMA_VERSION_V54,
         "signature": signature,
         "run_meta": run_meta,
         "resolved_config": resolved_cfg_obj,
@@ -394,13 +388,12 @@ def _assert_event(event_type: str, payload: dict) -> None:
     if not isinstance(payload, dict):
         raise TypeError("payload must be dict")
 
+    req_keys = REQUIRED_EVENT_PAYLOAD_KEYS_V54.get(event_type, ())
+    for k in req_keys:
+        if k not in payload:
+            raise KeyError(f"{event_type}.payload missing '{k}'")
+
     if event_type == "trace_header":
-        for k in ("signature", "no_drift_enabled", "acc_ref_source"):
-            if k not in payload:
-                raise KeyError(f"trace_header.payload missing '{k}'")
-        for k in ("requested_config", "effective_config", "contract_overrides", "requested", "effective"):
-            if k not in payload:
-                raise KeyError(f"trace_header.payload missing contract key '{k}'")
         if not isinstance(payload["signature"], dict):
             raise TypeError("trace_header.payload.signature must be dict")
         return
@@ -414,22 +407,14 @@ def _assert_event(event_type: str, payload: dict) -> None:
         return
 
     if event_type == "ref_update":
-        required = ["ref_name", "old_value", "new_value", "reason"]
-        for k in required:
-            if k not in payload:
-                raise KeyError(f"ref_update.payload missing '{k}'")
         return
 
-    if event_type == "trace_finalize":
-        required = ["reason", "steps_done", "best_solution_valid"]
-        for k in required:
-            if k not in payload:
-                raise KeyError(f"trace_finalize.payload missing '{k}'")
+    if event_type == "finalize":
         return
 
 
 def _assert_gating_event(payload: Dict[str, Any]) -> None:
-    req = set(REQUIRED_GATING_KEYS)
+    req = set(REQUIRED_EVENT_PAYLOAD_KEYS_V54.get("gating", ()))
     missing = [k for k in req if k not in payload]
     assert not missing, f"gating payload missing keys: {missing}"
     assert payload["gate"] in ("allow_hw", "reject_hw"), f"bad gate={payload['gate']}"
@@ -438,7 +423,7 @@ def _assert_gating_event(payload: Dict[str, Any]) -> None:
 
 
 def _assert_proxy_sanitize_event(payload: Dict[str, Any]) -> None:
-    req = set(REQUIRED_PROXY_SANITIZE_KEYS)
+    req = set(REQUIRED_EVENT_PAYLOAD_KEYS_V54.get("proxy_sanitize", ()))
     missing = [k for k in req if k not in payload]
     assert not missing, f"proxy_sanitize payload missing keys: {missing}"
     assert isinstance(payload["metric"], str) and payload["metric"], "metric must be non-empty str"
@@ -463,7 +448,7 @@ def append_trace_event_v54(
 
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
-    if flag.exists() and event_type != "trace_finalize":
+    if flag.exists() and event_type != "finalize":
         raise RuntimeError(f"trace_events is finalized; refusing to append event_type={event_type}")
 
     if run_id is None:
@@ -489,7 +474,7 @@ def append_trace_event_v54(
 
 
 def finalize_trace_events(path: Path, payload: dict, run_id: str, step: int):
-    append_trace_event_v54(path, "trace_finalize", payload=payload, run_id=run_id, step=step)
+    append_trace_event_v54(path, "finalize", payload=payload, run_id=run_id, step=step)
 
 
 def update_trace_summary(
@@ -625,7 +610,7 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
     v5.4 合同收尾：
     - 确保 summary.json 存在（否则写一个最小的）
     - 确保 trace.csv 最后一行是 finalize（否则自动补一行）
-    - 追加 trace_events.jsonl 的 trace_finalize 事件，并写 finalized.flag，禁止后续再 append
+    - 追加 trace_events.jsonl 的 finalize 事件，并写 finalized.flag，禁止后续再 append
     - 最后做 required files 校验
     """
     trace_events_path = Path(trace_events_path)
@@ -689,9 +674,16 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
         trace_events_path.write_text("", encoding="utf-8")
 
     if not flag.exists():
+        status = "ok" if str(reason) in ("done", "steps0", "ok", "success") else "error"
         finalize_trace_events(
             trace_events_path,
             payload={
+                "status": status,
+                "summary": {
+                    "reason": str(reason),
+                    "steps_done": int(steps_done),
+                    "best_solution_valid": bool(best_solution_valid),
+                },
                 "reason": str(reason),
                 "steps_done": int(steps_done),
                 "best_solution_valid": bool(best_solution_valid),
