@@ -767,10 +767,12 @@ def _write_trace_and_pareto(
                             "total_scalar": float(row["total_scalar"]),
                             "comm_norm": float(row["comm_norm"]),
                             "therm_norm": float(row["therm_norm"]),
+                            "pareto_added": int(row.get("pareto_added", 0)),
                             "duplicate_penalty": float(row["duplicate_penalty"]),
                             "boundary_penalty": float(row["boundary_penalty"]),
                             "seed_id": int(row["seed_id"]),
                             "time_ms": int(row["time_ms"]),
+                            "signature": str(row.get("signature", "")),
                         },
                         run_id=str(run_id),
                         step=int(iter_id),
@@ -872,7 +874,7 @@ def _write_layout_best(
         "artifacts": {
             "trace_csv": str(trace_path.absolute()),
             "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
-            "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
+            "llm_usage_jsonl": str((out_dir / "trace" / "llm_usage.jsonl").absolute()),
         },
     }
     with (out_dir / "layout_best.json").open("w", encoding="utf-8") as f:
@@ -1181,7 +1183,10 @@ def main() -> None:
     baseline_name = str(baseline_cfg.get("name", baseline_method))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
-    llm_usage_path = out_dir / "llm_usage.jsonl"
+    trace_dir = out_dir / "trace"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    llm_usage_path = trace_dir / "llm_usage.jsonl"
+    llm_usage_path_compat = out_dir / "llm_usage.jsonl"
 
     problem = str(baseline_cfg.get("problem", "wafer_layout"))
     internal_out = out_dir / "heuragenix_internal"
@@ -1260,7 +1265,6 @@ def main() -> None:
     }
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
-    trace_dir = out_dir / "trace"
     trace_path = trace_dir / "trace.csv"
     signature = _build_run_signature(cfg, method_name=method_label, seed_global=int(seed))
     requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
@@ -1384,6 +1388,14 @@ def main() -> None:
         }
         summary_payload.update(build_baseline_trace_summary(cfg, stable_hw_state))
         update_trace_summary(trace_dir, summary_payload)
+        try:
+            if llm_usage_path.exists():
+                llm_usage_path_compat.write_text(
+                    llm_usage_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
         finalize_trace_dir(
             trace_events_path,
             reason=str(finalize_state.get("reason", "error")),
