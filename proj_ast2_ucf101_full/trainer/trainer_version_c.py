@@ -669,21 +669,6 @@ def train_version_c(
     if layout_only:
         setattr(cfg.hw, "layout_only", True)
 
-    append_trace_event_v54(
-        trace_events_path,
-        "init",
-        payload={
-            "twostage": bool(twostage),
-            "mapping_only": bool(mapping_only),
-            "layout_only": bool(layout_only),
-            "stable_hw_enabled": bool(
-                getattr(cfg, "stable_hw", None) is not None and getattr(cfg.stable_hw, "enabled", False)
-            ),
-        },
-        run_id=run_id,
-        step=0,
-    )
-
     base_update_alpha = not layout_only
     update_layout = bool(getattr(cfg.hw, "optimize_layout", True))
 
@@ -792,23 +777,33 @@ def train_version_c(
 
         # init_hw_refs_from_baseline_stats accepts stable_hw_cfg but NOT output_dir
         init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
-        append_trace_event_v54(
-            trace_events_path,
-            "stable_hw_init",
-            payload={
-                "no_drift_requested": bool(stable_hw_state.get("no_drift_enabled", False)),
-                "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", False)),
-                "ref_update_mode": str(stable_hw_state.get("_force_ref_update_mode", "baseline_or_freeze")),
-                "hw_ref_source": str(stable_hw_state.get("hw_ref_source", "unknown")),
-                "acc_ref_source": str(stable_hw_state.get("acc_ref_source", "unknown")),
-                "baseline_stats_path": str(getattr(getattr(cfg, "stable_hw", {}), "baseline_stats", "") or ""),
-            },
-            run_id=run_id,
-            step=int(0),
-        )
     (out_dir / "stable_hw_state.json").write_text(
         json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    append_trace_event_v54(
+        trace_events_path,
+        "init",
+        payload={
+            "phase": "version_c_train",
+            "twostage": bool(twostage),
+            "mapping_only": bool(mapping_only),
+            "layout_only": bool(layout_only),
+            "stable_hw_enabled": bool(
+                getattr(cfg, "stable_hw", None) is not None and getattr(cfg.stable_hw, "enabled", False)
+            ),
+            "acc_ref": stable_hw_state.get("acc_ref", None),
+            "acc_ref_source": stable_hw_state.get("acc_ref_source", None),
+            "acc_ref_locked": bool(stable_hw_state.get("acc_ref_locked", False)),
+            "hw_ref_source": stable_hw_state.get("hw_ref_source", None),
+            "no_drift_requested": bool(stable_hw_state.get("no_drift_requested", True)),
+            "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", True)),
+            "ref_update_mode": stable_hw_state.get("ref_update_mode", "DISABLED"),
+            "epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0),
+            "acc_metric_key": stable_hw_state.get("acc_last_source", None),
+        },
+        run_id=run_id,
+        step=0,
     )
     run_state: Dict[str, Any] = {"last_model_info": None}
     last_acc1: Optional[float] = None

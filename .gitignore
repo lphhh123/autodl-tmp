@@ -4,6 +4,7 @@ data/
 !HeurAgenix/data/
 !HeurAgenix/data/llm_config/
 !HeurAgenix/data/llm_config/*.json
+HeurAgenix/orllm/
 
 *.avi
 *.jpg

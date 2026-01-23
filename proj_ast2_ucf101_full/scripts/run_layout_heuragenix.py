@@ -76,12 +76,10 @@ def _cfg_get(obj, key: str, default=None):
     return getattr(obj, key, default)
 
 
-def _build_run_signature(cfg: Any, method_name: str) -> Dict[str, Any]:
-    return build_signature_v54(
-        cfg,
-        method_name=method_name,
-        overrides=FAIRNESS_OVERRIDES,
-    )
+def _build_run_signature(cfg: Any, method_name: str, seed_global: int) -> Dict[str, Any]:
+    ov = dict(FAIRNESS_OVERRIDES)
+    ov.update({"seed_global": int(seed_global), "seed_problem": int(seed_global)})
+    return build_signature_v54(cfg, method_name=method_name, overrides=ov)
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
@@ -1060,6 +1058,9 @@ def main() -> None:
 
     cfg = load_config(args.cfg)
     cfg = validate_and_fill_defaults(cfg, mode="layout")
+    print(
+        "[V5.4 CONTRACT] This run emits v5.4 trace/run_manifest; do NOT run HeurAgenix directly for baselines."
+    )
     cfg_stem = Path(args.cfg).stem
     auto_out = Path("outputs/layout_heuragenix") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
@@ -1205,17 +1206,7 @@ def main() -> None:
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
     trace_path = trace_dir / "trace.csv"
-    # ---- v5.4 seed must be signature-visible (SPEC_E) ----
-    try:
-        cfg.seed = int(args.seed)
-    except Exception:
-        pass
-    try:
-        if hasattr(cfg, "train"):
-            cfg.train.seed = int(args.seed)
-    except Exception:
-        pass
-    signature = _build_run_signature(cfg, method_name=method_label)
+    signature = _build_run_signature(cfg, method_name=method_label, seed_global=int(seed))
     requested_config = {}
     try:
         contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
@@ -1272,23 +1263,20 @@ def main() -> None:
         sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = _trace_excepthook
-    try:
-        append_trace_event_v54(
-            trace_events_path,
-            "init",
-            payload={
-                "baseline_signature": signature_from_assign(np.array(_derive_initial_assign(layout_input), dtype=int)),
-                "seed_signature": signature_from_assign(np.array(seed_assign, dtype=int)),
-                "effective_max_steps": int(effective_max_steps),
-                "selection_frequency": int(selection_frequency),
-                "num_candidate_heuristics": int(num_candidate_heuristics),
-                "rollout_budget": int(rollout_budget),
-            },
-            run_id=run_id,
-            step=0,
-        )
-    except Exception:
-        pass
+    append_trace_event_v54(
+        trace_events_path,
+        "init",
+        payload={
+            "baseline_signature": signature_from_assign(np.array(_derive_initial_assign(layout_input), dtype=int)),
+            "seed_signature": signature_from_assign(np.array(seed_assign, dtype=int)),
+            "effective_max_steps": int(effective_max_steps),
+            "selection_frequency": int(selection_frequency),
+            "num_candidate_heuristics": int(num_candidate_heuristics),
+            "rollout_budget": int(rollout_budget),
+        },
+        run_id=run_id,
+        step=0,
+    )
     if hasattr(cfg, "train"):
         cfg.train.cfg_hash = cfg_hash
         cfg.train.cfg_path = str(args.cfg)
@@ -1301,8 +1289,8 @@ def main() -> None:
         seed=int(args.seed),
         stable_hw_state={
             "guard_mode": "acc_first_hard_gating",
-            "lambda_hw_base": None,
-            "lambda_hw_effective": None,
+            "lambda_hw_base": 0.0,
+            "lambda_hw_effective": 0.0,
             "discrete_cache": {
                 "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
                 "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",

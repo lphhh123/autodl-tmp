@@ -118,17 +118,11 @@ def run_layout_agent(
                 "layout_input": str(layout_input_path),
             }
         )
-    # ---- v5.4 seed must be signature-visible (SPEC_E) ----
-    try:
-        cfg.seed = int(seed)
-    except Exception:
-        pass
-    try:
-        if hasattr(cfg, "train"):
-            cfg.train.seed = int(seed)
-    except Exception:
-        pass
-    sig = build_signature_v54(cfg, method_name="ours_layout_agent")
+    sig = build_signature_v54(
+        cfg,
+        method_name="ours_layout_agent",
+        overrides={"seed_global": int(seed), "seed_problem": int(seed)},
+    )
     requested_config = {}
     try:
         contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)

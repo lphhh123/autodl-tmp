@@ -98,6 +98,19 @@ def _ensure_namespace(cfg: Any, key: str) -> Any:
     return getattr(cfg, key)
 
 
+def _record_resolved_aliases(cfg: Any, alias_pairs: list[tuple[str, str]]) -> None:
+    resolved = get_nested(cfg, "_resolved_aliases", None)
+    if resolved is None or not isinstance(resolved, dict):
+        resolved = {}
+        set_nested(cfg, "_resolved_aliases", resolved)
+    for old_path, new_path in alias_pairs:
+        val = get_nested(cfg, old_path, None)
+        if val is not None:
+            resolved[old_path] = {"mapped_to": new_path, "value": val}
+            set_nested(cfg, old_path, None)
+    set_nested(cfg, "_resolved_aliases", resolved)
+
+
 def _migrate_stable_hw_to_v5(cfg: Any) -> None:
     """
     v5.4 canonical:
@@ -941,5 +954,20 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             "SPEC v5.4 signature must be assign-only. "
             "Please set signature.allow_pos_signature=false."
         )
+
+    _record_resolved_aliases(
+        cfg,
+        [
+            ("stable_hw.controller", "stable_hw.accuracy_guard.controller"),
+            ("stable_hw.metric_key", "stable_hw.accuracy_guard.metric_key"),
+            ("stable_hw.epsilon_drop", "stable_hw.accuracy_guard.epsilon_drop"),
+            ("stable_hw.acc_margin", "stable_hw.accuracy_guard.acc_margin"),
+            ("stable_hw.allow_train_ema_fallback", "stable_hw.accuracy_guard.allow_train_ema_fallback"),
+            ("stable_hw.accuracy_guard.on_violate", "stable_hw.accuracy_guard.controller"),
+            ("stable_hw.normalize.method", "stable_hw.normalize.mode"),
+            ("stable_hw.normalize.clip_eps", "stable_hw.normalize.eps"),
+            ("layout.optimize_layout", "hw.optimize_layout"),
+        ],
+    )
 
     return cfg

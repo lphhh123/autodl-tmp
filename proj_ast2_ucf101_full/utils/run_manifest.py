@@ -121,6 +121,15 @@ def write_run_manifest(
         "metrics_summary": metrics_summary or {},
         "extra_meta": extra or {},
     }
+    st = stable_hw_state or {}
+    manifest["stable_hw_acc_ref"] = st.get("acc_ref", None)
+    manifest["stable_hw_acc_ref_source"] = st.get("acc_ref_source", None)
+    manifest["stable_hw_acc_ref_locked"] = bool(st.get("acc_ref_locked", False))
+    manifest["stable_hw_epsilon_drop"] = float(st.get("epsilon_drop", 0.0) or 0.0)
+    manifest["stable_hw_no_drift_requested"] = bool(st.get("no_drift_requested", True))
+    manifest["stable_hw_no_drift_effective"] = bool(st.get("no_drift_effective", True))
+    manifest["stable_hw_ref_update_mode"] = st.get("ref_update_mode", "DISABLED")
+    manifest["stable_hw_hw_ref_source"] = st.get("hw_ref_source", None)
 
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
