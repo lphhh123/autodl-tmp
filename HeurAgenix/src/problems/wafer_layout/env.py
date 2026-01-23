@@ -18,54 +18,42 @@ from src.problems.wafer_layout.problem_state import (
 
 
 def _load_layout_evaluator(self):
-    """
-    Contract: wafer_layout problem must not hard-code external repo directory names.
-    Resolution order (write-stable):
-      1) AST2_PROJECT_ROOT / PROJ_AST2_ROOT (explicit)
-      2) auto-discover by searching upward for a marker file in candidate dirs
-    """
-    import os
     import sys
     from pathlib import Path
 
-    repo_root = Path(__file__).resolve().parents[3]
+    # 1) explicit override
+    override = os.environ.get("PROJECT_EVAL_ROOT")
+    if override:
+        candidate = Path(override).expanduser().resolve()
+        pkg_root = candidate / "proj_ast2_ucf101_full"
+        if (pkg_root / "hw_proxy").exists():
+            sys.path.insert(0, str(candidate))
+            from layout.evaluator import LayoutEvaluator
+            return LayoutEvaluator
 
-    explicit = (
-        os.environ.get("AST2_PROJECT_ROOT")
-        or os.environ.get("PROJ_AST2_ROOT")
-        or ""
-    ).strip()
+    # 2) auto-discover from HeurAgenix repo root upward
+    here = Path(__file__).resolve()
+    heur_repo = here
+    while heur_repo.name != "HeurAgenix" and heur_repo.parent != heur_repo:
+        heur_repo = heur_repo.parent
+    candidates = [
+        heur_repo.parent,                   # sibling layout
+        heur_repo.parent.parent,             # one more up
+        Path.cwd(),
+        Path.cwd().parent,
+    ]
+    for base in candidates:
+        pkg = (base / "proj_ast2_ucf101_full")
+        if (pkg / "hw_proxy").exists():
+            sys.path.insert(0, str(base.resolve()))
+            from layout.evaluator import LayoutEvaluator
+            return LayoutEvaluator
 
-    candidates = []
-    if explicit:
-        candidates.append(Path(explicit).resolve())
-
-    # auto-discover: search parent dirs for sibling that contains trainer/trainer_version_c.py
-    for p in [repo_root] + list(repo_root.parents):
-        for sib in p.iterdir() if p.exists() else []:
-            if not sib.is_dir():
-                continue
-            marker = sib / "trainer" / "trainer_version_c.py"
-            if marker.exists():
-                candidates.append(sib.resolve())
-
-    proj_root = None
-    for c in candidates:
-        if (c / "trainer" / "trainer_version_c.py").exists():
-            proj_root = c
-            break
-
-    if proj_root is None:
-        raise RuntimeError(
-            "Cannot locate proj_ast2 project root for wafer_layout evaluator. "
-            "Set env AST2_PROJECT_ROOT (or PROJ_AST2_ROOT) to the proj_ast2_ucf101_full directory."
-        )
-
-    if str(proj_root) not in sys.path:
-        sys.path.insert(0, str(proj_root))
-
-    from layout.evaluator import LayoutEvaluator
-    return LayoutEvaluator
+    raise RuntimeError(
+        "Cannot locate 'proj_ast2_ucf101_full' evaluator package. "
+        "Set env PROJECT_EVAL_ROOT=<path containing proj_ast2_ucf101_full/> "
+        "or run from a workspace where it is a sibling of HeurAgenix."
+    )
 
 
 def _assign_signature(assign_list: list[int]) -> str:

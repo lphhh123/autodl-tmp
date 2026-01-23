@@ -68,8 +68,18 @@ def _resolve_roots(repo_root):
     amlt_data = (os.environ.get("AMLT_DATA_DIR") or "").strip()
     amlt_out = (os.environ.get("AMLT_OUTPUT_DIR") or "").strip()
 
-    data_root = Path(amlt_data).resolve() if amlt_data else (Path(repo_root) / "data").resolve()
-    output_root = Path(amlt_out).resolve() if amlt_out else (Path(repo_root) / "output").resolve()
+    data_root = Path(amlt_data).expanduser() if amlt_data else (Path(repo_root) / "data")
+    output_root = Path(amlt_out).expanduser() if amlt_out else (Path(repo_root) / "output")
+
+    if data_root.is_absolute() is False:
+        data_root = (Path(repo_root) / data_root).resolve()
+    else:
+        data_root = data_root.resolve()
+
+    if output_root.is_absolute() is False:
+        output_root = (Path(repo_root) / output_root).resolve()
+    else:
+        output_root = output_root.resolve()
 
     data_src = "AMLT_DATA_DIR" if amlt_data else "default_repo_root/data"
     out_src = "AMLT_OUTPUT_DIR" if amlt_out else "default_repo_root/output"
@@ -89,6 +99,8 @@ def _resolve_roots(repo_root):
 
     print(f"[HeurAgenix] data_root={data_root} (source={data_src})")
     print(f"[HeurAgenix] output_root={output_root} (source={out_src})")
+    print(f"[HeurAgenix] effective data_root  = {data_root}")
+    print(f"[HeurAgenix] effective output_root= {output_root}")
 
     return data_root, output_root
 

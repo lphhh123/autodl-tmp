@@ -563,14 +563,16 @@ def train_version_c(
 
     layout_export_dir_source = "cli"
     if layout_export_dir is None:
-        cfg_export_dir = str(getattr(cfg, "export_dir", "") or "").strip()
-        if cfg_export_dir:
-            layout_export_dir = cfg_export_dir
-            layout_export_dir_source = "cfg"
-        else:
-            # legacy fallback (kept) — but must be auditable
-            layout_export_dir = str(Path(cfg.out_dir) / "exports" / "layout_input")
-            layout_export_dir_source = "default_out_dir_exports"
+        layout_export_dir = getattr(cfg, "export_dir", None)
+        layout_export_dir_source = "cfg"
+    else:
+        cfg.export_dir = layout_export_dir
+
+    cfg_export_dir = str(layout_export_dir or "").strip()
+    if not cfg_export_dir:
+        # legacy fallback (kept) — but must be auditable
+        layout_export_dir = str(Path(cfg.out_dir) / "exports" / "layout_input")
+        layout_export_dir_source = "default_out_dir_exports"
     # out_dir: training outputs root
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1231,6 +1233,7 @@ def train_version_c(
                                 trace_events_path,
                                 "proxy_sanitize",
                                 payload={
+                                    "outer_iter": int(outer),
                                     "metric": metric,
                                     "raw_value": raw_v,
                                     "used_value": used_v,
@@ -1444,6 +1447,7 @@ def train_version_c(
                         "acc_ref": float(acc_ref_val),
                         "acc_now": float(acc_now),
                         "acc_drop": float(acc_drop),
+                        "acc_drop_max": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
                         "threshold_drop": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
                         "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
                         "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
@@ -1484,27 +1488,33 @@ def train_version_c(
                 )
                 after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
                 # v5.4 contract: NoDrift requested => never allow ref_update
-                if bool(stable_hw_state.get("no_drift_enabled", False)) and before != after:
-                    raise RuntimeError(
-                        "v5.4 contract violation: no_drift.enabled=true but hw_refs changed (ref_update would occur). "
-                        "This must never happen under SPEC_E NoDrift."
-                    )
                 if before != after:
-                    append_trace_event_v54(
-                        trace_events_path,
-                        "ref_update",
-                        payload={
-                            "epoch": int(outer),
-                            "before": before,
-                            "after": stable_hw_state.get("hw_refs", {}),
-                            "hw_ref_source": stable_hw_state.get("hw_ref_source", "unknown"),
-                            "no_drift_requested": bool(stable_hw_state.get("no_drift_enabled", False)),
-                            "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", False)),
-                            "ref_update_mode": str(stable_hw_state.get("_force_ref_update_mode", "baseline_or_freeze")),
-                        },
-                        run_id=run_id,
-                        step=int(outer),
-                    )
+                    if stable_hw_state.get("no_drift_enabled", False):
+                        raise RuntimeError(
+                            "[SPEC v5.4] NoDrift violation: ref changed while no_drift.enabled=True. "
+                            "This must not happen (no silent fallback)."
+                        )
+
+                    def _maybe_float(val):
+                        if val is None:
+                            return None
+                        return float(val)
+
+                    for ref_name in ("ref_T", "ref_E", "ref_M", "ref_C"):
+                        if before.get(ref_name) != after.get(ref_name):
+                            append_trace_event_v54(
+                                trace_events_path,
+                                "ref_update",
+                                payload={
+                                    "outer_iter": int(outer),
+                                    "ref_name": ref_name,
+                                    "old_value": _maybe_float(before.get(ref_name)),
+                                    "new_value": _maybe_float(after.get(ref_name)),
+                                    "reason": "hw_ref_update",
+                                },
+                                run_id=run_id,
+                                step=int(outer),
+                            )
             guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
             allow_discrete = (
                 bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
@@ -1570,7 +1580,7 @@ def train_version_c(
             if bool(hw_stats.get("proxy_had_invalid", False)) or float(hw_stats.get("proxy_extra_penalty", 0.0)) > 0.0:
                 append_trace_event_v54(
                     trace_events_path,
-                    "proxy_sanitize",
+                    "proxy_sanitize_summary",
                     payload={
                         "outer_epoch": int(outer),
                         "proxy_raw": hw_stats.get("proxy_raw", {}),
