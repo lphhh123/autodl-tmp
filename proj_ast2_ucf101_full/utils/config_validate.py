@@ -237,6 +237,15 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         set_nested(cfg, "_contract.requested_config_snapshot", OmegaConf.to_container(cfg, resolve=False))
     if get_nested(cfg, "_contract.overrides", None) is None:
         set_nested(cfg, "_contract.overrides", [])
+
+    def _stamp_contract(cfg_to_stamp: Any) -> Any:
+        # ===== v5.4 contract stamp (MUST exist for any v5.4 run) =====
+        if not hasattr(cfg_to_stamp, "contract"):
+            cfg_to_stamp.contract = AttrDict({})
+        cfg_to_stamp.contract.version = "v5.4"
+        cfg_to_stamp.contract.validated = True
+        cfg_to_stamp.contract.validated_by = "utils.config_validate.validate_and_fill_defaults"
+        return cfg_to_stamp
     # ---- v5.4: infer train.mode for backward compatibility ----
     train_mode = get_nested(cfg, "train.mode", None)
     if train_mode is None:
@@ -428,7 +437,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             cfg.train = AttrDict({})
         if getattr(cfg.train, "seed", None) is None:
             cfg.train.seed = 2024
-        return cfg
+        return _stamp_contract(cfg)
     elif mode == "layout":
         _apply_defaults(
             cfg,
@@ -528,7 +537,24 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 }
             )
 
-        return cfg
+        baseline_cfg = getattr(cfg, "baseline", None)
+        if baseline_cfg is None and isinstance(cfg, dict):
+            baseline_cfg = cfg.get("baseline", {})
+        method = None
+        llm_config_file = None
+        if isinstance(baseline_cfg, dict):
+            method = baseline_cfg.get("method")
+            llm_config_file = baseline_cfg.get("llm_config_file")
+        elif baseline_cfg is not None:
+            method = getattr(baseline_cfg, "method", None)
+            llm_config_file = getattr(baseline_cfg, "llm_config_file", None)
+        if str(method) == "llm_hh" and not str(llm_config_file or "").strip():
+            raise ValueError(
+                "[v5.4 P1] layout_heuragenix requires baseline.llm_config_file to be explicitly set "
+                "when method=llm_hh to avoid ambiguous defaults."
+            )
+
+        return _stamp_contract(cfg)
     elif mode == "single":
         # single-device baseline: only need hw.device_name/gpu_yaml/proxy_weight_dir/lambda_hw
         _apply_defaults(
@@ -1057,4 +1083,4 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         # never break runtime; but contract evidence may be incomplete -> audits will catch via smoke
         pass
 
-    return cfg
+    return _stamp_contract(cfg)

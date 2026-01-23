@@ -7,3 +7,7 @@ results should not be used for audit-grade comparisons.
 
 If you need a standalone HeurAgenix baseline for debugging, use the direct launcher at your
 own risk and do not mix those outputs with v5.4-tracked experiment results.
+
+**Packaging hygiene:** do not commit virtual environments (e.g., `HeurAgenix/orllm`) into the
+repo or any tarball. Use the project pack script, which already excludes `HeurAgenix/orllm`,
+and keep local envs outside the repository tree.
