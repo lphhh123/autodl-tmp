@@ -1543,13 +1543,34 @@ def train_version_c(
                 f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
                 f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
             )
-            # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
-            if val_acc1 is None:
-                # keep previous last_acc1 if exists; otherwise fall back to stable_hw_state history or 0.0
-                prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
-                last_acc1 = float(prev_last) if prev_last is not None else 0.0
+            # ---- v5.4: auditable acc source for gating / locked ref (SPEC_C) ----
+            acc_used_source = None
+            acc_used_value = None
+
+            if val_acc1 is not None:
+                acc_used_source = "val"
+                acc_used_value = float(val_acc1)
             else:
-                last_acc1 = float(val_acc1)
+                # 1) try last known val
+                prev_last = last_acc1 if last_acc1 is not None else stable_hw_state.get("val_acc1_last", None)
+                if prev_last is not None:
+                    acc_used_source = "val_last"
+                    acc_used_value = float(prev_last)
+                else:
+                    # 2) fall back to EMA train acc (SPEC_C)
+                    ema = stable_hw_state.get("train_acc1_ema", None)
+                    if ema is not None:
+                        acc_used_source = "train_ema"
+                        acc_used_value = float(ema)
+                    else:
+                        # contract: cannot decide gating without any auditable accuracy signal
+                        raise RuntimeError("[V5.4 CONTRACT] val_acc1 missing and no val_last/train_ema available")
+
+            last_acc1 = float(acc_used_value)
+
+            # record for audit
+            stable_hw_state["acc_used_source"] = str(acc_used_source)
+            stable_hw_state["acc_used_value"] = float(acc_used_value)
 
             if best_acc1 is None:
                 best_acc1 = float(last_acc1)
@@ -1619,6 +1640,7 @@ def train_version_c(
         run_id=run_id,
         seed=int(seed),
         git_sha=git_sha,
+        code_root=str(Path(__file__).resolve().parents[1]),
         stable_hw_state=stable_hw_state if "stable_hw_state" in locals() else {},
         cfg=cfg,
         metrics_summary=_metrics_summary,
@@ -1639,6 +1661,8 @@ def train_version_c(
         "mapping_signature": stable_hw_state.get("discrete_cache", {}).get("mapping_signature"),
         "layout_signature": stable_hw_state.get("discrete_cache", {}).get("layout_signature"),
         "stable_hw": stable_fields,
+        "acc_used_source": stable_hw_state.get("acc_used_source", None),
+        "acc_used_value": stable_hw_state.get("acc_used_value", None),
         "telemetry": {
             "gating_on_ratio": float(gating_epochs) / max(1, int(total_epochs)),
             "freeze_epoch_ratio": float(freeze_epochs) / max(1, int(total_epochs)),
