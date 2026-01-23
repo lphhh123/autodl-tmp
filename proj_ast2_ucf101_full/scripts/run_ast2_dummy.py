@@ -11,6 +11,7 @@ hardware cost to ensure the end-to-end pipeline (model + hw proxy)
 works correctly without a real dataset.
 """
 
+import argparse
 from typing import Dict, Any
 
 import torch
@@ -55,6 +56,15 @@ def compute_hw_loss(
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--allow_legacy", action="store_true", help="Allow running legacy AST2 script.")
+    args = parser.parse_args()
+    if not args.allow_legacy:
+        raise SystemExit(
+            "[v5.4] This script is LEGACY (AST2). Refusing to run by default.\n"
+            "Use scripts/run_version_c.py for v5.4 experiments.\n"
+            "If you really want legacy, pass --allow_legacy."
+        )
     cfg = load_config("configs/ast2_dummy.yaml")
     if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):
         raise RuntimeError(
