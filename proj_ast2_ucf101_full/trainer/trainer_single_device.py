@@ -139,6 +139,33 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         )
         trace_dir = Path(trace_meta["trace_dir"])
         trace_events_path = Path(trace_meta["trace_events"])
+        append_trace_event_v54(
+            trace_events_path,
+            "trace_header",
+            payload={
+                "requested": {
+                    "mode": "single_device",
+                    "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                    "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
+                    "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                    "no_double_scale_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                    ),
+                },
+                "effective": {
+                    "mode": "single_device",
+                    "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                    "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
+                    "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                    "no_double_scale_enabled": bool(
+                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                    ),
+                },
+                "signature": sig,
+            },
+            run_id=run_id,
+            step=0,
+        )
     train_loader, val_loader = build_dataloaders(cfg)
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -247,13 +274,14 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 if not bool(stable_state.get("allow_discrete_updates", True)):
                     freeze_epochs += 1
                 if trace_dir is not None:
-                    gate = "allow_hw"
+                    decision = "accept_hw"
                     if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
-                        gate = "reject_hw"
+                        decision = "reject_hw"
                     if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
-                        gate = "reject_hw"
+                        decision = "reject_hw"
                     acc_loss = stable_state.get("acc_loss", 0.0)
                     hw_loss_used = stable_state.get("hw_loss_used", 0.0)
+                    reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -262,10 +290,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
                             "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
-                            "acc_drop_max": float(
-                                stable_state.get("acc_drop_max", stable_state.get("epsilon_drop", 0.0)) or 0.0
-                            ),
-                            "gate": gate,
+                            "epsilon_drop": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
+                            "decision": decision,
+                            "reason_code": reason_code,
                             "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
                             "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
                             "total_loss_acc_part": float(acc_loss.item())
@@ -384,13 +411,14 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 )
                 stable_state = stable_decision.state
                 if trace_dir is not None:
-                    gate = "allow_hw"
+                    decision = "accept_hw"
                     if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
-                        gate = "reject_hw"
+                        decision = "reject_hw"
                     if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
-                        gate = "reject_hw"
+                        decision = "reject_hw"
                     acc_loss = stable_state.get("acc_loss", 0.0)
                     hw_loss_used = stable_state.get("hw_loss_used", 0.0)
+                    reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -399,10 +427,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
                             "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
-                            "acc_drop_max": float(
-                                stable_state.get("acc_drop_max", stable_state.get("epsilon_drop", 0.0)) or 0.0
-                            ),
-                            "gate": gate,
+                            "epsilon_drop": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
+                            "decision": decision,
+                            "reason_code": reason_code,
                             "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
                             "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
                             "total_loss_acc_part": float(acc_loss.item())
@@ -451,22 +478,6 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 f"locked={stable_state.get('locked_acc_ref', stable_state.get('acc_ref_locked'))}, "
                 f"allow_discrete={stable_state.get('allow_discrete_updates')}"
             )
-            if trace_dir is not None and last_hw_stats is not None:
-                append_trace_event_v54(
-                    trace_events_path,
-                    "proxy_sanitize_summary",
-                    payload={
-                        "epoch": int(epoch),
-                        "had_negative_latency": bool(last_hw_stats.get("sanitize", {}).get("had_negative", False))
-                        if isinstance(last_hw_stats.get("sanitize", None), dict)
-                        else False,
-                        "latency_penalty": float(last_hw_stats.get("sanitize", {}).get("penalty", 0.0))
-                        if isinstance(last_hw_stats.get("sanitize", None), dict)
-                        else 0.0,
-                    },
-                    run_id=run_id,
-                    step=int(epoch),
-                )
             if metrics_path:
                 stable_fields = stable_hw_log_fields(stable_state, cfg)
                 metrics = {
@@ -515,16 +526,6 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             # Must happen BEFORE finalize event
             early_stop = bool(early_stop_triggered) if "early_stop_triggered" in locals() else False
             epochs_ran = int(ran_epochs) if "ran_epochs" in locals() else 0
-            try:
-                append_trace_event_v54(
-                    trace_events_path,
-                    "training_complete",
-                    payload={"early_stop": early_stop, "epochs_ran": epochs_ran},
-                    run_id=run_id,
-                    step=int(steps_done),
-                )
-            except Exception as _exc:
-                logger.warning(f"[trace] skip training_complete event due to: {_exc}")
             update_trace_summary(
                 trace_dir,
                 ok=bool(ok),
@@ -532,7 +533,12 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 steps_done=int(steps_done),
                 best_solution_valid=bool(ok and not early_stop_triggered),
             )
-            finalize_trace_dir(trace_dir)
+            finalize_trace_dir(
+                trace_events_path,
+                reason="done" if ok else "error",
+                steps_done=int(steps_done),
+                best_solution_valid=bool(ok and not early_stop_triggered),
+            )
 
     if out_dir is not None:
         from utils.run_manifest import write_run_manifest
@@ -558,6 +564,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             seed=seed,
             git_sha=git_sha,
             stable_hw_state=stable_state if "stable_state" in locals() else {},
+            cfg=cfg,
             metrics_summary=_metrics_summary,
             extra={
                 "task": "single_device",

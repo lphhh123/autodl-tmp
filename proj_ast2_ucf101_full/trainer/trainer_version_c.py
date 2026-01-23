@@ -586,7 +586,7 @@ def train_version_c(
             "seed": int(seed),
         }
     )
-    signature = build_signature_v54(cfg, method_name="train_version_c")
+    signature = build_signature_v54(cfg, method_name="ours_version_c")
     signature_v54 = signature
     # ---- v5.4 trace dir contract: out_dir/trace/<run_id>/... ----
     trace_base = out_dir / "trace"
@@ -607,6 +607,33 @@ def train_version_c(
     )
     trace_dir = Path(trace_meta["trace_dir"])
     trace_events_path = Path(trace_meta["trace_events"])
+    append_trace_event_v54(
+        trace_events_path,
+        "trace_header",
+        payload={
+            "requested": {
+                "mode": "version_c",
+                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
+                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "no_double_scale_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                ),
+            },
+            "effective": {
+                "mode": "version_c",
+                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(getattr(getattr(cfg, "locked_acc_ref", None), "enabled", False)),
+                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "no_double_scale_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                ),
+            },
+            "signature": signature,
+        },
+        run_id=run_id,
+        step=0,
+    )
     # layout_export_dir: ONLY for exporting layout_input.json (optional)
     layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
     if layout_export_dir is not None:
@@ -781,30 +808,7 @@ def train_version_c(
         json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    append_trace_event_v54(
-        trace_events_path,
-        "init",
-        payload={
-            "phase": "version_c_train",
-            "twostage": bool(twostage),
-            "mapping_only": bool(mapping_only),
-            "layout_only": bool(layout_only),
-            "stable_hw_enabled": bool(
-                getattr(cfg, "stable_hw", None) is not None and getattr(cfg.stable_hw, "enabled", False)
-            ),
-            "acc_ref": stable_hw_state.get("acc_ref", None),
-            "acc_ref_source": stable_hw_state.get("acc_ref_source", None),
-            "acc_ref_locked": bool(stable_hw_state.get("acc_ref_locked", False)),
-            "hw_ref_source": stable_hw_state.get("hw_ref_source", None),
-            "no_drift_requested": bool(stable_hw_state.get("no_drift_requested", True)),
-            "no_drift_effective": bool(stable_hw_state.get("no_drift_effective", True)),
-            "ref_update_mode": stable_hw_state.get("ref_update_mode", "DISABLED"),
-            "epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0),
-            "acc_metric_key": stable_hw_state.get("acc_last_source", None),
-        },
-        run_id=run_id,
-        step=0,
-    )
+    stable_hw_state.setdefault("gating_reason_code", "")
     run_state: Dict[str, Any] = {"last_model_info": None}
     last_acc1: Optional[float] = None
     best_acc1: Optional[float] = None
@@ -926,27 +930,7 @@ def train_version_c(
                 fb_reason = "fallback_cache_empty_force_enable_discrete_updates"
                 stable_hw_state["decision_reason"] = (prev_reason + "|" + fb_reason) if prev_reason else fb_reason
                 stable_hw_state["discrete_frozen_init_mapping"] = True
-
-                # requested=False (frozen), effective=True (forced enable)
-                try:
-                    append_trace_event_v54(
-                        trace_events_path,
-                        "fallback",
-                        payload={
-                            "name": "stable_hw.allow_discrete_updates",
-                            "requested": False,
-                            "effective": True,
-                            "reason": fb_reason,
-                            "context": {
-                                "cached_mapping_is_none": cached_mapping is None,
-                                "cached_layout_is_none": cached_layout is None,
-                            },
-                        },
-                        run_id=str(run_id),
-                        step=int(global_step),
-                    )
-                except Exception as _e:
-                    logger.warning(f"[StableHW] failed to append fallback trace event: {_e}")
+                stable_hw_state["gating_reason_code"] = fb_reason
 
                 allow_discrete_updates = True
                 stable_hw_state["allow_discrete_updates"] = True
@@ -966,21 +950,7 @@ def train_version_c(
                     need_update_layout = need_update_layout and (cache["layout"] is None)
 
                 if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
-                    append_trace_event_v54(
-                        trace_events_path,
-                        "discrete_blocked",
-                        payload={
-                            "epoch": int(outer),
-                            "mapping_requested": bool(need_update_mapping),
-                            "layout_requested": bool(need_update_layout),
-                            "guard_mode": str(stable_hw_state.get("guard_mode", "")),
-                            "reason": "accuracy_guard",
-                            "op": "noop",
-                            "accepted": 0,
-                        },
-                        run_id=run_id,
-                        step=int(outer),
-                    )
+                    stable_hw_state["gating_reason_code"] = "discrete_updates_blocked"
                     print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
                     need_update_mapping = False
                     need_update_layout = False
@@ -1259,9 +1229,12 @@ def train_version_c(
                                 payload={
                                     "outer_iter": int(outer),
                                     "metric": metric,
+                                    "hw_metric_raw": hw_stats.get("proxy_raw", {}),
+                                    "hw_metric_used": hw_stats.get("proxy_used", {}),
                                     "raw_value": raw_v,
                                     "used_value": used_v,
-                                    "penalty_added": pen_v,
+                                    "penalty": float(pen_v),
+                                    "had_invalid": bool(hw_stats.get("proxy_had_invalid", False) or cnt_v > 0),
                                     "clamp_count": cnt_v,
                                     "clamp_min_value": min_v,
                                     "reason": "invalid_proxy_or_clamp",
@@ -1454,29 +1427,31 @@ def train_version_c(
                 hw_loss_used = last_loss.get("hw_loss_used", 0.0)
                 # v5.4 trace: gating event (spec_e)
                 # 合同要求：每个 outer step 都必须产出 gating 证据（allow_hw / reject_hw），不能只在触发时记录
-                gate = "allow_hw"
+                decision = "accept_hw"
                 if float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0) <= 0.0:
-                    gate = "reject_hw"
+                    decision = "reject_hw"
                 if float(hw_loss_used or 0.0) <= 0.0:
-                    gate = "reject_hw"
+                    decision = "reject_hw"
                 if str(getattr(stable_decision, "guard_mode", "")) in ("VIOLATE", "RECOVERY", "WARMUP"):
-                    gate = "reject_hw"
+                    decision = "reject_hw"
+                reason_code = str(stable_hw_state.get("gating_reason_code", "") or "")
+                if not reason_code:
+                    reason_code = "hw_enabled" if decision == "accept_hw" else "hw_cut_or_warmup_or_recovery"
 
                 append_trace_event_v54(
                     trace_events_path,
                     "gating",
                     payload={
-                        "gate": gate,  # allow_hw / reject_hw
-                        "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
                         "acc_ref": float(acc_ref_val),
                         "acc_now": float(stable_hw_state.get("acc_now", 0.0)),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
-                        "acc_drop_max": float(
-                            stable_hw_state.get("acc_drop_max", stable_hw_state.get("epsilon_drop", 0.0))
-                        ),
+                        "epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0)),
+                        "decision": decision,
+                        "reason_code": reason_code,
+                        "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
+                        "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
                         "threshold_drop": float(getattr(stable_decision, "threshold_drop", 0.0) or 0.0),
                         "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
-                        "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
                         "hw_loss_raw": float(hw_loss_norm or 0.0),
                         "hw_loss_used": float(hw_loss_used or 0.0),
                         "total_loss_acc_part": float(acc_loss.item())
@@ -1486,10 +1461,16 @@ def train_version_c(
                         "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
                         "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
                         "reason": dict(getattr(stable_decision, "reason", {}) or {}),
+                        "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
+                        "hw_metric_ref": hw_stats.get("proxy_refs", {}),
+                        "hw_metric_raw": hw_stats.get("proxy_raw", {}),
+                        "hw_metric_normed": hw_stats.get("proxy_used", {}),
+                        "hw_scale_schema_version": "v5.4_hw_loss_norm",
                     },
                     run_id=run_id,
                     step=int(outer),
                 )
+                stable_hw_state["gating_reason_code"] = ""
                 # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
                 if bool(stable_decision.stop_training):
                     val_acc1_str = f"{val_acc1:.6f}" if val_acc1 is not None else "None"
@@ -1562,65 +1543,6 @@ def train_version_c(
                 f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
                 f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
             )
-            append_trace_event_v54(
-                trace_events_path,
-                "proxy_sanitize_summary",
-                payload={
-                    "epoch": int(outer),
-                    "had_negative_latency": bool(last_hw_stats.get("sanitize", {}).get("had_negative", False))
-                    if isinstance(last_hw_stats, dict)
-                    else False,
-                    "latency_penalty": float(last_hw_stats.get("sanitize", {}).get("penalty", 0.0))
-                    if isinstance(last_hw_stats, dict)
-                    else 0.0,
-                },
-                run_id=run_id,
-                step=int(outer),
-            )
-            append_trace_event_v54(
-                trace_events_path,
-                "epoch_summary",
-                payload={
-                    "outer_epoch": int(outer),
-                    "acc_ref": float(stable_hw_state.get("acc_ref", 0.0)),
-                    "acc_now": float(stable_hw_state.get("acc_now", 0.0)),
-                    "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
-                    "acc_drop_max": float(stable_hw_state.get("epsilon_drop", 0.0)),
-                    "lambda_hw_effective": float(stable_hw_state.get("lambda_hw_effective", lambda_hw_eff)),
-                    "guard_mode": str(stable_hw_state.get("guard_mode", "")),
-                    "in_recovery": bool(stable_hw_state.get("in_recovery", False)),
-                    "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
-                    "total_loss_acc_part": float(L_task.detach().cpu()) if hasattr(L_task, "detach") else float(L_task),
-                    "total_loss_hw_part": float((lambda_hw_eff * (L_hw.detach().cpu() if hasattr(L_hw, "detach") else L_hw))),
-                    "hw_metric_ref": hw_stats.get("proxy_refs", {}),
-                    "hw_metric_raw": hw_stats.get("proxy_raw", {}),
-                    "hw_metric_used": hw_stats.get("proxy_used", {}),
-                    "proxy_extra_penalty": float(hw_stats.get("proxy_extra_penalty", 0.0)),
-                    "hw_scale_schema_version": "v5.4_hw_loss_norm",
-                    # v5.4 minimal audit set (repeat at epoch granularity)
-                    "acc_loss": (run_state.get("last_loss_components", {}) or {}).get("acc_loss", None),
-                    "hw_loss_raw": (run_state.get("last_loss_components", {}) or {}).get("hw_loss_raw", None),
-                    "hw_loss_used": (run_state.get("last_loss_components", {}) or {}).get("hw_loss_used", None),
-                    "total_loss": (run_state.get("last_loss_components", {}) or {}).get("total_loss", None),
-                },
-                run_id=run_id,
-                step=int(outer),
-            )
-
-            if bool(hw_stats.get("proxy_had_invalid", False)) or float(hw_stats.get("proxy_extra_penalty", 0.0)) > 0.0:
-                append_trace_event_v54(
-                    trace_events_path,
-                    "proxy_sanitize_summary",
-                    payload={
-                        "outer_epoch": int(outer),
-                        "proxy_raw": hw_stats.get("proxy_raw", {}),
-                        "proxy_used": hw_stats.get("proxy_used", {}),
-                        "proxy_extra_penalty": float(hw_stats.get("proxy_extra_penalty", 0.0)),
-                        "note": "raw<0 or clamped",
-                    },
-                    run_id=run_id,
-                    step=int(outer),
-                )
             # ---- robustness: val_acc1 may be None in edge cases (empty val set / skipped eval) ----
             if val_acc1 is None:
                 # keep previous last_acc1 if exists; otherwise fall back to stable_hw_state history or 0.0
@@ -1639,7 +1561,7 @@ def train_version_c(
             no_drift_cfg = getattr(cfg, "no_drift", None)
             if no_drift_cfg is None:
                 no_drift_cfg = getattr(stable_hw_cfg, "no_drift", None)
-            stable_hw_state["_contract_no_drift"] = bool(getattr(no_drift_cfg, "enabled", True)) if no_drift_cfg else True
+            stable_hw_state["_contract_no_drift"] = bool(getattr(no_drift_cfg, "enabled", False)) if no_drift_cfg else False
             norm = getattr(stable_hw_cfg, "normalize", None)
             stable_hw_state["_contract_ref_update"] = (
                 "frozen" if norm is None else str(getattr(norm, "ref_update", "frozen") or "frozen")
@@ -1665,7 +1587,12 @@ def train_version_c(
             steps_done=int(steps_done),
             best_solution_valid=bool(best_solution_valid),
         )
-        finalize_trace_dir(trace_dir)
+        finalize_trace_dir(
+            trace_events_path,
+            reason=str(reason),
+            steps_done=int(steps_done),
+            best_solution_valid=bool(best_solution_valid),
+        )
 
     # write run_manifest.json (auditable LockedAccRef)  -- v5.4 compliant
     from utils.run_manifest import write_run_manifest
@@ -1693,6 +1620,7 @@ def train_version_c(
         seed=int(seed),
         git_sha=git_sha,
         stable_hw_state=stable_hw_state if "stable_hw_state" in locals() else {},
+        cfg=cfg,
         metrics_summary=_metrics_summary,
         extra={
             "task": "version_c",

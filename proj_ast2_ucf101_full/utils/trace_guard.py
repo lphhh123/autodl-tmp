@@ -13,6 +13,14 @@ from .stable_hash import stable_hash
 
 FINALIZED_FLAG = "finalized.flag"
 
+ALLOWED_EVENT_TYPES_V54 = {
+    "trace_header",
+    "gating",
+    "proxy_sanitize",
+    "ref_update",
+    "finalize",
+}
+
 
 def _write_json(path: Path, obj: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +101,9 @@ def _make_min_row(
     row["delta_total"] = 0.0
     row["delta_comm"] = 0.0
     row["delta_therm"] = 0.0
+    row["d_total"] = row.get("d_total", row.get("delta_total", 0.0))
+    row["d_comm"] = row.get("d_comm", row.get("delta_comm", 0.0))
+    row["d_therm"] = row.get("d_therm", row.get("delta_therm", 0.0))
 
     row["pareto_added"] = 0
     row["duplicate_penalty"] = 0.0
@@ -295,24 +306,9 @@ def init_trace_dir(
         manifest.update(extra_manifest)
     _write_json(manifest_path, manifest)
 
-    # 3) trace_events.jsonl：确保首条为 trace_header
+    # 3) trace_events.jsonl：仅确保文件存在（trace_header 由调用方写入）
     if not events_path.exists():
         events_path.write_text("", encoding="utf-8")
-
-    run_id = run_meta.get("run_id") or signature.get("run_id") or "unknown"
-    if _count_jsonl_lines(events_path) == 0:
-        append_trace_event_v54(
-            events_path,
-            "trace_header",
-            payload={
-                "schema": "v5.4",
-                "signature": signature,
-                "run_meta": run_meta,
-                "resolved_config": resolved_cfg_obj,
-            },
-            run_id=str(run_id),
-            step=0,
-        )
 
     # 4) trace.csv：保证至少有 init 行（训练场景也不会因缺 trace.csv 而在收尾崩溃）
     seed_id = int(run_meta.get("seed_id", 0) or 0)
@@ -389,18 +385,35 @@ def init_trace_dir_v54(
 _DEFAULT_RUN_ID: Optional[str] = None
 
 
-def _require_keys(event_type: str, payload: dict, keys: list) -> None:
-    missing = [k for k in keys if k not in payload]
-    if missing:
-        raise ValueError(f"[SPEC_E v5.4] trace event '{event_type}' missing keys: {missing}")
-
-
 def _assert_event(event_type: str, payload: dict) -> None:
-    if event_type not in ("trace_header", "init", "gating_trigger", "proxy_sanitize", "ref_update", "finalize"):
-        return
-    if event_type == "init":
-        if not isinstance(payload, dict):
-            raise ValueError("init.payload must be a dict")
+    if event_type not in ALLOWED_EVENT_TYPES_V54:
+        raise ValueError(
+            f"[v5.4 TRACE CONTRACT] unknown event_type={event_type!r}. "
+            f"Allowed={sorted(ALLOWED_EVENT_TYPES_V54)}"
+        )
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dict")
+
+    if event_type == "trace_header":
+        for k in ("requested", "effective", "signature"):
+            if k not in payload:
+                raise ValueError(f"[v5.4 TRACE CONTRACT] trace_header missing {k}")
+    elif event_type == "gating":
+        for k in ("acc_ref", "acc_now", "acc_drop", "epsilon_drop", "decision", "reason_code"):
+            if k not in payload:
+                raise ValueError(f"[v5.4 TRACE CONTRACT] gating missing {k}")
+    elif event_type == "proxy_sanitize":
+        for k in ("hw_metric_raw", "hw_metric_used", "penalty", "had_invalid"):
+            if k not in payload:
+                raise ValueError(f"[v5.4 TRACE CONTRACT] proxy_sanitize missing {k}")
+    elif event_type == "ref_update":
+        for k in ("ref_name", "old_value", "new_value", "reason"):
+            if k not in payload:
+                raise ValueError(f"[v5.4 TRACE CONTRACT] ref_update missing {k}")
+    elif event_type == "finalize":
+        for k in ("reason", "steps_done", "best_solution_valid"):
+            if k not in payload:
+                raise ValueError(f"[v5.4 TRACE CONTRACT] finalize missing {k}")
 
 
 def append_trace_event_v54(
@@ -416,42 +429,6 @@ def append_trace_event_v54(
         payload = {}
 
     _assert_event(event_type, payload)
-
-    # hard forbid legacy / ambiguous event_type aliases
-    if event_type in {"gating_decision", "gatingDecision", "gate_decision"}:
-        raise ValueError(
-            "[SPEC_E v5.4] Illegal trace event_type alias. Use event_type='gating' with payload.gate in "
-            "{'allow_hw','reject_hw'}."
-        )
-
-    # schema enforcement for contract-critical events
-    if event_type == "gating":
-        _require_keys(
-            event_type,
-            payload,
-            [
-                "gate",
-                "guard_mode",
-                "acc_ref",
-                "acc_now",
-                "acc_drop",
-                "acc_drop_max",
-                "lambda_hw_effective",
-                "hw_loss_raw",
-                "hw_loss_used",
-                "total_loss_acc_part",
-                "total_loss_hw_part",
-                "total_loss",
-            ],
-        )
-        if payload["gate"] not in ("allow_hw", "reject_hw"):
-            raise ValueError(
-                f"[SPEC_E v5.4] gating.gate must be 'allow_hw' or 'reject_hw', got: {payload['gate']}"
-            )
-    elif event_type == "proxy_sanitize":
-        _require_keys(event_type, payload, ["metric", "raw_value", "used_value", "penalty_added"])
-    elif event_type == "ref_update":
-        _require_keys(event_type, payload, ["ref_name", "old_value", "new_value", "reason"])
 
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
@@ -548,7 +525,7 @@ def ensure_trace_events(trace_dir: Path) -> Path:
     return p
 
 
-def finalize_trace_dir(trace_dir: Path):
+def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int, best_solution_valid: bool):
     """
     v5.4 合同收尾：
     - 确保 summary.json 存在（否则写一个最小的）
@@ -556,7 +533,8 @@ def finalize_trace_dir(trace_dir: Path):
     - 追加 trace_events.jsonl 的 finalize 事件，并写 finalized.flag，禁止后续再 append
     - 最后做 required files 校验
     """
-    trace_dir = Path(trace_dir)
+    trace_events_path = Path(trace_events_path)
+    trace_dir = trace_events_path.parent
     required = [
         "trace_header.json",
         "manifest.json",
@@ -568,7 +546,13 @@ def finalize_trace_dir(trace_dir: Path):
     # 0) summary.json 兜底
     summary_path = trace_dir / "summary.json"
     if not summary_path.exists():
-        update_trace_summary(trace_dir, ok=False, reason="missing_summary_autofill", steps_done=0, best_solution_valid=False)
+        update_trace_summary(
+            trace_dir,
+            ok=False,
+            reason="missing_summary_autofill",
+            steps_done=int(steps_done),
+            best_solution_valid=bool(best_solution_valid),
+        )
 
     summary = _read_json(summary_path, default={})
     manifest = _read_json(trace_dir / "manifest.json", default={})
@@ -577,26 +561,23 @@ def finalize_trace_dir(trace_dir: Path):
 
     run_id = run_meta.get("run_id") or signature.get("run_id") or "unknown"
     seed_id = int(run_meta.get("seed_id", 0) or 0)
-    step_hint = max(0, int(summary.get("steps_done", 0) or 0))
+    step_hint = max(0, int(steps_done))
 
     # 1) trace.csv finalize 行兜底
     _ensure_trace_csv_finalize(trace_dir)
 
     # 2) finalize 事件：只允许写一次，并且必须是最后一条
     flag = trace_dir / FINALIZED_FLAG
-    events_path = trace_dir / "trace_events.jsonl"
-    if not events_path.exists():
-        events_path.write_text("", encoding="utf-8")
+    if not trace_events_path.exists():
+        trace_events_path.write_text("", encoding="utf-8")
 
     if not flag.exists():
         finalize_trace_events(
-            events_path,
+            trace_events_path,
             payload={
-                "schema": "v5.4",
-                "ok": bool(summary.get("ok", False)),
-                "reason": str(summary.get("reason", "done")),
-                "steps_done": int(summary.get("steps_done", 0) or 0),
-                "best_solution_valid": bool(summary.get("best_solution_valid", False)),
+                "reason": str(reason),
+                "steps_done": int(steps_done),
+                "best_solution_valid": bool(best_solution_valid),
             },
             run_id=str(run_id),
             step=int(step_hint),

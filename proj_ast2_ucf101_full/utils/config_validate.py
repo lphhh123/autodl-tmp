@@ -354,6 +354,9 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _ensure(stable_hw, "accuracy_guard", {})
     _ensure(stable_hw.accuracy_guard, "enabled", _inherit_enabled("stable_hw.accuracy_guard.enabled"))
     _ensure(stable_hw.accuracy_guard, "metric", get_nested(cfg, "stable_hw.accuracy_guard.metric", "acc1"))
+    if float(get_nested(cfg, "train.acc_drop_max", 0.0) or 0.0) <= 0.0:
+        set_nested(cfg, "train.acc_drop_max", 0.002)
+        print("[v5.4 contract] stable_hw.acc_drop_max missing/0; force to 0.002")
     default_acc_drop_max = float(get_nested(cfg, "train.acc_drop_max", 0.002) or 0.002)
     _ensure(
         stable_hw.accuracy_guard,

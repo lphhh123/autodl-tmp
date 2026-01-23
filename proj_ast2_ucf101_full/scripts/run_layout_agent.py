@@ -151,6 +151,17 @@ def run_layout_agent(
         requested_config=requested_config,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
+    append_trace_event_v54(
+        trace_events_path,
+        "trace_header",
+        payload={
+            "requested": {"mode": "layout_agent"},
+            "effective": {"mode": "layout_agent"},
+            "signature": sig,
+        },
+        run_id=run_id,
+        step=0,
+    )
 
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
     planned_steps = int(detailed_cfg.get("max_steps", detailed_cfg.get("steps", 0)) or 0)
@@ -237,18 +248,6 @@ def run_layout_agent(
             seed_eval["comm_norm"],
             seed_eval["therm_norm"],
             {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
-        )
-        append_trace_event_v54(
-            trace_events_path,
-            "init",
-            payload={
-                "baseline_signature": signature_from_assign(assign_grid),
-                "seed_signature": signature_from_assign(assign_seed),
-                "baseline_total_scalar": float(base_eval.get("total_scalar", 0.0)),
-                "seed_total_scalar": float(seed_eval.get("total_scalar", 0.0)),
-            },
-            run_id=run_id,
-            step=0,
         )
 
         # Stage1: coarsen
@@ -442,13 +441,6 @@ def run_layout_agent(
         ok = True
     except Exception as exc:
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
-        append_trace_event_v54(
-            trace_events_path,
-            "error",
-            payload={"error": str(exc)},
-            run_id=run_id,
-            step=int(steps_done),
-        )
         raise
     finally:
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
@@ -463,7 +455,12 @@ def run_layout_agent(
         )
         if trace_path.exists():
             shutil.copy2(trace_path, trace_path_compat)
-        finalize_trace_dir(trace_dir)
+        finalize_trace_dir(
+            trace_events_path,
+            reason=str(reason),
+            steps_done=int(steps_done),
+            best_solution_valid=bool(best_solution_valid),
+        )
 
 
 def main():
@@ -542,6 +539,7 @@ def main():
                 "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
         },
+        cfg=cfg,
         extra=extra_meta,
         run_id=run_id,
         spec_version="v5.4",
@@ -582,6 +580,7 @@ def main():
                 "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
             },
         },
+        cfg=cfg,
         extra=extra_meta,
         run_id=run_id,
         spec_version="v5.4",

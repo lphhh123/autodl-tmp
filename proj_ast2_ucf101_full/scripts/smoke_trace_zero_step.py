@@ -11,7 +11,7 @@ import json
 import time
 from pathlib import Path
 
-from utils.trace_guard import init_trace_dir, finalize_trace_dir
+from utils.trace_guard import init_trace_dir, finalize_trace_dir, append_trace_event_v54
 from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
@@ -188,7 +188,24 @@ def main() -> None:
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
         resolved_config=cfg_min,
     )
-    finalize_trace_dir(trace_dir)
+    trace_events_path = trace_dir / "trace_events.jsonl"
+    append_trace_event_v54(
+        trace_events_path,
+        "trace_header",
+        payload={
+            "requested": {"mode": "smoke_steps0"},
+            "effective": {"mode": "smoke_steps0"},
+            "signature": sig,
+        },
+        run_id=run_id,
+        step=0,
+    )
+    finalize_trace_dir(
+        trace_events_path,
+        reason="steps0",
+        steps_done=0,
+        best_solution_valid=True,
+    )
 
     # also drop a minimal json file to help debugging
     (out_dir / "smoke_signature.json").write_text(
