@@ -20,6 +20,7 @@ import time
 import uuid
 
 import numpy as np
+from omegaconf import OmegaConf
 
 from layout.alt_opt import run_alt_opt
 from layout.candidate_pool import signature_from_assign
@@ -117,8 +118,15 @@ def run_layout_agent(
     init_trace_dir(
         trace_dir,
         signature=sig,
-        run_meta={"layout_input": str(layout_input_path), "mode": "layout_agent", "run_id": run_id},
+        run_meta={
+            "heuristic": "ours_layout_agent",
+            "layout_input": str(layout_input_path),
+            "mode": "layout_agent",
+            "run_id": run_id,
+            "seed_id": int(seed),
+        },
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+        resolved_config=OmegaConf.to_container(cfg, resolve=True),
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
 

@@ -1527,6 +1527,7 @@ def train_version_c(cfg, export_layout_input: bool = False, layout_export_dir: O
         out_dir=str(out_dir),
         cfg_path=str(cfg.train.cfg_path),
         cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+        run_id=run_id,
         seed=int(seed),
         git_sha=git_sha,
         stable_hw_state=stable_hw_state if "stable_hw_state" in locals() else {},

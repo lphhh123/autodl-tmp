@@ -24,6 +24,8 @@ no_drift:
 # === v5.4 StableHW (Acc-First Hard Gating + LockedAccRef + NoDrift + NoDoubleScale) ===
 stable_hw:
   enabled: true
+  no_double_scale:
+    enabled: true
 
   lambda_hw_schedule:
     warmup_epochs: 0

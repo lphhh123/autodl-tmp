@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict
 from types import SimpleNamespace
 
+from omegaconf import OmegaConf
+
 from .config_utils import get_nested, set_nested
 from .config import AttrDict
 
@@ -241,6 +243,48 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             )
     except Exception:
         pass
+
+    def _ensure(path: str, value):
+        if OmegaConf.select(cfg, path) is None:
+            OmegaConf.update(cfg, path, value, merge=True)
+
+    # ---- v5.4 signature-required StableHW knobs (must exist in ALL modes) ----
+    _ensure("stable_hw.enabled", False)
+    _ensure("stable_hw.no_double_scale.enabled", True)
+
+    # moves_enabled required by SPEC_E signature
+    _ensure(
+        "stable_hw.discrete_ops",
+        {
+            "relocate": {"enabled": True},
+            "swap": {"enabled": True},
+            "assign": {"enabled": True},
+        },
+    )
+    _ensure("stable_hw.continuous_ops", {})
+
+    # no_drift required by signature
+    _ensure("stable_hw.no_drift.enabled", False)
+    _ensure("stable_hw.no_drift.freeze_baseline_stats", False)
+
+    # normalize + schedule required by signature
+    _ensure("stable_hw.normalize.enabled", False)
+    _ensure("stable_hw.normalize.use_baseline_stats", False)
+    _ensure("stable_hw.normalize.baseline_stats_path", "")
+    _ensure("stable_hw.normalize.scheme", "none")
+    _ensure("stable_hw.normalize.ref_update", "frozen")
+
+    _ensure("stable_hw.lambda_hw_schedule.enabled", False)
+    _ensure("stable_hw.lambda_hw_schedule.start_epoch", 0)
+    _ensure("stable_hw.lambda_hw_schedule.end_epoch", 0)
+    _ensure("stable_hw.lambda_hw_schedule.warmup_epochs", 0)
+    _ensure("stable_hw.lambda_hw_schedule.final_lambda_hw", 0.0)
+    _ensure("stable_hw.lambda_hw_schedule.freeze_schedule_in_recovery", True)
+
+    # locked_acc_ref_json required by signature: allow empty placeholder in layout-only configs
+    if OmegaConf.select(cfg, "locked_acc_ref") is None and OmegaConf.select(cfg, "stable_hw.locked_acc_ref") is None:
+        _ensure("stable_hw.locked_acc_ref.path", "")
+        _ensure("stable_hw.locked_acc_ref.expected_acc1", None)
 
     if mode == "version_c":
         _apply_defaults(cfg, REQ_VERSION_C_HW_DEFAULTS)

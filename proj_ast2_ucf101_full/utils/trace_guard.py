@@ -1,8 +1,10 @@
+import csv
 import json
 import time
-import csv
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+import yaml
 
 from .trace_schema import TRACE_FIELDS
 from .stable_hash import stable_hash
@@ -40,7 +42,7 @@ def _count_jsonl_lines(path: Path) -> int:
 def _trace_csv_candidates(trace_dir: Path) -> list[Path]:
     """
     v5.4 contract: trace.csv should live at run out_dir root (trace_dir.parent),
-    while trace_events.jsonl/trace_summary live under out_dir/trace/.
+    while trace_events.jsonl/summary.json live under out_dir/trace/.
     """
     return [
         trace_dir.parent / "trace.csv",
@@ -194,7 +196,15 @@ def init_trace_dir(
     run_meta: Optional[Dict[str, Any]] = None,
     required_signature_keys: Optional[list[str]] = None,
     extra_manifest: Optional[Dict[str, Any]] = None,
+    resolved_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Path]:
+    """
+    Create/initialize a trace directory with v5.4 required artifacts.
+
+    SPEC_E requirements:
+    - trace_header.json must include resolved effective config (after defaults/overrides).
+    - eval_config_snapshot.yaml must contain the resolved config.
+    """
     trace_dir = Path(trace_dir)
     trace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -218,20 +228,39 @@ def init_trace_dir(
     snapshot_path = trace_dir / "eval_config_snapshot.yaml"
     events_path = trace_dir / "trace_events.jsonl"
 
+    # 0) Write resolved config snapshot (YAML)
+    resolved_cfg_obj = None
+    if resolved_config is not None:
+        resolved_cfg_obj = dict(resolved_config)
+        with snapshot_path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(resolved_cfg_obj, f, sort_keys=False, allow_unicode=True)
+    else:
+        if not snapshot_path.exists():
+            snapshot_path.write_text("# eval_config_snapshot placeholder (v5.4)\n", encoding="utf-8")
+
     # 1) trace_header.json（结构化元信息）
-    _write_json(header_path, {"schema": "v5.4", "signature": signature, "run_meta": run_meta, "ts_ms": int(time.time() * 1000)})
+    header_payload = {
+        "schema": "v5.4",
+        "signature": signature,
+        "run_meta": run_meta,
+        "resolved_config": resolved_cfg_obj,
+        "ts_ms": int(time.time() * 1000),
+    }
+    _write_json(header_path, header_payload)
 
     # 2) manifest.json
-    manifest = {"schema": "v5.4", "signature": signature, "run_meta": run_meta, "created_ts_ms": int(time.time() * 1000)}
+    manifest = {
+        "schema": "v5.4",
+        "signature": signature,
+        "run_meta": run_meta,
+        "resolved_config_path": str(snapshot_path),
+        "created_ts_ms": int(time.time() * 1000),
+    }
     if extra_manifest:
         manifest.update(extra_manifest)
     _write_json(manifest_path, manifest)
 
-    # 3) eval_config_snapshot.yaml（这里只做占位；真正 snapshot 由上层脚本写入即可）
-    if not snapshot_path.exists():
-        snapshot_path.write_text("# eval_config_snapshot placeholder (v5.4)\n", encoding="utf-8")
-
-    # 4) trace_events.jsonl：确保首条为 trace_header
+    # 3) trace_events.jsonl：确保首条为 trace_header
     if not events_path.exists():
         events_path.write_text("", encoding="utf-8")
 
@@ -240,12 +269,17 @@ def init_trace_dir(
         append_trace_event_v54(
             events_path,
             "trace_header",
-            payload={"schema": "v5.4", "signature": signature, "run_meta": run_meta},
+            payload={
+                "schema": "v5.4",
+                "signature": signature,
+                "run_meta": run_meta,
+                "resolved_config": resolved_cfg_obj,
+            },
             run_id=str(run_id),
             step=0,
         )
 
-    # 5) trace.csv：保证至少有 init 行（训练场景也不会因缺 trace.csv 而在收尾崩溃）
+    # 4) trace.csv：保证至少有 init 行（训练场景也不会因缺 trace.csv 而在收尾崩溃）
     seed_id = int(run_meta.get("seed_id", 0) or 0)
     _ensure_trace_csv_init(trace_dir, seed_id=seed_id)
 
@@ -270,12 +304,21 @@ def init_trace_dir_v54(
     extra_manifest: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Path]:
     trace_dir = Path(base_dir) / str(run_id)
+    resolved_config = None
+    if cfg is not None:
+        try:
+            import omegaconf
+
+            resolved_config = omegaconf.OmegaConf.to_container(cfg, resolve=True)
+        except Exception:
+            resolved_config = None
     meta = init_trace_dir(
         trace_dir=trace_dir,
         signature=signature_v54 or signature,
         run_meta=run_meta,
         required_signature_keys=required_signature_fields,
         extra_manifest=extra_manifest,
+        resolved_config=resolved_config,
     )
     snapshot_path = Path(meta["eval_config_snapshot"])
     if cfg is not None:
@@ -312,33 +355,55 @@ def finalize_trace_events(path: Path, payload: dict, run_id: str, step: int):
 
 def update_trace_summary(
     trace_dir: Path,
-    ok: bool = True,
-    reason: str = "",
-    steps_done: int = 0,
-    best_solution_valid: bool = False,
+    ok: Any,
+    reason: Optional[str] = None,
+    steps_done: Optional[int] = None,
+    best_solution_valid: Optional[bool] = None,
 ) -> None:
     """
-    v5.4 contract: write trace_summary.json with {ok, reason, steps_done, best_solution_valid}.
-    Backward-compatible: if caller mistakenly passes a dict as `ok`, parse it.
+    v5.4 compat:
+    - Accept both legacy signature:
+        update_trace_summary(trace_dir, ok, reason, steps_done, best_solution_valid)
+    - And new call style used across this repo:
+        update_trace_summary(trace_dir, {"reason":..., "steps_done":..., "best_solution_valid":..., ...})
     """
-    if isinstance(ok, dict):
-        d = ok
-        ok = bool(d.get("ok", True))
-        reason = str(d.get("reason", reason))
-        steps_done = int(d.get("steps_done", steps_done))
-        best_solution_valid = bool(d.get("best_solution_valid", best_solution_valid))
-
     trace_dir = Path(trace_dir)
+
+    extra = {}
+    if isinstance(ok, dict) and reason is None and steps_done is None and best_solution_valid is None:
+        payload = ok
+        reason = str(payload.get("reason", "unknown"))
+        steps_done = int(payload.get("steps_done", 0) or 0)
+        best_solution_valid = bool(payload.get("best_solution_valid", False))
+        ok_val = payload.get("ok", None)
+        if ok_val is None:
+            ok_val = reason in ("done", "steps0", "ok", "success")
+        ok = bool(ok_val)
+
+        extra = {
+            k: v
+            for k, v in payload.items()
+            if k not in ("ok", "reason", "steps_done", "best_solution_valid")
+        }
+    else:
+        ok = bool(ok)
+        reason = str(reason if reason is not None else "unknown")
+        steps_done = int(steps_done if steps_done is not None else 0)
+        best_solution_valid = bool(best_solution_valid if best_solution_valid is not None else False)
+
     trace_dir.mkdir(parents=True, exist_ok=True)
     out = {
-        "ok": bool(ok),
-        "reason": str(reason),
-        "steps_done": int(steps_done),
-        "best_solution_valid": bool(best_solution_valid),
-        "ts_unix": float(time.time()),
+        "schema": "v5.4",
+        "ok": ok,
+        "reason": reason,
+        "steps_done": steps_done,
+        "best_solution_valid": best_solution_valid,
+        "ts_ms": int(time.time() * 1000),
     }
-    with (trace_dir / "trace_summary.json").open("w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, ensure_ascii=False)
+    if extra:
+        out.update(extra)
+
+    _write_json(trace_dir / "summary.json", out)
 
 
 def ensure_trace_events(trace_dir: Path) -> Path:
@@ -355,7 +420,7 @@ def ensure_trace_events(trace_dir: Path) -> Path:
 def finalize_trace_dir(trace_dir: Path):
     """
     v5.4 合同收尾：
-    - 确保 trace_summary.json 存在（否则写一个最小的）
+    - 确保 summary.json 存在（否则写一个最小的）
     - 确保 trace.csv 最后一行是 finalize（否则自动补一行）
     - 追加 trace_events.jsonl 的 finalize 事件，并写 finalized.flag，禁止后续再 append
     - 最后做 required files 校验
@@ -363,8 +428,8 @@ def finalize_trace_dir(trace_dir: Path):
     trace_dir = Path(trace_dir)
     required = ["trace_header.json", "manifest.json", "eval_config_snapshot.yaml", "trace_events.jsonl"]
 
-    # 0) trace_summary.json 兜底
-    summary_path = trace_dir / "trace_summary.json"
+    # 0) summary.json 兜底
+    summary_path = trace_dir / "summary.json"
     if not summary_path.exists():
         update_trace_summary(trace_dir, ok=False, reason="missing_summary_autofill", steps_done=0, best_solution_valid=False)
 

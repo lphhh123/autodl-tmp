@@ -118,3 +118,28 @@ partition:
   max_split_layers: 4
   max_groups_per_layer: 2
   max_new_segments: 32
+
+stable_hw:
+  no_double_scale:
+    enabled: true
+  discrete_ops:
+    relocate: { enabled: true }
+    swap: { enabled: true }
+    assign: { enabled: true }
+  continuous_ops: {}
+  no_drift:
+    enabled: true
+    freeze_baseline_stats: false
+  normalize:
+    enabled: false
+    use_baseline_stats: false
+    baseline_stats_path: ""
+    scheme: "none"
+    ref_update: "frozen"
+  lambda_hw_schedule:
+    enabled: false
+    start_epoch: 0
+    end_epoch: 0
+    warmup_epochs: 0
+    final_lambda_hw: 0.0
+    freeze_schedule_in_recovery: true

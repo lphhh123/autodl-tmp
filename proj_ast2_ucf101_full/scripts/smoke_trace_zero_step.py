@@ -180,11 +180,13 @@ def main() -> None:
     trace_csv = _write_trace_csv_v54(out_dir, int(args.seed))
 
     trace_dir = out_dir / "trace"
+    run_id = stable_hash({"mode": "smoke_steps0", "seed": int(args.seed)})
     init_trace_dir(
         trace_dir,
         signature=sig,
-        run_meta={"note": "steps0", "mode": "smoke_trace_zero_step"},
+        run_meta={"run_id": run_id, "seed_id": int(args.seed), "mode": "smoke_steps0"},
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+        resolved_config=cfg_min,
     )
     finalize_trace_dir(trace_dir)
 

@@ -17,7 +17,8 @@ no_drift:
 
 stable_hw:
   enabled: true
-  no_double_scale: true
+  no_double_scale:
+    enabled: true
   force_disable_ok: false
 
   allow_train_ema_fallback: true
