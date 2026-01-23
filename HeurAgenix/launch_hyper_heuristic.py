@@ -46,22 +46,18 @@ def _resolve_test_data_dir(problem: str) -> Path:
     return test_dir
 
 
-def _resolve_output_base() -> Path:
+def _resolve_output_base(repo_root: Path) -> Path:
+    """Resolve output base directory.
+
+    Official: outputs go under:
+      <output_base>/<problem>/<test_data>/<result_dir>/<engine>/...
+
+    If AMLT_OUTPUT_DIR is set, use it as output base.
     """
-    v5.4 integration rule:
-    - If AMLT_OUTPUT_DIR is NOT set, output base must default to HeurAgenix repo_root/output.
-    - If AMLT_OUTPUT_DIR is set and is relative, interpret it relative to repo_root.
-    """
-    repo_root = Path(__file__).resolve().parent
-    env = os.environ.get("AMLT_OUTPUT_DIR", None)
-    if env:
-        p = Path(env).expanduser()
-        if not p.is_absolute():
-            p = (repo_root / p).resolve()
-        else:
-            p = p.resolve()
-        return p / "output"
-    return (repo_root / "output").resolve()
+    p = os.environ.get("AMLT_OUTPUT_DIR", "")
+    if p:
+        return Path(p).expanduser().resolve()
+    return repo_root / "output"
 
 
 def _import_env(problem: str):
@@ -123,15 +119,15 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    repo_root = Path(__file__).resolve().parent
     test_data_dir = _resolve_test_data_dir(args.problem)
-    output_base = _resolve_output_base()
+    output_base = _resolve_output_base(repo_root)
 
     if args.test_data is None or args.test_data.strip() == "":
         data_name_list = sorted([p.name for p in test_data_dir.iterdir() if p.is_file()])
     else:
         data_name_list = [x.strip() for x in args.test_data.split(",") if x.strip()]
 
-    repo_root = Path(__file__).resolve().parent
     heur_dir = repo_root / "src" / "problems" / args.problem / "heuristics" / args.heuristic_dir
     if not heur_dir.exists():
         raise FileNotFoundError(f"heuristic_dir not found: {heur_dir.resolve()}")

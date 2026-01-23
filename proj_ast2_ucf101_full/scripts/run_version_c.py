@@ -126,9 +126,8 @@ def main():
     )
     parser.add_argument("--export_dir", type=str, default=None, help="Directory to write layout artifacts")
     args = parser.parse_args()
-    cli_out = args.out_dir or args.out
-    if args.export_dir is None and cli_out is not None:
-        args.export_dir = str(Path(cli_out) / "exports" / "layout_input")
+    if args.out_dir is None and args.out is not None:
+        args.out_dir = args.out
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
     seed_everything(int(args.seed))
@@ -153,9 +152,9 @@ def main():
     if not rid:
         OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
 
-    # ---- out_dir resolution (CLI highest priority) ----
-    auto_out = f"outputs/version_c_auto"
-    out_dir = Path(cli_out) if cli_out else Path(getattr(cfg.train, "out_dir", "") or auto_out)
+    exp_name = Path(args.cfg).stem
+    # out_dir is where we store training outputs (checkpoints, trace, cfg_resolved, etc.)
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else Path("outputs") / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
     # ---- v5.4 contract: BOTH cfg.out_dir and cfg.train.out_dir must be set ----
     cfg.out_dir = str(out_dir)
@@ -164,10 +163,9 @@ def main():
     out_dir_path = Path(out_dir)
 
     export_layout_input = bool(args.export_layout_input)
-    # IMPORTANT:
-    # - CLI --export_dir only takes effect when explicitly provided.
-    # - If CLI is not provided, DO NOT synthesize a default here; let trainer read cfg.export_dir.
-    export_dir = args.export_dir  # may be None
+    # IMPORTANT: export_dir is where we write layout_input payloads for downstream layout solver.
+    # If not provided, trainer will fall back to (out_dir/layout_input) internally.
+    export_dir = Path(args.export_dir).expanduser().resolve() if args.export_dir else None
 
     # ---- dump resolved config ----
     try:

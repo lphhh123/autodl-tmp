@@ -1,7 +1,7 @@
 """HeurAgenix baseline wrapper for wafer layout (SPEC v5.4).
 
-Note: AMLT_OUTPUT_DIR is treated as the base directory; actual outputs are written under
-<AMLT_OUTPUT_DIR>/output/...
+Note: AMLT_OUTPUT_DIR points to the output root directory; actual outputs are written under
+<AMLT_OUTPUT_DIR>/<problem>/<test_data>/<result_dir>/<engine>/...
 """
 from __future__ import annotations
 
@@ -987,7 +987,7 @@ def _collect_subprocess_outputs(
 ) -> Path:
     """
     HeurAgenix subprocess writes into:
-      <AMLT_OUTPUT_DIR>/output/{problem}/{case_stem}/{result_dir}/{engine}/
+      <AMLT_OUTPUT_DIR>/{problem}/{case_stem}/{result_dir}/{engine}/
     Mirror outputs into:
       <out_dir>/{problem}/{case_stem}/{result_dir}/{engine}/
     """
@@ -1258,6 +1258,8 @@ def main() -> None:
         code_root=str(_PROJECT_ROOT),
     )
 
+    # AMLT_OUTPUT_DIR is the output root directory.
+    # internal_base layout: <AMLT_OUTPUT_DIR>/<problem>/<test_data>/<result_dir>/<engine>/...
     output_root = internal_out / "output"
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -1284,7 +1286,7 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    env["AMLT_OUTPUT_DIR"] = str(internal_out)
+    env["AMLT_OUTPUT_DIR"] = str(output_root)
     env["AMLT_DATA_DIR"] = str(internal_data_root)
     timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
     result = None

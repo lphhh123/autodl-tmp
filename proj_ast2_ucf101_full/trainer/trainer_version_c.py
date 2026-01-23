@@ -1191,19 +1191,36 @@ def train_version_c(
                     sum_mem += float(hw_stats.get("mem_mb", 0.0))
                     sum_comm += float(hw_stats.get("comm_ms", 0.0))
                     hw_stats_count += 1
+                    # SPEC_E: proxy sanitize audit must be verifiable (raw_value/used_value/penalty_added).
                     if hw_stats.get("proxy_had_invalid", False) or hw_stats.get("proxy_clamp_count", 0) > 0:
-                        append_trace_event_v54(
-                            trace_events_path,
-                            "proxy_sanitize",
-                            payload={
-                                "proxy_had_invalid": bool(hw_stats.get("proxy_had_invalid", False)),
-                                "proxy_clamp_count": int(hw_stats.get("proxy_clamp_count", 0)),
-                                "raw": hw_stats.get("proxy_raw", {}),
-                                "used": hw_stats.get("proxy_used", {}),
-                            },
-                            run_id=run_id,
-                            step=int(outer),
-                        )
+                        raw = hw_stats.get("proxy_raw", {}) or {}
+                        used = hw_stats.get("proxy_used", {}) or {}
+                        invalid_counts = hw_stats.get("proxy_invalid_counts", {}) or {}
+                        extra_penalty = float(hw_stats.get("proxy_extra_penalty", 0.0) or 0.0)
+
+                        keys = set(raw.keys()) | set(used.keys()) | set(invalid_counts.keys())
+                        for metric in sorted(keys):
+                            raw_v = raw.get(metric, None)
+                            used_v = used.get(metric, None)
+                            cnt = int(invalid_counts.get(metric, 0) or 0)
+
+                            # Emit only if something happened (invalid/clamp or changed value)
+                            if cnt <= 0 and raw_v == used_v:
+                                continue
+
+                            penalty_added = extra_penalty if metric == "latency_ms" else 0.0
+                            append_trace_event_v54(
+                                trace_events_path,
+                                "proxy_sanitize",
+                                payload={
+                                    "metric": str(metric),
+                                    "raw_value": (float(raw_v) if raw_v is not None else None),
+                                    "used_value": (float(used_v) if used_v is not None else None),
+                                    "penalty_added": float(penalty_added),
+                                },
+                                run_id=run_id,
+                                step=int(outer),
+                            )
                     hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
                     loss = L_task + cfg.loss.lambda_AST * info["L_AST"] + hw_term
                     # ---- v5.4 audit: capture the exact loss components used ----
@@ -1374,44 +1391,39 @@ def train_version_c(
                     else None,
                 )
                 stable_hw_state = stable_decision.state
-                # ---- v5.4 contract: gating event must be auditable & schema-stable ----
-                last_loss = run_state.get("last_loss_components", {}) or {}
-                acc_ref = stable_decision.reason.get("acc_ref", stable_hw_state.get("acc_ref", None))
-                acc_now = stable_decision.reason.get("metric", stable_hw_state.get("acc_last", None))
-                try:
-                    acc_drop = (float(acc_ref) - float(acc_now)) if (acc_ref is not None and acc_now is not None) else None
-                except Exception:
-                    acc_drop = None
-
-                gate = "reject_hw" if float(stable_decision.lambda_hw_effective) <= 0.0 else "allow_hw"
-
-                append_trace_event_v54(
-                    trace_events_path,
-                    "gating",
-                    payload={
-                        "gate": gate,
-                        "guard_mode": str(stable_decision.guard_mode),
-                        "acc_ref": (float(acc_ref) if acc_ref is not None else None),
-                        "acc_now": (float(acc_now) if acc_now is not None else None),
-                        "acc_drop": (float(acc_drop) if acc_drop is not None else None),
-                        "epsilon_drop": float(stable_hw_state.get("epsilon_drop", stable_decision.reason.get("eps_drop", 0.0))),
-
-                        # minimal audit set (SPEC_E)
-                        "hw_loss_raw": last_loss.get("hw_loss_raw", None),
-                        "hw_loss_used": last_loss.get("hw_loss_used", None),
-                        "acc_loss": last_loss.get("acc_loss", None),
-                        "total_loss": last_loss.get("total_loss", None),
-
-                        # schedule + discrete isolation observability
-                        "lambda_hw_base": float(stable_decision.lambda_hw_base),
-                        "lambda_hw_eff": float(stable_decision.lambda_hw_effective),
-                        "allow_discrete_updates": bool(stable_decision.allow_discrete_updates),
-                        "mapping_signature": cache.get("mapping_signature", None),
-                        "layout_signature": cache.get("layout_signature", None),
-                    },
-                    run_id=run_id,
-                    step=int(outer),
-                )
+                if str(stable_hw_state.get("guard_mode", "")).upper() != "HW_OPT":
+                    epoch = int(outer)
+                    outer_iter = int(outer)
+                    last_loss = run_state.get("last_loss_components", {}) or {}
+                    acc_ref = stable_hw_state.get("acc_ref", None)
+                    acc_now = stable_hw_state.get("acc_now", None)
+                    acc_drop = stable_hw_state.get("acc_drop", None)
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "gating",
+                        payload={
+                            "gate": "reject_hw" if (stable_hw_state.get("guard_mode") in ("RECOVERY", "GUARD")) else "allow_hw",
+                            "acc_ref": (float(acc_ref) if acc_ref is not None else None),
+                            "acc_now": (float(acc_now) if acc_now is not None else None),
+                            "acc_drop": (float(acc_drop) if acc_drop is not None else None),
+                            "acc_drop_max": float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0),
+                            "epsilon_drop": float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0),
+                            "guard_mode": str(stable_hw_state.get("guard_mode")),
+                            "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
+                            "lambda_hw_base": float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0),
+                            "lambda_hw_effective": float(stable_hw_state.get("lambda_hw_effective", 0.0) or 0.0),
+                            "acc_loss": last_loss.get("acc_loss", None),
+                            "ast_loss": last_loss.get("ast_loss", None),
+                            "hw_loss_raw": last_loss.get("hw_loss_raw", None),
+                            "hw_loss_used": last_loss.get("hw_loss_used", None),
+                            "total_loss_acc_part": last_loss.get("total_loss_acc_part", None),
+                            "total_loss_hw_part": last_loss.get("total_loss_hw_part", None),
+                            "total_loss": last_loss.get("total_loss", None),
+                            "reason": stable_decision.reason,
+                        },
+                        epoch=epoch,
+                        outer_iter=outer_iter,
+                    )
                 # ===== v5.4 Acc-First Hard Gating: stop_on_violation 必须真的停止 =====
                 if bool(stable_decision.stop_training):
                     val_acc1_str = f"{val_acc1:.6f}" if val_acc1 is not None else "None"

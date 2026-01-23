@@ -263,44 +263,73 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if OmegaConf.select(cfg, path) is None:
             OmegaConf.update(cfg, path, value, merge=True)
 
-    # ---- v5.4 signature-required StableHW knobs (must exist in ALL modes) ----
-    _ensure("stable_hw.enabled", False)
-    _ensure("stable_hw.no_double_scale.enabled", True)
+    if getattr(cfg, "stable_hw", None) is None:
+        cfg.stable_hw = OmegaConf.create({})
+    if getattr(cfg.stable_hw, "normalize", None) is None:
+        cfg.stable_hw.normalize = OmegaConf.create({})
+    if getattr(cfg.stable_hw, "lambda_hw_schedule", None) is None:
+        cfg.stable_hw.lambda_hw_schedule = OmegaConf.create({})
 
-    # moves_enabled required by SPEC_E signature
-    _ensure(
-        "stable_hw.discrete_ops",
-        {
-            "relocate": {"enabled": True},
-            "swap": {"enabled": True},
-            "assign": {"enabled": True},
-        },
+    # -----------------------------
+    # StableHW defaults (v5.4)
+    # -----------------------------
+    stable_hw_enabled = bool(get_nested(cfg, "stable_hw.enabled", True))  # Version-C default = enabled
+
+    # normalize defaults
+    cfg.stable_hw.normalize.enabled = bool(get_nested(cfg, "stable_hw.normalize.enabled", True))
+    cfg.stable_hw.normalize.mode = str(get_nested(cfg, "stable_hw.normalize.mode", "log_ratio_hinge"))
+    cfg.stable_hw.normalize.hinge_margin = float(get_nested(cfg, "stable_hw.normalize.hinge_margin", 0.0))
+    cfg.stable_hw.normalize.eps = float(get_nested(cfg, "stable_hw.normalize.eps", 1e-6))
+    cfg.stable_hw.normalize.alpha = float(get_nested(cfg, "stable_hw.normalize.alpha", 0.5))
+    cfg.stable_hw.normalize.beta = float(get_nested(cfg, "stable_hw.normalize.beta", 0.5))
+    cfg.stable_hw.normalize.gamma = float(get_nested(cfg, "stable_hw.normalize.gamma", 0.5))
+    cfg.stable_hw.normalize.delta = float(get_nested(cfg, "stable_hw.normalize.delta", 0.0))
+    cfg.stable_hw.normalize.clip = float(get_nested(cfg, "stable_hw.normalize.clip", 10.0))
+    cfg.stable_hw.normalize.ref_update = str(get_nested(cfg, "stable_hw.normalize.ref_update", "frozen"))
+    cfg.stable_hw.normalize.use_baseline_stats = bool(get_nested(cfg, "stable_hw.normalize.use_baseline_stats", True))
+    cfg.stable_hw.normalize.baseline_stats_path = get_nested(cfg, "stable_hw.normalize.baseline_stats_path", None)
+
+    # lambda schedule defaults
+    cfg.stable_hw.lambda_hw_schedule.enabled = bool(get_nested(cfg, "stable_hw.lambda_hw_schedule.enabled", True))
+    cfg.stable_hw.lambda_hw_schedule.mode = str(get_nested(cfg, "stable_hw.lambda_hw_schedule.mode", "linear_warmup"))
+    cfg.stable_hw.lambda_hw_schedule.warmup_epochs = int(get_nested(cfg, "stable_hw.lambda_hw_schedule.warmup_epochs", 1))
+    cfg.stable_hw.lambda_hw_schedule.start = float(get_nested(cfg, "stable_hw.lambda_hw_schedule.start", 0.0))
+    cfg.stable_hw.lambda_hw_schedule.end = float(get_nested(cfg, "stable_hw.lambda_hw_schedule.end", 0.0))
+
+    # accuracy guard defaults (Acc-First hard gating)
+    if getattr(cfg.stable_hw, "accuracy_guard", None) is None:
+        cfg.stable_hw.accuracy_guard = OmegaConf.create({})
+    cfg.stable_hw.accuracy_guard.enabled = bool(get_nested(cfg, "stable_hw.accuracy_guard.enabled", True))
+    if getattr(cfg.stable_hw.accuracy_guard, "controller", None) is None:
+        cfg.stable_hw.accuracy_guard.controller = OmegaConf.create({})
+    cfg.stable_hw.accuracy_guard.controller.mode = str(get_nested(cfg, "stable_hw.accuracy_guard.controller.mode", "locked_acc_ref"))
+    cfg.stable_hw.accuracy_guard.controller.epsilon_drop = float(get_nested(cfg, "stable_hw.accuracy_guard.controller.epsilon_drop", 0.0))
+    cfg.stable_hw.accuracy_guard.controller.hysteresis = float(get_nested(cfg, "stable_hw.accuracy_guard.controller.hysteresis", 0.0))
+    cfg.stable_hw.accuracy_guard.controller.recovery_patience = int(get_nested(cfg, "stable_hw.accuracy_guard.controller.recovery_patience", 0))
+    cfg.stable_hw.accuracy_guard.controller.min_outer_iter_before_guard = int(
+        get_nested(cfg, "stable_hw.accuracy_guard.controller.min_outer_iter_before_guard", 0)
     )
-    _ensure("stable_hw.continuous_ops", {})
 
-    # no_drift required by signature
-    _ensure("stable_hw.no_drift.enabled", False)
-    _ensure("stable_hw.no_drift.freeze_baseline_stats", False)
+    # locked acc ref defaults
+    if getattr(cfg.stable_hw, "locked_acc_ref", None) is None:
+        cfg.stable_hw.locked_acc_ref = OmegaConf.create({})
+    cfg.stable_hw.locked_acc_ref.enabled = bool(get_nested(cfg, "stable_hw.locked_acc_ref.enabled", True))
+    cfg.stable_hw.locked_acc_ref.path = get_nested(cfg, "stable_hw.locked_acc_ref.path", None)
+    cfg.stable_hw.locked_acc_ref.expected_acc1 = float(get_nested(cfg, "stable_hw.locked_acc_ref.expected_acc1", 0.0))
+    cfg.stable_hw.locked_acc_ref.auto_write = bool(get_nested(cfg, "stable_hw.locked_acc_ref.auto_write", True))
+    cfg.stable_hw.locked_acc_ref.write_every_outer = int(get_nested(cfg, "stable_hw.locked_acc_ref.write_every_outer", 1))
 
-    # normalize + schedule required by signature
-    # stable_hw signature: submodules default ENABLED (v5.4 expects normalize + schedule to work unless explicitly disabled)
-    _ensure("stable_hw.normalize.enabled", True)
-    _ensure("stable_hw.normalize.use_baseline_stats", False)
-    _ensure("stable_hw.normalize.baseline_stats_path", "")
-    _ensure("stable_hw.normalize.scheme", "none")
-    _ensure("stable_hw.normalize.ref_update", "frozen")
+    # NoDrift defaults
+    if getattr(cfg.stable_hw, "no_drift", None) is None:
+        cfg.stable_hw.no_drift = OmegaConf.create({})
+    cfg.stable_hw.no_drift.enabled = bool(get_nested(cfg, "stable_hw.no_drift.enabled", stable_hw_enabled))
+    cfg.stable_hw.no_drift.freeze_baseline_stats = bool(get_nested(cfg, "stable_hw.no_drift.freeze_baseline_stats", False))
+    cfg.stable_hw.no_drift.ref_update_alpha = float(get_nested(cfg, "stable_hw.no_drift.ref_update_alpha", 0.1))
 
-    _ensure("stable_hw.lambda_hw_schedule.enabled", True)
-    _ensure("stable_hw.lambda_hw_schedule.start_epoch", 0)
-    _ensure("stable_hw.lambda_hw_schedule.end_epoch", 0)
-    _ensure("stable_hw.lambda_hw_schedule.warmup_epochs", 0)
-    _ensure("stable_hw.lambda_hw_schedule.final_lambda_hw", 0.0)
-    _ensure("stable_hw.lambda_hw_schedule.freeze_schedule_in_recovery", True)
-
-    # locked_acc_ref_json required by signature: allow empty placeholder in layout-only configs
-    if OmegaConf.select(cfg, "locked_acc_ref") is None and OmegaConf.select(cfg, "stable_hw.locked_acc_ref") is None:
-        _ensure("stable_hw.locked_acc_ref.path", "")
-        _ensure("stable_hw.locked_acc_ref.expected_acc1", None)
+    # NoDoubleScale defaults
+    if getattr(cfg.stable_hw, "no_double_scale", None) is None:
+        cfg.stable_hw.no_double_scale = OmegaConf.create({})
+    cfg.stable_hw.no_double_scale.enabled = bool(get_nested(cfg, "stable_hw.no_double_scale.enabled", True))
 
     if mode == "version_c":
         _apply_defaults(cfg, REQ_VERSION_C_HW_DEFAULTS)
