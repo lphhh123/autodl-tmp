@@ -1453,6 +1453,10 @@ def train_version_c(
                         "lambda_hw_effective": float(getattr(stable_decision, "lambda_hw_effective", 0.0) or 0.0),
                         "hw_loss_raw": float(hw_loss_norm or 0.0),
                         "hw_loss_used": float(hw_loss_used or 0.0),
+                        "total_loss_acc_part": float(acc_loss.item())
+                        if hasattr(acc_loss, "item")
+                        else float(acc_loss or 0.0),
+                        "total_loss_hw_part": float(hw_loss_used or 0.0),
                         "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
                         "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
                         "reason": dict(getattr(stable_decision, "reason", {}) or {}),

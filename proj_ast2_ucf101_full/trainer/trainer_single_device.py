@@ -252,6 +252,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                         gate = "reject_hw"
                     if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
                         gate = "reject_hw"
+                    acc_loss = stable_state.get("acc_loss", 0.0)
+                    hw_loss_used = stable_state.get("hw_loss_used", 0.0)
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -264,6 +266,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "gate": gate,
                             "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
                             "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
+                            "total_loss_acc_part": float(acc_loss.item())
+                            if hasattr(acc_loss, "item")
+                            else float(acc_loss or 0.0),
+                            "total_loss_hw_part": float(hw_loss_used or 0.0),
                             "total_loss": float(stable_state.get("total_loss", 0.0) or 0.0),
                             "guard_mode": str(stable_decision.guard_mode),
                             "lambda_hw_effective": float(stable_decision.lambda_hw_effective),
@@ -381,6 +387,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                         gate = "reject_hw"
                     if str(getattr(stable_decision, "guard_mode", "")).upper() in ("VIOLATE", "RECOVERY", "WARMUP"):
                         gate = "reject_hw"
+                    acc_loss = stable_state.get("acc_loss", 0.0)
+                    hw_loss_used = stable_state.get("hw_loss_used", 0.0)
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -393,6 +401,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "gate": gate,
                             "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
                             "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
+                            "total_loss_acc_part": float(acc_loss.item())
+                            if hasattr(acc_loss, "item")
+                            else float(acc_loss or 0.0),
+                            "total_loss_hw_part": float(hw_loss_used or 0.0),
                             "total_loss": float(stable_state.get("total_loss", 0.0) or 0.0),
                             "guard_mode": str(stable_decision.guard_mode),
                             "lambda_hw_effective": float(stable_decision.lambda_hw_effective),

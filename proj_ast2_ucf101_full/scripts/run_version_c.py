@@ -129,6 +129,10 @@ def main():
     if args.out_dir is None and args.out is not None:
         args.out_dir = args.out
     cfg = load_config(args.cfg)
+    requested_cfg_yaml = OmegaConf.to_yaml(cfg)
+    if not hasattr(cfg, "train") or cfg.train is None:
+        cfg.train = {}
+    cfg.train.requested_cfg_yaml = requested_cfg_yaml
     cfg.cfg_path = args.cfg
     seed_everything(int(args.seed))
     if hasattr(cfg, "train"):
@@ -136,6 +140,7 @@ def main():
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
+    cfg.train.requested_cfg_yaml = requested_cfg_yaml
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
 
