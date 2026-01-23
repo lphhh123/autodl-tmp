@@ -96,21 +96,35 @@ def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
     heuragenix_root_cfg = cfg_root or "../HeurAgenix"
     hx = Path(heuragenix_root_cfg).expanduser()
 
+    candidates = []
     if not hx.is_absolute():
         cand_parent = (project_root.parent / hx).resolve()
         cand_local = (project_root / hx).resolve()
         if cand_parent.exists():
-            heuragenix_root = cand_parent
-        else:
-            heuragenix_root = cand_local
+            candidates.append(cand_parent)
+        if cand_local.exists():
+            candidates.append(cand_local)
+        heuragenix_root = candidates[0] if candidates else cand_local
     else:
         heuragenix_root = hx
+        if heuragenix_root.exists():
+            candidates.append(heuragenix_root.resolve())
 
     local_dup = project_root / "HeurAgenix"
     parent_dup = project_root.parent / "HeurAgenix"
-    if local_dup.exists() and parent_dup.exists():
-        print(f"[WARN] Detected two HeurAgenix copies: {local_dup} and {parent_dup}. Use sibling one.")
-        heuragenix_root = parent_dup.resolve()
+    if local_dup.exists():
+        candidates.append(local_dup.resolve())
+    if parent_dup.exists():
+        candidates.append(parent_dup.resolve())
+
+    candidates = list(dict.fromkeys(candidates))
+    if len(candidates) > 1 and not cfg_root:
+        raise RuntimeError(
+            "[v5.4 contract] Multiple HeurAgenix roots detected. "
+            "You must pass --heuragenix_dir to avoid silent repo mismatch."
+        )
+    if candidates:
+        heuragenix_root = candidates[0]
 
     return heuragenix_root
 
@@ -576,7 +590,6 @@ def _write_trace_and_pareto(
     """
     out_dir = trace_dir.parent
     trace_csv = trace_dir / "trace.csv"
-    trace_csv_compat = out_dir / "trace.csv"
     pareto_csv = out_dir / "pareto_points.csv"
 
     trace_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -606,6 +619,8 @@ def _write_trace_and_pareto(
     fallback_note = ""
     if str(requested_method) != str(effective_method):
         fallback_note = f"method_fallback:{requested_method}->{effective_method}"
+        # ---- v5.4 contract: make fallback auditable in an existing CSV field ----
+        method_note = method_note + "|" + fallback_note
 
     with trace_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=TRACE_FIELDS, restval="", extrasaction="ignore")
@@ -648,7 +663,6 @@ def _write_trace_and_pareto(
                 }
             )
             row["policy_switch"] = method_note
-            row["fallback_reason"] = fallback_note
             w.writerow(row)
         else:
             for idx, r in enumerate(hx_rows):
@@ -719,7 +733,6 @@ def _write_trace_and_pareto(
                 )
                 row["time_s"] = float(row["time_ms"]) / 1000.0
                 row["policy_switch"] = method_note
-                row["fallback_reason"] = fallback_note
 
                 if "selection_id" in r:
                     row["selection_id"] = str(r.get("selection_id", ""))
@@ -732,9 +745,6 @@ def _write_trace_and_pareto(
 
                 if rec_stage != "init" and accepted:
                     pareto.add(float(row["comm_norm"]), float(row["therm_norm"]), {})
-
-    if trace_csv.exists():
-        shutil.copy2(trace_csv, trace_csv_compat)
 
     with pareto_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["comm_norm", "therm_norm"], restval="")
@@ -780,7 +790,6 @@ def _load_pareto_from_csv(pareto_csv_path: Path, pareto_cfg: dict) -> ParetoSet:
 def _write_layout_best(
     out_dir: Path,
     trace_path: Path,
-    trace_path_compat: Path,
     layout_input: dict,
     cfg: Any,
     pareto: ParetoSet,
@@ -808,7 +817,6 @@ def _write_layout_best(
         "knee_point": {"comm_norm": best_comm, "therm_norm": best_therm},
         "artifacts": {
             "trace_csv": str(trace_path.absolute()),
-            "trace_csv_compat": str(trace_path_compat.absolute()),
             "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
             "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
         },
@@ -1197,7 +1205,6 @@ def main() -> None:
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
     trace_path = trace_dir / "trace.csv"
-    trace_path_compat = out_dir / "trace.csv"
     # ---- v5.4 seed must be signature-visible (SPEC_E) ----
     try:
         cfg.seed = int(args.seed)
@@ -1618,6 +1625,23 @@ def main() -> None:
     hx_rows = list(_iter_recordings(recordings_path))
     budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
     trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
+    # ---- v5.4 contract: auditable method fallback (requested vs effective) ----
+    if str(baseline_method) != str(method):
+        try:
+            append_trace_event_v54(
+                trace_events_path,
+                "fallback",
+                payload={
+                    "name": "heuragenix.method",
+                    "requested": str(baseline_method),
+                    "effective": str(method),
+                    "reason": "heuragenix_llm_failed_or_unavailable",
+                },
+                run_id=str(run_id),
+                step=0,
+            )
+        except Exception as _e:
+            logger.warning(f"[HeurAgenix] failed to append method fallback trace event: {_e}")
     pareto, trace_info = _write_trace_and_pareto(
         trace_dir=out_dir / "trace",
         hx_rows=hx_rows,
@@ -1661,7 +1685,7 @@ def main() -> None:
     best_solution_path = output_dir / "best_solution.json"
     best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
     best_solution_payload = _read_best_solution_meta(best_solution_path)
-    _write_layout_best(out_dir, trace_path, trace_path_compat, layout_input, cfg, pareto, best_assign, run_id)
+    _write_layout_best(out_dir, trace_path, layout_input, cfg, pareto, best_assign, run_id)
 
     detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
@@ -1840,7 +1864,6 @@ def main() -> None:
             "trace_dir": str(trace_dir.absolute()),
             "artifacts": {
                 "trace_csv": str(trace_path.absolute()),
-                "trace_csv_compat": str(trace_path_compat.absolute()),
                 "pareto_points_csv": str((out_dir / "pareto_points.csv").absolute()),
                 "trace_metrics_json": str((out_dir / "trace_metrics.json").absolute()),
                 "oscillation_metrics_json": str((out_dir / "oscillation_metrics.json").absolute()),

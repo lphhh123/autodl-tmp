@@ -923,9 +923,38 @@ def train_version_c(
                 logger.info(
                     "[StableHW] Discrete gate is closed but cache is empty; initializing mapping/layout once."
                 )
+
+                # ---- v5.4 contract: explicit auditable fallback (requested vs effective) ----
+                cached_mapping = cache.get("mapping")
+                cached_layout = cache.get("layout")
+                prev_reason = str(stable_hw_state.get("decision_reason", "") or "")
+                fb_reason = "fallback_cache_empty_force_enable_discrete_updates"
+                stable_hw_state["decision_reason"] = (prev_reason + "|" + fb_reason) if prev_reason else fb_reason
+                stable_hw_state["discrete_frozen_init_mapping"] = True
+
+                # requested=False (frozen), effective=True (forced enable)
+                try:
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "fallback",
+                        payload={
+                            "name": "stable_hw.allow_discrete_updates",
+                            "requested": False,
+                            "effective": True,
+                            "reason": fb_reason,
+                            "context": {
+                                "cached_mapping_is_none": cached_mapping is None,
+                                "cached_layout_is_none": cached_layout is None,
+                            },
+                        },
+                        run_id=str(run_id),
+                        step=int(global_step),
+                    )
+                except Exception as _e:
+                    logger.warning(f"[StableHW] failed to append fallback trace event: {_e}")
+
                 allow_discrete_updates = True
                 stable_hw_state["allow_discrete_updates"] = True
-                stable_hw_state["discrete_frozen_init_mapping"] = True
 
             allow_discrete = allow_discrete_updates
             update_alpha = base_update_alpha and allow_discrete
