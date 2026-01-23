@@ -45,7 +45,13 @@ from utils.config_validate import validate_and_fill_defaults
 from utils.config_utils import get_nested
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
+from utils.trace_guard import (
+    init_trace_dir,
+    append_trace_event_v54,
+    finalize_trace_dir,
+    update_trace_summary,
+    build_baseline_trace_summary,
+)
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
 
@@ -535,10 +541,13 @@ def run_layout_agent(
             pass
         update_trace_summary(
             trace_dir,
-            ok=bool(ok),
-            reason=str(reason),
-            steps_done=int(steps_done),
-            best_solution_valid=bool(best_solution_valid),
+            {
+                "ok": bool(ok),
+                "reason": str(reason),
+                "steps_done": int(steps_done),
+                "best_solution_valid": bool(best_solution_valid),
+                **build_baseline_trace_summary(cfg, {}),
+            },
         )
         if trace_path.exists():
             shutil.copy2(trace_path, trace_path_compat)

@@ -545,6 +545,70 @@ def update_trace_summary(
     _write_json(trace_dir / "summary.json", out)
 
 
+def _get_cfg_value(cfg: Any, path: str, default: Any = None) -> Any:
+    if cfg is None:
+        return default
+    try:
+        if OmegaConf.is_config(cfg):
+            val = OmegaConf.select(cfg, path)
+            return default if val is None else val
+    except Exception:
+        pass
+    cur = cfg
+    for part in path.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            cur = getattr(cur, part, None)
+    return default if cur is None else cur
+
+
+def build_baseline_trace_summary(cfg: Any, stable_hw_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    locked_path = _get_cfg_value(cfg, "stable_hw.locked_acc_ref.baseline_stats_path", None)
+    if locked_path is None:
+        locked_path = _get_cfg_value(cfg, "locked_acc_ref.baseline_stats_path", None)
+    hw_path = _get_cfg_value(cfg, "stable_hw.baseline_stats_path", None)
+    baseline_path = str(locked_path or hw_path or "").strip()
+
+    acc_ref_source = ""
+    hw_ref_source = ""
+    if isinstance(stable_hw_state, dict):
+        acc_ref_source = str(stable_hw_state.get("acc_ref_source", "") or "")
+        hw_ref_source = str(stable_hw_state.get("hw_ref_source", "") or "")
+    if not acc_ref_source:
+        acc_ref_source = str(
+            _get_cfg_value(cfg, "stable_hw.locked_acc_ref.source", None)
+            or _get_cfg_value(cfg, "locked_acc_ref.source", "")
+            or ""
+        )
+    if not hw_ref_source:
+        hw_ref_source = str(_get_cfg_value(cfg, "stable_hw.hw_ref_source", "") or "")
+
+    is_placeholder = None
+    if baseline_path:
+        try:
+            p = Path(baseline_path)
+            if p.exists() and p.is_file():
+                obj = json.loads(p.read_text(encoding="utf-8"))
+                note = str(obj.get("note", "")).lower()
+                if obj.get("is_placeholder") is True or ("placeholder" in note):
+                    is_placeholder = True
+                else:
+                    is_placeholder = False
+        except Exception:
+            is_placeholder = None
+
+    return {
+        "baseline_stats_path": baseline_path,
+        "hw_baseline_stats_path": str(hw_path or "").strip(),
+        "acc_ref_source": str(acc_ref_source),
+        "hw_ref_source": str(hw_ref_source),
+        "is_placeholder": is_placeholder,
+    }
+
+
 def ensure_trace_events(trace_dir: Path) -> Path:
     """
     兼容旧逻辑：保证 trace_events.jsonl 至少存在；真正的 trace_header/finalize 由 init/finalize 管控。

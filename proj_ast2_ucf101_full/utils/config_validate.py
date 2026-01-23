@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+import json
+import os
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -878,6 +880,38 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                     )
                 if not Path(p).exists():
                     raise ValueError(f"SPEC v5.4 violation: baseline_stats_path not found: {p}")
+                lk = str(p)
+
+                # ★ v5.4 P0: disallow placeholder baseline stats under strict mode
+                try:
+                    with open(lk, "r", encoding="utf-8") as f:
+                        _bs = json.load(f)
+                except Exception as e:
+                    raise ValueError(f"[v5.4 P0] failed to read baseline_stats_path: {lk}: {e}")
+
+                _note = str(_bs.get("note", "")).lower()
+                if _bs.get("is_placeholder") is True or ("placeholder" in _note):
+                    raise ValueError(
+                        "[v5.4 P0] baseline_stats_path points to a PLACEHOLDER baseline_stats. "
+                        "This would silently corrupt LockedAccRef/NoDrift semantics. "
+                        "Run a real baseline and regenerate baseline_stats."
+                    )
+
+                # ★ v5.4 P0: enforce single baseline source when using baseline_stats for hw refs
+                hw_bs = str(get_nested(cfg, "stable_hw.baseline_stats_path", "") or "").strip()
+                hw_src = str(get_nested(cfg, "stable_hw.hw_ref_source", "") or "").strip()
+
+                if hw_src == "baseline_stats":
+                    if not hw_bs:
+                        raise ValueError(
+                            "[v5.4 P0] stable_hw.hw_ref_source=baseline_stats but stable_hw.baseline_stats_path is empty."
+                        )
+                    if os.path.abspath(hw_bs) != os.path.abspath(lk):
+                        raise ValueError(
+                            "[v5.4 P0] baseline split detected: "
+                            "stable_hw.baseline_stats_path != stable_hw.locked_acc_ref.baseline_stats_path. "
+                            "v5.4 requires a single baseline source for auditability."
+                        )
 
     # === v5.4 contract enforcement (P0 hard fail) ===
     mode_value = str(get_nested(cfg, "train.mode", "") or "")

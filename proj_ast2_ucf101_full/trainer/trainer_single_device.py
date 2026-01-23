@@ -24,7 +24,13 @@ from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
-from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
+from utils.trace_guard import (
+    init_trace_dir_v54,
+    append_trace_event_v54,
+    finalize_trace_dir,
+    update_trace_summary,
+    build_baseline_trace_summary,
+)
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config import AttrDict
@@ -555,13 +561,19 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             # Must happen BEFORE finalize event
             early_stop = bool(early_stop_triggered) if "early_stop_triggered" in locals() else False
             epochs_ran = int(ran_epochs) if "ran_epochs" in locals() else 0
-            update_trace_summary(
-                trace_dir,
-                ok=bool(ok),
-                reason="done" if ok else "error",
-                steps_done=int(steps_done),
-                best_solution_valid=bool(ok and not early_stop_triggered),
+            summary_payload = {
+                "ok": bool(ok),
+                "reason": "done" if ok else "error",
+                "steps_done": int(steps_done),
+                "best_solution_valid": bool(ok and not early_stop_triggered),
+            }
+            summary_payload.update(
+                build_baseline_trace_summary(
+                    cfg,
+                    stable_state if "stable_state" in locals() else {},
+                )
             )
+            update_trace_summary(trace_dir, summary_payload)
             finalize_trace_dir(
                 trace_events_path,
                 reason="done" if ok else "error",

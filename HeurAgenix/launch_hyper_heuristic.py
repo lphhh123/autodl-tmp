@@ -1,5 +1,6 @@
 import os
 import argparse
+import json
 import random
 from pathlib import Path
 
@@ -132,7 +133,7 @@ def parse_arguments():
         "-l",
         "--llm_config_file",
         type=str,
-        required=True,
+        default=None,
         help="Path to the language model configuration file (REQUIRED by v5.4 contract).",
     )
     parser.add_argument("-n", "--iterations_scale_factor", type=float, default=2.0)
@@ -168,6 +169,9 @@ def main():
     np.random.seed(args.seed)
 
     repo_root = Path(__file__).resolve().parent
+    llm_config_effective = None
+    if args.llm_config_file:
+        llm_config_effective = str(Path(args.llm_config_file).expanduser().resolve())
     data_root, output_base = _resolve_roots(repo_root)
     test_data_dir = data_root / args.problem / "test_data"
 
@@ -238,11 +242,27 @@ def main():
                 seed=seed_val,
             )
         elif args.heuristic == "llm_hh":
+            if not args.llm_config_file:
+                raise ValueError(
+                    "[v5.4] --llm_config_file is required when using llm_hh. "
+                    "Refusing to fall back to implicit defaults."
+                )
+            llm_meta = {
+                "llm_config_file": llm_config_effective,
+                "llm_config_file_exists": bool(
+                    llm_config_effective and Path(llm_config_effective).is_file()
+                ),
+                "llm_config_file_source": "cli",
+            }
+            (out_dir / "llm_config_meta.json").write_text(
+                json.dumps(llm_meta, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             runner = LLMSelectionHyperHeuristic(
                 heuristic_pool=heuristic_pool_files,
                 problem=args.problem,
                 heuristic_dir=str(heur_dir),
-                llm_config_file=args.llm_config_file,
+                llm_config_file=llm_config_effective,
                 iterations_scale_factor=float(args.iterations_scale_factor),
                 selection_frequency=int(args.selection_frequency),
                 num_candidate_heuristics=int(args.num_candidate_heuristics),
