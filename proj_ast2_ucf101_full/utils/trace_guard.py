@@ -303,6 +303,8 @@ def init_trace_dir_v54(
     run_meta: Optional[Dict[str, Any]] = None,
     extra_manifest: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Path]:
+    global _DEFAULT_RUN_ID
+    _DEFAULT_RUN_ID = str(run_id)
     trace_dir = Path(base_dir) / str(run_id)
     resolved_config = None
     if cfg is not None:
@@ -331,11 +333,32 @@ def init_trace_dir_v54(
     return meta
 
 
-def append_trace_event_v54(path: Path, event_type: str, payload: dict, run_id: str, step: int):
+_DEFAULT_RUN_ID: Optional[str] = None
+
+
+def append_trace_event_v54(
+    path: Path,
+    event_type: str,
+    payload: dict,
+    run_id: Optional[str] = None,
+    step: Optional[int] = None,
+    epoch: Optional[int] = None,
+    outer_iter: Optional[int] = None,
+):
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
     if flag.exists() and event_type != "finalize":
         raise RuntimeError(f"trace_events is finalized; refusing to append event_type={event_type}")
+
+    if run_id is None:
+        run_id = _DEFAULT_RUN_ID or "unknown"
+    if step is None:
+        if outer_iter is not None:
+            step = int(outer_iter)
+        elif epoch is not None:
+            step = int(epoch)
+        else:
+            step = 0
 
     _append_jsonl(
         path,

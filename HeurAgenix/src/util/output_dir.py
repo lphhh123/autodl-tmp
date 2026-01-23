@@ -10,18 +10,19 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def get_output_dir() -> Path:
-    """
+def get_output_root(repo_root: Path) -> Path:
+    """Get output root directory.
+
     Official HeurAgenix outputs under:
-      <output_base>/output/{problem}/{test_data}/{result_dir}/{engine}/...
+      <output_root>/{problem}/{test_data}/{result_dir}/{engine}/...
 
-    Wrapper will set AMLT_OUTPUT_DIR=<base_dir>. We append /output unless it already ends with /output.
-    This keeps compatibility with guides that refer to ./output as the canonical root.
+    If AMLT_OUTPUT_DIR is set, treat it as the output root directory.
     """
-    base = os.environ.get("AMLT_OUTPUT_DIR")
+    base = os.environ.get("AMLT_OUTPUT_DIR", None)
     if base:
-        p = Path(base).expanduser().resolve()
-        return p if p.name == "output" else (p / "output")
-
-    repo_root = _repo_root()
+        return Path(base).expanduser().resolve()
     return (repo_root / "output").resolve()
+
+
+def get_output_dir() -> Path:
+    return get_output_root(_repo_root())

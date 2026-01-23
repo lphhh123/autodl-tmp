@@ -242,7 +242,9 @@ def stable_hw_schedule(
     st.setdefault("in_recovery", False)
     st.setdefault("allow_discrete_updates", True)
 
-    enabled = bool(_cfg_get(stable_hw_cfg, "enabled", False))
+    # v5.4: treat missing stable_hw.enabled as enabled (Version-C default);
+    # only disable schedule when stable_hw.enabled is explicitly False.
+    enabled = bool(_cfg_get(stable_hw_cfg, "enabled", True))
     sched = _cfg_get(stable_hw_cfg, "lambda_hw_schedule", {}) or {}
     sched_enabled = bool(_cfg_get(sched, "enabled", enabled))
 
@@ -806,14 +808,16 @@ def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=N
             loaded_ok = True
 
     if (not loaded_ok) and no_drift_requested:
-        # SPEC_C 12B.2: baseline missing -> warning + fallback=ema + record
-        stable_hw_state["hw_ref_source"] = "ema_fallback_missing_baseline_stats"
-        stable_hw_state["_refs_loaded_from"] = str(stats_path) if stats_path else None
-        stable_hw_state["_force_ref_update_mode"] = "ema"
-        stable_hw_state["no_drift_effective"] = False
+        # v5.4: NoDrift MUST remain effective even when baseline stats are missing.
+        # We freeze refs (hw_loss will fall back to cfg.hw.* refs) and forbid any ref_update.
+        stable_hw_state["baseline_missing"] = True
+        stable_hw_state["hw_ref_source"] = "cfg_defaults_missing_baseline_stats"
+        stable_hw_state["_refs_loaded_from"] = str(stats_path) if stats_path else "none"
+        stable_hw_state["_force_ref_update_mode"] = "frozen"
+        stable_hw_state["no_drift_effective"] = True
     else:
-        stable_hw_state["no_drift_effective"] = bool(no_drift_requested)
-        stable_hw_state.setdefault("hw_ref_source", "cfg_defaults" if not loaded_ok else "dense_baseline")
+        stable_hw_state["hw_ref_source"] = "baseline_stats" if loaded_ok else "none"
+        stable_hw_state["_refs_loaded_from"] = str(stats_path) if stats_path else "none"
 
     # always keep aliases in sync
     stable_hw_state["latency_ref_ms"] = stable_hw_state["ref_T"]

@@ -43,19 +43,13 @@ def _load_layout_evaluator():
         if env_override:
             candidates.append(Path(env_override).expanduser())
 
-        # common sibling names
-        candidates.extend(
-            [
-                sibling_root / "proj_ast2_ucf101_full",
-                sibling_root / "proj_ast2_ucf101_full_CODE_ONLY",
-            ]
-        )
-
-        # fallback: any sibling that matches prefix
+        # auto-discover sibling repository (no hard-coded directory name)
         try:
-            for p in sibling_root.iterdir():
-                if p.is_dir() and p.name.startswith("proj_ast2_ucf101_full"):
-                    candidates.append(p)
+            for c in sibling_root.iterdir():
+                if not c.is_dir():
+                    continue
+                if (c / "layout" / "evaluator.py").exists():
+                    candidates.append(c)
         except Exception:
             pass
 
