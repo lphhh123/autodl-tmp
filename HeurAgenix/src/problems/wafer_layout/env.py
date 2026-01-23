@@ -20,6 +20,14 @@ from src.problems.wafer_layout.problem_state import (
 
 def _load_layout_evaluator():
     try:
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[3]
+        sibling = repo_root.parent / "proj_ast2_ucf101_full"
+        if sibling.exists() and str(sibling) not in sys.path:
+            sys.path.insert(0, str(sibling))
+
         if importlib.util.find_spec("layout.evaluator") is None:
             return None, None, "layout.evaluator not found"
         module = importlib.import_module("layout.evaluator")
@@ -111,6 +119,7 @@ class Env(BaseEnv):
         self._evaluator = None
         self._layout_state = None
         self._init_evaluator()
+        self._max_eval_calls = int(self.instance_data.get("max_eval_calls", 0) or 0)
         self._meta_base = {
             "evaluator_source": self._evaluator_source,
             "evaluator_import_error": self._evaluator_import_error,
@@ -290,6 +299,8 @@ class Env(BaseEnv):
         super().reset(output_dir=output_dir)
         self._step_id = 0
         self._sa_T = float(self.temp_init)
+        ms = int(self.instance_data.get("max_steps", 0) or 0)
+        self.max_steps = ms if ms > 0 else None
         seed_obj = self.instance_data.get("seed", {}) or {}
         seed = int(seed_obj.get("seed_id", getattr(self, "_seed_id", 0)) or 0)
         self.seed = seed
@@ -593,9 +604,12 @@ class Env(BaseEnv):
 
     @property
     def continue_run(self) -> bool:
-        if getattr(self, "max_steps", None) is None:
-            return True
-        return int(self.current_steps) < int(self.max_steps)
+        if getattr(self, "_max_eval_calls", 0) and self._evaluator is not None:
+            if int(getattr(self._evaluator, "evaluator_calls", 0)) >= int(self._max_eval_calls):
+                return False
+        if self.max_steps is not None:
+            return int(self.current_steps) < int(self.max_steps)
+        return True
 
     def dump_result(self):
         if self._rec_fp is not None:

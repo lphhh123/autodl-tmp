@@ -16,6 +16,13 @@ python -m scripts.run_ast2_ucf101 --cfg configs/smoke_ast_ucf101.yaml
 echo "[SMOKE] Version-C"
 python -m scripts.run_version_c --cfg configs/smoke_version_c_ucf101.yaml
 
+# After run_vc, assert A3 middleware exists
+if [[ ! -f "outputs/P3/A3/layout_input.json" ]]; then
+  echo "[SMOKE] Missing outputs/P3/A3/layout_input.json after Version-C phase3."
+  echo "[SMOKE] This breaks B0/B1/B2. Check export flags & config promotion."
+  exit 3
+fi
+
 echo "[SMOKE] Layout agent L0"
 python -m scripts.run_layout_agent \
   --layout_input outputs/P3/A3/layout_input.json \

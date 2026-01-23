@@ -4,6 +4,10 @@ layout_agent:
   max_runtime_sec: 1800
   export_trace: true
 
+budget:
+  total_eval_budget: 2000
+  max_wallclock_sec: 1800
+
 objective:
   enable_therm: true
   sigma_mm: 20.0

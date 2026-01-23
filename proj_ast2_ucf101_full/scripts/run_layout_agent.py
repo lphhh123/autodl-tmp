@@ -18,6 +18,7 @@ import json
 import random
 import time
 import uuid
+from types import SimpleNamespace
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -114,6 +115,16 @@ def run_layout_agent(
                 "layout_input": str(layout_input_path),
             }
         )
+    # ---- v5.4 seed must be signature-visible (SPEC_E) ----
+    try:
+        cfg.seed = int(seed)
+    except Exception:
+        pass
+    try:
+        if hasattr(cfg, "train"):
+            cfg.train.seed = int(seed)
+    except Exception:
+        pass
     sig = build_signature_v54(cfg, method_name="ours_layout_agent")
     init_trace_dir(
         trace_dir,
@@ -132,6 +143,11 @@ def run_layout_agent(
 
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
     planned_steps = int(detailed_cfg.get("max_steps", detailed_cfg.get("steps", 0)) or 0)
+    # ---- budget (SPEC_D/E): evaluator-calls hard budget ----
+    budget_cfg = getattr(cfg, "budget", None) or {}
+    total_eval_budget = int(getattr(budget_cfg, "total_eval_budget", 0) or 0)
+    max_wallclock_sec = float(getattr(budget_cfg, "max_wallclock_sec", 0.0) or 0.0)
+    search_eval_budget = total_eval_budget - 1 if total_eval_budget and total_eval_budget > 1 else total_eval_budget
 
     start_time = time.time()
     seed_everything(int(seed))
@@ -165,6 +181,17 @@ def run_layout_agent(
                 "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
             },
         )
+        class _BudgetExceeded(RuntimeError):
+            pass
+
+        _orig_eval = evaluator.evaluate
+
+        def _budgeted_evaluate(state):
+            if search_eval_budget and evaluator.evaluator_calls >= search_eval_budget:
+                raise _BudgetExceeded("eval budget exhausted")
+            return _orig_eval(state)
+
+        evaluator.evaluate = _budgeted_evaluate
         layout_state = LayoutState(
             S=S,
             Ns=sites_xy.shape[0],
@@ -258,24 +285,32 @@ def run_layout_agent(
 
         # Stage5: detailed place
         detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-        result = run_detailed_place(
-            sites_xy=sites_xy,
-            assign_seed=assign_leg,
-            evaluator=evaluator,
-            layout_state=layout_state,
-            traffic_sym=traffic_sym,
-            site_to_region=site_to_region,
-            regions=regions,
-            clusters=clusters,
-            cluster_to_region=cluster_to_region,
-            pareto=pareto,
-            cfg=detailed_cfg,
-            trace_path=out_dir / "trace.csv",
-            seed_id=int(seed),
-            chip_tdp=chip_tdp,
-            llm_usage_path=out_dir / "llm_usage.jsonl",
-            recordings_path=out_dir / "recordings.jsonl",
-        )
+        budget_exhausted = False
+        try:
+            result = run_detailed_place(
+                sites_xy=sites_xy,
+                assign_seed=assign_leg,
+                evaluator=evaluator,
+                layout_state=layout_state,
+                traffic_sym=traffic_sym,
+                site_to_region=site_to_region,
+                regions=regions,
+                clusters=clusters,
+                cluster_to_region=cluster_to_region,
+                pareto=pareto,
+                cfg=detailed_cfg,
+                trace_path=out_dir / "trace.csv",
+                seed_id=int(seed),
+                chip_tdp=chip_tdp,
+                llm_usage_path=out_dir / "llm_usage.jsonl",
+                recordings_path=out_dir / "recordings.jsonl",
+            )
+        except _BudgetExceeded:
+            budget_exhausted = True
+            _, _, payload = pareto.knee_point()
+            best_assign = payload.get("assign", None)
+            best_total = payload.get("total_scalar", None)
+            result = SimpleNamespace(assign=assign_leg, policy_meta={})
         assign_final = result.assign
 
         # Stage6: alt-opt (optional)
@@ -302,17 +337,23 @@ def run_layout_agent(
         best_comm, best_therm, best_payload = pareto.knee_point()
         best_assign = best_payload.get("assign", assign_final)
         layout_state.assign = np.array(best_assign, dtype=int)
-        best_eval = evaluator.evaluate(layout_state)
+        best_eval = None
+        if best_assign is not None and (not total_eval_budget or evaluator.evaluator_calls < total_eval_budget):
+            evaluator.evaluate = _orig_eval
+            best_eval = evaluator.evaluate(layout_state)
         runtime_s = time.time() - start_time
-        best_total = float(best_eval.get("total_scalar", 0.0))
+        best_total = float(best_eval.get("total_scalar", 0.0)) if best_eval else float(best_total or 0.0)
         layout_best = {
             "run_id": run_id,
             "best": {
                 "assign": best_assign.tolist(),
                 "pos_xy_mm": sites_xy[best_assign].tolist(),
                 "objectives": {"comm_norm": best_comm, "therm_norm": best_therm},
-                "raw": {"L_comm": best_eval["L_comm"], "L_therm": best_eval["L_therm"]},
-                "penalty": best_eval["penalty"],
+                "raw": {
+                    "L_comm": best_eval["L_comm"] if best_eval else None,
+                    "L_therm": best_eval["L_therm"] if best_eval else None,
+                },
+                "penalty": best_eval["penalty"] if best_eval else {},
                 "meta": {"stage": "knee_point"},
             },
             "pareto_front": [
@@ -349,9 +390,9 @@ def run_layout_agent(
             "run_id": run_id,
             "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
             "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
-            "best_total": float(best_eval.get("total_scalar", 0.0)),
-            "best_comm": float(best_eval.get("comm_norm", best_comm)),
-            "best_therm": float(best_eval.get("therm_norm", best_therm)),
+            "best_total": float(best_eval.get("total_scalar", 0.0)) if best_eval else float(best_total or 0.0),
+            "best_comm": float(best_eval.get("comm_norm", best_comm)) if best_eval else float(best_comm),
+            "best_therm": float(best_eval.get("therm_norm", best_therm)) if best_eval else float(best_therm),
             "pareto_size": len(pareto.points),
             "pareto_front_size": len(pareto.points),
             "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
@@ -369,17 +410,17 @@ def run_layout_agent(
 
         # ---- v5.4: enforce budget fairness artifact (budget.json) ----
         try:
-            detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
-            step_limit = int(detailed_cfg.get("steps", 0) or detailed_cfg.get("max_steps", 0) or 0)
-            wall_limit = int(getattr(getattr(cfg, "layout_agent", None), "max_runtime_sec", 0) or 0)
-
             budget = {
                 "run_id": run_id,
-                "primary_limit": {"type": "wall_time_s", "limit": wall_limit},
-                "secondary_limit": {"type": "steps", "limit": step_limit},
-                "actual_eval_calls": int(getattr(evaluator, "evaluate_calls", 0)),
+                "primary_limit": {"type": "eval_calls", "limit": int(total_eval_budget)},
+                "secondary_limit": {"type": "wall_time_s", "limit": float(max_wallclock_sec)},
+                "planned_total_eval_budget": int(total_eval_budget),
+                "planned_search_eval_budget": int(search_eval_budget),
+                "actual_evaluator_calls": int(getattr(evaluator, "evaluator_calls", 0) if evaluator else 0),
+                "actual_wallclock_sec": float(time.time() - start_time),
                 "seed_id": int(seed) if "seed" in locals() else None,
                 "method": "ours",
+                "budget_exhausted": bool(budget_exhausted),
             }
             (out_dir / "budget.json").write_text(
                 json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
