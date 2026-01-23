@@ -395,6 +395,14 @@ def _require_keys(event_type: str, payload: dict, keys: list) -> None:
         raise ValueError(f"[SPEC_E v5.4] trace event '{event_type}' missing keys: {missing}")
 
 
+def _assert_event(event_type: str, payload: dict) -> None:
+    if event_type not in ("trace_header", "init", "gating_trigger", "proxy_sanitize", "ref_update", "finalize"):
+        return
+    if event_type == "init":
+        if not isinstance(payload, dict):
+            raise ValueError("init.payload must be a dict")
+
+
 def append_trace_event_v54(
     path: Path,
     event_type: str,
@@ -406,6 +414,8 @@ def append_trace_event_v54(
 ):
     if payload is None:
         payload = {}
+
+    _assert_event(event_type, payload)
 
     # hard forbid legacy / ambiguous event_type aliases
     if event_type in {"gating_decision", "gatingDecision", "gate_decision"}:
