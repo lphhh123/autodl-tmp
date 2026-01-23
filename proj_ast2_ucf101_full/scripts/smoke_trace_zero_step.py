@@ -193,6 +193,9 @@ def main() -> None:
         trace_events_path,
         "trace_header",
         payload={
+            "requested_config": {},
+            "effective_config": {},
+            "contract_overrides": [],
             "requested": {"mode": "smoke_steps0"},
             "effective": {"mode": "smoke_steps0"},
             "signature": sig,

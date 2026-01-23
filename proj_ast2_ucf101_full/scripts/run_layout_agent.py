@@ -66,6 +66,84 @@ def _is_valid_assign(assign: list[int] | np.ndarray | None, S: int, Ns: int) -> 
     return all(0 <= int(x) < int(Ns) for x in assign)
 
 
+def _append_trace_events_from_csv(trace_events_path: Path, trace_csv: Path, run_id: str) -> int:
+    if not trace_csv.exists():
+        return 0
+    added = 0
+    with trace_csv.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            stage = str(row.get("stage", "") or "")
+            if stage in {"init", "finalize"}:
+                continue
+
+            def _num(val, default=0.0):
+                try:
+                    if val is None or val == "":
+                        return default
+                    return float(val)
+                except Exception:
+                    return default
+
+            def _int(val, default=0):
+                try:
+                    if val is None or val == "":
+                        return default
+                    return int(float(val))
+                except Exception:
+                    return default
+
+            iter_id = _int(row.get("iter", 0), 0)
+            comm_norm = _num(row.get("comm_norm", 0.0), 0.0)
+            therm_norm = _num(row.get("therm_norm", 0.0), 0.0)
+
+            append_trace_event_v54(
+                trace_events_path,
+                "step",
+                payload={
+                    "iter": int(iter_id),
+                    "stage": stage,
+                    "op": str(row.get("op", "")),
+                    "op_args_json": str(row.get("op_args_json", "")),
+                    "accepted": _int(row.get("accepted", 0), 0),
+                    "total_scalar": _num(row.get("total_scalar", 0.0), 0.0),
+                    "comm_norm": comm_norm,
+                    "therm_norm": therm_norm,
+                    "duplicate_penalty": _num(row.get("duplicate_penalty", 0.0), 0.0),
+                    "boundary_penalty": _num(row.get("boundary_penalty", 0.0), 0.0),
+                    "seed_id": _int(row.get("seed_id", 0), 0),
+                    "time_ms": _int(row.get("time_ms", 0), 0),
+                },
+                run_id=str(run_id),
+                step=int(iter_id),
+            )
+            append_trace_event_v54(
+                trace_events_path,
+                "proxy_sanitize",
+                payload={
+                    "metric": "comm",
+                    "raw_value": float(comm_norm),
+                    "used_value": float(comm_norm),
+                    "penalty_added": 0.0,
+                },
+                run_id=str(run_id),
+                step=int(iter_id),
+            )
+            append_trace_event_v54(
+                trace_events_path,
+                "proxy_sanitize",
+                payload={
+                    "metric": "therm",
+                    "raw_value": float(therm_norm),
+                    "used_value": float(therm_norm),
+                    "penalty_added": 0.0,
+                },
+                run_id=str(run_id),
+                step=int(iter_id),
+            )
+            added += 1
+    return added
+
 def _parse_segments(raw_segments) -> list[Segment]:
     segments: list[Segment] = []
     if not raw_segments:
@@ -451,6 +529,10 @@ def run_layout_agent(
         steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
         best_solution_valid = _is_valid_assign(best_assign, S, Ns)
         reason = "steps0" if int(planned_steps) <= 0 else ("done" if ok else "error")
+        try:
+            _append_trace_events_from_csv(trace_events_path, trace_path, run_id)
+        except Exception:
+            pass
         update_trace_summary(
             trace_dir,
             ok=bool(ok),
