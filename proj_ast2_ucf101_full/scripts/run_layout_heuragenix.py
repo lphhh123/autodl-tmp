@@ -39,6 +39,7 @@ from layout.pareto import ParetoSet
 from layout.trace_metrics import compute_trace_metrics_from_csv
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
+from utils.config_utils import get_nested
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_guard import init_trace_dir, append_trace_event_v54, finalize_trace_dir, update_trace_summary
@@ -1208,19 +1209,13 @@ def main() -> None:
     trace_dir = out_dir / "trace"
     trace_path = trace_dir / "trace.csv"
     signature = _build_run_signature(cfg, method_name=method_label, seed_global=int(seed))
-    requested_config = {}
+    requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
     try:
-        contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
-        if contract is None and hasattr(cfg, "get"):
-            contract = cfg.get("_contract", {})
-        if contract is None:
-            contract = {}
-        snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
-            contract, "requested_config_snapshot", {}
-        )
-        requested_config = OmegaConf.to_container(snapshot, resolve=False)
+        requested_config = OmegaConf.to_container(requested_config, resolve=False)
     except Exception:
         requested_config = {}
+    effective_config = OmegaConf.to_container(cfg, resolve=True)
+    contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
     init_trace_dir(
         trace_dir,
         signature=signature,
@@ -1232,7 +1227,7 @@ def main() -> None:
             "mode": "layout_heuragenix",
         },
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
-        resolved_config=OmegaConf.to_container(cfg, resolve=True),
+        resolved_config=effective_config,
         requested_config=requested_config,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
@@ -1253,15 +1248,30 @@ def main() -> None:
             trace_events_path,
             "trace_header",
             payload={
+                "requested_config": requested_config,
+                "effective_config": effective_config,
+                "contract_overrides": contract_overrides,
                 "requested": {
                     "mode": "layout_heuragenix",
                     "method": str(requested_method),
                     "llm_config": str(llm_req),
+                    "heuragenix_root": str(get_nested(requested_config, "baseline.heuragenix_root", "")),
+                    "heuristic_dir": str(get_nested(requested_config, "baseline.heuristic_dir", "")),
+                    "llm_config_file": str(get_nested(requested_config, "baseline.llm_config_file", "")),
                 },
                 "effective": {
                     "mode": "layout_heuragenix",
                     "method": str(effective_method),
                     "llm_config": str(llm_eff),
+                    "heuragenix_root": str(heuragenix_root.resolve()),
+                    "heuristic_dir": str(heuristic_dir),
+                    "llm_config_file": str(llm_eff),
+                },
+                "heuragenix_root": str(heuragenix_root.resolve()),
+                "llm_config_file": {"requested": str(llm_req), "effective": str(llm_eff)},
+                "heuristic_dir": {
+                    "requested": str(get_nested(requested_config, "baseline.heuristic_dir", "")),
+                    "effective": str(heuristic_dir),
                 },
                 "signature": signature,
                 "no_drift_enabled": bool(

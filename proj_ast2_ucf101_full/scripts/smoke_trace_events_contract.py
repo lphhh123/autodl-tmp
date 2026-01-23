@@ -35,6 +35,9 @@ def _validate_payload(event_type: str, payload: dict) -> list[str]:
         for key in ("signature", "no_drift_enabled", "acc_ref_source"):
             if key not in payload:
                 errors.append(f"trace_header missing {key}")
+        for key in ("requested_config", "effective_config", "contract_overrides", "requested", "effective"):
+            if key not in payload:
+                errors.append(f"trace_header missing {key}")
     elif event_type == "gating":
         for key in REQUIRED_GATING_KEYS:
             if key not in payload:
@@ -82,6 +85,9 @@ def main() -> int:
         trace_events_path,
         "trace_header",
         payload={
+            "requested_config": {},
+            "effective_config": {},
+            "contract_overrides": [],
             "requested": {"mode": "version_c"},
             "effective": {"mode": "version_c"},
             "signature": signature,
