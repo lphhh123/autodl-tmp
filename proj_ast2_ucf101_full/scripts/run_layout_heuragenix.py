@@ -579,6 +579,8 @@ def _write_trace_and_pareto(
     cache_key: str,
     requested_method: str,
     effective_method: str,
+    trace_events_path: Path,
+    run_id: str,
 ) -> Tuple[ParetoSet, Dict[str, Any]]:
     """
     Convert HeurAgenix recordings.jsonl -> v5.4 trace.csv + pareto_points.csv.
@@ -745,6 +747,52 @@ def _write_trace_and_pareto(
 
                 if rec_stage != "init" and accepted:
                     pareto.add(float(row["comm_norm"]), float(row["therm_norm"]), {})
+
+                if rec_stage != "init":
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "step",
+                        payload={
+                            "iter": int(iter_id),
+                            "stage": rec_stage,
+                            "op": op,
+                            "op_args_json": str(op_args_json),
+                            "accepted": int(accepted),
+                            "total_scalar": float(row["total_scalar"]),
+                            "comm_norm": float(row["comm_norm"]),
+                            "therm_norm": float(row["therm_norm"]),
+                            "duplicate_penalty": float(row["duplicate_penalty"]),
+                            "boundary_penalty": float(row["boundary_penalty"]),
+                            "seed_id": int(row["seed_id"]),
+                            "time_ms": int(row["time_ms"]),
+                        },
+                        run_id=str(run_id),
+                        step=int(iter_id),
+                    )
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "proxy_sanitize",
+                        payload={
+                            "metric": "comm",
+                            "raw_value": float(row["comm_norm"]),
+                            "used_value": float(row["comm_norm"]),
+                            "penalty_added": 0.0,
+                        },
+                        run_id=str(run_id),
+                        step=int(iter_id),
+                    )
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "proxy_sanitize",
+                        payload={
+                            "metric": "therm",
+                            "raw_value": float(row["therm_norm"]),
+                            "used_value": float(row["therm_norm"]),
+                            "penalty_added": 0.0,
+                        },
+                        run_id=str(run_id),
+                        step=int(iter_id),
+                    )
 
     with pareto_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["comm_norm", "therm_norm"], restval="")
@@ -1660,6 +1708,12 @@ def main() -> None:
     hx_rows = list(_iter_recordings(recordings_path))
     budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
     trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
+    _ensure_trace_header(
+        requested_method=str(baseline_method),
+        effective_method=str(method),
+        llm_req=str(llm_config_requested),
+        llm_eff=str(llm_config_effective),
+    )
     # ---- v5.4 contract: auditable method fallback (requested vs effective) ----
     pareto, trace_info = _write_trace_and_pareto(
         trace_dir=out_dir / "trace",
@@ -1668,6 +1722,8 @@ def main() -> None:
         cache_key=trace_cache_key,
         requested_method=str(baseline_method),
         effective_method=str(method),
+        trace_events_path=trace_events_path,
+        run_id=str(run_id),
     )
 
     pareto.eps_comm = float(pareto_cfg.get("eps_comm", 0.0))

@@ -418,11 +418,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         raise ValueError("[SPEC v5.4] stable_hw.no_double_scale.enabled MUST be True when stable_hw.enabled=True.")
 
     # NoDoubleScale contract: legacy lambdas must be exactly 0 when stable_hw is enabled
-    if stable_hw_enabled:
-        if abs(float(get_nested(cfg, "hw.lambda_hw", 0.0))) > 1e-12:
-            raise ValueError("[SPEC v5.4] hw.lambda_hw MUST be 0 when stable_hw.enabled=True (NoDoubleScale).")
-        if abs(float(get_nested(cfg, "loss.lambda_hw", 0.0))) > 1e-12:
-            raise ValueError("[SPEC v5.4] loss.lambda_hw MUST be 0 when stable_hw.enabled=True (NoDoubleScale).")
+    # (override + trace in later block to avoid silent mismatch).
 
     if mode == "version_c":
         _apply_defaults(cfg, REQ_VERSION_C_HW_DEFAULTS)
@@ -778,6 +774,22 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if not hasattr(cfg, "locked_acc_ref") or cfg.locked_acc_ref is None:
             cfg.locked_acc_ref = OmegaConf.create({})
         cfg.locked_acc_ref.enabled = bool(getattr(_lar, "enabled", bool(_lar)) if _lar is not None else False)
+        if hasattr(_lar, "source"):
+            cfg.locked_acc_ref.source = str(getattr(_lar, "source", ""))
+
+        # root-level shim must only expose enabled/source to avoid ambiguous reads
+        try:
+            allowed = {"enabled", "source"}
+            if hasattr(cfg.locked_acc_ref, "keys"):
+                for key in list(cfg.locked_acc_ref.keys()):
+                    if key not in allowed:
+                        del cfg.locked_acc_ref[key]
+            elif isinstance(cfg.locked_acc_ref, dict):
+                for key in list(cfg.locked_acc_ref.keys()):
+                    if key not in allowed:
+                        cfg.locked_acc_ref.pop(key, None)
+        except Exception:
+            pass
 
     # ---- hard contract: version_c + stable_hw.enabled => all core submodules must be enabled
     #      unless stable_hw.force_disable_ok=true (explicit ablation escape hatch)

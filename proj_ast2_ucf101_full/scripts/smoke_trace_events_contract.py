@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Smoke: v5.4 trace_events.jsonl must start with trace_header and end with finalize.
-This script writes a minimal trace_header + finalize (steps0) and validates the contract.
+Smoke: v5.4 trace_events.jsonl must start with trace_header and end with trace_finalize.
+This script writes a minimal trace_header + trace_finalize (steps0) and validates the contract.
 """
 from __future__ import annotations
 
@@ -50,10 +50,10 @@ def _validate_payload(event_type: str, payload: dict) -> list[str]:
         for key in ("ref_name", "old_value", "new_value", "reason"):
             if key not in payload:
                 errors.append(f"ref_update missing {key}")
-    elif event_type == "finalize":
+    elif event_type == "trace_finalize":
         for key in ("reason", "steps_done", "best_solution_valid"):
             if key not in payload:
-                errors.append(f"finalize missing {key}")
+                errors.append(f"trace_finalize missing {key}")
     return errors
 
 
@@ -112,8 +112,8 @@ def main() -> int:
     if rows[0].get("event_type") != "trace_header":
         print(f"[SMOKE] first event_type is not trace_header: {rows[0].get('event_type')}")
         return 1
-    if rows[-1].get("event_type") != "finalize":
-        print(f"[SMOKE] last event_type is not finalize: {rows[-1].get('event_type')}")
+    if rows[-1].get("event_type") != "trace_finalize":
+        print(f"[SMOKE] last event_type is not trace_finalize: {rows[-1].get('event_type')}")
         return 1
     for idx, row in enumerate(rows):
         event_type = row.get("event_type")

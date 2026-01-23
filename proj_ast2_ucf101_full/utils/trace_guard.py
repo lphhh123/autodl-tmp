@@ -16,10 +16,11 @@ FINALIZED_FLAG = "finalized.flag"
 
 ALLOWED_EVENT_TYPES_V54 = {
     "trace_header",
+    "step",
     "gating",
     "proxy_sanitize",
     "ref_update",
-    "finalize",
+    "trace_finalize",
 }
 
 
@@ -419,11 +420,11 @@ def _assert_event(event_type: str, payload: dict) -> None:
                 raise KeyError(f"ref_update.payload missing '{k}'")
         return
 
-    if event_type == "finalize":
+    if event_type == "trace_finalize":
         required = ["reason", "steps_done", "best_solution_valid"]
         for k in required:
             if k not in payload:
-                raise KeyError(f"finalize.payload missing '{k}'")
+                raise KeyError(f"trace_finalize.payload missing '{k}'")
         return
 
 
@@ -462,7 +463,7 @@ def append_trace_event_v54(
 
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
-    if flag.exists() and event_type != "finalize":
+    if flag.exists() and event_type != "trace_finalize":
         raise RuntimeError(f"trace_events is finalized; refusing to append event_type={event_type}")
 
     if run_id is None:
@@ -488,7 +489,7 @@ def append_trace_event_v54(
 
 
 def finalize_trace_events(path: Path, payload: dict, run_id: str, step: int):
-    append_trace_event_v54(path, "finalize", payload=payload, run_id=run_id, step=step)
+    append_trace_event_v54(path, "trace_finalize", payload=payload, run_id=run_id, step=step)
 
 
 def update_trace_summary(
@@ -560,7 +561,7 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
     v5.4 合同收尾：
     - 确保 summary.json 存在（否则写一个最小的）
     - 确保 trace.csv 最后一行是 finalize（否则自动补一行）
-    - 追加 trace_events.jsonl 的 finalize 事件，并写 finalized.flag，禁止后续再 append
+    - 追加 trace_events.jsonl 的 trace_finalize 事件，并写 finalized.flag，禁止后续再 append
     - 最后做 required files 校验
     """
     trace_events_path = Path(trace_events_path)
@@ -572,6 +573,28 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
         "config_requested.yaml",
         "trace_events.jsonl",
     ]
+
+    def _read_first_event_type(p: Path) -> Optional[str]:
+        if not p.exists():
+            return None
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    return obj.get("event_type")
+                except Exception:
+                    return None
+        return None
+
+    first_type = _read_first_event_type(trace_events_path)
+    if first_type != "trace_header":
+        raise RuntimeError(
+            "[v5.4 TRACE CONTRACT] trace_events.jsonl must start with trace_header, "
+            f"got {first_type} (trace_events={trace_events_path})."
+        )
 
     # 0) summary.json 兜底
     summary_path = trace_dir / "summary.json"

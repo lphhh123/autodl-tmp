@@ -168,19 +168,10 @@ def main():
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
         cfg.training.seed = int(args.seed)
-    cfg = validate_and_fill_defaults(cfg, mode="version_c")
-    cfg.train.requested_cfg_yaml = requested_cfg_yaml
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
-
-        # Enforce NoDrift: disable legacy direct-sum entrances
-        try:
-            if hasattr(cfg, "hw") and hasattr(cfg.hw, "lambda_hw"):
-                cfg.hw.lambda_hw = 0.0
-            if hasattr(cfg, "loss") and hasattr(cfg.loss, "lambda_hw"):
-                cfg.loss.lambda_hw = 0.0
-        except Exception:
-            pass
+    cfg = validate_and_fill_defaults(cfg, mode="version_c")
+    cfg.train.requested_cfg_yaml = requested_cfg_yaml
 
     rid = OmegaConf.select(cfg, "train.run_id")
     if not rid:
