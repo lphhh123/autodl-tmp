@@ -324,6 +324,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                     f"Fix: set stable_hw.enabled=True or disable the submodule explicitly."
                 )
 
+    # --- [v5.4 CONTRACT] twostage must not silently disable StableHW in version_c ---
+    if stable_hw_enabled and bool(get_nested(cfg, "training.twostage", False)):
+        raise ValueError(
+            "[v5.4 P0] training.twostage=True would nullify HW loss while StableHW is enabled. "
+            "This is a silent semantic degradation. Disable twostage for version_c (StableHW) runs."
+        )
+
     # --- normalize ---
     _ensure(stable_hw, "normalize", {})
     _ensure(stable_hw.normalize, "enabled", _inherit_enabled("stable_hw.normalize.enabled"))
@@ -347,10 +354,25 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _ensure(stable_hw, "accuracy_guard", {})
     _ensure(stable_hw.accuracy_guard, "enabled", _inherit_enabled("stable_hw.accuracy_guard.enabled"))
     _ensure(stable_hw.accuracy_guard, "metric", get_nested(cfg, "stable_hw.accuracy_guard.metric", "acc1"))
+    default_acc_drop_max = float(get_nested(cfg, "train.acc_drop_max", 0.002) or 0.002)
     _ensure(
         stable_hw.accuracy_guard,
         "acc_drop_max",
-        float(get_nested(cfg, "stable_hw.accuracy_guard.acc_drop_max", float(get_nested(cfg, "train.acc_drop_max", 0.0)))),
+        float(get_nested(cfg, "stable_hw.accuracy_guard.acc_drop_max", default_acc_drop_max) or default_acc_drop_max),
+    )
+    # keep controller.epsilon_drop aligned with contract field acc_drop_max (do not diverge silently)
+    _ensure(stable_hw.accuracy_guard, "controller", {})
+    _ensure(
+        stable_hw.accuracy_guard.controller,
+        "epsilon_drop",
+        float(
+            get_nested(
+                cfg,
+                "stable_hw.accuracy_guard.controller.epsilon_drop",
+                get_nested(cfg, "stable_hw.accuracy_guard.acc_drop_max", default_acc_drop_max),
+            )
+            or default_acc_drop_max
+        ),
     )
 
     # --- locked acc ref ---

@@ -262,7 +262,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
                             "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
-                            "acc_drop_max": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
+                            "acc_drop_max": float(
+                                stable_state.get("acc_drop_max", stable_state.get("epsilon_drop", 0.0)) or 0.0
+                            ),
                             "gate": gate,
                             "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
                             "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
@@ -397,7 +399,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
                             "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
                             "acc_drop": float(stable_state.get("acc_drop", 0.0) or 0.0),
-                            "acc_drop_max": float(stable_state.get("epsilon_drop", 0.0) or 0.0),
+                            "acc_drop_max": float(
+                                stable_state.get("acc_drop_max", stable_state.get("epsilon_drop", 0.0)) or 0.0
+                            ),
                             "gate": gate,
                             "hw_loss_raw": float(stable_state.get("hw_loss_raw", 0.0) or 0.0),
                             "hw_loss_used": float(stable_state.get("hw_loss_used", 0.0) or 0.0),
