@@ -356,8 +356,15 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _ensure(
         stable_hw.lambda_hw_schedule,
         "lambda_hw_max",
-        float(get_nested(cfg, "stable_hw.lambda_hw_schedule.lambda_hw_max", float(get_nested(cfg, "hw.lambda_hw", 0.0)))),
+        float(get_nested(cfg, "stable_hw.lambda_hw_schedule.lambda_hw_max", 0.2)),
     )
+    if bool(get_nested(cfg, "stable_hw.enabled", False)):
+        v = float(get_nested(cfg, "stable_hw.lambda_hw_schedule.lambda_hw_max", 0.0) or 0.0)
+        if v <= 0.0:
+            raise ValueError(
+                "[V5.4 CONTRACT] stable_hw.enabled=True but lambda_hw_max<=0. "
+                "Refuse silent HW-loss disable. Set stable_hw.lambda_hw_schedule.lambda_hw_max explicitly if ablation."
+            )
 
     # --- accuracy guard (HardGating) ---
     _ensure(stable_hw, "accuracy_guard", {})
@@ -581,147 +588,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             },
         )
 
-    # ---- stable_hw defaults (v5 canonical) ----
-    # IMPORTANT:
-    #   1) Do NOT silently override schedule fields twice.
-    #   2) Default stable_hw.enabled depends on mode to avoid "ast2 configs silently changed".
-    #   3) NoDoubleScale ONLY enforced when stable_hw.enabled=True.
-
-    stable_hw = getattr(cfg, "stable_hw", None)
-    if stable_hw is None:
-        from omegaconf import OmegaConf
-        stable_hw = OmegaConf.create({})
-        cfg.stable_hw = stable_hw
-
-    # migrate legacy keys -> v5 structure (safe no-op if already v5)
-    _migrate_stable_hw_to_v5(cfg)
-    stable_hw = cfg.stable_hw
-
-    # default enable policy
-    default_enabled = True if str(mode) in ("version_c", "single_device") else False
-    if getattr(stable_hw, "enabled", None) is None:
-        stable_hw.enabled = bool(default_enabled)
-    stable_hw_enabled = bool(stable_hw.enabled)
-
-    # allow legacy alias: stable_hw.allow_train_ema_fallback -> stable_hw.accuracy_guard.allow_train_ema_fallback
-    if getattr(stable_hw, "allow_train_ema_fallback", None) is not None:
-        if getattr(getattr(stable_hw, "accuracy_guard", None), "allow_train_ema_fallback", None) is None:
-            if getattr(stable_hw, "accuracy_guard", None) is None:
-                from omegaconf import OmegaConf
-                stable_hw.accuracy_guard = OmegaConf.create({})
-            stable_hw.accuracy_guard.allow_train_ema_fallback = bool(stable_hw.allow_train_ema_fallback)
-
-    # ---- locked acc ref (v5) ----
-    # v5.4 contract: locked_acc_ref is defined EITHER at root (preferred) OR under stable_hw (legacy), not both.
-    root_locked = getattr(cfg, "locked_acc_ref", None)
-    nested_locked = getattr(stable_hw, "locked_acc_ref", None)
-
-    if root_locked is not None and nested_locked is not None:
-        raise ValueError(
-            "locked_acc_ref must be defined only once (root preferred). Remove one of: "
-            "locked_acc_ref OR stable_hw.locked_acc_ref"
-        )
-
-    # If neither exists, create the legacy nested container (so downstream defaults can still be applied)
-    if root_locked is None and nested_locked is None:
-        from omegaconf import OmegaConf
-
-        stable_hw.locked_acc_ref = OmegaConf.create({})
-        nested_locked = stable_hw.locked_acc_ref
-
-    # Apply defaults onto whichever container is actually used
-    locked = root_locked if root_locked is not None else nested_locked
-
-    if getattr(locked, "enabled", None) is None:
-        locked.enabled = True
-    locked.enabled = bool(locked.enabled)
-    locked.setdefault("freeze_epoch", 0)
-    locked.setdefault("warmup_epochs", 1)
-    locked.setdefault("ref_source", "best_warmup_val")
-    locked.setdefault("baseline_stats_path", None)
-    locked.setdefault("prefer_dense_baseline", True)
-    locked.setdefault("acc_margin", 0.0)
-    locked.setdefault("min_acc_ref", 0.0)
-    # ---- ensure locked_acc_ref.source exists (stable_hw reads `source`, not `ref_source`) ----
-    if getattr(locked, "source", None) is None:
-        rs = getattr(locked, "ref_source", None)
-        locked.source = str(rs) if rs is not None else "warmup_best"
-
-    # ---- accuracy guard (v5) ----
-    if getattr(stable_hw, "accuracy_guard", None) is None:
-        from omegaconf import OmegaConf
-        stable_hw.accuracy_guard = OmegaConf.create({})
-    guard = stable_hw.accuracy_guard
-    if getattr(guard, "enabled", None) is None:
-        guard.enabled = True
-    guard.enabled = bool(guard.enabled)
-    guard.setdefault("epsilon_drop", 0.002)
-    guard.setdefault("guard_mode", "hard")
-    guard.setdefault("freeze_hw_on_drop", True)
-    guard.setdefault("freeze_discrete_on_drop", True)
-    guard.setdefault("freeze_alpha_on_drop", False)
-    guard.setdefault("prefer_val_metric", True)
-    guard.setdefault("allow_train_ema_fallback", False)
-
-    if getattr(guard, "controller", None) is None:
-        from omegaconf import OmegaConf
-        guard.controller = OmegaConf.create({})
-    ctrl = guard.controller
-    ctrl.setdefault("max_bad_epochs", 1)
-    ctrl.setdefault("lr_restart_mul", 2.0)
-    ctrl.setdefault("cooldown_epochs", 1)
-    ctrl.setdefault("recovery_min_epochs", 1)
-    ctrl.setdefault("recovery_mode", "freeze_discrete_and_hw")
-    ctrl.setdefault("resume_hw_after", "val_recovers")
-    ctrl.setdefault("acc_ema_beta", 0.9)
-    ctrl.setdefault("train_ema_gate_eps", 0.001)
-    ctrl.setdefault("log_prefix", "StableHW")
-
-    # ---- lambda schedule (v5) ----
-    if getattr(stable_hw, "lambda_hw_schedule", None) is None:
-        from omegaconf import OmegaConf
-        stable_hw.lambda_hw_schedule = OmegaConf.create({})
-    sched = stable_hw.lambda_hw_schedule
-    if getattr(sched, "enabled", None) is None:
-        sched.enabled = True
-    sched.enabled = bool(sched.enabled)
-
-    # defaults MUST match v5.4 intent (NOT 0.0)
-    sched.setdefault("warmup_epochs", 5)
-    sched.setdefault("ramp_epochs", 10)
-
-    # ---- alias bridge: do NOT override user configs written in older keys ----
-    # If user provided max_lambda/min_lambda but not lambda_hw_max/min, map them first.
-    if getattr(sched, "lambda_hw_max", None) is None and getattr(sched, "max_lambda", None) is not None:
-        sched.lambda_hw_max = float(sched.max_lambda)
-    if getattr(sched, "lambda_hw_min", None) is None and getattr(sched, "min_lambda", None) is not None:
-        sched.lambda_hw_min = float(sched.min_lambda)
-
-    # Now apply true defaults only when still missing.
-    if getattr(sched, "lambda_hw_min", None) is None:
-        sched.lambda_hw_min = 0.0
-    if getattr(sched, "lambda_hw_max", None) is None:
-        sched.lambda_hw_max = 0.2
-
-    # clamp defaults
-    sched.setdefault("clamp_min", float(sched.lambda_hw_min))
-    sched.setdefault("clamp_max", float(sched.lambda_hw_max))
-
-    # ---- normalization defaults (v5) ----
-    if getattr(stable_hw, "normalize", None) is None:
-        from omegaconf import OmegaConf
-        stable_hw.normalize = OmegaConf.create({})
-    norm = stable_hw.normalize
-    if getattr(norm, "enabled", None) is None:
-        norm.enabled = True
-    norm.enabled = bool(norm.enabled)
-    norm.setdefault("mode", "hinge_log_ratio")
-    norm.setdefault("wT", 1.0)
-    norm.setdefault("wE", 0.0)
-    norm.setdefault("wM", 0.0)
-    norm.setdefault("wC", 0.0)
-    norm.setdefault("clip_term_max", 2.0)
-    norm.setdefault("eps", 1e-6)
+    # v5.4 contract: once filled, STOP. Do not apply legacy defaults.
 
     # ===== v5.4 defaults: NoDrift + frozen HW refs =====
     if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):

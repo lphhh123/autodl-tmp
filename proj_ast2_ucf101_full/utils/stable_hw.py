@@ -441,25 +441,37 @@ def _pick_acc_used(
     if has_val_this_epoch and val_metric_or_none is not None:
         st["val_acc1_last"] = _safe_float(val_metric_or_none, None)  # type: ignore[arg-type]
         if metric == "val_acc1":
+            st["acc_used_source"] = metric
+            st["acc_fallback_reason"] = "none"
             return _safe_float(val_metric_or_none, None)  # type: ignore[arg-type]
 
     if metric in ("train_acc1_ema", "acc1_ema"):
         if train_acc1_ema is not None:
+            st["acc_used_source"] = "train_acc1_ema"
+            st["acc_fallback_reason"] = "none"
             return _safe_float(train_acc1_ema, None)  # type: ignore[arg-type]
         # fallback to state
         if st.get("train_acc1_ema") is not None:
+            st["acc_used_source"] = "train_acc1_ema"
+            st["acc_fallback_reason"] = "use_state_train_ema"
             return _safe_float(st.get("train_acc1_ema"), None)  # type: ignore[arg-type]
 
     # allow fallback to val_acc1_last if has_val missed but we have last
     if metric == "val_acc1" and st.get("val_acc1_last") is not None:
+        st["acc_used_source"] = f"{metric}_last"
+        st["acc_fallback_reason"] = "use_last_val"
         return _safe_float(st.get("val_acc1_last"), None)  # type: ignore[arg-type]
 
     # final fallback: if asked, use ema state
     _, stable_cfg = _get_root_and_stable(stable_hw_cfg)
     allow_fallback = bool(_cfg_get(stable_cfg, "allow_train_ema_fallback", False))
     if allow_fallback and st.get("train_acc1_ema") is not None:
+        st["acc_used_source"] = "train_acc1_ema"
+        st["acc_fallback_reason"] = "fallback_train_ema"
         return _safe_float(st.get("train_acc1_ema"), None)  # type: ignore[arg-type]
 
+    st["acc_used_source"] = ""
+    st["acc_fallback_reason"] = "no_signal"
     return None
 
 

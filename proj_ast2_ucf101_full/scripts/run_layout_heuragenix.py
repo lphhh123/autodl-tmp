@@ -1371,6 +1371,19 @@ def main() -> None:
                 json.dump(js, f, indent=2, ensure_ascii=False)
             llm_config = adapted
         llm_config_effective = str(llm_config) if llm_config else ""
+    heuragenix_path_map = {
+        "heuragenix_root": str(heuragenix_root.resolve()),
+        "effective_data_root": str(internal_data_root.resolve()),
+        "effective_output_root": str(output_root.resolve()),
+        "llm_config_path": str(Path(llm_config).resolve()) if llm_config else "",
+        "problem": str(problem),
+        "heuristic_dir": str(heuristic_dir),
+        "result_dir": "result",
+    }
+    (trace_dir / "heuragenix_path_map.json").write_text(
+        json.dumps(heuragenix_path_map, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     output_dir = output_root / problem / case_name / "result" / method
     case_stem = case_name
 
