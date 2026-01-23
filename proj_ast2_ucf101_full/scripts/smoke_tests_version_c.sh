@@ -16,6 +16,12 @@ python -m scripts.run_ast2_ucf101 --cfg configs/smoke_ast_ucf101.yaml
 echo "[SMOKE] Version-C"
 python -m scripts.run_version_c --cfg configs/smoke_version_c_ucf101.yaml
 
+echo "[SMOKE] Trace events contract"
+python scripts/smoke_trace_events_contract.py --cfg configs/smoke_version_c_ucf101.yaml
+
+echo "[SMOKE] Trace signature contract"
+python scripts/smoke_check_trace_signature.py --cfg configs/smoke_version_c_ucf101.yaml
+
 # After run_vc, assert A3 middleware exists
 if [[ ! -f "outputs/P3/A3/layout_input.json" ]]; then
   echo "[SMOKE] Missing outputs/P3/A3/layout_input.json after Version-C phase3."

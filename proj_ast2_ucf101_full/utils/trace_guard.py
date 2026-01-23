@@ -686,19 +686,18 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
         trace_events_path.write_text("", encoding="utf-8")
 
     if not flag.exists():
-        status = "ok" if str(reason) in ("done", "steps0", "ok", "success") else "error"
         finalize_trace_events(
             trace_events_path,
             payload={
-                "status": status,
+                "reason": str(reason),
+                "steps_done": int(steps_done),
+                "best_solution_valid": bool(best_solution_valid),
+                "status": "ok",
                 "summary": {
                     "reason": str(reason),
                     "steps_done": int(steps_done),
                     "best_solution_valid": bool(best_solution_valid),
                 },
-                "reason": str(reason),
-                "steps_done": int(steps_done),
-                "best_solution_valid": bool(best_solution_valid),
             },
             run_id=str(run_id),
             step=int(step_hint),
