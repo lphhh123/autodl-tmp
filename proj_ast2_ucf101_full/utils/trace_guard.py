@@ -387,33 +387,57 @@ _DEFAULT_RUN_ID: Optional[str] = None
 
 def _assert_event(event_type: str, payload: dict) -> None:
     if event_type not in ALLOWED_EVENT_TYPES_V54:
-        raise ValueError(
-            f"[v5.4 TRACE CONTRACT] unknown event_type={event_type!r}. "
-            f"Allowed={sorted(ALLOWED_EVENT_TYPES_V54)}"
-        )
+        raise ValueError(f"Unknown v5.4 event_type={event_type}")
+
     if not isinstance(payload, dict):
-        raise ValueError("payload must be a dict")
+        raise TypeError("payload must be dict")
 
     if event_type == "trace_header":
-        for k in ("requested", "effective", "signature"):
+        for k in ("signature", "no_drift_enabled", "acc_ref_source"):
             if k not in payload:
-                raise ValueError(f"[v5.4 TRACE CONTRACT] trace_header missing {k}")
-    elif event_type == "gating":
-        for k in ("acc_ref", "acc_now", "acc_drop", "epsilon_drop", "decision", "reason_code"):
+                raise KeyError(f"trace_header.payload missing '{k}'")
+        if not isinstance(payload["signature"], dict):
+            raise TypeError("trace_header.payload.signature must be dict")
+        return
+
+    if event_type == "gating":
+        required = [
+            "gate",
+            "acc_ref",
+            "acc_used",
+            "acc_drop",
+            "acc_drop_max",
+            "guard_mode",
+            "lambda_hw_base",
+            "lambda_hw_effective",
+            "total_loss",
+            "total_loss_hw_part",
+        ]
+        for k in required:
             if k not in payload:
-                raise ValueError(f"[v5.4 TRACE CONTRACT] gating missing {k}")
-    elif event_type == "proxy_sanitize":
-        for k in ("hw_metric_raw", "hw_metric_used", "penalty", "had_invalid"):
+                raise KeyError(f"gating.payload missing '{k}'")
+        return
+
+    if event_type == "proxy_sanitize":
+        required = ["metric", "raw_value", "used_value", "penalty_added"]
+        for k in required:
             if k not in payload:
-                raise ValueError(f"[v5.4 TRACE CONTRACT] proxy_sanitize missing {k}")
-    elif event_type == "ref_update":
-        for k in ("ref_name", "old_value", "new_value", "reason"):
+                raise KeyError(f"proxy_sanitize.payload missing '{k}'")
+        return
+
+    if event_type == "ref_update":
+        required = ["ref_name", "old_value", "new_value", "reason"]
+        for k in required:
             if k not in payload:
-                raise ValueError(f"[v5.4 TRACE CONTRACT] ref_update missing {k}")
-    elif event_type == "finalize":
-        for k in ("reason", "steps_done", "best_solution_valid"):
+                raise KeyError(f"ref_update.payload missing '{k}'")
+        return
+
+    if event_type == "finalize":
+        required = ["reason", "steps_done", "best_solution_valid"]
+        for k in required:
             if k not in payload:
-                raise ValueError(f"[v5.4 TRACE CONTRACT] finalize missing {k}")
+                raise KeyError(f"finalize.payload missing '{k}'")
+        return
 
 
 def append_trace_event_v54(

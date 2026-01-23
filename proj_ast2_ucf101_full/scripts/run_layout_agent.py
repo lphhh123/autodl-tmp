@@ -38,6 +38,7 @@ from layout.regions import build_regions
 from layout.sites import build_sites
 from layout.trace_metrics import compute_trace_metrics_from_csv
 from mapping.mapping_solver import MappingSolver
+from utils.config import AttrDict
 from mapping.segments import Segment
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
@@ -158,6 +159,12 @@ def run_layout_agent(
             "requested": {"mode": "layout_agent"},
             "effective": {"mode": "layout_agent"},
             "signature": sig,
+            "no_drift_enabled": bool(
+                getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+            ),
+            "acc_ref_source": str(
+                getattr(getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})), "source", "none")
+            ),
         },
         run_id=run_id,
         step=0,

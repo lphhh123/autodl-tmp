@@ -28,6 +28,43 @@ def _load_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _validate_payload(event_type: str, payload: dict) -> list[str]:
+    errors = []
+    if event_type == "trace_header":
+        for key in ("signature", "no_drift_enabled", "acc_ref_source"):
+            if key not in payload:
+                errors.append(f"trace_header missing {key}")
+    elif event_type == "gating":
+        required = [
+            "gate",
+            "acc_ref",
+            "acc_used",
+            "acc_drop",
+            "acc_drop_max",
+            "guard_mode",
+            "lambda_hw_base",
+            "lambda_hw_effective",
+            "total_loss",
+            "total_loss_hw_part",
+        ]
+        for key in required:
+            if key not in payload:
+                errors.append(f"gating missing {key}")
+    elif event_type == "proxy_sanitize":
+        for key in ("metric", "raw_value", "used_value", "penalty_added"):
+            if key not in payload:
+                errors.append(f"proxy_sanitize missing {key}")
+    elif event_type == "ref_update":
+        for key in ("ref_name", "old_value", "new_value", "reason"):
+            if key not in payload:
+                errors.append(f"ref_update missing {key}")
+    elif event_type == "finalize":
+        for key in ("reason", "steps_done", "best_solution_valid"):
+            if key not in payload:
+                errors.append(f"finalize missing {key}")
+    return errors
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", required=True, help="config path")
@@ -59,6 +96,8 @@ def main() -> int:
             "requested": {"mode": "version_c"},
             "effective": {"mode": "version_c"},
             "signature": signature,
+            "no_drift_enabled": True,
+            "acc_ref_source": "locked",
         },
         run_id=str(run_id),
         step=0,
@@ -81,10 +120,13 @@ def main() -> int:
     if rows[-1].get("event_type") != "finalize":
         print(f"[SMOKE] last event_type is not finalize: {rows[-1].get('event_type')}")
         return 1
-    finalize_payload = rows[-1].get("payload", {})
-    for key in ("reason", "steps_done", "best_solution_valid"):
-        if key not in finalize_payload:
-            print(f"[SMOKE] finalize missing field: {key}")
+    for idx, row in enumerate(rows):
+        event_type = row.get("event_type")
+        payload = row.get("payload", {})
+        errors = _validate_payload(event_type, payload)
+        if errors:
+            joined = ", ".join(errors)
+            print(f"[SMOKE] event {idx} ({event_type}) failed contract: {joined}")
             return 1
     print("[SMOKE] trace_events contract ok")
     return 0

@@ -25,6 +25,7 @@ from utils.seed import seed_everything
 from utils.trace_guard import init_trace_dir_v54, append_trace_event_v54, finalize_trace_dir, update_trace_summary
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hash import stable_hash
+from utils.config import AttrDict
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -162,6 +163,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     ),
                 },
                 "signature": sig,
+                "no_drift_enabled": bool(getattr(getattr(cfg, "no_drift", None), "enabled", False)),
+                "acc_ref_source": str(
+                    getattr(getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})), "source", "unknown")
+                ),
             },
             run_id=run_id,
             step=0,

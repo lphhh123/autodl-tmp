@@ -1262,6 +1262,12 @@ def main() -> None:
                     "llm_config": str(llm_eff),
                 },
                 "signature": signature,
+                "no_drift_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+                ),
+                "acc_ref_source": str(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
+                ),
             },
             run_id=run_id,
             step=0,
