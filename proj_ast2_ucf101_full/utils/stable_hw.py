@@ -344,26 +344,39 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
     if st.get("acc_ref") is not None:
         return
 
+    source = str(_cfg_get(locked, "source", _cfg_get(locked, "ref_source", "warmup_best")))
+    strict = bool(_cfg_get(locked, "strict", True))
     baseline_stats_path = _cfg_get(locked, "baseline_stats_path", None)
     baseline_stats_path = _expand_out_dir_template(baseline_stats_path, st.get("out_dir"))
-    if baseline_stats_path:
+    if source == "baseline_stats":
+        if not baseline_stats_path:
+            if strict:
+                raise RuntimeError("[v5.4 LockedAccRef] baseline_stats_path is required (strict=true).")
+            st["acc_ref_source"] = "baseline_stats_missing_path"
+            return
         p = Path(str(baseline_stats_path))
-        if p.exists() and p.is_file():
-            try:
-                obj = json.loads(p.read_text(encoding="utf-8"))
-                # accept a few common keys
-                cand = None
-                for k in ("val_acc1", "acc1", "best_val_acc1", "best_acc1"):
-                    if isinstance(obj, dict) and k in obj:
-                        cand = obj[k]
-                        break
-                if cand is not None:
-                    st["acc_ref"] = _safe_float(cand, None)  # type: ignore[arg-type]
-                    st["acc_ref_source"] = f"baseline_stats:{p}"
-                    return
-            except Exception:
-                # fall back to warmup best
-                st["acc_ref_source"] = f"baseline_stats_parse_error:{p}"
+        if not (p.exists() and p.is_file()):
+            if strict:
+                raise RuntimeError(f"[v5.4 LockedAccRef] baseline_stats_path invalid: {baseline_stats_path}")
+            st["acc_ref_source"] = f"baseline_stats_missing:{p}"
+            return
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            # accept a few common keys
+            cand = None
+            for k in ("val_acc1", "acc1", "best_val_acc1", "best_acc1"):
+                if isinstance(obj, dict) and k in obj:
+                    cand = obj[k]
+                    break
+            if cand is not None:
+                st["acc_ref"] = _safe_float(cand, None)  # type: ignore[arg-type]
+                st["acc_ref_source"] = f"baseline_stats:{p}"
+                return
+        except Exception:
+            if strict:
+                raise RuntimeError(f"[v5.4 LockedAccRef] baseline_stats_path invalid: {baseline_stats_path}")
+            st["acc_ref_source"] = f"baseline_stats_parse_error:{p}"
+            return
 
     # else: will be set by warmup_best when val metrics arrive
     st.setdefault("acc_ref_source", "warmup_best_pending")

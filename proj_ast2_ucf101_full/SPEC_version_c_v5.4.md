@@ -7,6 +7,6 @@ canonical requirements are implemented in:
 - `utils/stable_hw.py` (StableHW semantics, LockedAccRef, NoDrift, NoDoubleScale).
 - `utils/trace_schema.py` and `utils/trace_signature_v54.py` (trace schema/signature).
 
-Older SPEC files have been archived under `deprecated/spec_archive/` to avoid ambiguity.
+Older SPEC files have been archived under `docs/legacy/spec_archive/` to avoid ambiguity.
 If you need the full narrative spec, consult the project documentation that accompanies
 this codebase and keep this file as the authoritative entry point for v5.4.

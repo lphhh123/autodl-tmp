@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 from types import SimpleNamespace
+from pathlib import Path
 
 from omegaconf import OmegaConf
 
@@ -165,7 +166,8 @@ def _migrate_stable_hw_to_v5(cfg: Any) -> None:
             "enabled": bool(locked),
             "freeze_epoch": int(stable_hw.get("warmup_epochs", 0) or 0),
             "prefer_dense_baseline": True,
-            "baseline_stats_path": "",
+            "baseline_stats_path": None,
+            "strict": True,
         }
 
     # 2) normalize: keep SPEC key "mode", but also allow legacy "method"
@@ -215,6 +217,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
       - "layout":    layout-only agent scripts (optional; keep minimal)
       - "single":    single-device pruning baseline
     """
+    cfg_contract = get_nested(cfg, "_contract", None)
+    if cfg_contract is None:
+        set_nested(cfg, "_contract", {})
+    if get_nested(cfg, "_contract.requested_config_snapshot", None) is None:
+        set_nested(cfg, "_contract.requested_config_snapshot", OmegaConf.to_container(cfg, resolve=False))
+    if get_nested(cfg, "_contract.overrides", None) is None:
+        set_nested(cfg, "_contract.overrides", [])
     # ---- v5.4: infer train.mode for backward compatibility ----
     train_mode = get_nested(cfg, "train.mode", None)
     if train_mode is None:
@@ -314,7 +323,6 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     _ensure(stable_hw.lambda_hw_schedule, "enabled", _inherit_enabled("stable_hw.lambda_hw_schedule.enabled"))
     _ensure(stable_hw.lambda_hw_schedule, "kind", get_nested(cfg, "stable_hw.lambda_hw_schedule.kind", "linear_warmup_hold"))
     _ensure(stable_hw.lambda_hw_schedule, "start_step", int(get_nested(cfg, "stable_hw.lambda_hw_schedule.start_step", 0)))
-    _ensure(stable_hw.lambda_hw_schedule, "warmup_steps", int(get_nested(cfg, "stable_hw.lambda_hw_schedule.warmup_steps", 200)))
     _ensure(stable_hw.lambda_hw_schedule, "lambda_hw_min", float(get_nested(cfg, "stable_hw.lambda_hw_schedule.lambda_hw_min", 0.0)))
     _ensure(
         stable_hw.lambda_hw_schedule,
@@ -749,6 +757,25 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             f"[WARN] NoDoubleScale(v5.4): overriding legacy lambdas to 0.0 "
             f"(hw.lambda_hw={legacy_hw_lam}, loss.lambda_hw={legacy_loss_lam})."
         )
+        overrides = get_nested(cfg, "_contract.overrides", [])
+        if legacy_hw_lam != 0.0:
+            overrides.append(
+                {
+                    "path": "hw.lambda_hw",
+                    "requested": float(legacy_hw_lam),
+                    "effective": 0.0,
+                    "reason": "v5.4 NoDoubleScale under stable_hw.enabled",
+                }
+            )
+        if legacy_loss_lam != 0.0:
+            overrides.append(
+                {
+                    "path": "loss.lambda_hw",
+                    "requested": float(legacy_loss_lam),
+                    "effective": 0.0,
+                    "reason": "v5.4 NoDoubleScale under stable_hw.enabled",
+                }
+            )
         if hasattr(cfg, "hw"):
             cfg.hw.lambda_hw = 0.0
         if hasattr(cfg, "loss"):
@@ -880,6 +907,21 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 "SPEC v5.4 contract violation: train.mode=version_c requires stable_hw.locked_acc_ref.enabled=true. "
                 "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
             )
+
+        locked_cfg = get_nested(cfg, "locked_acc_ref", None)
+        if locked_cfg is None:
+            locked_cfg = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+        if bool(locked_cfg.get("enabled", False)) and (not force_disable_ok):
+            strict = bool(locked_cfg.get("strict", True))
+            src = str(locked_cfg.get("source", "baseline_stats"))
+            p = locked_cfg.get("baseline_stats_path", None)
+            if strict and src == "baseline_stats":
+                if not p:
+                    raise ValueError(
+                        "SPEC v5.4 violation: locked_acc_ref.baseline_stats_path is required (strict=true)."
+                    )
+                if not Path(p).exists():
+                    raise ValueError(f"SPEC v5.4 violation: baseline_stats_path not found: {p}")
 
     # ---- v5.4 Addendum: signature must be assign-only ----
     if bool(get_nested(cfg, "signature.allow_pos_signature", False)):

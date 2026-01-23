@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+from omegaconf import OmegaConf
 
 from .trace_schema import TRACE_FIELDS
 from .stable_hash import stable_hash
@@ -41,12 +42,12 @@ def _count_jsonl_lines(path: Path) -> int:
 
 def _trace_csv_candidates(trace_dir: Path) -> list[Path]:
     """
-    v5.4 contract: trace.csv should live at run out_dir root (trace_dir.parent),
+    v5.4 contract: trace.csv must live under trace_dir,
     while trace_events.jsonl/summary.json live under out_dir/trace/.
     """
     return [
-        trace_dir.parent / "trace.csv",
         trace_dir / "trace.csv",
+        trace_dir.parent / "trace.csv",
     ]
 
 
@@ -54,8 +55,8 @@ def _pick_trace_csv_path(trace_dir: Path) -> Path:
     for p in _trace_csv_candidates(trace_dir):
         if p.exists():
             return p
-    # 默认写到 out_dir/trace.csv（即 trace_dir.parent）
-    return trace_dir.parent / "trace.csv"
+    # 默认写到 trace_dir/trace.csv（v5.4 contract）
+    return trace_dir / "trace.csv"
 
 
 def _make_min_row(
@@ -197,6 +198,7 @@ def init_trace_dir(
     required_signature_keys: Optional[list[str]] = None,
     extra_manifest: Optional[Dict[str, Any]] = None,
     resolved_config: Optional[Dict[str, Any]] = None,
+    requested_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Path]:
     """
     Create/initialize a trace directory with v5.4 required artifacts.
@@ -226,6 +228,7 @@ def init_trace_dir(
     header_path = trace_dir / "trace_header.json"
     manifest_path = trace_dir / "manifest.json"
     snapshot_path = trace_dir / "eval_config_snapshot.yaml"
+    requested_path = trace_dir / "config_requested.yaml"
     events_path = trace_dir / "trace_events.jsonl"
 
     # 0) Write resolved config snapshot (YAML)
@@ -238,12 +241,26 @@ def init_trace_dir(
         if not snapshot_path.exists():
             snapshot_path.write_text("# eval_config_snapshot placeholder (v5.4)\n", encoding="utf-8")
 
+    requested_cfg_obj = {}
+    if requested_config is not None:
+        requested_cfg_obj = dict(requested_config)
+        with requested_path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(requested_cfg_obj, f, sort_keys=False, allow_unicode=True)
+    else:
+        if not requested_path.exists():
+            requested_path.write_text("# config_requested placeholder (v5.4)\n", encoding="utf-8")
+
     # 1) trace_header.json（结构化元信息）
+    overrides = []
+    if resolved_cfg_obj:
+        contract = resolved_cfg_obj.get("_contract", {}) or {}
+        overrides = contract.get("overrides", []) or []
     header_payload = {
         "schema": "v5.4",
         "signature": signature,
         "run_meta": run_meta,
         "resolved_config": resolved_cfg_obj,
+        "contract_overrides": overrides,
         "ts_ms": int(time.time() * 1000),
     }
     _write_json(header_path, header_payload)
@@ -254,6 +271,7 @@ def init_trace_dir(
         "signature": signature,
         "run_meta": run_meta,
         "resolved_config_path": str(snapshot_path),
+        "requested_config_path": str(requested_path),
         "created_ts_ms": int(time.time() * 1000),
     }
     if extra_manifest:
@@ -288,6 +306,7 @@ def init_trace_dir(
         "trace_header": header_path,
         "manifest": manifest_path,
         "eval_config_snapshot": snapshot_path,
+        "config_requested": requested_path,
         "trace_events": events_path,
         "trace_csv": _pick_trace_csv_path(trace_dir),
     }
@@ -309,11 +328,23 @@ def init_trace_dir_v54(
     resolved_config = None
     if cfg is not None:
         try:
-            import omegaconf
-
-            resolved_config = omegaconf.OmegaConf.to_container(cfg, resolve=True)
+            resolved_config = OmegaConf.to_container(cfg, resolve=True)
         except Exception:
             resolved_config = None
+    requested_config = None
+    if cfg is not None:
+        try:
+            contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
+            if contract is None and hasattr(cfg, "get"):
+                contract = cfg.get("_contract", {})
+            if contract is None:
+                contract = {}
+            snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
+                contract, "requested_config_snapshot", {}
+            )
+            requested_config = OmegaConf.to_container(snapshot, resolve=False)
+        except Exception:
+            requested_config = {}
     meta = init_trace_dir(
         trace_dir=trace_dir,
         signature=signature_v54 or signature,
@@ -321,13 +352,12 @@ def init_trace_dir_v54(
         required_signature_keys=required_signature_fields,
         extra_manifest=extra_manifest,
         resolved_config=resolved_config,
+        requested_config=requested_config,
     )
     snapshot_path = Path(meta["eval_config_snapshot"])
     if cfg is not None:
         try:
-            import omegaconf
-
-            snapshot_path.write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
+            snapshot_path.write_text(OmegaConf.to_yaml(cfg), encoding="utf-8")
         except Exception:
             snapshot_path.write_text(str(cfg), encoding="utf-8")
     return meta
@@ -481,7 +511,13 @@ def finalize_trace_dir(trace_dir: Path):
     - 最后做 required files 校验
     """
     trace_dir = Path(trace_dir)
-    required = ["trace_header.json", "manifest.json", "eval_config_snapshot.yaml", "trace_events.jsonl"]
+    required = [
+        "trace_header.json",
+        "manifest.json",
+        "eval_config_snapshot.yaml",
+        "config_requested.yaml",
+        "trace_events.jsonl",
+    ]
 
     # 0) summary.json 兜底
     summary_path = trace_dir / "summary.json"
@@ -527,7 +563,7 @@ def finalize_trace_dir(trace_dir: Path):
         if not p.exists():
             raise FileNotFoundError(f"Missing required trace file: {p}")
 
-    # trace.csv 也必须存在（两处之一）
-    csv_ok = any(p.exists() for p in _trace_csv_candidates(trace_dir))
-    if not csv_ok:
-        raise FileNotFoundError(f"Missing required trace.csv at either {trace_dir/'trace.csv'} or {trace_dir.parent/'trace.csv'}")
+    # trace.csv must exist in trace_dir (v5.4 contract)
+    csv_path = trace_dir / "trace.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing required trace.csv at {csv_path}")
