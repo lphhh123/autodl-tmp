@@ -753,6 +753,54 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     except Exception:
         pass
 
+    # =========================
+    # v5.4 CONTRACT ENFORCEMENT
+    # =========================
+    # v5.4 原则：未显式写 enabled ≠ False；并且在 version_c 训练语义下，不允许悄悄退化
+    # 统一以 cfg.stable_hw.* 为单一事实源，并同步 root-level shim，避免“读到不同开关”的漂移
+
+    # ---- mirror stable_hw -> root-level shims (single source of truth) ----
+    if hasattr(cfg, "stable_hw") and cfg.stable_hw is not None:
+        _nd = getattr(cfg.stable_hw, "no_drift", None)
+        _nds = getattr(cfg.stable_hw, "no_double_scale", None)
+        _lar = getattr(cfg.stable_hw, "locked_acc_ref", None)
+
+        # keep shims present + consistent
+        if not hasattr(cfg, "no_drift") or cfg.no_drift is None:
+            cfg.no_drift = OmegaConf.create({})
+        cfg.no_drift.enabled = bool(getattr(_nd, "enabled", bool(_nd)) if _nd is not None else False)
+
+        if not hasattr(cfg, "no_double_scale") or cfg.no_double_scale is None:
+            cfg.no_double_scale = OmegaConf.create({})
+        cfg.no_double_scale.enabled = bool(getattr(_nds, "enabled", bool(_nds)) if _nds is not None else False)
+
+        if not hasattr(cfg, "locked_acc_ref") or cfg.locked_acc_ref is None:
+            cfg.locked_acc_ref = OmegaConf.create({})
+        cfg.locked_acc_ref.enabled = bool(getattr(_lar, "enabled", bool(_lar)) if _lar is not None else False)
+
+    # ---- hard contract: version_c + stable_hw.enabled => all core submodules must be enabled
+    #      unless stable_hw.force_disable_ok=true (explicit ablation escape hatch)
+    train_mode_now = str(get_nested(cfg, "train.mode", "baseline") or "baseline")
+    stable_hw_enabled_now = bool(get_nested(cfg, "stable_hw.enabled", True))
+    force_disable_ok_now = bool(get_nested(cfg, "stable_hw.force_disable_ok", False))
+
+    if train_mode_now == "version_c" and stable_hw_enabled_now and not force_disable_ok_now:
+        required = {
+            "stable_hw.normalize.enabled": bool(get_nested(cfg, "stable_hw.normalize.enabled", True)),
+            "stable_hw.lambda_hw_schedule.enabled": bool(get_nested(cfg, "stable_hw.lambda_hw_schedule.enabled", True)),
+            "stable_hw.accuracy_guard.enabled": bool(get_nested(cfg, "stable_hw.accuracy_guard.enabled", True)),
+            "stable_hw.locked_acc_ref.enabled": bool(get_nested(cfg, "stable_hw.locked_acc_ref.enabled", True)),
+            "stable_hw.no_drift.enabled": bool(get_nested(cfg, "stable_hw.no_drift.enabled", True)),
+            "stable_hw.no_double_scale.enabled": bool(get_nested(cfg, "stable_hw.no_double_scale.enabled", True)),
+        }
+        bad = [k for k, v in required.items() if not v]
+        if bad:
+            raise ValueError(
+                "v5.4 contract violation: version_c requires StableHW core submodules enabled. "
+                f"Missing/disabled: {bad}. "
+                "If you really want to disable (ablation), set stable_hw.force_disable_ok=true explicitly."
+            )
+
     # ---- v5.4: sanitize hw refs early (avoid silent instability) ----
     for k, default in [
         ("latency_ref_ms", 1.0),

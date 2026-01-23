@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 import json
+import math
 import os
 from pathlib import Path
 
@@ -751,81 +752,86 @@ def update_train_acc1_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc1: float) -
 
 
 # ===== v5.4: Locked HW refs (NoDrift for proxy refs) =====
-def init_hw_refs_from_baseline_stats(cfg, stable_hw_state: dict, stable_hw_cfg=None):
+def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], stable_hw_cfg: Any = None) -> None:
     """
-    v5.4 canonical:
-      - ref_T/E/M/C 来源: dense_baseline OR ema
-      - baseline_stats 缺失: warning + fallback=ema + metrics.json 可审计
+    v5.4 contract:
+      - NoDrift requested => refs must not drift (no ref_update).
+      - baseline_stats missing is allowed ONLY if behavior is explicit + auditable and still drift-free.
+    Policy (write-stable):
+      - If baseline_stats present: init from baseline, freeze if NoDrift requested.
+      - If baseline_stats missing + NoDrift requested: mark frozen and let first valid observation initialize refs (still no drift after init).
+      - Never silently downgrade to EMA when NoDrift requested.
     """
-    if stable_hw_cfg is None:
-        stable_hw_cfg = getattr(cfg, "stable_hw", None)
+    stable_hw_cfg = stable_hw_cfg if stable_hw_cfg is not None else getattr(cfg, "stable_hw", None)
+    nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
+    requested_no_drift = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
 
-    # defaults from cfg.hw (safe fallback start point)
-    stable_hw_state["ref_T"] = float(getattr(getattr(cfg, "hw", None), "latency_ref_ms", 1.0))
-    stable_hw_state["ref_E"] = float(getattr(getattr(cfg, "hw", None), "energy_ref_mj", 1.0))
-    stable_hw_state["ref_M"] = float(getattr(getattr(cfg, "hw", None), "memory_ref_mb", 1.0))
+    baseline_path = ""
+    if stable_hw_cfg is not None:
+        baseline_path = str(getattr(stable_hw_cfg, "baseline_stats", "") or "")
 
-    comm_ref_ms = float(getattr(getattr(cfg, "hw", None), "comm_ref_ms", 1.0))
-    stable_hw_state["comm_ref_ms"] = comm_ref_ms
-    stable_hw_state["ref_C"] = comm_ref_ms
+    baseline_stats = None
+    if baseline_path:
+        try:
+            baseline_stats = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+        except Exception:
+            baseline_stats = None
 
-    nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg)
-    lock_cfg = _get_locked_cfg(cfg)
+    # Always record requested flag
+    stable_hw_state["no_drift_enabled"] = bool(requested_no_drift)
 
-    def _enabled(x):
-        if isinstance(x, bool):
-            return x
-        return bool(getattr(x, "enabled", False))
+    if baseline_stats is None:
+        # baseline missing: do NOT EMA when NoDrift requested
+        if requested_no_drift:
+            stable_hw_state["_force_ref_update_mode"] = "frozen"
+            stable_hw_state["no_drift_effective"] = True
+            stable_hw_state["hw_ref_source"] = "missing_baseline_frozen_init_on_first_observation"
+            # leave refs as None => first valid observation initializes once
+            stable_hw_state.setdefault("hw_refs", {})
+            stable_hw_state["hw_refs"].setdefault("latency_ref_ms", None)
+            stable_hw_state["hw_refs"].setdefault("energy_ref_mj", None)
+            stable_hw_state["hw_refs"].setdefault("mem_ref_mb", None)
+            stable_hw_state["hw_refs"].setdefault("comm_ref", None)
+            return
 
-    no_drift_requested = _enabled(nd_cfg)
+        # NoDrift not requested: allow legacy behavior (EMA)
+        stable_hw_state["_force_ref_update_mode"] = "ema"
+        stable_hw_state["no_drift_effective"] = False
+        stable_hw_state["hw_ref_source"] = "missing_baseline_ema"
+        stable_hw_state.setdefault("hw_refs", {})
+        stable_hw_state["hw_refs"].setdefault(
+            "latency_ref_ms", float(getattr(getattr(cfg, "hw", None), "latency_ref_ms", 1.0) or 1.0)
+        )
+        stable_hw_state["hw_refs"].setdefault(
+            "energy_ref_mj", float(getattr(getattr(cfg, "hw", None), "energy_ref_mj", 1.0) or 1.0)
+        )
+        stable_hw_state["hw_refs"].setdefault(
+            "mem_ref_mb", float(getattr(getattr(cfg, "hw", None), "mem_ref_mb", 1.0) or 1.0)
+        )
+        stable_hw_state["hw_refs"].setdefault(
+            "comm_ref", float(getattr(getattr(cfg, "hw", None), "comm_ref", 1.0) or 1.0)
+        )
+        stable_hw_state["ref_T"] = stable_hw_state["hw_refs"].get("latency_ref_ms")
+        stable_hw_state["ref_E"] = stable_hw_state["hw_refs"].get("energy_ref_mj")
+        stable_hw_state["ref_M"] = stable_hw_state["hw_refs"].get("mem_ref_mb")
+        stable_hw_state["ref_C"] = stable_hw_state["hw_refs"].get("comm_ref")
+        return
 
-    # resolve baseline stats path candidates
-    stats_path = None
-    if nd_cfg is not None:
-        stats_path = getattr(nd_cfg, "stats_path", None) or getattr(nd_cfg, "baseline_stats_path", None)
-    if (not stats_path) and (lock_cfg is not None):
-        stats_path = getattr(lock_cfg, "baseline_stats_path", None)
-    stats_path = _expand_out_dir_template(stats_path, stable_hw_state.get("out_dir"))
-
-    loaded_ok = False
-    if stats_path:
-        loaded = _load_baseline_stats(stats_path)
-        if loaded:
-            # ---- v5.4 NoDrift enforcement: baseline_stats must not change across runs ----
-            new_sha = str(loaded.get("sha256", "") or "")
-            old_sha = str(stable_hw_state.get("baseline_stats_sha256", "") or "")
-            if old_sha and new_sha and (old_sha != new_sha):
-                raise RuntimeError(
-                    f"[NoDrift] baseline_stats sha256 changed! old={old_sha} new={new_sha} path={stats_path}"
-                )
-            stable_hw_state["baseline_stats_sha256"] = new_sha
-            stable_hw_state["ref_T"] = float(loaded.get("ref_T", loaded.get("latency_ref_ms", stable_hw_state["ref_T"])))
-            stable_hw_state["ref_E"] = float(loaded.get("ref_E", loaded.get("energy_ref_mj", stable_hw_state["ref_E"])))
-            stable_hw_state["ref_M"] = float(loaded.get("ref_M", loaded.get("memory_ref_mb", stable_hw_state["ref_M"])))
-            stable_hw_state["ref_C"] = float(loaded.get("ref_C", loaded.get("comm_ref_ms", stable_hw_state["ref_C"])))
-            stable_hw_state["_refs_loaded_from"] = str(stats_path)
-            stable_hw_state["hw_ref_source"] = "dense_baseline"
-            loaded_ok = True
-
-    if (not loaded_ok) and no_drift_requested:
-        # v5.4: NoDrift MUST remain effective even when baseline stats are missing.
-        # We freeze refs (hw_loss will fall back to cfg.hw.* refs) and forbid any ref_update.
-        stable_hw_state["baseline_missing"] = True
-        stable_hw_state["hw_ref_source"] = "cfg_defaults_missing_baseline_stats"
-        stable_hw_state["_refs_loaded_from"] = str(stats_path) if stats_path else "none"
+    # baseline present => init from baseline
+    refs = extract_hw_refs_from_baseline(baseline_stats)
+    stable_hw_state.setdefault("hw_refs", {})
+    stable_hw_state["hw_refs"].update(refs)
+    stable_hw_state["hw_ref_source"] = "baseline_stats"
+    if requested_no_drift:
         stable_hw_state["_force_ref_update_mode"] = "frozen"
         stable_hw_state["no_drift_effective"] = True
     else:
-        stable_hw_state["hw_ref_source"] = "baseline_stats" if loaded_ok else "none"
-        stable_hw_state["_refs_loaded_from"] = str(stats_path) if stats_path else "none"
-
-    # always keep aliases in sync
-    stable_hw_state["latency_ref_ms"] = stable_hw_state["ref_T"]
-    stable_hw_state["energy_ref_mj"] = stable_hw_state["ref_E"]
-    stable_hw_state["memory_ref_mb"] = stable_hw_state["ref_M"]
-    stable_hw_state["comm_ref_ms"] = stable_hw_state["ref_C"]
-
-    return stable_hw_state
+        stable_hw_state["_force_ref_update_mode"] = "ema"
+        stable_hw_state["no_drift_effective"] = False
+    stable_hw_state["ref_T"] = stable_hw_state["hw_refs"].get("latency_ref_ms")
+    stable_hw_state["ref_E"] = stable_hw_state["hw_refs"].get("energy_ref_mj")
+    stable_hw_state["ref_M"] = stable_hw_state["hw_refs"].get("mem_ref_mb")
+    stable_hw_state["ref_C"] = stable_hw_state["hw_refs"].get("comm_ref")
 
 
 def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
@@ -854,70 +860,74 @@ def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) 
     return stats
 
 
-def update_hw_refs_from_stats(cfg, stable_hw_state: dict, latest_stats: dict, stable_hw_cfg=None):
+def update_hw_refs_from_stats(
+    cfg: Any,
+    stable_hw_state: Dict[str, Any],
+    latest_hw_stats: Dict[str, Any],
+    stable_hw_cfg: Any = None,
+) -> None:
     """
-    v5.4:
-      - 默认 NoDrift 冻结 refs
-      - baseline 缺失时允许 fallback=ema（由 stable_hw_state["_force_ref_update_mode"]="ema" 驱动）
-      - 写入 stable_hw_state: no_drift_effective / ref_update_mode / hw_ref_source
+    v5.4 contract:
+      - If NoDrift requested => refs must not update (no ref_update).
+      - Any downgrade to EMA while NoDrift requested is a hard contract violation.
     """
-    if stable_hw_cfg is None:
-        stable_hw_cfg = getattr(cfg, "stable_hw", None)
-
-    nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg)
+    stable_hw_cfg = stable_hw_cfg if stable_hw_cfg is not None else getattr(cfg, "stable_hw", None)
+    nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
     requested_no_drift = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
 
-    forced = str(stable_hw_state.get("_force_ref_update_mode", "") or "").lower()
-    norm_cfg = getattr(stable_hw_cfg, "normalize", None)
-    cfg_mode = str(getattr(norm_cfg, "ref_update", "frozen") if norm_cfg is not None else "frozen").lower()
+    forced = str(stable_hw_state.get("_force_ref_update_mode", "baseline_or_freeze"))
+    if requested_no_drift and forced == "ema":
+        raise RuntimeError("v5.4 contract violation: NoDrift requested but ref_update_mode='ema' (silent downgrade not allowed).")
 
-    ref_update_mode = forced if forced else cfg_mode
-    stable_hw_state["ref_update_mode"] = ref_update_mode
+    # If no_drift is requested, always freeze
+    if requested_no_drift or forced == "frozen":
+        stable_hw_state["no_drift_effective"] = True
+        return
 
-    # effective NoDrift: only when requested AND not forced-ema AND mode==frozen
-    effective_no_drift = bool(requested_no_drift) and (ref_update_mode == "frozen") and (forced != "ema")
-    stable_hw_state["no_drift_effective"] = effective_no_drift
+    # Otherwise, EMA update allowed (legacy)
+    stable_hw_state["no_drift_effective"] = False
+    refs = stable_hw_state.get("hw_refs", {}) or {}
+    if not refs:
+        stable_hw_state["hw_refs"] = refs
 
-    if effective_no_drift:
-        stable_hw_state["_contract_ref_frozen"] = True
-        return stable_hw_state
+    # Initialize-once if missing
+    def _init_if_none(k: str, v: Optional[float]) -> None:
+        if refs.get(k, None) is None and v is not None and math.isfinite(float(v)) and float(v) > 0.0:
+            refs[k] = float(v)
 
-    # v5.4 scope: only ema update when not frozen
-    if ref_update_mode != "ema":
-        ref_update_mode = "ema"
-        stable_hw_state["ref_update_mode"] = "ema"
+    _init_if_none("latency_ref_ms", latest_hw_stats.get("latency_ref_ms", latest_hw_stats.get("latency_ms", None)))
+    _init_if_none("energy_ref_mj", latest_hw_stats.get("energy_ref_mj", latest_hw_stats.get("energy_mj", None)))
+    _init_if_none("mem_ref_mb", latest_hw_stats.get("mem_ref_mb", latest_hw_stats.get("mem_mb", None)))
+    _init_if_none("comm_ref", latest_hw_stats.get("comm_ref", latest_hw_stats.get("comm_norm", None)))
 
-    alpha = float(getattr(nd_cfg, "ref_update_alpha", 0.1)) if nd_cfg is not None else 0.1
-    alpha = max(0.0, min(1.0, alpha))
-
-    def _pos(x, fallback):
+    # EMA update
+    alpha = float(getattr(getattr(stable_hw_cfg, "no_drift", None), "ema_alpha", 0.05) or 0.05) if stable_hw_cfg is not None else 0.05
+    for rk, obs_key in [
+        ("latency_ref_ms", "latency_ms"),
+        ("energy_ref_mj", "energy_mj"),
+        ("mem_ref_mb", "mem_mb"),
+        ("comm_ref", "comm_norm"),
+    ]:
+        obs = latest_hw_stats.get(obs_key, None)
+        if obs is None:
+            continue
         try:
-            v = float(x)
-            if v > 0:
-                return v
+            obs_f = float(obs)
         except Exception:
-            pass
-        return float(fallback if fallback > 0 else 1.0)
+            continue
+        if not math.isfinite(obs_f) or obs_f <= 0.0:
+            continue
+        cur = refs.get(rk, None)
+        if cur is None or not math.isfinite(float(cur)) or float(cur) <= 0.0:
+            refs[rk] = obs_f
+        else:
+            refs[rk] = (1.0 - alpha) * float(cur) + alpha * obs_f
 
-    T_new = _pos(latest_stats.get("latency_ms", latest_stats.get("T_ms", None)), stable_hw_state.get("ref_T", 1.0))
-    E_new = _pos(latest_stats.get("energy_mj", latest_stats.get("E_mj", None)), stable_hw_state.get("ref_E", 1.0))
-    M_new = _pos(latest_stats.get("memory_mb", latest_stats.get("M_mb", None)), stable_hw_state.get("ref_M", 1.0))
-    C_new = _pos(latest_stats.get("comm_ms", latest_stats.get("C_ms", None)), stable_hw_state.get("ref_C", 1.0))
-
-    def _ema(old, new):
-        old = _pos(old, new)
-        return (1.0 - alpha) * float(old) + alpha * float(new)
-
-    stable_hw_state["ref_T"] = _ema(stable_hw_state.get("ref_T", T_new), T_new)
-    stable_hw_state["ref_E"] = _ema(stable_hw_state.get("ref_E", E_new), E_new)
-    stable_hw_state["ref_M"] = _ema(stable_hw_state.get("ref_M", M_new), M_new)
-    stable_hw_state["ref_C"] = _ema(stable_hw_state.get("ref_C", C_new), C_new)
-
-    stable_hw_state["latency_ref_ms"] = stable_hw_state["ref_T"]
-    stable_hw_state["energy_ref_mj"] = stable_hw_state["ref_E"]
-    stable_hw_state["memory_ref_mb"] = stable_hw_state["ref_M"]
-    stable_hw_state["comm_ref_ms"] = stable_hw_state["ref_C"]
-
-    stable_hw_state["hw_ref_source"] = stable_hw_state.get("hw_ref_source", "ema")
-    stable_hw_state["_ref_update_alpha"] = alpha
-    return stable_hw_state
+    stable_hw_state["ref_T"] = refs.get("latency_ref_ms")
+    stable_hw_state["ref_E"] = refs.get("energy_ref_mj")
+    stable_hw_state["ref_M"] = refs.get("mem_ref_mb")
+    stable_hw_state["ref_C"] = refs.get("comm_ref")
+    stable_hw_state["latency_ref_ms"] = refs.get("latency_ref_ms")
+    stable_hw_state["energy_ref_mj"] = refs.get("energy_ref_mj")
+    stable_hw_state["mem_ref_mb"] = refs.get("mem_ref_mb")
+    stable_hw_state["comm_ref"] = refs.get("comm_ref")

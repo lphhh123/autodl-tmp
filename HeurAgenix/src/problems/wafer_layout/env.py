@@ -1,5 +1,4 @@
 from __future__ import annotations
-import importlib
 import json
 import math
 import os
@@ -18,65 +17,55 @@ from src.problems.wafer_layout.problem_state import (
 )
 
 
-def _load_layout_evaluator():
+def _load_layout_evaluator(self):
     """
-    Load LayoutEvaluator from the sibling proj_ast2 repository.
-
-    v5.4 project integration requirement:
-    - Must NOT hard-code the sibling directory name.
-    - Allow override via env var to support relocation / renaming.
+    Contract: wafer_layout problem must not hard-code external repo directory names.
+    Resolution order (write-stable):
+      1) AST2_PROJECT_ROOT / PROJ_AST2_ROOT (explicit)
+      2) auto-discover by searching upward for a marker file in candidate dirs
     """
-    try:
-        import sys
-        from pathlib import Path
+    import os
+    import sys
+    from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parents[3]  # HeurAgenix/
-        sibling_root = repo_root.parent
+    repo_root = Path(__file__).resolve().parents[3]
 
-        env_override = (
-            os.environ.get("PROJ_AST2_ROOT")
-            or os.environ.get("AST2_PROJECT_ROOT")
-            or os.environ.get("PROJ_AST2_UCF101_ROOT")
+    explicit = (
+        os.environ.get("AST2_PROJECT_ROOT")
+        or os.environ.get("PROJ_AST2_ROOT")
+        or ""
+    ).strip()
+
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit).resolve())
+
+    # auto-discover: search parent dirs for sibling that contains trainer/trainer_version_c.py
+    for p in [repo_root] + list(repo_root.parents):
+        for sib in p.iterdir() if p.exists() else []:
+            if not sib.is_dir():
+                continue
+            marker = sib / "trainer" / "trainer_version_c.py"
+            if marker.exists():
+                candidates.append(sib.resolve())
+
+    proj_root = None
+    for c in candidates:
+        if (c / "trainer" / "trainer_version_c.py").exists():
+            proj_root = c
+            break
+
+    if proj_root is None:
+        raise RuntimeError(
+            "Cannot locate proj_ast2 project root for wafer_layout evaluator. "
+            "Set env AST2_PROJECT_ROOT (or PROJ_AST2_ROOT) to the proj_ast2_ucf101_full directory."
         )
 
-        candidates = []
-        if env_override:
-            candidates.append(Path(env_override).expanduser())
+    if str(proj_root) not in sys.path:
+        sys.path.insert(0, str(proj_root))
 
-        # auto-discover sibling repository (no hard-coded directory name)
-        try:
-            for c in sibling_root.iterdir():
-                if not c.is_dir():
-                    continue
-                if (c / "layout" / "evaluator.py").exists():
-                    candidates.append(c)
-        except Exception:
-            pass
-
-        proj_root = None
-        for c in candidates:
-            c = c.resolve()
-            if (c / "layout" / "evaluator.py").exists():
-                proj_root = c
-                break
-
-        if proj_root is None:
-            msg = (
-                "Cannot locate proj_ast2 repository for wafer_layout integration.\n"
-                f"Tried candidates:\n  - " + "\n  - ".join([str(x) for x in candidates]) + "\n"
-                "Set env PROJ_AST2_ROOT (or AST2_PROJECT_ROOT) to the correct path."
-            )
-            raise RuntimeError(msg)
-
-        if str(proj_root) not in sys.path:
-            sys.path.insert(0, str(proj_root))
-
-        if importlib.util.find_spec("layout.evaluator") is None:
-            return None, None, "layout.evaluator not found"
-        module = importlib.import_module("layout.evaluator")
-    except Exception as exc:  # noqa: BLE001
-        return None, None, repr(exc)
-    return module.LayoutEvaluator, module.LayoutState, ""
+    from layout.evaluator import LayoutEvaluator
+    return LayoutEvaluator
 
 
 def _assign_signature(assign_list: list[int]) -> str:
@@ -194,7 +183,15 @@ class Env(BaseEnv):
         return total_scalar, comm_norm, therm_norm
 
     def _init_evaluator(self):
-        LayoutEvaluator, LayoutState, import_error = _load_layout_evaluator()
+        try:
+            LayoutEvaluator = _load_layout_evaluator(self)
+            from layout.evaluator import LayoutState
+            import_error = ""
+        except Exception as exc:  # noqa: BLE001
+            LayoutEvaluator = None
+            LayoutState = None
+            import_error = repr(exc)
+
         self._evaluator_import_error = import_error
 
         if LayoutEvaluator is None or LayoutState is None:
