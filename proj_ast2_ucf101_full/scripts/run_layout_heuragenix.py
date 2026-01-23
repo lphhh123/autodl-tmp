@@ -126,6 +126,14 @@ def _ensure_heuragenix_syspath(heuragenix_root: Path) -> None:
 def _resolve_llm_config_path(baseline_cfg, heuragenix_root: Path) -> Path:
     llm_cfg = baseline_cfg.get("llm_config_file", "")
     if not llm_cfg:
+        default_candidates = [
+            heuragenix_root / "data" / "llm_config" / "azure_gpt_4o.json",
+            heuragenix_root / "configs" / "llm" / "azure_gpt_4o.json",
+            heuragenix_root / "configs" / "llm_configs" / "azure_gpt_4o.json",
+        ]
+        for c in default_candidates:
+            if c.exists():
+                return c
         return Path("")
 
     p = Path(llm_cfg)
@@ -560,12 +568,13 @@ def _write_trace_and_pareto(
     Convert HeurAgenix recordings.jsonl -> v5.4 trace.csv + pareto_points.csv.
 
     Contract:
-    - trace.csv must be at out_dir/trace.csv (NOT out_dir/trace/trace.csv)
+    - trace.csv must be at out_dir/trace/trace.csv (v5.4 contract)
     - pareto_points.csv must be at out_dir/pareto_points.csv
     - columns in TRACE_FIELDS must be populated (esp. delta_*, tabu/repeat/undo, accepted_steps_cum, eval_calls_cum)
     """
     out_dir = trace_dir.parent
-    trace_csv = out_dir / "trace.csv"
+    trace_csv = trace_dir / "trace.csv"
+    trace_csv_compat = out_dir / "trace.csv"
     pareto_csv = out_dir / "pareto_points.csv"
 
     trace_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -713,6 +722,9 @@ def _write_trace_and_pareto(
                 if rec_stage != "init" and accepted:
                     pareto.add(float(row["comm_norm"]), float(row["therm_norm"]), {})
 
+    if trace_csv.exists():
+        shutil.copy2(trace_csv, trace_csv_compat)
+
     with pareto_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["comm_norm", "therm_norm"], restval="")
         w.writeheader()
@@ -756,6 +768,8 @@ def _load_pareto_from_csv(pareto_csv_path: Path, pareto_cfg: dict) -> ParetoSet:
 
 def _write_layout_best(
     out_dir: Path,
+    trace_path: Path,
+    trace_path_compat: Path,
     layout_input: dict,
     cfg: Any,
     pareto: ParetoSet,
@@ -782,7 +796,8 @@ def _write_layout_best(
         "selection": {"method": "knee_point_v1", "pareto_size": len(pareto.points)},
         "knee_point": {"comm_norm": best_comm, "therm_norm": best_therm},
         "artifacts": {
-            "trace_csv": str((out_dir / "trace.csv").absolute()),
+            "trace_csv": str(trace_path.absolute()),
+            "trace_csv_compat": str(trace_path_compat.absolute()),
             "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
             "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
         },
@@ -1159,6 +1174,8 @@ def main() -> None:
     cfg_hash = stable_hash({"cfg": resolved_text})
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
+    trace_path = trace_dir / "trace.csv"
+    trace_path_compat = out_dir / "trace.csv"
     # ---- v5.4 seed must be signature-visible (SPEC_E) ----
     try:
         cfg.seed = int(args.seed)
@@ -1170,6 +1187,19 @@ def main() -> None:
     except Exception:
         pass
     signature = _build_run_signature(cfg, method_name=method_label)
+    requested_config = {}
+    try:
+        contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
+        if contract is None and hasattr(cfg, "get"):
+            contract = cfg.get("_contract", {})
+        if contract is None:
+            contract = {}
+        snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
+            contract, "requested_config_snapshot", {}
+        )
+        requested_config = OmegaConf.to_container(snapshot, resolve=False)
+    except Exception:
+        requested_config = {}
     init_trace_dir(
         trace_dir,
         signature=signature,
@@ -1182,6 +1212,7 @@ def main() -> None:
         },
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
         resolved_config=OmegaConf.to_container(cfg, resolve=True),
+        requested_config=requested_config,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
     finalize_state = {
@@ -1266,6 +1297,8 @@ def main() -> None:
     fallback_used = False
     log_text = ""
     llm_config = None
+    llm_config_requested = str(baseline_cfg.get("llm_config_file", ""))
+    llm_config_effective = ""
     if method == "llm_hh":
         llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
         if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
@@ -1279,6 +1312,14 @@ def main() -> None:
             with open(adapted, "w", encoding="utf-8") as f:
                 json.dump(js, f, indent=2, ensure_ascii=False)
             llm_config = adapted
+        llm_config_effective = str(llm_config) if llm_config else ""
+        append_trace_event_v54(
+            trace_events_path,
+            "llm_config_resolved",
+            payload={"requested": llm_config_requested, "effective": llm_config_effective},
+            run_id=run_id,
+            step=0,
+        )
     output_dir = output_root / problem / case_name / "result" / method
     case_stem = case_name
 
@@ -1596,12 +1637,12 @@ def main() -> None:
     best_solution_path = output_dir / "best_solution.json"
     best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
     best_solution_payload = _read_best_solution_meta(best_solution_path)
-    _write_layout_best(out_dir, layout_input, cfg, pareto, best_assign, run_id)
+    _write_layout_best(out_dir, trace_path, trace_path_compat, layout_input, cfg, pareto, best_assign, run_id)
 
     detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
     metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
     eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-    trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
+    trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
 
     best_eval = {
         "total_scalar": float(trace_info.get("best_total_scalar", 0.0)),
@@ -1613,7 +1654,7 @@ def main() -> None:
     evaluator_import_error = str(best_meta.get("evaluator_import_error", ""))
     base_eval = trace_info.get("base_eval", {}) or {}
     knee_comm, knee_therm, _ = pareto.knee_point()
-    trace_summary = _summarize_trace_hits(out_dir / "trace.csv")
+    trace_summary = _summarize_trace_hits(trace_path)
     accept_rate = float(trace_metrics.get("accept_rate_overall", 0.0))
     llm_summary = _summarize_llm_usage(llm_usage_path)
     if llm_summary.get("fallback_used"):
@@ -1668,6 +1709,10 @@ def main() -> None:
                 "comm_norm": float(base_eval.get("comm_norm", 0.0)),
                 "therm_norm": float(base_eval.get("therm_norm", 0.0)),
             },
+        },
+        "llm_config": {
+            "requested": llm_config_requested,
+            "effective": llm_config_effective,
         },
         "best_objective": {
             "total_scalar": float(best_eval.get("total_scalar", 0.0)),
@@ -1770,7 +1815,8 @@ def main() -> None:
             "objective_hash": str(objective_hash),
             "trace_dir": str(trace_dir.absolute()),
             "artifacts": {
-                "trace_csv": str((out_dir / "trace.csv").absolute()),
+                "trace_csv": str(trace_path.absolute()),
+                "trace_csv_compat": str(trace_path_compat.absolute()),
                 "pareto_points_csv": str((out_dir / "pareto_points.csv").absolute()),
                 "trace_metrics_json": str((out_dir / "trace_metrics.json").absolute()),
                 "oscillation_metrics_json": str((out_dir / "oscillation_metrics.json").absolute()),

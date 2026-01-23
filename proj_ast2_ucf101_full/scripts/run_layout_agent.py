@@ -16,6 +16,7 @@ import csv
 import hashlib
 import json
 import random
+import shutil
 import time
 import uuid
 from types import SimpleNamespace
@@ -106,6 +107,8 @@ def run_layout_agent(
         llm_usage_path.write_text("", encoding="utf-8")
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_dir = out_dir / "trace"
+    trace_path = trace_dir / "trace.csv"
+    trace_path_compat = out_dir / "trace.csv"
     if run_id is None:
         run_id = stable_hash(
             {
@@ -126,6 +129,19 @@ def run_layout_agent(
     except Exception:
         pass
     sig = build_signature_v54(cfg, method_name="ours_layout_agent")
+    requested_config = {}
+    try:
+        contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
+        if contract is None and hasattr(cfg, "get"):
+            contract = cfg.get("_contract", {})
+        if contract is None:
+            contract = {}
+        snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
+            contract, "requested_config_snapshot", {}
+        )
+        requested_config = OmegaConf.to_container(snapshot, resolve=False)
+    except Exception:
+        requested_config = {}
     init_trace_dir(
         trace_dir,
         signature=sig,
@@ -138,6 +154,7 @@ def run_layout_agent(
         },
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
         resolved_config=OmegaConf.to_container(cfg, resolve=True),
+        requested_config=requested_config,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
 
@@ -299,7 +316,7 @@ def run_layout_agent(
                 cluster_to_region=cluster_to_region,
                 pareto=pareto,
                 cfg=detailed_cfg,
-                trace_path=out_dir / "trace.csv",
+                trace_path=trace_path,
                 seed_id=int(seed),
                 chip_tdp=chip_tdp,
                 llm_usage_path=out_dir / "llm_usage.jsonl",
@@ -328,7 +345,7 @@ def run_layout_agent(
                 layout_state=layout_state,
                 pareto=pareto,
                 cfg=cfg.alt_opt,
-                trace_path=out_dir / "trace.csv",
+                trace_path=trace_path,
                 chip_tdp=chip_tdp,
             )
 
@@ -369,7 +386,8 @@ def run_layout_agent(
                 "J": J,
             },
             "artifacts": {
-                "trace_csv": str((out_dir / "trace.csv").absolute()),
+                "trace_csv": str(trace_path.absolute()),
+                "trace_csv_compat": str(trace_path_compat.absolute()),
                 "pareto_csv": str((out_dir / "pareto_points.csv").absolute()),
                 "llm_usage_jsonl": str((out_dir / "llm_usage.jsonl").absolute()),
             },
@@ -384,7 +402,7 @@ def run_layout_agent(
         detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
         metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
         eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-        trace_metrics = compute_trace_metrics_from_csv(out_dir / "trace.csv", metrics_window, eps_flat)
+        trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
 
         report = {
             "run_id": run_id,
@@ -449,6 +467,8 @@ def run_layout_agent(
             steps_done=int(steps_done),
             best_solution_valid=bool(best_solution_valid),
         )
+        if trace_path.exists():
+            shutil.copy2(trace_path, trace_path_compat)
         finalize_trace_dir(trace_dir)
 
 
