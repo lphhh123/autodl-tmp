@@ -995,4 +995,66 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         ],
     )
 
+    # ===========================
+    # v5.4 CONTRACT: auto-record requested vs effective for CRITICAL paths
+    # ===========================
+    try:
+        contract = cfg.setdefault("_contract", {})
+        requested = contract.get("requested_config_snapshot", {}) or {}
+        overrides = contract.setdefault("overrides", []) or []
+
+        # prevent duplicates
+        existing = set()
+        for o in overrides:
+            p = o.get("path", "")
+            if p:
+                existing.add(p)
+
+        def _get_requested(path: str):
+            cur = requested
+            for k in path.split("."):
+                if not isinstance(cur, dict):
+                    return None
+                cur = cur.get(k, None)
+            return cur
+
+        def _get_effective(path: str):
+            return get_nested(cfg, path, None)
+
+        CRITICAL = [
+            # v5.4 semantic anchors
+            "stable_hw.enabled",
+            "stable_hw.accuracy_guard.enabled",
+            "stable_hw.accuracy_guard.controller.guard_mode",
+            "stable_hw.locked_acc_ref.enabled",
+            "stable_hw.locked_acc_ref.source",
+            "stable_hw.no_drift.enabled",
+            "stable_hw.no_double_scale.enabled",
+            # trace/audit anchors
+            "trace.enabled",
+            "hw_proxy.sanitize.enabled",
+        ]
+
+        for path in CRITICAL:
+            if path in existing:
+                continue
+            req = _get_requested(path)
+            eff = _get_effective(path)
+            if req != eff:
+                overrides.append(
+                    {
+                        "path": path,
+                        "requested": req,
+                        "effective": eff,
+                        "reason": "auto_default_or_mirror_v5p4",
+                    }
+                )
+                existing.add(path)
+
+        contract["overrides"] = overrides
+        cfg["_contract"] = contract
+    except Exception:
+        # never break runtime; but contract evidence may be incomplete -> audits will catch via smoke
+        pass
+
     return cfg
