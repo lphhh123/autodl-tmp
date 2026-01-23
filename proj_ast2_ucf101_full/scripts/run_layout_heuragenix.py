@@ -29,6 +29,7 @@ import uuid
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
+from omegaconf import OmegaConf
 
 project_root = Path(__file__).resolve().parents[1]
 
@@ -1143,8 +1144,15 @@ def main() -> None:
     init_trace_dir(
         trace_dir,
         signature=signature,
-        run_meta={"heuristic": method_label, "method": method, "run_id": run_id, "mode": "layout_heuragenix"},
+        run_meta={
+            "heuristic": method_label,
+            "method": method,
+            "run_id": run_id,
+            "seed_id": int(seed),
+            "mode": "layout_heuragenix",
+        },
         required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
+        resolved_config=OmegaConf.to_container(cfg, resolve=True),
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
     finalize_state = {

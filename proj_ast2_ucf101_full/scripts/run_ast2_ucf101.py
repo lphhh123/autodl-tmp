@@ -1,7 +1,10 @@
 """Entry for AST2.0-lite single device training (SPEC)."""
 import argparse
 import json
+import uuid
 from pathlib import Path
+
+from omegaconf import OmegaConf
 
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
@@ -39,6 +42,9 @@ def main():
         cfg.train.seed = seed
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
+    rid = OmegaConf.select(cfg, "train.run_id")
+    if not rid:
+        OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
     cli_out = args.out_dir or args.out
     auto_out = f"outputs/ast2_auto"
     out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)

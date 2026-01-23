@@ -51,7 +51,7 @@ def _check_trace_events(trace_path: Path) -> None:
     if missing:
         raise AssertionError(f"trace_header signature missing required fields: {missing}")
 
-    for fn in ["manifest.json", "trace_summary.json"]:
+    for fn in ["manifest.json", "summary.json"]:
         p = trace_dir / fn
         if not p.exists():
             raise FileNotFoundError(f"Missing {p}")

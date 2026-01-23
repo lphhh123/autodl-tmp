@@ -102,7 +102,7 @@ def test_smoke_run_layout_agent():
         trace_dir = out_dir / "trace"
         trace_header = trace_dir / "trace_header.json"
         trace_events = trace_dir / "trace_events.jsonl"
-        trace_summary = trace_dir / "trace_summary.json"
+        trace_summary = trace_dir / "summary.json"
         assert trace_header.exists()
         assert trace_events.exists()
         assert trace_summary.exists()

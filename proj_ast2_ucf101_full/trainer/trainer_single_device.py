@@ -532,6 +532,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             out_dir=str(out_dir),
             cfg_path=str(cfg.train.cfg_path),
             cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+            run_id=run_id,
             seed=seed,
             git_sha=git_sha,
             stable_hw_state=stable_state if "stable_state" in locals() else {},

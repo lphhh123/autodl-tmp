@@ -11,7 +11,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 import json
+import uuid
 from typing import Union
+
+from omegaconf import OmegaConf
 
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
@@ -145,6 +148,10 @@ def main():
                 cfg.loss.lambda_hw = 0.0
         except Exception:
             pass
+
+    rid = OmegaConf.select(cfg, "train.run_id")
+    if not rid:
+        OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
 
     # ---- out_dir resolution (CLI highest priority) ----
     auto_out = f"outputs/version_c_auto"
