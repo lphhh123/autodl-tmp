@@ -77,9 +77,9 @@ def main():
                     no_drift_cfg, "baseline_stats_path", None
                 )
             if stats_path is None:
-                print(
-                    "[SMOKE][WARN] no_drift enabled but baseline_stats_path is missing; "
-                    "StableHW will fallback to EMA refs if configured."
+                raise SystemExit(
+                    "[v5.4 P0] no_drift enabled but baseline_stats_path is missing; "
+                    "StableHW would fallback to EMA refs if configured."
                 )
 
     print("[SMOKE] config no_drift OK. stable_hw.enabled=", stable_en)
