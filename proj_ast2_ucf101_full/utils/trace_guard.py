@@ -284,6 +284,14 @@ def init_trace_dir(
         "contract_overrides": overrides,
         "ts_ms": int(time.time() * 1000),
     }
+    header_payload.update(
+        {
+            "requested_config": requested_cfg_obj,
+            "effective_config": resolved_cfg_obj,
+            "requested": run_meta.get("requested", {}),
+            "effective": run_meta.get("effective", {}),
+        }
+    )
     # ---- SPEC_E header required (top-level) ----
     header_payload["no_drift_enabled"] = bool(signature.get("no_drift_enabled", True))
     header_payload["acc_ref_source"] = str(signature.get("acc_ref_source", "locked"))

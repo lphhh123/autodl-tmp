@@ -128,6 +128,7 @@ def main() -> int:
         trace_events_path,
         "proxy_sanitize",
         payload={
+            "candidate_id": 1,
             "metric": "comm",
             "raw_value": 0.0,
             "used_value": 0.0,
