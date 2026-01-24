@@ -34,6 +34,7 @@ from utils.trace_guard import (
     build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
+from utils.trace_contract_v54 import compute_effective_cfg_digest_v54
 from utils.stable_hash import stable_hash
 from utils.config import AttrDict
 from utils.config_utils import get_nested
@@ -130,6 +131,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     specv = str(getattr(contract, "spec_version", getattr(contract, "version", "")))
     if specv not in ("v5.4", "v5.4-stable"):
         raise RuntimeError(f"v5.4 contract violation: unexpected spec_version={specv!r}")
+    seal_digest = getattr(contract, "seal_digest", None)
+    if not seal_digest:
+        raise RuntimeError("v5.4 P0: missing cfg.contract.seal_digest (contract evidence not sealed)")
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
@@ -391,7 +395,24 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     freeze_epochs = 0
     total_epochs = 0
     try:
+        def _assert_cfg_sealed():
+            cur = compute_effective_cfg_digest_v54(cfg)
+            if cur != seal_digest:
+                if trace_dir is not None:
+                    append_trace_event_v54(
+                        trace_events_path,
+                        "contract_violation",
+                        {
+                            "reason": "cfg_mutated_after_seal",
+                            "expected_seal_digest": str(seal_digest),
+                            "actual_seal_digest": str(cur),
+                        },
+                    )
+                raise RuntimeError("v5.4 P0: cfg mutated after seal (NoDrift/Trace evidence invalid)")
+
+        _assert_cfg_sealed()
         for epoch in range(cfg.train.epochs):
+            _assert_cfg_sealed()
             ran_epochs += 1
             steps_done = ran_epochs
             total_epochs += 1

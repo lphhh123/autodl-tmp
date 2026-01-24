@@ -13,6 +13,7 @@ from utils.trace_contract_v54 import (
     REQUIRED_EVENT_PAYLOAD_KEYS_V54,
     SCHEMA_VERSION_V54,
 )
+from utils.config_utils import get_nested
 from .trace_schema import TRACE_FIELDS
 from .stable_hash import stable_hash
 
@@ -219,6 +220,7 @@ def init_trace_dir(
     extra_manifest: Optional[Dict[str, Any]] = None,
     resolved_config: Optional[Dict[str, Any]] = None,
     requested_config: Optional[Dict[str, Any]] = None,
+    contract_overrides: Optional[list[Dict[str, Any]]] = None,
     requested_cfg_yaml: Optional[str] = None,
 ) -> Dict[str, Path]:
     """
@@ -272,10 +274,15 @@ def init_trace_dir(
             requested_path.write_text("# config_requested placeholder (v5.4)\n", encoding="utf-8")
 
     # 1) trace_header.json（结构化元信息）
-    overrides = []
-    if resolved_cfg_obj:
-        contract = resolved_cfg_obj.get("_contract", {}) or {}
-        overrides = contract.get("overrides", []) or []
+    # ---- contract_overrides: v5.4 合同证据，必须可审计 ----
+    if contract_overrides is not None:
+        overrides = list(contract_overrides)
+    else:
+        overrides = []
+        if isinstance(resolved_cfg_obj, dict):
+            c = resolved_cfg_obj.get("_contract", None)
+            if isinstance(c, dict):
+                overrides = c.get("overrides", []) or []
     header_payload = {
         "schema": SCHEMA_VERSION_V54,
         "signature": signature,
@@ -372,9 +379,20 @@ def init_trace_dir_v54(
         snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
             contract, "requested_config_snapshot", {}
         )
-        requested_config = OmegaConf.to_container(snapshot, resolve=False)
-        if not isinstance(requested_config, dict):
+        if snapshot is None:
+            requested_config = None
+        elif OmegaConf.is_config(snapshot):
+            requested_config = OmegaConf.to_container(snapshot, resolve=False)
+        elif isinstance(snapshot, dict):
+            requested_config = snapshot
+        else:
+            # 最保守：强制转成 dict，避免 header 缺字段
+            requested_config = {"_unsupported_requested_snapshot_type": str(type(snapshot))}
+        if requested_config is not None and not isinstance(requested_config, dict):
             raise RuntimeError("[P0][v5.4] requested_config must be a dict for auditable trace_header.")
+    contract_overrides = get_nested(cfg, "_contract.overrides", [])
+    if contract_overrides is None:
+        contract_overrides = []
     meta = init_trace_dir(
         trace_dir=trace_dir,
         signature=signature_v54 or signature,
@@ -383,6 +401,7 @@ def init_trace_dir_v54(
         extra_manifest=extra_manifest,
         resolved_config=resolved_config,
         requested_config=requested_config,
+        contract_overrides=contract_overrides,
         requested_cfg_yaml=requested_cfg_yaml,
     )
     snapshot_path = Path(meta["eval_config_snapshot"])

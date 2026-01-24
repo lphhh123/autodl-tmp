@@ -1,6 +1,12 @@
 # utils/trace_contract_v54.py
 # Contract: SPEC_E_AntiLoop_Contracts_and_Smoke_v5.4.md (Appendix A)
 
+import hashlib
+
+from omegaconf import OmegaConf
+
+from .trace_signature_v54 import stable_json_dumps
+
 SCHEMA_VERSION_V54 = "5.4"
 
 # Keep a superset to avoid breaking existing layout pipelines,
@@ -11,6 +17,7 @@ ALLOWED_EVENT_TYPES_V54 = {
     "proxy_sanitize",
     "ref_update",
     "finalize",
+    "contract_violation",
 
     # non-contract-critical / legacy (allowed but not strictly keyed here)
     "step",
@@ -116,6 +123,7 @@ REQUIRED_EVENT_PAYLOAD_KEYS_V54 = {
     "proxy_sanitize": REQUIRED_PROXY_SANITIZE_KEYS,
     "ref_update": REQUIRED_REF_UPDATE_KEYS,
     "finalize": REQUIRED_FINALIZE_KEYS,
+    "contract_violation": ["reason", "expected_seal_digest", "actual_seal_digest"],
 
     # Allow free-form payload for these (legacy / non-contract-critical)
     "step": [],
@@ -124,3 +132,23 @@ REQUIRED_EVENT_PAYLOAD_KEYS_V54 = {
     "duplicate": [],
     "boundary": [],
 }
+
+
+class TraceContractV54:
+    CONTRACT_VERSION = "v5.4"
+
+    @staticmethod
+    def encode_config_snapshot(cfg, resolve: bool = True):
+        if cfg is None:
+            return None
+        if OmegaConf.is_config(cfg):
+            return OmegaConf.to_container(cfg, resolve=resolve)
+        if isinstance(cfg, dict):
+            return dict(cfg)
+        return {"_unsupported_cfg_snapshot_type": str(type(cfg))}
+
+
+def compute_effective_cfg_digest_v54(cfg) -> str:
+    snap = TraceContractV54.encode_config_snapshot(cfg, resolve=True)
+    s = stable_json_dumps(snap).encode("utf-8")
+    return hashlib.sha256(s).hexdigest()
