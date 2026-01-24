@@ -211,6 +211,7 @@ def main() -> None:
         effective={"mode": "smoke_steps0"},
         no_drift_enabled=True,
         acc_ref_source="manual",
+        seal_digest="dummy",
     )
     append_trace_event_v54(
         trace_events_path,

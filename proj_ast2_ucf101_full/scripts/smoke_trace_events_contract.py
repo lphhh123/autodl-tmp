@@ -24,6 +24,7 @@ from utils.trace_contract_v54 import (
     REQUIRED_EVENT_PAYLOAD_KEYS_V54,
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
+    TraceContractV54,
 )
 from utils.trace_guard import (
     append_trace_event_v54,
@@ -108,7 +109,9 @@ def main() -> int:
         effective={"mode": "version_c"},
         no_drift_enabled=True,
         acc_ref_source="locked",
+        seal_digest="dummy",
     )
+    TraceContractV54.validate_event("trace_header", trace_header_payload)
     append_trace_event_v54(
         trace_events_path,
         "trace_header",

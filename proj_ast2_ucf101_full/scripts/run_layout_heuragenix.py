@@ -129,7 +129,7 @@ def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
     if len(candidates) > 1 and not cfg_root:
         raise RuntimeError(
             "[v5.4 contract] Multiple HeurAgenix roots detected. "
-            "You must pass --heuragenix_dir to avoid silent repo mismatch."
+            "You must pass --heuragenix_root to avoid silent repo mismatch."
         )
     if candidates:
         heuragenix_root = candidates[0]
@@ -1118,11 +1118,11 @@ def main() -> None:
     parser.add_argument("--layout_input", type=str, required=True)
     parser.add_argument("--cfg", type=str, required=True)
     parser.add_argument("--out_dir", type=str, default=None)
+    parser.add_argument("--heuragenix_root", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
-    cfg = validate_and_fill_defaults(cfg, mode="layout")
     print(
         "[V5.4 CONTRACT] This run emits v5.4 trace/run_manifest; do NOT run HeurAgenix directly for baselines."
     )
@@ -1131,8 +1131,11 @@ def main() -> None:
     out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
-    if hasattr(cfg, "train"):
-        cfg.train.out_dir = str(out_dir)
+    if not hasattr(cfg, "train") or cfg.train is None:
+        cfg.train = {}
+    cfg.train.out_dir = str(out_dir)
+    cfg.out_dir = str(out_dir)
+    cfg = validate_and_fill_defaults(cfg, mode="layout")
 
     # dump config_used
     try:
@@ -1145,7 +1148,12 @@ def main() -> None:
         (out_dir / "config_resolved.yaml").write_text(omegaconf.OmegaConf.to_yaml(cfg), encoding="utf-8")
     except Exception:
         (out_dir / "config_resolved.yaml").write_text(str(cfg), encoding="utf-8")
-    meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
+    meta = {
+        "argv": sys.argv,
+        "out_dir": str(out_dir),
+        "cfg_path": str(args.cfg),
+        "seed": int(args.seed),
+    }
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     layout_input_path = Path(args.layout_input)
@@ -1161,13 +1169,24 @@ def main() -> None:
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else cfg.get("baseline", {})
     layout_input["require_main_evaluator"] = bool(baseline_cfg.get("require_main_evaluator", True))
     layout_input["allow_fallback_evaluator"] = bool(baseline_cfg.get("allow_fallback_evaluator", False))
-    heuragenix_root = _resolve_heuragenix_root(baseline_cfg.get("heuragenix_root"), project_root)
+    heuragenix_root = _resolve_heuragenix_root(args.heuragenix_root or baseline_cfg.get("heuragenix_root"), project_root)
     if not heuragenix_root.exists():
         raise FileNotFoundError(
             "Cannot find HeurAgenix directory.\n"
             f"cwd={os.getcwd()}\n"
-            f"heuragenix_dir={heuragenix_root}\n"
-            "Tip: run with --heuragenix_dir /ABS/PATH/TO/HeurAgenix"
+            f"heuragenix_root={heuragenix_root}\n"
+            "Tip: run with --heuragenix_root /ABS/PATH/TO/HeurAgenix"
+        )
+    required_paths = [
+        heuragenix_root / "launch_hyper_heuristic.py",
+        heuragenix_root / "src" / "problems",
+        heuragenix_root / "configs",
+    ]
+    missing = [str(p) for p in required_paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "[v5.4 P1][HeurAgenix] heuragenix_root is missing required paths:\n"
+            + "\n".join(f"  - {p}" for p in missing)
         )
     _ensure_heuragenix_syspath(heuragenix_root)
     (out_dir / "heuragenix_resolution.json").write_text(
@@ -1349,6 +1368,7 @@ def main() -> None:
             acc_ref_source=str(
                 getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
             ),
+            seal_digest=str(getattr(getattr(cfg, "contract", None), "seal_digest", "")),
         )
         # optional extra context (allowed by schema; improves auditability)
         payload.update(
@@ -1409,9 +1429,8 @@ def main() -> None:
         sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = _trace_excepthook
-    if hasattr(cfg, "train"):
-        cfg.train.cfg_hash = cfg_hash
-        cfg.train.cfg_path = str(args.cfg)
+    meta["cfg_hash"] = str(cfg_hash)
+    (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     from utils.run_manifest import write_run_manifest
 
     write_run_manifest(

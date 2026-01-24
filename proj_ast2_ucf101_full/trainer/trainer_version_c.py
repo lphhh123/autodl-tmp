@@ -681,8 +681,8 @@ def train_version_c(
         logger.info(
             f"[v5.4 contract] train.mode={getattr(cfg.train, 'mode', None)} "
             f"stable_hw.enabled={getattr(cfg.stable_hw, 'enabled', None)} "
-            f"locked_acc_ref.enabled={getattr(cfg.locked_acc_ref, 'enabled', None)} "
-            f"no_drift.enabled={getattr(cfg.no_drift, 'enabled', None)} "
+            f"stable_hw.locked_acc_ref.enabled={getattr(getattr(cfg.stable_hw, 'locked_acc_ref', None), 'enabled', None)} "
+            f"stable_hw.no_drift.enabled={getattr(getattr(cfg.stable_hw, 'no_drift', None), 'enabled', None)} "
             f"stable_hw.no_double_scale.enabled={nds_en}"
         )
 
@@ -694,11 +694,12 @@ def train_version_c(
                 manifest = {}
             stable_cfg = getattr(cfg_obj, "stable_hw", None)
             no_drift_cfg = _cfg_get(stable_cfg, "no_drift", None)
+            guard_cfg = _cfg_get(stable_cfg, "accuracy_guard", None)
             gating_summary = {
                 "requested": {
                     "stable_hw_enabled": bool(_cfg_get(stable_cfg, "enabled", False)),
                     "no_drift_enabled": bool(_cfg_get(no_drift_cfg, "enabled", False)),
-                    "hard_gating": bool(_cfg_get(getattr(cfg_obj, "accuracy_guard", None), "hard_gating", False)),
+                    "hard_gating": bool(_cfg_get(guard_cfg, "hard_gating", False)),
                 },
                 "effective": {
                     "stable_hw_enabled": bool(stable_state.get("stable_hw_enabled", _cfg_get(stable_cfg, "enabled", False))),
@@ -969,6 +970,7 @@ def train_version_c(
             },
             no_drift_enabled=bool(no_drift_enabled),
             acc_ref_source=str(lar_source),
+            seal_digest=str(getattr(getattr(cfg, "contract", None), "seal_digest", "")),
         )
         trace_header_payload.update(
             {
@@ -2042,6 +2044,7 @@ def train_version_c(
                 acc_ref_source=str(
                     getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
                 ),
+                seal_digest=str(getattr(getattr(cfg, "contract", None), "seal_digest", "")),
             )
             trace_header_payload["stable_hw_state"] = {"init_status": "failed_before_full_init"}
 

@@ -152,6 +152,20 @@ def main():
         cfg.train = {}
     cfg.train.requested_cfg_yaml = requested_cfg_yaml
     cfg.cfg_path = args.cfg
+
+    exp_name = Path(args.cfg).stem
+    # out_dir is where we store training outputs (checkpoints, trace, cfg_resolved, etc.)
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else Path("outputs") / exp_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    rid = OmegaConf.select(cfg, "train.run_id")
+    if not rid:
+        OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
+
+    # ---- v5.4 contract: BOTH cfg.out_dir and cfg.train.out_dir must be set ----
+    cfg.out_dir = str(out_dir)
+    cfg.train.out_dir = str(out_dir)
+
     seed_everything(int(args.seed))
     if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)
@@ -161,18 +175,6 @@ def main():
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
     cfg.train.requested_cfg_yaml = requested_cfg_yaml
-
-    rid = OmegaConf.select(cfg, "train.run_id")
-    if not rid:
-        OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
-
-    exp_name = Path(args.cfg).stem
-    # out_dir is where we store training outputs (checkpoints, trace, cfg_resolved, etc.)
-    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else Path("outputs") / exp_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # ---- v5.4 contract: BOTH cfg.out_dir and cfg.train.out_dir must be set ----
-    cfg.out_dir = str(out_dir)
-    cfg.train.out_dir = str(out_dir)
 
     out_dir_path = Path(out_dir)
 
@@ -219,13 +221,14 @@ def main():
         print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
-    cfg.train.cfg_hash = cfg_hash
-    cfg.train.cfg_path = str(args.cfg)
 
     # ---- run meta ----
     meta = {
         "argv": sys.argv,
         "out_dir": str(out_dir_path),
+        "cfg_path": str(args.cfg),
+        "cfg_hash": str(cfg_hash),
+        "seed": int(args.seed),
         "validation": {},
     }
     with open(out_dir_path / "run_meta.json", "w", encoding="utf-8") as f:

@@ -29,12 +29,13 @@ ALLOWED_EVENT_TYPES_V54 = {
 
 # ===== SPEC_E Appendix A1.3 (trace_header) =====
 REQUIRED_TRACE_HEADER_KEYS = [
-    "requested_config",
-    "effective_config",
+    "requested_config_snapshot",
+    "effective_config_snapshot",
     "contract_overrides",
     "requested",
     "effective",
     "signature",
+    "seal_digest",
 
     # --- SPEC_E: Acc-First / Locked / Stability required fields (auditable) ---
     "acc_first_hard_gating_enabled",
@@ -146,6 +147,14 @@ class TraceContractV54:
         if isinstance(cfg, dict):
             return dict(cfg)
         return {"_unsupported_cfg_snapshot_type": str(type(cfg))}
+
+    @staticmethod
+    def validate_event(event_type: str, payload: dict) -> bool:
+        required = REQUIRED_EVENT_PAYLOAD_KEYS_V54.get(event_type, [])
+        missing = [key for key in required if key not in payload]
+        if missing:
+            raise ValueError(f"trace_contract_v54: {event_type} missing required keys: {missing}")
+        return True
 
 
 def compute_effective_cfg_digest_v54(cfg) -> str:
