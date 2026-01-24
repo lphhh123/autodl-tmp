@@ -27,7 +27,7 @@ def _load_layout_evaluator(self):
         candidate = Path(override).expanduser().resolve()
         pkg_root = candidate / "proj_ast2_ucf101_full"
         if (pkg_root / "hw_proxy").exists():
-            sys.path.insert(0, str(candidate))
+            sys.path.insert(0, str(pkg_root))
             from layout.evaluator import LayoutEvaluator
             return LayoutEvaluator
 
@@ -45,7 +45,8 @@ def _load_layout_evaluator(self):
     for base in candidates:
         pkg = (base / "proj_ast2_ucf101_full")
         if (pkg / "hw_proxy").exists():
-            sys.path.insert(0, str(base.resolve()))
+            pkg_root = pkg.resolve()
+            sys.path.insert(0, str(pkg_root))
             from layout.evaluator import LayoutEvaluator
             return LayoutEvaluator
 

@@ -6,6 +6,7 @@ import hashlib
 from omegaconf import OmegaConf
 
 from .trace_signature_v54 import stable_json_dumps
+from .trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS
 
 SCHEMA_VERSION_V54 = "5.4"
 
@@ -154,6 +155,19 @@ class TraceContractV54:
         if missing:
             raise ValueError(f"trace_contract_v54: {event_type} missing required keys: {missing}")
         return True
+
+
+def assert_trace_header_v54(payload: dict, strict: bool = True) -> None:
+    if not isinstance(payload, dict):
+        raise TypeError("trace_header payload must be a dict")
+    TraceContractV54.validate_event("trace_header", payload)
+    signature = payload.get("signature", {})
+    if not isinstance(signature, dict):
+        raise TypeError("trace_header.signature must be a dict")
+    if strict:
+        missing = [k for k in REQUIRED_SIGNATURE_FIELDS if k not in signature]
+        if missing:
+            raise ValueError(f"trace_header.signature missing required fields: {missing}")
 
 
 def compute_effective_cfg_digest_v54(cfg) -> str:
