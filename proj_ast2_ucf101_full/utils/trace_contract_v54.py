@@ -158,12 +158,31 @@ class TraceContractV54:
 
 def compute_effective_cfg_digest_v54(cfg) -> str:
     snap = TraceContractV54.encode_config_snapshot(cfg, resolve=True)
-    # --- prevent self-referential seal pollution ---
     if isinstance(snap, dict):
-        c = snap.get("contract", None)
-        if isinstance(c, dict) and "seal_digest" in c:
-            c2 = dict(c)
-            c2.pop("seal_digest", None)
-            snap["contract"] = c2
-    s = stable_json_dumps(snap).encode("utf-8")
+        snap = strip_seal_fields_v54(snap)
+    return compute_snapshot_sha256_v54(snap)
+
+
+def strip_seal_fields_v54(snapshot: dict) -> dict:
+    """
+    Return a COPY of snapshot where self-referential seal fields are removed.
+    This MUST match what is stored as trace_header.effective_config_snapshot.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    snap = dict(snapshot)
+
+    c = snap.get("contract", None)
+    if isinstance(c, dict) and "seal_digest" in c:
+        c2 = dict(c)
+        c2.pop("seal_digest", None)
+        snap["contract"] = c2
+    return snap
+
+
+def compute_snapshot_sha256_v54(snapshot_obj: dict) -> str:
+    """
+    sha256(stable_json_dumps(snapshot_obj)) — canonical seal definition for v5.4.
+    """
+    s = stable_json_dumps(snapshot_obj).encode("utf-8")
     return hashlib.sha256(s).hexdigest()

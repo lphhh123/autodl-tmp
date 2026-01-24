@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# NOTE: run_layout_suite is an orchestrator for batch runs, not the OneCommand entrypoint.
+# It intentionally dispatches to the canonical module runners to avoid path-entry ambiguity.
 # --- bootstrap sys.path for both invocation styles ---
 import sys
 from pathlib import Path
@@ -54,11 +56,14 @@ def run_layout_suite(inputs: List[str], cfgs: List[str], seeds: List[int], out_r
         try:
             cfg_path = Path(cfg)
             runner = _pick_runner(cfg_path)
-            script = Path(__file__).parent / runner
+            runner_mod = (
+                "scripts.run_layout_heuragenix" if runner.endswith("run_layout_heuragenix.py") else "scripts.run_layout_agent"
+            )
             subprocess.run(
                 [
                     sys.executable,
-                    str(script),
+                    "-m",
+                    runner_mod,
                     "--layout_input",
                     str(layout_input),
                     "--cfg",
