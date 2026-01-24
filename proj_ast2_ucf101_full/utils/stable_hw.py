@@ -78,13 +78,41 @@ def _get_root_and_stable(cfg_or_stable):
     return None, cfg_or_stable
 
 
+def _get_contract_version_and_strict(root) -> tuple[str, bool]:
+    """
+    Unify contract flags across boot stages:
+      - validate stage writes _contract.strict
+      - trace_init syncs contract.strict
+    v5.4 strict MUST be effective in both stages.
+    """
+    c = getattr(root, "contract", None)
+    cc = getattr(root, "_contract", None)
+
+    ver = ""
+    if c is not None:
+        ver = str(getattr(c, "version", "") or "").strip()
+    if not ver and cc is not None:
+        ver = str(getattr(cc, "version", "") or "").strip()
+    if not ver:
+        ver = "v5.4"
+
+    strict = False
+    if c is not None and getattr(c, "strict", None) is not None:
+        strict = bool(getattr(c, "strict"))
+    elif cc is not None and getattr(cc, "strict", None) is not None:
+        strict = bool(getattr(cc, "strict"))
+    else:
+        strict = True
+
+    return ver, strict
+
+
 def _get_locked_cfg(cfg_or_stable):
     root, stable = _get_root_and_stable(cfg_or_stable)
 
     # v5.4 strict: forbid legacy root-level fields (Anti-Loop evidence must match signature)
-    contract = getattr(root, "contract", None) if root is not None else None
-    is_v54 = bool(contract) and str(getattr(contract, "version", "")).strip() == "v5.4"
-    strict = bool(contract) and bool(getattr(contract, "strict", False))
+    ver, strict = _get_contract_version_and_strict(root) if root is not None else ("", False)
+    is_v54 = (ver == "v5.4")
     if is_v54 and strict:
         if getattr(root, "locked_acc_ref", None) not in (None, {}, ""):
             raise ValueError(
@@ -101,14 +129,13 @@ def _get_locked_cfg(cfg_or_stable):
 
 def _get_no_drift_cfg(cfg_or_stable, stable_hw_cfg=None):
     """
-    v5.4: support both legacy root-level cfg.no_drift and v5 nested cfg.stable_hw.no_drift.
+    v5.4 strict forbids legacy root-level cfg.no_drift; legacy path is only for non-strict/old experiments.
     Also keep backward-compat with old call sites that pass (cfg, stable_hw_cfg).
     """
     root, stable = _get_root_and_stable(cfg_or_stable)
 
-    contract = getattr(root, "contract", None) if root is not None else None
-    is_v54 = bool(contract) and str(getattr(contract, "version", "")).strip() == "v5.4"
-    strict = bool(contract) and bool(getattr(contract, "strict", False))
+    ver, strict = _get_contract_version_and_strict(root) if root is not None else ("", False)
+    is_v54 = (ver == "v5.4")
     if is_v54 and strict:
         if getattr(root, "no_drift", None) not in (None, {}, ""):
             raise ValueError(
