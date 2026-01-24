@@ -119,23 +119,13 @@ def main() -> None:
         else:
             raise AssertionError("stable_hw.accuracy_guard.controller missing")
 
-    lock_root = getattr(cfg, "locked_acc_ref", None)
-    lock_nested = getattr(stable_hw_cfg, "locked_acc_ref", None)
-    if lock_root is not None and lock_nested is not None:
-        raise AssertionError("locked_acc_ref must be defined only once (root preferred)")
-    if lock_root is None and lock_nested is None:
-        raise AssertionError("locked_acc_ref missing (root preferred)")
-    if lock_root is None and lock_nested is not None:
-        print("[WARN] locked_acc_ref is nested under stable_hw; prefer stable_hw.* (v5.4 canonical).", file=sys.stderr)
+    if getattr(cfg, "locked_acc_ref", None) is not None or getattr(cfg, "no_drift", None) is not None:
+        raise AssertionError("[v5.4 P0][HardGate-A] root-level locked_acc_ref/no_drift forbidden in strict mode.")
 
-    no_drift_root = getattr(cfg, "no_drift", None)
-    no_drift_nested = getattr(stable_hw_cfg, "no_drift", None)
-    if no_drift_root is not None and no_drift_nested is not None:
-        raise AssertionError("no_drift must be defined only once (root preferred)")
-    if no_drift_root is None and no_drift_nested is None:
-        raise AssertionError("no_drift missing (root preferred)")
-    if no_drift_root is None and no_drift_nested is not None:
-        print("[WARN] no_drift is nested under stable_hw; prefer stable_hw.* (v5.4 canonical).", file=sys.stderr)
+    if getattr(stable_hw_cfg, "locked_acc_ref", None) is None:
+        raise AssertionError("stable_hw.locked_acc_ref missing (canonical).")
+    if getattr(stable_hw_cfg, "no_drift", None) is None:
+        raise AssertionError("stable_hw.no_drift missing (canonical).")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

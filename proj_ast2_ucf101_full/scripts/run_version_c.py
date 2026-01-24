@@ -75,46 +75,27 @@ def _record_override(cfg: dict, key_path: str, old, new, reason: str = "cli_over
 
 
 def _inject_baseline_stats_path(cfg, baseline_stats_path: str):
-    from pathlib import Path
+    baseline_stats = getattr(cfg, "baseline_stats", None)
+    stats_path = ""
+    if baseline_stats_path:
+        stats_path = baseline_stats_path
+    elif baseline_stats is not None:
+        stats_path = getattr(baseline_stats, "path", "") or ""
+    if not stats_path:
+        return cfg
 
-    from omegaconf import OmegaConf
+    p = str(stats_path)
 
-    p = str(Path(baseline_stats_path).expanduser())
+    # strict: forbid root-level no_drift entirely
+    if bool(getattr(getattr(cfg, "contract", None), "strict", False)) and getattr(cfg, "no_drift", None) is not None:
+        raise RuntimeError("[v5.4 P0][HardGate-A] cfg.no_drift root-level is forbidden in strict mode.")
 
-    # Ensure stable_hw exists + enabled (Version-C + StableHW contract)
-    if getattr(cfg, "stable_hw", None) is None:
-        cfg.stable_hw = OmegaConf.create({})
-    if not hasattr(cfg.stable_hw, "enabled"):
-        cfg.stable_hw.enabled = True
-
-    # Replace the whole locked_cfg selection with a single-source read
-    if getattr(cfg, "stable_hw", None) is None or getattr(cfg.stable_hw, "locked_acc_ref", None) is None:
-        raise ValueError("v5.4 requires stable_hw.locked_acc_ref to exist after validation/migration.")
-    locked_cfg = cfg.stable_hw.locked_acc_ref
-    locked_key_path = "stable_hw.locked_acc_ref.baseline_stats_path"
-    if getattr(locked_cfg, "baseline_stats_path", None) != p:
-        old_val = getattr(locked_cfg, "baseline_stats_path", None)
-        locked_cfg.baseline_stats_path = p
-        _record_override(cfg, locked_key_path, old_val, p, "cli_inject_baseline_stats")
-
-    # Keep a readable alias (optional, but harmless)
-    if getattr(cfg.stable_hw, "baseline_stats_path", None) != p:
-        old_val = getattr(cfg.stable_hw, "baseline_stats_path", None)
-        cfg.stable_hw.baseline_stats_path = p
-        _record_override(cfg, "stable_hw.baseline_stats_path", old_val, p, "cli_inject_baseline_stats")
-
-    # Also help NoDrift stats_path if it exists but unset
-    try:
-        if getattr(cfg, "no_drift", None) is not None and not getattr(cfg.no_drift, "stats_path", None):
-            old_val = getattr(cfg.no_drift, "stats_path", None)
-            cfg.no_drift.stats_path = p
-            _record_override(cfg, "no_drift.stats_path", old_val, p, "cli_inject_baseline_stats")
-        if getattr(cfg.stable_hw, "no_drift", None) is not None and not getattr(cfg.stable_hw.no_drift, "stats_path", None):
-            old_val = getattr(cfg.stable_hw.no_drift, "stats_path", None)
-            cfg.stable_hw.no_drift.stats_path = p
-            _record_override(cfg, "stable_hw.no_drift.stats_path", old_val, p, "cli_inject_baseline_stats")
-    except Exception:
-        pass
+    # canonical write
+    nd_cfg = getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "stats_path", None)
+    if nd_cfg in (None, "", "auto"):
+        old_val = getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "stats_path", None)
+        cfg.stable_hw.no_drift.stats_path = p
+        _record_override(cfg, "stable_hw.no_drift.stats_path", old_val, p, "cli_inject_baseline_stats")
 
     return cfg
 

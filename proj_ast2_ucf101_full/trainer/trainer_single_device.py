@@ -34,10 +34,10 @@ from utils.trace_guard import (
     build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
-from utils.trace_contract_v54 import compute_effective_cfg_digest_v54
 from utils.stable_hash import stable_hash
 from utils.config import AttrDict
 from utils.config_utils import get_nested
+from utils.contract_seal import assert_cfg_sealed_or_violate
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -398,24 +398,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     freeze_epochs = 0
     total_epochs = 0
     try:
-        def _assert_cfg_sealed():
-            cur = compute_effective_cfg_digest_v54(cfg)
-            if cur != seal_digest:
-                if trace_dir is not None:
-                    append_trace_event_v54(
-                        trace_events_path,
-                        "contract_violation",
-                        {
-                            "reason": "cfg_mutated_after_seal",
-                            "expected_seal_digest": str(seal_digest),
-                            "actual_seal_digest": str(cur),
-                        },
-                    )
-                raise RuntimeError("v5.4 P0: cfg mutated after seal (NoDrift/Trace evidence invalid)")
-
-        _assert_cfg_sealed()
+        assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=0)
         for epoch in range(cfg.train.epochs):
-            _assert_cfg_sealed()
+            assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=epoch)
             ran_epochs += 1
             steps_done = ran_epochs
             total_epochs += 1

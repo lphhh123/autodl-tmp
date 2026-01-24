@@ -267,6 +267,26 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             }
         )
 
+    # --- v5.4 strict hard gate A: forbid legacy/root-level keys (single source of truth) ---
+    FORBIDDEN_LEGACY_ROOT_KEYS_V54 = [
+        "locked_acc_ref",
+        "no_drift",
+        "no_double_scale",
+        "hard_gating",
+        "accuracy_guard",
+    ]
+
+    cfg_dict = cfg if isinstance(cfg, dict) else {}
+    req = cfg_dict if isinstance(cfg_dict, dict) else {}
+    found = [k for k in FORBIDDEN_LEGACY_ROOT_KEYS_V54 if k in req]
+    if bool(get_nested(cfg, "contract.strict", False) or get_nested(cfg, "_contract.strict", False)) and found:
+        raise RuntimeError(
+            "[v5.4 P0][HardGate-A] legacy/root-level keys are forbidden in strict mode: "
+            + ", ".join(found)
+            + ". Move them under cfg.stable_hw.* (canonical) and re-run."
+        )
+    # -----------------------------------------------------------------------------
+
     def _fail_on_legacy(path: str, hint: str):
         v = get_nested(cfg, path, None)
         if v is not None:

@@ -29,13 +29,12 @@ ALLOWED_EVENT_TYPES_V54 = {
 
 # ===== SPEC_E Appendix A1.3 (trace_header) =====
 REQUIRED_TRACE_HEADER_KEYS = [
+    # HardGate-B canonical evidence chain
     "requested_config_snapshot",
     "effective_config_snapshot",
     "contract_overrides",
-    "requested",
-    "effective",
-    "signature",
     "seal_digest",
+    "signature",
 
     # --- SPEC_E: Acc-First / Locked / Stability required fields (auditable) ---
     "acc_first_hard_gating_enabled",
