@@ -340,6 +340,26 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                         loss_scalar = float(loss_value)
                     else:
                         loss_scalar = 0.0
+                    _nan = float("nan")
+
+                    def _hw_dict_or_nan(stable_state: dict, key: str):
+                        d = stable_state.get(key, None)
+                        if isinstance(d, dict) and len(d) > 0:
+                            # 强制 float，避免字符串/None 混入导致审计歧义
+                            out = {}
+                            for k, v in d.items():
+                                try:
+                                    out[str(k)] = float(v)
+                                except Exception:
+                                    out[str(k)] = _nan
+                            return out
+                        # single_device 没有 hw proxy：用带固定键的 NaN 占位，保持可审计结构
+                        return {"latency_ms": _nan, "memory_mb": _nan, "power_w": _nan}
+
+                    hw_metric_ref = _hw_dict_or_nan(stable_state, "hw_metric_ref")
+                    hw_metric_raw = _hw_dict_or_nan(stable_state, "hw_metric_raw")
+                    hw_metric_normed = _hw_dict_or_nan(stable_state, "hw_metric_normed")
+                    hw_scale_schema_version = str(stable_state.get("hw_scale_schema_version", "v1"))
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
@@ -360,16 +380,18 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                             "total_loss_scalar": float(loss_scalar),
                             "total_loss_acc_part": float(loss_scalar),
                             "total_loss_hw_part": 0.0,
-                            "hw_metric_ref": {},
-                            "hw_metric_raw": {},
-                            "hw_metric_normed": {},
-                            "hw_scale_schema_version": "v1",
+                            "hw_metric_ref": hw_metric_ref,
+                            "hw_metric_raw": hw_metric_raw,
+                            "hw_metric_normed": hw_metric_normed,
+                            "hw_scale_schema_version": hw_scale_schema_version,
 
                             # ===== STRONGLY RECOMMENDED (auditable) =====
                             "epoch": int(epoch),
                             "guard_mode": str(stable_state.get("guard_mode", "")),
                             "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
-                            "reason_code": "hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery",
+                            "reason_code": "single_device_no_hw_metrics"
+                            if (hw_metric_ref.get("latency_ms") != hw_metric_ref.get("latency_ms"))
+                            else ("hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery"),
                             "reason": dict(getattr(stable_decision, "reason", {}) or {}),
                         },
                         run_id=run_id,
