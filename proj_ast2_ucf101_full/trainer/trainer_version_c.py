@@ -32,7 +32,11 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
-from utils.trace_contract_v54 import REQUIRED_GATING_KEYS, REQUIRED_PROXY_SANITIZE_KEYS
+from utils.trace_contract_v54 import (
+    REQUIRED_GATING_KEYS,
+    REQUIRED_PROXY_SANITIZE_KEYS,
+    compute_effective_cfg_digest_v54,
+)
 from utils.trace_guard import (
     init_trace_dir_v54,
     append_trace_event_v54,
@@ -572,6 +576,9 @@ def train_version_c(
             "Do NOT call train_version_c() with raw load_config(); use scripts/run_version_c.py "
             "or call validate_and_fill_defaults(cfg) explicitly."
         )
+    seal_digest = getattr(getattr(cfg, "contract", None), "seal_digest", None)
+    if not seal_digest:
+        raise RuntimeError("v5.4 P0: missing cfg.contract.seal_digest (contract evidence not sealed)")
 
     device = get_device(cfg.train.device)
     device_type = device.type
@@ -634,6 +641,21 @@ def train_version_c(
     trace_header_written = False
     steps_done_for_finalize = 0
     try:
+        def _assert_cfg_sealed():
+            cur = compute_effective_cfg_digest_v54(cfg)
+            if cur != seal_digest:
+                append_trace_event_v54(
+                    trace_events_path,
+                    "contract_violation",
+                    {
+                        "reason": "cfg_mutated_after_seal",
+                        "expected_seal_digest": str(seal_digest),
+                        "actual_seal_digest": str(cur),
+                    },
+                )
+                raise RuntimeError("v5.4 P0: cfg mutated after seal (NoDrift/Trace evidence invalid)")
+
+        _assert_cfg_sealed()
         # layout_export_dir: ONLY for exporting layout_input.json (optional)
         layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
         if layout_export_dir is not None:
@@ -997,6 +1019,7 @@ def train_version_c(
         total_epochs = 0
         try:
             for outer in range(cfg.training.outer_epochs):
+                _assert_cfg_sealed()
                 ran_epochs += 1
                 total_epochs += 1
                 stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False

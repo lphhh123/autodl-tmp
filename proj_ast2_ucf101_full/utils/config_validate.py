@@ -247,6 +247,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         cfg_to_stamp.contract.version = "v5.4"
         cfg_to_stamp.contract.validated = True
         cfg_to_stamp.contract.validated_by = "utils.config_validate.validate_and_fill_defaults"
+        from .trace_contract_v54 import compute_effective_cfg_digest_v54
+        cfg_to_stamp.contract.seal_digest = compute_effective_cfg_digest_v54(cfg_to_stamp)
         return cfg_to_stamp
     # ---- v5.4: infer train.mode for backward compatibility ----
     train_mode = get_nested(cfg, "train.mode", None)

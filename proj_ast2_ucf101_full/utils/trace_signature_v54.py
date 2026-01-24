@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
+import json
 import os
 
 from .stable_hash import stable_hash
+
+
+def stable_json_dumps(obj: Any) -> str:
+    return json.dumps(
+        obj,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 # v5.4 trace signature contract (SPEC_E §6)
 REQUIRED_SIGNATURE_FIELDS: List[str] = [

@@ -126,7 +126,7 @@ def main() -> None:
     if lock_root is None and lock_nested is None:
         raise AssertionError("locked_acc_ref missing (root preferred)")
     if lock_root is None and lock_nested is not None:
-        print("[WARN] locked_acc_ref is nested under stable_hw; prefer top-level.", file=sys.stderr)
+        print("[WARN] locked_acc_ref is nested under stable_hw; prefer stable_hw.* (v5.4 canonical).", file=sys.stderr)
 
     no_drift_root = getattr(cfg, "no_drift", None)
     no_drift_nested = getattr(stable_hw_cfg, "no_drift", None)
@@ -135,7 +135,7 @@ def main() -> None:
     if no_drift_root is None and no_drift_nested is None:
         raise AssertionError("no_drift missing (root preferred)")
     if no_drift_root is None and no_drift_nested is not None:
-        print("[WARN] no_drift is nested under stable_hw; prefer top-level.", file=sys.stderr)
+        print("[WARN] no_drift is nested under stable_hw; prefer stable_hw.* (v5.4 canonical).", file=sys.stderr)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
