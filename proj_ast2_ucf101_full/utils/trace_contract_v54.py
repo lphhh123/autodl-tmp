@@ -14,6 +14,7 @@ ALLOWED_EVENT_TYPES_V54 = {
 
     # non-contract-critical / legacy (allowed but not strictly keyed here)
     "step",
+    "layout_step",
     "pareto_add",
     "duplicate",
     "boundary",
@@ -63,6 +64,24 @@ REQUIRED_GATING_KEYS = [
     "total_loss",
 ]
 
+# ===== Layout agent step payload (layout pipeline only) =====
+REQUIRED_LAYOUT_STEP_KEYS = [
+    "iter",
+    "stage",
+    "op",
+    "op_args_json",
+    "accepted",
+    "total_scalar",
+    "comm_norm",
+    "therm_norm",
+    "pareto_added",
+    "duplicate_penalty",
+    "boundary_penalty",
+    "seed_id",
+    "time_ms",
+    "signature",
+]
+
 # ===== SPEC_E Appendix A1.4 (proxy_sanitize) =====
 REQUIRED_PROXY_SANITIZE_KEYS = [
     "candidate_id",
@@ -100,6 +119,7 @@ REQUIRED_EVENT_PAYLOAD_KEYS_V54 = {
 
     # Allow free-form payload for these (legacy / non-contract-critical)
     "step": [],
+    "layout_step": REQUIRED_LAYOUT_STEP_KEYS,
     "pareto_add": [],
     "duplicate": [],
     "boundary": [],
