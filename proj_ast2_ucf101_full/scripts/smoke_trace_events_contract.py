@@ -25,7 +25,12 @@ from utils.trace_contract_v54 import (
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
 )
-from utils.trace_guard import append_trace_event_v54, finalize_trace_dir, init_trace_dir_v54
+from utils.trace_guard import (
+    append_trace_event_v54,
+    finalize_trace_dir,
+    init_trace_dir_v54,
+    build_trace_header_payload_v54,
+)
 from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS, build_signature_v54
 
 
@@ -93,19 +98,20 @@ def main() -> int:
     )
     trace_events_path = Path(trace_meta["trace_events"])
 
+    trace_header_payload = build_trace_header_payload_v54(
+        signature=signature,
+        requested_config={},
+        effective_config={},
+        contract_overrides=[],
+        requested={"mode": "version_c"},
+        effective={"mode": "version_c"},
+        no_drift_enabled=True,
+        acc_ref_source="locked",
+    )
     append_trace_event_v54(
         trace_events_path,
         "trace_header",
-        payload={
-            "requested_config": {},
-            "effective_config": {},
-            "contract_overrides": [],
-            "requested": {"mode": "version_c"},
-            "effective": {"mode": "version_c"},
-            "signature": signature,
-            "no_drift_enabled": True,
-            "acc_ref_source": "locked",
-        },
+        payload=trace_header_payload,
         run_id=str(run_id),
         step=0,
     )

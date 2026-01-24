@@ -39,6 +39,7 @@ from utils.trace_guard import (
     finalize_trace_dir,
     update_trace_summary,
     build_baseline_trace_summary,
+    build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.config import AttrDict
@@ -912,39 +913,42 @@ def train_version_c(
         if eff_fb is None:
             eff_fb = get_nested(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
 
-        append_trace_event_v54(
-            trace_events_path,
-            "trace_header",
-            payload={
-                "requested_config": requested_cfg,
-                "effective_config": effective_cfg,
-                "contract_overrides": contract_overrides,
-                "requested": {
-                    "mode": "version_c",
-                    "stable_hw_enabled": bool(_get_req("stable_hw.enabled", None))
-                    if _get_req("stable_hw.enabled", None) is not None
-                    else None,
-                    "locked_acc_ref_enabled": bool(_get_req("stable_hw.locked_acc_ref.enabled", None))
-                    if _get_req("stable_hw.locked_acc_ref.enabled", None) is not None
-                    else None,
-                    "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
-                    if _get_req("stable_hw.no_drift.enabled", None) is not None
-                    else None,
-                    "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
-                    if _get_req("stable_hw.no_double_scale.enabled", None) is not None
-                    else None,
-                    "allow_train_ema_fallback": req_fb,
-                },
-                "effective": {
-                    "mode": "version_c",
-                    "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                    "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
-                    "no_drift_enabled": bool(no_drift_enabled),
-                    "no_double_scale_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                    ),
-                    "allow_train_ema_fallback": bool(eff_fb) if eff_fb is not None else None,
-                },
+        trace_header_payload = build_trace_header_payload_v54(
+            signature=signature,
+            requested_config=requested_cfg,
+            effective_config=effective_cfg,
+            contract_overrides=contract_overrides,
+            requested={
+                "mode": "version_c",
+                "stable_hw_enabled": bool(_get_req("stable_hw.enabled", None))
+                if _get_req("stable_hw.enabled", None) is not None
+                else None,
+                "locked_acc_ref_enabled": bool(_get_req("stable_hw.locked_acc_ref.enabled", None))
+                if _get_req("stable_hw.locked_acc_ref.enabled", None) is not None
+                else None,
+                "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
+                if _get_req("stable_hw.no_drift.enabled", None) is not None
+                else None,
+                "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
+                if _get_req("stable_hw.no_double_scale.enabled", None) is not None
+                else None,
+                "allow_train_ema_fallback": req_fb,
+            },
+            effective={
+                "mode": "version_c",
+                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(locked_acc_ref_enabled),
+                "no_drift_enabled": bool(no_drift_enabled),
+                "no_double_scale_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
+                ),
+                "allow_train_ema_fallback": bool(eff_fb) if eff_fb is not None else None,
+            },
+            no_drift_enabled=bool(no_drift_enabled),
+            acc_ref_source=str(lar_source),
+        )
+        trace_header_payload.update(
+            {
                 "stable_hw_effective": {
                     "enabled": bool(stable_hw_state.get("stable_hw_enabled", False)),
                     "no_drift_effective": bool(
@@ -968,10 +972,12 @@ def train_version_c(
                     if _get_req("hw.lambda_hw", None) is not None
                     else None,
                 },
-                "signature": signature,
-                "no_drift_enabled": bool(no_drift_enabled),
-                "acc_ref_source": str(lar_source),
-            },
+            }
+        )
+        append_trace_event_v54(
+            trace_events_path,
+            "trace_header",
+            payload=trace_header_payload,
             run_id=run_id,
             step=0,
         )
@@ -1974,28 +1980,42 @@ def train_version_c(
         write_exception_json(trace_dir, e, stage="trainer_version_c")
 
         if not trace_header_written:
+            # Ensure trace_events_path is defined even if failure happened early
+            try:
+                _tep = trace_events_path
+            except NameError:
+                _tep = trace_dir / "trace_events.jsonl"
+                _tep.parent.mkdir(parents=True, exist_ok=True)
+                if not _tep.exists():
+                    _tep.write_text("", encoding="utf-8")
+
             requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
             effective_cfg = cfg.to_dict() if hasattr(cfg, "to_dict") else {}
+            contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
             signature = build_signature_v54(cfg, method_name="ours_version_c")
 
+            trace_header_payload = build_trace_header_payload_v54(
+                signature=signature,
+                requested_config=requested_cfg,
+                effective_config=effective_cfg,
+                contract_overrides=contract_overrides,
+                requested={"mode": "version_c"},
+                effective={"mode": "version_c"},
+                no_drift_enabled=bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+                ),
+                acc_ref_source=str(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
+                ),
+            )
+            trace_header_payload["stable_hw_state"] = {"init_status": "failed_before_full_init"}
+
             append_trace_event_v54(
-                trace_events_path=trace_events_path,
-                event_type="trace_header",
-                payload={
-                    "schema_version": "v5.4",
-                    "signature": signature,
-                    "requested_config": requested_cfg,
-                    "effective_config": effective_cfg,
-                    "no_drift_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-                    ),
-                    "acc_ref_source": str(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
-                    ),
-                    "stable_hw_state": {
-                        "init_status": "failed_before_full_init",
-                    },
-                },
+                _tep,
+                "trace_header",
+                payload=trace_header_payload,
+                run_id=str(getattr(locals().get("run_id", ""), "strip", lambda: "")() or "unknown"),
+                step=0,
             )
             trace_header_written = True
 

@@ -27,8 +27,19 @@ REQUIRED_TRACE_HEADER_KEYS = [
     "requested",
     "effective",
     "signature",
-    "no_drift_enabled",
+
+    # --- SPEC_E: Acc-First / Locked / Stability required fields (auditable) ---
+    "acc_first_hard_gating_enabled",
+    "locked_acc_ref_enabled",
     "acc_ref_source",
+    "no_drift_enabled",
+    "no_double_scale_enabled",
+
+    # --- SPEC_E: Repro required fields (auditable) ---
+    "seed_global",
+    "seed_problem",
+    "config_fingerprint",
+    "git_commit_or_version",
 ]
 
 # ===== SPEC_E Appendix A1.2 (gating) =====
