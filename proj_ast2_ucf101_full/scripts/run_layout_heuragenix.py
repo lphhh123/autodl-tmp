@@ -2010,6 +2010,27 @@ def main() -> None:
         f"Internal: {src_root}\nGuide-mirror: {guide_root}\n",
         encoding="utf-8",
     )
+    fallback_reasons = []
+    if fallback_used:
+        fallback_reasons.append(f"method_fallback:{baseline_method}->{fallback_method}")
+    if bool(llm_summary.get("fallback_used", False)):
+        fallback_reasons.append(
+            f"llm_fallback:{llm_summary.get('fallback_last_engine')}"
+            if llm_summary.get("fallback_last_engine")
+            else "llm_fallback"
+        )
+    manifest = {
+        "heuragenix_root": str(heuragenix_root.resolve()),
+        "internal_out": str(src_root.resolve()),
+        "mirrored_out": str(guide_root.resolve()),
+        "llm_config_requested": str(llm_config_requested),
+        "llm_config_effective": str(llm_config_effective),
+        "fallback_reason": ";".join(fallback_reasons) if fallback_reasons else "",
+    }
+    (out_dir / "run_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     report.update(
         {

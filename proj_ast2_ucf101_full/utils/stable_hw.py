@@ -43,6 +43,18 @@ def _cfg_get(obj: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def _as_enabled(val: Any, default: bool = True) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, dict):
+        return bool(val.get("enabled", default))
+    return bool(getattr(val, "enabled", default))
+
+
 def _expand_out_dir_template(path_val: Any, out_dir: Any) -> Any:
     if path_val is None:
         return None
@@ -329,7 +341,7 @@ def stable_hw_schedule(
     # ===== v5.4 LockedAccRef guard: 未锁定 acc_ref 前，硬件项必须强制关闭 =====
     # 目的：acc_ref 必须是“纯精度参考”，不能被硬件项污染
     lock_cfg = _get_locked_cfg(stable_hw_cfg)
-    lock_enabled = True if lock_cfg is None else bool(getattr(lock_cfg, "enabled", True))
+    lock_enabled = _as_enabled(lock_cfg, default=True)
     if lock_enabled and (st.get("acc_ref", None) is None):
         st["lambda_hw_effective"] = 0.0
     return st
@@ -783,7 +795,7 @@ def init_locked_acc_ref(cfg_or_stable, state: dict):
         then let apply_accuracy_guard() populate/lock it.
     """
     lock = _get_locked_cfg(cfg_or_stable)
-    if lock is None or not bool(getattr(lock, "enabled", False)):
+    if lock is None or not _as_enabled(lock, default=False):
         return
 
     src = str(getattr(lock, "source", "manual")).lower().strip()
@@ -886,7 +898,7 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
     """
     stable_hw_cfg = stable_hw_cfg if stable_hw_cfg is not None else getattr(cfg, "stable_hw", None)
     nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
-    requested_no_drift = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
+    requested_no_drift = _as_enabled(nd_cfg, default=False)
 
     # v5.4 canonical key is baseline_stats_path; keep baseline_stats as legacy alias.
     baseline_path = (
@@ -1016,7 +1028,7 @@ def update_hw_refs_from_stats(
     """
     stable_hw_cfg = stable_hw_cfg if stable_hw_cfg is not None else getattr(cfg, "stable_hw", None)
     nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
-    no_drift_enabled = bool(getattr(nd_cfg, "enabled", False)) if nd_cfg is not None else False
+    no_drift_enabled = _as_enabled(nd_cfg, default=False)
     ref_update_mode = str(stable_hw_state.get("_force_ref_update_mode", "ema")).lower().strip()
 
     # CONTRACT SEAL: NoDrift requested => MUST NOT update refs (no hidden fallback)
