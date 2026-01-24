@@ -1426,9 +1426,13 @@ def train_version_c(
                                 return float(x.detach().cpu().item())
                             return float(x)
 
+                        ast_term = _to_f(ast_loss_val) * float(cfg.loss.lambda_AST)
+                        acc_part = _to_f(L_task) + float(ast_term)
                         run_state["last_loss_components"] = {
                             "acc_loss": _to_f(L_task),
                             "ast_loss": _to_f(ast_loss_val),
+                            "acc_part": float(acc_part),
+                            "ast_term": float(ast_term),
                             "hw_loss_raw": _to_f(L_hw),
                             "hw_loss_used": _to_f(hw_term),
                             "total_loss": _to_f(loss),
@@ -1592,6 +1596,7 @@ def train_version_c(
                     acc_now = float(acc_now) if acc_now is not None else 0.0
                     acc_drop = float(acc_drop) if acc_drop is not None else 0.0
                     acc_loss = last_loss.get("acc_loss", 0.0)
+                    acc_part = float(last_loss.get("acc_part", acc_loss or 0.0))
                     total_loss = last_loss.get("total_loss", 0.0)
                     hw_loss_norm = last_loss.get("hw_loss_raw", 0.0)
                     hw_loss_used = last_loss.get("hw_loss_used", 0.0)
@@ -1624,6 +1629,27 @@ def train_version_c(
 
                     acc_used_source = str(stable_hw_state.get("acc_used_source", "") or "")
                     acc_used_value = stable_hw_state.get("acc_used_value", acc_now)
+                    eps = 1e-12
+                    hw_ref = {
+                        "latency_ms": float(hw_stats.get("ref_latency_ms", 0.0)),
+                        "energy_mj": float(hw_stats.get("ref_energy_mj", 0.0)),
+                        "mem_mb": float(hw_stats.get("ref_mem_mb", 0.0)),
+                        "comm_ms": float(hw_stats.get("ref_comm_ms", 0.0)),
+                    }
+                    hw_raw = {
+                        "latency_ms": float(hw_stats.get("proxy_raw_latency_ms", 0.0)),
+                        "energy_mj": float(hw_stats.get("proxy_raw_energy_mj", 0.0)),
+                        "mem_mb": float(hw_stats.get("proxy_raw_mem_mb", 0.0)),
+                        "comm_ms": float(hw_stats.get("raw_comm_ms", hw_stats.get("proxy_raw_comm_norm", 0.0))),
+                    }
+                    hw_used = {
+                        "latency_ms": float(hw_stats.get("proxy_used_latency_ms", hw_stats.get("latency_ms", 0.0))),
+                        "energy_mj": float(hw_stats.get("proxy_used_energy_mj", hw_stats.get("energy_mj", 0.0))),
+                        "mem_mb": float(hw_stats.get("proxy_used_mem_mb", hw_stats.get("mem_mb", 0.0))),
+                        "comm_ms": float(hw_stats.get("comm_ms", 0.0)),
+                    }
+                    hw_normed = {k: (hw_used[k] / max(eps, hw_ref[k])) for k in hw_ref.keys()}
+
                     payload = {
                         "candidate_id": int(outer),
                         "gate": gate,
@@ -1643,18 +1669,16 @@ def train_version_c(
                         "total_loss_scalar": float(total_loss.item())
                         if hasattr(total_loss, "item")
                         else float(total_loss or 0.0),
-                        "total_loss_acc_part": float(acc_loss.item())
-                        if hasattr(acc_loss, "item")
-                        else float(acc_loss or 0.0),
+                        "total_loss_acc_part": float(acc_part),
                         "total_loss_hw_part": float(hw_part),
                         "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
                         "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
                         "reason": dict(getattr(stable_decision, "reason", {}) or {}),
                         "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
-                        "hw_metric_ref": hw_stats.get("proxy_refs", {}),
-                        "hw_metric_raw": hw_stats.get("proxy_raw", {}),
-                        "hw_metric_normed": hw_stats.get("proxy_used", {}),
-                        "hw_scale_schema_version": "v5.4_hw_loss_norm",
+                        "hw_scale_schema_version": "v5.4_ratio_v1",
+                        "hw_metric_ref": hw_ref,
+                        "hw_metric_raw": hw_raw,
+                        "hw_metric_normed": hw_normed,
                         "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
                         "epoch": int(epoch),
                         "outer_iter": int(outer_iter),
