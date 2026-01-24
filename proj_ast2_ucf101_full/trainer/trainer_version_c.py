@@ -20,6 +20,7 @@ from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
 from utils.data_ucf101 import UCF101Dataset
 from hw_proxy.hw_loss import compute_hw_loss
 from hw_proxy.layer_hw_proxy import LayerHwProxy
+from layout.candidate_pool import signature_for_assign
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.sites import build_sites
 from layout.wafer_layout import WaferLayout
@@ -545,9 +546,9 @@ def _solve_layout_for_cache(
             lambda_thermal=hw_cfg.lambda_thermal,
             distance_scale=float(getattr(hw_cfg, "distance_scale_ms", 1.0) or 1.0),
         )
-    pos = wafer_layout.current_pos_continuous().detach().cpu().tolist()
-    pos_round = [[round(float(x), 6) for x in row] for row in pos]
-    signature = stable_hash({"pos": pos_round})
+    # v5.4: layout signature must be assign-only (SPEC_B). pos is auxiliary and must NOT affect signature.
+    assign = getattr(wafer_layout, "assign", None)
+    signature = signature_for_assign(assign)
     return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
@@ -717,7 +718,15 @@ def train_version_c(
             setattr(cfg.hw, "layout_only", True)
 
         base_update_alpha = not layout_only
-        update_layout = bool(getattr(cfg.hw, "optimize_layout", True))
+        # v5.4: layout updates must be discrete and auditable; continuous pos optimization in trainer is forbidden
+        stable_hw_cfg = getattr(cfg, "stable_hw", None)
+        iso_cfg_global = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+        update_layout = bool(_get_iso_cfg_value(iso_cfg_global, "optimize_layout", False))
+        if update_layout:
+            raise RuntimeError(
+                "[P0][v5.4] optimize_layout in Version-C trainer is forbidden. "
+                "Use layout_agent/HeurAgenix to generate cached layouts (assign-only) and run with cache-only."
+            )
 
         model_type = getattr(cfg.training, "model_type", "video")
         num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
@@ -769,18 +778,42 @@ def train_version_c(
 
         hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
         mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
-        wafer_layout = WaferLayout(cfg.hw.num_slots, cfg.hw.wafer_radius_mm).to(device)
-        partitioner = PartitionPlanner(mapping_solver, wafer_layout, hw_proxy, cfg.partition)
-        optimizer_layout = torch.optim.Adam(wafer_layout.parameters(), lr=1e-3)
+        # v5.4: build discrete sites + deterministic initial assign (SPEC_B)
+        chip_max_w = max(library.get(n).width_mm for n in cfg.chiplet.candidate_types)
+        chip_max_h = max(library.get(n).height_mm for n in cfg.chiplet.candidate_types)
 
-        stable_hw_cfg = getattr(cfg, "stable_hw", None)
-        iso_cfg_global = getattr(stable_hw_cfg, "discrete_isolation", None) if stable_hw_cfg else None
+        sites_xy_np = build_sites(
+            wafer_radius_mm=float(cfg.hw.wafer_radius_mm),
+            chip_max_width_mm=float(chip_max_w),
+            chip_max_height_mm=float(chip_max_h),
+            margin_mm=float(getattr(cfg.hw, "site_margin_mm", 0.0) or 0.0),
+            method=str(getattr(cfg.hw, "site_method", "square_grid_in_circle")),
+            grid_pitch_mm=(
+                float(getattr(cfg.hw, "site_pitch_mm")) if getattr(cfg.hw, "site_pitch_mm", None) is not None else None
+            ),
+            seed=int(seed),
+        )
+        if int(sites_xy_np.shape[0]) < int(cfg.hw.num_slots):
+            raise RuntimeError(
+                f"[P0][v5.4] Not enough discrete sites: Ns={int(sites_xy_np.shape[0])} < num_slots={int(cfg.hw.num_slots)}"
+            )
+
+        sites_xy = torch.tensor(sites_xy_np, device=device, dtype=torch.float32)
+        assign0 = torch.arange(int(cfg.hw.num_slots), device=device, dtype=torch.long)  # slot i -> site i
+
+        wafer_layout = WaferLayout(
+            num_slots=int(cfg.hw.num_slots),
+            wafer_radius_mm=float(cfg.hw.wafer_radius_mm),
+            sites_xy=sites_xy,
+            assign=assign0,
+        ).to(device)
+        partitioner = PartitionPlanner(mapping_solver, wafer_layout, hw_proxy, cfg.partition)
+        optimizer_layout = None  # v5.4: forbidden (see P0-3)
+
         layout_opt_steps = int(_get_iso_cfg_value(iso_cfg_global, "layout_opt_steps", 10) or 10)
         layout_opt_lr = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_lr", 5e-2) or 5e-2)
         layout_opt_grad_clip = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_grad_clip", 1.0) or 1.0)
         layout_opt = None
-        if bool(_get_iso_cfg_value(iso_cfg_global, "optimize_layout", False)):
-            layout_opt = torch.optim.Adam([wafer_layout.pos], lr=layout_opt_lr)
 
         global_step = 0
         last_segments: List = []
@@ -1167,7 +1200,6 @@ def train_version_c(
                     y = batch["label"].to(device)
                     optimizer_model.zero_grad()
                     optimizer_alpha.zero_grad()
-                    optimizer_layout.zero_grad()
                     with autocast(device_type, enabled=cfg.train.amp):
                         if model_type == "video_audio":
                             logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
@@ -1299,12 +1331,7 @@ def train_version_c(
                                 for n, p in model.named_parameters():
                                     p.requires_grad_(prev_requires[n])
 
-                                layout_positions = wafer_layout.current_pos_continuous()
-                                pos_round = [
-                                    [round(float(x), 6) for x in row]
-                                    for row in layout_positions.detach().cpu().tolist()
-                                ]
-                                cache["layout_signature"] = stable_hash({"pos": pos_round})
+                                cache["layout_signature"] = signature_for_assign(getattr(wafer_layout, "assign", None))
                                 cache["layout"] = {"signature": cache["layout_signature"]}
 
                         layout_positions = wafer_layout.current_pos_continuous()
@@ -1416,8 +1443,7 @@ def train_version_c(
                     scaler.step(optimizer_model)
                     if not twostage and update_alpha:
                         scaler.step(optimizer_alpha)
-                    if not twostage and update_layout and allow_discrete:
-                        scaler.step(optimizer_layout)
+                    # v5.4: forbidden (P0-3) — layout must be updated via discrete assign-only agent + cache
                     scaler.update()
                     if step % 10 == 0:
                         acc1 = (logits.argmax(dim=1) == y).float().mean()
