@@ -57,6 +57,8 @@ def main():
     auto_out = f"outputs/ast2_auto"
     out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    legacy_notice = "THIS IS NOT v5.4 CONTRACT RUN; TRACE NOT AUDITABLE AS v5.4.\n"
+    (out_dir / "LEGACY_MODE.txt").write_text(legacy_notice, encoding="utf-8")
     cfg.out_dir = str(out_dir)
     if not hasattr(cfg, "train") or cfg.train is None:
         cfg.train = {}
@@ -74,6 +76,14 @@ def main():
             "requested": "ast2",
             "effective": "single",
             "reason": "mode_alias_ast2_to_single",
+        }
+    )
+    overrides.append(
+        {
+            "path": "contract.version",
+            "requested": "v5.4",
+            "effective": "legacy_ast2",
+            "reason": "explicit_allow_legacy",
         }
     )
     cfg._contract["overrides"] = overrides
