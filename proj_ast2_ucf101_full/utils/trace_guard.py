@@ -696,8 +696,13 @@ def _get_cfg_value(cfg: Any, path: str, default: Any = None) -> Any:
 
 
 def build_baseline_trace_summary(cfg: Any, stable_hw_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    strict = bool(_get_cfg_value(cfg, "contract.strict", False) or _get_cfg_value(cfg, "_contract.strict", False))
     locked_path = _get_cfg_value(cfg, "stable_hw.locked_acc_ref.baseline_stats_path", None)
-    if locked_path is None:
+    if strict:
+        # LEGAL: strict mode forbids legacy/root-level sources
+        if _get_cfg_value(cfg, "locked_acc_ref", None) is not None:
+            raise ValueError("P0: strict forbids legacy root key locked_acc_ref (should have failed in validate).")
+    elif locked_path is None:
         locked_path = _get_cfg_value(cfg, "locked_acc_ref.baseline_stats_path", None)
     hw_path = _get_cfg_value(cfg, "stable_hw.baseline_stats_path", None)
     baseline_path = str(locked_path or hw_path or "").strip()
