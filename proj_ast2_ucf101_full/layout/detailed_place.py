@@ -38,6 +38,8 @@ from layout.candidate_pool import (
 from layout.policy_switch import EvalCache, PolicySwitchController
 from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
+from utils.config_utils import get_nested
+from utils.contract_seal import assert_cfg_sealed_or_violate
 
 EVAL_VERSION = "v5.4"
 TIME_UNIT = "ms"
@@ -233,6 +235,7 @@ def run_detailed_place(
     chip_tdp: Optional[np.ndarray] = None,
     llm_usage_path: Optional[Path] = None,
     recordings_path: Optional[Path] = None,
+    trace_events_path: Optional[Path] = None,
 ) -> DetailedPlaceResult:
     # ---- deterministic seeds ----
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
@@ -490,6 +493,15 @@ def run_detailed_place(
                 save_every = int(_cfg_get(cfg, "save_every", 50))
 
                 for step in range(steps):
+                    if trace_events_path is not None:
+                        seal_digest = str(get_nested(cfg, "contract.seal_digest", "") or "").strip()
+                        assert_cfg_sealed_or_violate(
+                            cfg=cfg,
+                            seal_digest=seal_digest,
+                            trace_events_path=trace_events_path,
+                            step=int(step),
+                            strict=True,
+                        )
                     step_start = time.perf_counter()
                     eval_calls_before = eval_calls_cum
                     h0 = eval_cache.hits if eval_cache is not None else 0

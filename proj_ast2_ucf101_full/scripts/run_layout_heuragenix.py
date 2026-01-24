@@ -48,10 +48,10 @@ from utils.trace_guard import (
     finalize_trace_dir,
     update_trace_summary,
     build_baseline_trace_summary,
-    build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.trace_schema import TRACE_FIELDS
+from utils.contract_seal import assert_cfg_sealed_or_violate
 
 EVAL_VERSION = "v5.4"
 TIME_UNIT = "ms"
@@ -588,6 +588,7 @@ def _write_trace_and_pareto(
     effective_method: str,
     trace_events_path: Path,
     run_id: str,
+    cfg: Any,
 ) -> Tuple[ParetoSet, Dict[str, Any]]:
     """
     Convert HeurAgenix recordings.jsonl -> v5.4 trace.csv + pareto_points.csv.
@@ -683,6 +684,14 @@ def _write_trace_and_pareto(
                     iter_id = -1
                 else:
                     iter_id = rec_iter - 1
+                seal_digest = str(get_nested(cfg, "contract.seal_digest", "") or "").strip()
+                assert_cfg_sealed_or_violate(
+                    cfg=cfg,
+                    seal_digest=seal_digest,
+                    trace_events_path=trace_events_path,
+                    step=int(iter_id),
+                    strict=True,
+                )
 
                 accepted = 1 if bool(r.get("accepted", False)) else 0
                 if rec_stage != "init" and accepted:
@@ -1304,20 +1313,25 @@ def main() -> None:
     # ---- v5.4: canonical trace events (JSONL) ----
     trace_path = trace_dir / "trace.csv"
     signature = _build_run_signature(cfg, method_name=method_label, seed_global=int(seed))
-    requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
-    try:
-        requested_config = OmegaConf.to_container(requested_config, resolve=False)
-    except Exception:
-        requested_config = {}
-    effective_config = OmegaConf.to_container(cfg, resolve=True)
-    effective_config["heuragenix_runtime"] = {
-        "internal_data_root": str(internal_data_root),
-        "internal_out_root": str(internal_out),
-        "data_root": str(internal_data_root),
-        "output_root": str(output_root),
-        "llm_config_path": None,
-    }
-    contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+    llm_config = None
+    llm_config_requested = str(baseline_cfg.get("llm_config_file", ""))
+    llm_config_effective = ""
+    if method == "llm_hh":
+        llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
+        if str(method).lower() == "llm_hh" and not llm_config:
+            raise SystemExit("[v5.4] llm_hh requires an explicit --llm_config_file (no implicit fallback).")
+        if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
+            raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
+        if llm_config:
+            with open(llm_config, "r", encoding="utf-8") as f:
+                js = json.load(f)
+            if "top-p" in js and "top_p" not in js:
+                js["top_p"] = js.pop("top-p")
+            adapted = internal_out / "llm_config_adapted.json"
+            with open(adapted, "w", encoding="utf-8") as f:
+                json.dump(js, f, indent=2, ensure_ascii=False)
+            llm_config = adapted
+        llm_config_effective = str(llm_config) if llm_config else ""
     init_trace_dir_v54(
         base_dir=out_dir,
         run_id="trace",
@@ -1333,11 +1347,32 @@ def main() -> None:
             "heuragenix_output_problem_dir": str((output_root / problem).resolve()),
             "heuristic_dir": str(heuristic_dir),
             "llm_config_file": str(llm_config_effective),
+            "requested": {
+                "method": "layout_heuragenix",
+                "llm_config_file": str(llm_config_effective),
+            },
+            "effective": {
+                "method": "layout_heuragenix",
+                "heuragenix_internal_data_root": str(internal_data_root),
+                "heuragenix_internal_out_root": str(internal_out),
+                "heuragenix_output_root": str(output_root),
+                "heuragenix_problem": str(problem),
+                "llm_config_file": str(llm_config_effective),
+            },
         },
         required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
-    trace_header_written = False
+    with (trace_dir / "trace_header.json").open("r", encoding="utf-8") as f:
+        header_payload = json.load(f)
+    append_trace_event_v54(
+        trace_events_path=trace_events_path,
+        run_id=run_id,
+        step=0,
+        event_type="trace_header",
+        payload=header_payload,
+        strict=True,
+    )
     finalize_state = {
         "finalized": False,
         "reason": "error",
@@ -1347,62 +1382,10 @@ def main() -> None:
     }
     stable_hw_state: Dict[str, Any] = {}
 
-    def _ensure_trace_header(requested_method: str, effective_method: str, llm_req: str, llm_eff: str):
-        nonlocal trace_header_written
-        if trace_header_written:
-            return
-        requested_selection = get_nested(requested_config, "baseline.selection_mode", "")
-        effective_selection = get_nested(effective_config, "baseline.selection_mode", "")
-        payload = build_trace_header_payload_v54(
-            signature=signature,
-            requested_config=requested_config,
-            effective_config=effective_config,
-            contract_overrides=contract_overrides,
-            requested={
-                "method": str(requested_method),
-                "selection_mode": str(requested_selection),
-                "llm_config": str(llm_req),
-            },
-            effective={
-                "method": str(effective_method),
-                "selection_mode": str(effective_selection),
-                "llm_config": str(llm_eff),
-            },
-            no_drift_enabled=bool(getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)),
-            acc_ref_source=str(
-                getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
-            ),
-            seal_digest=str(getattr(getattr(cfg, "contract", None), "seal_digest", "")),
-        )
-        # optional extra context (allowed by schema; improves auditability)
-        payload.update(
-            {
-                "heuragenix_root": str(heuragenix_root),
-                "llm_requested": llm_req,
-                "llm_effective": llm_eff,
-                "llm_config_file": llm_eff,
-                "heuristic_dir": str(heuristic_dir),
-            }
-        )
-        append_trace_event_v54(
-            trace_events_path,
-            "trace_header",
-            payload=payload,
-            run_id=run_id,
-            step=0,
-        )
-        trace_header_written = True
-
     def _finalize_trace(**overrides):
         if finalize_state["finalized"]:
             return
         finalize_state.update({k: v for k, v in overrides.items() if v is not None})
-        _ensure_trace_header(
-            requested_method=str(baseline_method),
-            effective_method=str(method),
-            llm_req=str(llm_config_requested),
-            llm_eff=str(llm_config_effective),
-        )
         summary_payload = {
             "ok": bool(finalize_state.get("ok", True)),
             "reason": str(finalize_state.get("reason", "error")),
@@ -1464,29 +1447,6 @@ def main() -> None:
 
     fallback_used = False
     log_text = ""
-    llm_config = None
-    llm_config_requested = str(baseline_cfg.get("llm_config_file", ""))
-    llm_config_effective = ""
-    if method == "llm_hh":
-        llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
-        if str(method).lower() == "llm_hh" and not llm_config:
-            raise SystemExit("[v5.4] llm_hh requires an explicit --llm_config_file (no implicit fallback).")
-        if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
-            raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
-        if llm_config:
-            with open(llm_config, "r", encoding="utf-8") as f:
-                js = json.load(f)
-            if "top-p" in js and "top_p" not in js:
-                js["top_p"] = js.pop("top-p")
-            adapted = internal_out / "llm_config_adapted.json"
-            with open(adapted, "w", encoding="utf-8") as f:
-                json.dump(js, f, indent=2, ensure_ascii=False)
-            llm_config = adapted
-        llm_config_effective = str(llm_config) if llm_config else ""
-    if isinstance(effective_config, dict):
-        heur_runtime = effective_config.get("heuragenix_runtime", {})
-        heur_runtime["llm_config_path"] = str(llm_config) if llm_config else None
-        effective_config["heuragenix_runtime"] = heur_runtime
     heuragenix_path_map = {
         "heuragenix_root": str(heuragenix_root.resolve()),
         "effective_data_root": str(internal_data_root.resolve()),
@@ -1776,12 +1736,6 @@ def main() -> None:
     hx_rows = list(_iter_recordings(recordings_path))
     budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
     trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
-    _ensure_trace_header(
-        requested_method=str(baseline_method),
-        effective_method=str(method),
-        llm_req=str(llm_config_requested),
-        llm_eff=str(llm_config_effective),
-    )
     # ---- v5.4 contract: auditable method fallback (requested vs effective) ----
     pareto, trace_info = _write_trace_and_pareto(
         trace_dir=out_dir / "trace",
@@ -1792,6 +1746,7 @@ def main() -> None:
         effective_method=str(method),
         trace_events_path=trace_events_path,
         run_id=str(run_id),
+        cfg=cfg,
     )
 
     pareto.eps_comm = float(pareto_cfg.get("eps_comm", 0.0))

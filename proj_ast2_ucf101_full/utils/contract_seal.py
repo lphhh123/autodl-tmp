@@ -12,6 +12,7 @@ def assert_cfg_sealed_or_violate(
     seal_digest: str,
     trace_events_path: Path,
     step: int,
+    strict: bool = True,
 ) -> None:
     cur = compute_effective_cfg_digest_v54(cfg)
     if str(cur) != str(seal_digest):
@@ -25,4 +26,5 @@ def assert_cfg_sealed_or_violate(
             },
             step=int(step),
         )
-        raise RuntimeError("[v5.4 P0] cfg mutated after seal_digest")
+        if strict:
+            raise RuntimeError("[v5.4 P0] cfg mutated after seal_digest")
