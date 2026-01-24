@@ -15,6 +15,7 @@ from utils.trace_contract_v54 import (
     compute_effective_cfg_digest_v54,
 )
 from utils.config_utils import get_nested
+from utils.trace_signature_v54 import build_signature_v54
 from .trace_schema import TRACE_FIELDS
 from .stable_hash import stable_hash
 
@@ -848,18 +849,38 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
         raise FileNotFoundError(f"Missing required trace.csv at {csv_path}")
 
 
+def build_trace_signature_v54(
+    *,
+    cfg: Any,
+    run_id: str,
+    seal_digest: str,
+    method_name: str = "ast2_single_device",
+) -> dict:
+    overrides = {"run_id": str(run_id)}
+    if seal_digest:
+        overrides["seal_digest"] = str(seal_digest)
+    return build_signature_v54(cfg, method_name=method_name, overrides=overrides)
+
+
 def build_trace_header_payload_v54(
     *,
     signature: dict,
-    requested_config,
-    effective_config,
-    contract_overrides,
-    requested: dict,
-    effective: dict,
-    no_drift_enabled: bool,
-    acc_ref_source: str,
-    seal_digest: str,
+    requested_config=None,
+    effective_config=None,
+    contract_overrides=None,
+    requested: dict | None = None,
+    effective: dict | None = None,
+    no_drift_enabled: bool | None = None,
+    acc_ref_source: str | None = None,
+    seal_digest: str | None = None,
+    cfg: Any | None = None,
+    requested_config_snapshot=None,
+    effective_config_snapshot=None,
 ) -> dict:
+    if requested_config is None and requested_config_snapshot is not None:
+        requested_config = requested_config_snapshot
+    if effective_config is None and effective_config_snapshot is not None:
+        effective_config = effective_config_snapshot
     payload = {}
     payload["signature"] = dict(signature or {})
 
@@ -881,11 +902,15 @@ def build_trace_header_payload_v54(
     payload["effective"] = dict(effective or {})
 
     # keep existing booleans used by SPEC_E validators
+    if no_drift_enabled is None:
+        no_drift_enabled = bool(payload["signature"].get("no_drift_enabled", False))
+    if acc_ref_source is None:
+        acc_ref_source = payload["signature"].get("acc_ref_source", "unknown")
     payload["no_drift_enabled"] = bool(no_drift_enabled)
-    payload["no_double_scale_enabled"] = bool(signature.get("no_double_scale_enabled", False))
+    payload["no_double_scale_enabled"] = bool(payload["signature"].get("no_double_scale_enabled", False))
     payload["acc_ref_source"] = str(acc_ref_source)
-    payload["locked_acc_ref_enabled"] = bool(signature.get("locked_acc_ref_enabled", False))
-    payload["acc_first_hard_gating_enabled"] = bool(signature.get("acc_first_hard_gating_enabled", False))
+    payload["locked_acc_ref_enabled"] = bool(payload["signature"].get("locked_acc_ref_enabled", False))
+    payload["acc_first_hard_gating_enabled"] = bool(payload["signature"].get("acc_first_hard_gating_enabled", False))
     payload["git_commit_or_version"] = str(signature.get("git_commit_or_version", ""))
     payload["config_fingerprint"] = str(signature.get("config_fingerprint", ""))
     payload["seed_global"] = int(signature.get("seed_global", 0))

@@ -16,6 +16,8 @@ from omegaconf import OmegaConf
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
+from utils.trace_guard import init_trace_dir_v54
+from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from trainer.trainer_single_device import train_single_device
 
 
@@ -59,10 +61,11 @@ def main():
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
     cfg = validate_and_fill_defaults(cfg, mode="single")
+    seal_digest = str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")
+    signature = None
     # ---- v5.4 quick contract self-check (fail-fast before training) ----
     try:
         from utils.config_validate import get_nested
-        from utils.signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
         from utils.trace_guard import build_trace_header_payload_v54
         from utils.trace_contract_v54 import TraceContractV54
 
@@ -84,6 +87,28 @@ def main():
         TraceContractV54.validate_event("trace_header", payload)
     except Exception as exc:
         raise RuntimeError(f"v5.4 contract self-check failed: {exc}") from exc
+    if signature is None:
+        raise RuntimeError("v5.4 contract self-check failed: signature not generated")
+    # v5.4: 进入训练运行语义就必须有可审计证据链（trace_header）
+    trace_base = out_dir / "trace"
+    run_id = str(getattr(getattr(cfg, "train", None), "run_id", "") or "")
+    if not run_id:
+        run_id = uuid.uuid4().hex
+        if hasattr(cfg, "train") and cfg.train is not None:
+            cfg.train.run_id = run_id
+    trace_meta = init_trace_dir_v54(
+        base_dir=trace_base,
+        run_id=run_id,
+        cfg=cfg,
+        signature=signature,
+        signature_v54=signature,
+        required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
+        run_meta={"mode": "single_device_train", "seed_id": int(seed), "run_id": str(run_id)},
+        extra_manifest={"task": "single_device", "out_dir": str(out_dir)},
+    )
+    trace_dir = Path(trace_meta["trace_dir"])
+    trace_events_path = Path(trace_meta["trace_events"])
+    run_id = trace_dir.name
     seed_everything(seed)
     with (out_dir / "config_used.yaml").open("w", encoding="utf-8") as f:
         f.write(Path(args.cfg).read_text(encoding="utf-8"))
@@ -126,7 +151,12 @@ def main():
         print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
-    train_single_device(cfg, out_dir=out_dir)
+    train_single_device(
+        cfg,
+        trace_events_path=str(trace_events_path),
+        run_id=run_id,
+        seal_digest=seal_digest,
+    )
 
 
 if __name__ == "__main__":

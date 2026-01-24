@@ -32,12 +32,14 @@ from utils.trace_guard import (
     update_trace_summary,
     build_baseline_trace_summary,
     build_trace_header_payload_v54,
+    build_trace_signature_v54,
 )
-from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
+from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config import AttrDict
 from utils.config_utils import get_nested
 from utils.contract_seal import assert_cfg_sealed_or_violate
+from utils.trace_contract_v54 import assert_trace_header_v54
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -121,7 +123,13 @@ def build_dataloaders(cfg):
     return train_loader, val_loader
 
 
-def train_single_device(cfg, out_dir: str | Path | None = None):
+def train_single_device(
+    cfg,
+    out_dir: str | Path | None = None,
+    trace_events_path: str | Path | None = None,
+    run_id: str | None = None,
+    seal_digest: str | None = None,
+):
     ctr = getattr(cfg, "_contract", None)
     if ctr is None or not bool(getattr(ctr, "stamped_v54", False)):
         raise RuntimeError(
@@ -139,7 +147,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
     specv = str(getattr(contract, "spec_version", getattr(contract, "version", "")))
     if specv not in ("v5.4", "v5.4-stable"):
         raise RuntimeError(f"v5.4 contract violation: unexpected spec_version={specv!r}")
-    seal_digest = getattr(contract, "seal_digest", None)
+    if seal_digest is None:
+        seal_digest = getattr(contract, "seal_digest", None)
     if not seal_digest:
         raise RuntimeError("v5.4 P0: missing cfg.contract.seal_digest (contract evidence not sealed)")
     device = get_device(cfg.train.device)
@@ -154,83 +163,61 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = out_dir / "metrics.json"
-        sig = build_signature_v54(cfg, method_name="train_single_device")
-        signature_v54 = sig
         cfg_hash = str(seal_digest)
         cfg_path = str(getattr(cfg, "cfg_path", "") or getattr(getattr(cfg, "train", None), "cfg_path", "") or "")
-        run_id = stable_hash(
-            {"mode": "single_device_train", "seed": int(seed), "seal_digest": str(seal_digest)}
-        )
+
+    if run_id is None:
+        run_id = str(getattr(getattr(cfg, "train", None), "run_id", "") or "")
+    if not run_id:
+        run_id = stable_hash({"mode": "single_device_train", "seed": int(seed), "seal_digest": str(seal_digest)})
+    signature = build_trace_signature_v54(cfg=cfg, run_id=run_id, seal_digest=seal_digest)
+
+    if trace_events_path is None and out_dir is not None:
         trace_base = out_dir / "trace"
         trace_meta = init_trace_dir_v54(
             base_dir=trace_base,
             run_id=str(run_id),
             cfg=cfg,
-            signature=sig,
-            signature_v54=signature_v54,
+            signature=signature,
+            signature_v54=signature,
             required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
             run_meta={"mode": "single_device_train", "seed_id": int(seed), "run_id": str(run_id)},
             extra_manifest={"task": "single_device", "out_dir": str(out_dir)},
         )
         trace_dir = Path(trace_meta["trace_dir"])
         trace_events_path = Path(trace_meta["trace_events"])
-        requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
-        effective_cfg = OmegaConf.to_container(cfg, resolve=True)
-        contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+    elif trace_events_path is not None:
+        trace_events_path = Path(trace_events_path)
+        trace_dir = trace_events_path.parent
+        trace_dir.mkdir(parents=True, exist_ok=True)
 
-        def _get_req(path, default=None):
-            cur = requested_cfg
-            for key in path.split("."):
-                if not isinstance(cur, dict) or key not in cur:
-                    return default
-                cur = cur[key]
-            return cur
+    if trace_events_path is None:
+        raise RuntimeError("v5.4 contract violation: trace_events_path missing for single-device training")
+
+    if trace_events_path is not None:
+        contract_meta = getattr(cfg, "_contract", None)
+        requested_cfg = (
+            getattr(contract_meta, "requested_config_snapshot", None) if contract_meta is not None else None
+        )
+        if requested_cfg is None:
+            requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+        effective_cfg = (
+            getattr(contract_meta, "effective_config_snapshot", None) if contract_meta is not None else None
+        )
+        if effective_cfg is None:
+            effective_cfg = OmegaConf.to_container(cfg, resolve=True)
+        contract_overrides = getattr(contract_meta, "overrides", None) if contract_meta is not None else None
+        if contract_overrides is None:
+            contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
 
         trace_header_payload = build_trace_header_payload_v54(
-            signature=sig,
-            requested_config=requested_cfg,
-            effective_config=effective_cfg,
+            cfg=cfg,
+            signature=signature,
+            requested_config_snapshot=requested_cfg,
+            effective_config_snapshot=effective_cfg,
             contract_overrides=contract_overrides,
-            requested={
-                "mode": "single_device",
-                "stable_hw_enabled": bool(_get_req("stable_hw.enabled", None))
-                if _get_req("stable_hw.enabled", None) is not None
-                else None,
-                "locked_acc_ref_enabled": bool(_get_req("stable_hw.locked_acc_ref.enabled", None))
-                if _get_req("stable_hw.locked_acc_ref.enabled", None) is not None
-                else None,
-                "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
-                if _get_req("stable_hw.no_drift.enabled", None) is not None
-                else None,
-                "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
-                if _get_req("stable_hw.no_double_scale.enabled", None) is not None
-                else None,
-            },
-            effective={
-                "mode": "single_device",
-                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                "locked_acc_ref_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "enabled", False)
-                ),
-                "no_drift_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-                ),
-                "no_double_scale_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                ),
-            },
-            no_drift_enabled=bool(
-                getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-            ),
-            acc_ref_source=str(
-                getattr(
-                    getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})),
-                    "source",
-                    "unknown",
-                )
-            ),
-            seal_digest=str(getattr(getattr(cfg, "contract", None), "seal_digest", "")),
         )
+        assert_trace_header_v54(trace_header_payload, strict=True)
         append_trace_event_v54(
             trace_events_path,
             "trace_header",
