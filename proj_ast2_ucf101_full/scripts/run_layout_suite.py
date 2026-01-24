@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 import itertools
+import json
 import subprocess
 import time
 from typing import List, Dict, Any
@@ -41,6 +42,33 @@ def _pick_runner(cfg_path: Path) -> str:
     if name.startswith("heuragenix"):
         return "run_layout_heuragenix.py"
     return "run_layout_agent.py"
+
+
+def _annotate_suite_run(run_dir: Path) -> None:
+    run_meta_path = run_dir / "run_meta.json"
+    if not run_meta_path.exists():
+        return
+    try:
+        run_meta = json.loads(run_meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    run_meta["role"] = "orchestrator_non_onecommand"
+    run_meta["deprecated_as_onecommand"] = True
+    run_meta_path.write_text(json.dumps(run_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    run_id = run_meta.get("run_id")
+    trace_dir = run_dir / str(run_id) if run_id else run_dir
+    header_path = trace_dir / "trace_header.json"
+    if not header_path.exists():
+        return
+    try:
+        header = json.loads(header_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    header_run_meta = header.get("run_meta", {}) or {}
+    header_run_meta["role"] = "orchestrator_non_onecommand"
+    header_run_meta["deprecated_as_onecommand"] = True
+    header["run_meta"] = header_run_meta
+    header_path.write_text(json.dumps(header, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def run_layout_suite(inputs: List[str], cfgs: List[str], seeds: List[int], out_root: Path, backtrack_window: int = 10) -> None:
@@ -75,6 +103,7 @@ def run_layout_suite(inputs: List[str], cfgs: List[str], seeds: List[int], out_r
                 ],
                 check=True,
             )
+            _annotate_suite_run(run_dir)
         except subprocess.CalledProcessError:
             pass
         wall_time = time.perf_counter() - start

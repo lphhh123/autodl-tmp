@@ -99,8 +99,20 @@ def _llm_stats(llm_usage_path: Path) -> Dict[str, float]:
 
 
 def summarize_run(run_dir: Path, backtrack_window: int = 10, wall_time_override: Optional[float] = None) -> Dict[str, object]:
-    pareto_stats = _read_best_from_pareto(run_dir / "pareto_points.csv")
-    trace_path = run_dir / "trace.csv"
+    data_dir = run_dir
+    if not (data_dir / "pareto_points.csv").exists():
+        run_meta_path = run_dir / "run_meta.json"
+        if run_meta_path.exists():
+            try:
+                run_meta = json.loads(run_meta_path.read_text(encoding="utf-8"))
+                run_id = run_meta.get("run_id")
+                candidate = run_dir / str(run_id) if run_id else None
+                if candidate and candidate.exists():
+                    data_dir = candidate
+            except Exception:
+                data_dir = run_dir
+    pareto_stats = _read_best_from_pareto(data_dir / "pareto_points.csv")
+    trace_path = data_dir / "trace.csv"
     oscillation_rate = compute_oscillation_rate(trace_path, window=backtrack_window)
     trace_lines = 0
     accepted_count = 0
@@ -111,8 +123,8 @@ def summarize_run(run_dir: Path, backtrack_window: int = 10, wall_time_override:
                 trace_lines += 1
                 if str(row.get("accepted", "0")) == "1":
                     accepted_count += 1
-    llm_stats = _llm_stats(run_dir / "llm_usage.jsonl")
-    budget_path = run_dir / "budget.json"
+    llm_stats = _llm_stats(data_dir / "llm_usage.jsonl")
+    budget_path = data_dir / "budget.json"
     actual_eval_calls = None
     budget_main_axis = None
     if budget_path.exists():
