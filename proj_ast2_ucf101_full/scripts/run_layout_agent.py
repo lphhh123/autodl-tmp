@@ -258,6 +258,7 @@ def run_layout_agent(
                 "none",
             )
         ),
+        seal_digest=str(getattr(getattr(cfg, "contract", AttrDict({})), "seal_digest", "")),
     )
     append_trace_event_v54(
         trace_events_path,
@@ -597,9 +598,6 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
-    cfg = validate_and_fill_defaults(cfg, mode="layout")
-    seed_everything(int(args.seed))
-
     # auto out_dir if not provided
     cfg_stem = Path(args.cfg).stem
     auto_out = Path("outputs/layout_agent") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -608,9 +606,13 @@ def main():
     run_id = uuid.uuid4().hex
 
     # sync cfg.train.out_dir
-    if hasattr(cfg, "train"):
-        cfg.train.out_dir = str(out_dir)
+    if not hasattr(cfg, "train") or cfg.train is None:
+        cfg.train = AttrDict({})
+    cfg.train.out_dir = str(out_dir)
     cfg.out_dir = str(out_dir)
+
+    cfg = validate_and_fill_defaults(cfg, mode="layout")
+    seed_everything(int(args.seed))
 
     # dump config_used
     try:
@@ -645,9 +647,6 @@ def main():
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
 
     cfg_hash = stable_hash({"cfg": resolved_text})
-    if hasattr(cfg, "train"):
-        cfg.train.cfg_hash = cfg_hash
-        cfg.train.cfg_path = str(args.cfg)
     from utils.run_manifest import write_run_manifest
 
     write_run_manifest(
@@ -673,7 +672,13 @@ def main():
     )
 
     # run meta
-    meta = {"argv": sys.argv, "out_dir": str(out_dir), "cfg_path": str(args.cfg), "seed": int(args.seed)}
+    meta = {
+        "argv": sys.argv,
+        "out_dir": str(out_dir),
+        "cfg_path": str(args.cfg),
+        "cfg_hash": str(cfg_hash),
+        "seed": int(args.seed),
+    }
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     run_layout_agent(

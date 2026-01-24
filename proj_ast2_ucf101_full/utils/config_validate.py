@@ -88,6 +88,11 @@ def _sync_layout_to_hw(cfg: Any) -> None:
         ("layout.lambda_comm_extra", "hw.lambda_comm_extra"),
         ("layout.lambda_thermal", "hw.lambda_thermal"),
     ]
+    STRICT = bool(get_nested(cfg, "_contract.strict", False))
+    if STRICT:
+        for src, _ in pairs:
+            if get_nested(cfg, src, None) is not None:
+                raise ValueError(f"v5.4 strict: legacy key '{src}' is forbidden; use hw.* instead.")
     for src, dst in pairs:
         v = get_nested(cfg, src, None)
         if v is not None and get_nested(cfg, dst, None) is None:
@@ -240,6 +245,36 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     if get_nested(cfg, "_contract.overrides", None) is None:
         set_nested(cfg, "_contract.overrides", [])
 
+    # ---- v5.4 strict gate (Hard Gate A) ----
+    # strict 默认开启：只要是 version_c / layout（法定入口）就必须 strict
+    if get_nested(cfg, "_contract.strict", None) is None:
+        set_nested(cfg, "_contract.strict", bool(mode in ("version_c", "layout")))
+
+    STRICT = bool(get_nested(cfg, "_contract.strict", False))
+
+    def _fail_on_legacy(path: str, hint: str):
+        v = get_nested(cfg, path, None)
+        if v is not None:
+            raise ValueError(f"v5.4 strict: legacy key '{path}' is forbidden. {hint}")
+
+    if STRICT:
+        for p in [
+            "no_drift",
+            "locked_acc_ref",
+            "no_double_scale",
+            "accuracy_guard",
+            "hard_gating",
+            "layout.optimize_layout",
+            "layout.num_slots",
+            "layout.wafer_radius_mm",
+            "layout.site_margin_mm",
+            "layout.lambda_boundary",
+            "layout.lambda_overlap",
+            "layout.lambda_comm_extra",
+            "layout.lambda_thermal",
+        ]:
+            _fail_on_legacy(p, "Use canonical cfg.stable_hw.* and cfg.hw.* only.")
+
     def _stamp_contract(cfg_to_stamp: Any) -> Any:
         # ===== v5.4 contract stamp (MUST exist for any v5.4 run) =====
         if not hasattr(cfg_to_stamp, "contract"):
@@ -247,6 +282,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         cfg_to_stamp.contract.version = "v5.4"
         cfg_to_stamp.contract.validated = True
         cfg_to_stamp.contract.validated_by = "utils.config_validate.validate_and_fill_defaults"
+        cfg_to_stamp.contract.strict = bool(get_nested(cfg_to_stamp, "_contract.strict", False))
         from .trace_contract_v54 import compute_effective_cfg_digest_v54
         cfg_to_stamp.contract.seal_digest = compute_effective_cfg_digest_v54(cfg_to_stamp)
         return cfg_to_stamp
@@ -280,20 +316,6 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             cfg.export_layout_input = bool(vc.export_layout_input)
         if getattr(cfg, "export_dir", None) is None and getattr(vc, "export_dir", None) is not None:
             cfg.export_dir = str(vc.export_dir)
-    # ---- legacy compat: layout.optimize_layout -> hw.optimize_layout ----
-    try:
-        layout_opt = get_nested(cfg, "layout.optimize_layout", None)
-        hw_opt = get_nested(cfg, "hw.optimize_layout", None)
-        if hw_opt is None and layout_opt is not None:
-            set_nested(cfg, "hw.optimize_layout", bool(layout_opt))
-            print(
-                "[WARN] Detected legacy config key layout.optimize_layout. "
-                "Please move it to hw.optimize_layout (SPEC). "
-                f"Auto-synced hw.optimize_layout={bool(layout_opt)} for this run."
-            )
-    except Exception:
-        pass
-
     def _ensure(obj, key: str, value):
         if getattr(obj, key, None) is None:
             if isinstance(value, dict):
@@ -333,7 +355,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             )
 
         if root_obj is not None and nested_obj is None:
-            # migrate legacy -> stable_hw
+            if STRICT:
+                raise ValueError(
+                    f"v5.4 strict: legacy root key '{k}' is forbidden. "
+                    f"Move it to 'stable_hw.{k}' explicitly."
+                )
+            # non-strict only: migrate legacy -> stable_hw
             try:
                 cfg.stable_hw[k] = root_obj
             except Exception:

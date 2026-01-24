@@ -219,6 +219,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     "unknown",
                 )
             ),
+            seal_digest=str(getattr(getattr(cfg, "contract", None), "seal_digest", "")),
         )
         append_trace_event_v54(
             trace_events_path,

@@ -766,14 +766,18 @@ def build_trace_header_payload_v54(
     effective: dict,
     no_drift_enabled: bool,
     acc_ref_source: str,
+    seal_digest: str,
 ) -> dict:
-    return {
+    payload = {
+        "requested_config_snapshot": requested_config,
+        "effective_config_snapshot": effective_config,
+        "seal_digest": str(seal_digest),
+        "contract_overrides": contract_overrides,
+        "signature": signature,
         "requested_config": requested_config,
         "effective_config": effective_config,
-        "contract_overrides": contract_overrides,
         "requested": requested,
         "effective": effective,
-        "signature": signature,
         "acc_first_hard_gating_enabled": bool(signature.get("acc_first_hard_gating_enabled", False)),
         "locked_acc_ref_enabled": bool(signature.get("locked_acc_ref_enabled", False)),
         "acc_ref_source": str(acc_ref_source),
@@ -784,3 +788,4 @@ def build_trace_header_payload_v54(
         "config_fingerprint": str(signature.get("config_fingerprint", "")),
         "git_commit_or_version": str(signature.get("git_commit_or_version", "")),
     }
+    return payload
