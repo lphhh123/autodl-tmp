@@ -12,6 +12,8 @@ from utils.trace_contract_v54 import (
     ALLOWED_EVENT_TYPES_V54,
     REQUIRED_EVENT_PAYLOAD_KEYS_V54,
     SCHEMA_VERSION_V54,
+    compute_snapshot_sha256_v54,
+    strip_seal_fields_v54,
 )
 from utils.config_utils import get_nested
 from .trace_schema import TRACE_FIELDS
@@ -287,14 +289,15 @@ def init_trace_dir(
     requested_snapshot_path.write_text(requested_snapshot_text, encoding="utf-8")
     requested_config_sha256 = hashlib.sha256(requested_snapshot_text.encode("utf-8")).hexdigest()
 
+    effective_snapshot_obj = strip_seal_fields_v54(resolved_cfg_obj or {})
     effective_snapshot_text = yaml.safe_dump(
-        resolved_cfg_obj or {},
+        effective_snapshot_obj,
         sort_keys=False,
         allow_unicode=True,
     )
     effective_snapshot_path.write_text(effective_snapshot_text, encoding="utf-8")
-    effective_config_sha256 = hashlib.sha256(effective_snapshot_text.encode("utf-8")).hexdigest()
-    seal_digest = effective_config_sha256
+    effective_config_text_sha256 = hashlib.sha256(effective_snapshot_text.encode("utf-8")).hexdigest()
+    seal_digest = compute_snapshot_sha256_v54(effective_snapshot_obj)
 
     # 1) trace_header.json（结构化元信息）
     # ---- contract_overrides: v5.4 合同证据，必须可审计 ----
@@ -307,8 +310,7 @@ def init_trace_dir(
             if isinstance(c, dict):
                 overrides = c.get("overrides", []) or []
     requested_snap = requested_config
-    effective_snap = resolved_cfg_obj
-    seal_digest = str(get_nested(resolved_cfg_obj, "contract.seal_digest", "")) or str(seal_digest)
+    effective_snap = effective_snapshot_obj
 
     header_payload = {
         "schema": SCHEMA_VERSION_V54,
@@ -320,7 +322,8 @@ def init_trace_dir(
         "requested_config_snapshot": requested_snap,
         "effective_config_snapshot": effective_snap,
         "requested_config_sha256": requested_config_sha256,
-        "effective_config_sha256": effective_config_sha256,
+        "effective_config_text_sha256": effective_config_text_sha256,
+        "effective_config_sha256": effective_config_text_sha256,
         "seal_digest": seal_digest,
     }
     header_payload.update(
@@ -351,7 +354,8 @@ def init_trace_dir(
     manifest["requested_config_snapshot"] = requested_snapshot_path.name
     manifest["effective_config_snapshot"] = effective_snapshot_path.name
     manifest["requested_config_sha256"] = requested_config_sha256
-    manifest["effective_config_sha256"] = effective_config_sha256
+    manifest["effective_config_text_sha256"] = effective_config_text_sha256
+    manifest["effective_config_sha256"] = effective_config_text_sha256
     manifest["seal_digest"] = seal_digest
     if extra_manifest:
         manifest.update(extra_manifest)
@@ -394,6 +398,35 @@ def init_trace_dir_v54(
         resolved_config = OmegaConf.to_container(cfg, resolve=True)
         if not isinstance(resolved_config, dict):
             raise RuntimeError("[P0][v5.4] resolved_config must be a dict for auditable trace_header.")
+        effective_snapshot_obj = strip_seal_fields_v54(resolved_config)
+        seal_digest = compute_snapshot_sha256_v54(effective_snapshot_obj)
+        if not hasattr(cfg, "contract") or getattr(cfg, "contract", None) is None:
+            try:
+                cfg.contract = {}
+            except Exception:
+                pass
+        prev_seal = getattr(getattr(cfg, "contract", None), "seal_digest", None)
+        if prev_seal != seal_digest:
+            try:
+                if not hasattr(cfg, "_contract") or getattr(cfg, "_contract", None) is None:
+                    cfg._contract = {}
+                ov = getattr(cfg._contract, "overrides", None)
+                if ov is None:
+                    cfg._contract.overrides = []
+                cfg._contract.overrides.append(
+                    {
+                        "path": "contract.seal_digest",
+                        "requested": prev_seal,
+                        "effective": seal_digest,
+                        "reason": "sync_seal_digest_to_effective_snapshot_v5.4",
+                    }
+                )
+            except Exception:
+                pass
+        try:
+            cfg.contract.seal_digest = seal_digest
+        except Exception:
+            pass
     requested_cfg_yaml = None
     if cfg is not None:
         requested_cfg_yaml = getattr(getattr(cfg, "train", None), "requested_cfg_yaml", None)
