@@ -96,7 +96,18 @@ def main():
     parser.add_argument("--seeds", nargs="*", type=int, default=[])
     parser.add_argument("--out_root", type=str, default="outputs/layout_suite")
     parser.add_argument("--backtrack_window", type=int, default=10)
+    parser.add_argument(
+        "--i_ack_not_onecommand",
+        action="store_true",
+        help="Acknowledge this is a suite orchestrator, not the OneCommand entrypoint.",
+    )
     args = parser.parse_args()
+
+    if not args.i_ack_not_onecommand:
+        raise SystemExit(
+            "This script is NOT the OneCommand entrypoint. "
+            "It dispatches to canonical runners. Re-run with --i_ack_not_onecommand."
+        )
 
     if args.suite:
         suite_cfg = _load_suite(Path(args.suite))

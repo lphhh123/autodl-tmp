@@ -100,7 +100,12 @@ def _load_layout_input(path: Path) -> dict:
         return json.load(f)
 
 
-def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
+def _resolve_heuragenix_root(
+    cfg_root: str | None,
+    project_root: Path,
+    trace_events_path: Path | None = None,
+    run_id: str | None = None,
+) -> Path:
     heuragenix_root_cfg = cfg_root or "../HeurAgenix"
     hx = Path(heuragenix_root_cfg).expanduser()
 
@@ -127,6 +132,21 @@ def _resolve_heuragenix_root(cfg_root: str | None, project_root: Path) -> Path:
 
     candidates = list(dict.fromkeys(candidates))
     if len(candidates) > 1 and not cfg_root:
+        if trace_events_path is not None:
+            try:
+                append_trace_event_v54(
+                    trace_events_path=trace_events_path,
+                    run_id=str(run_id or "preflight"),
+                    step=0,
+                    event_type="contract_violation",
+                    payload={
+                        "reason": "multiple_heuragenix_roots",
+                        "candidates": [str(c) for c in candidates],
+                    },
+                    strict=True,
+                )
+            except Exception:
+                pass
         raise RuntimeError(
             "[v5.4 contract] Multiple HeurAgenix roots detected. "
             "You must pass --heuragenix_root to avoid silent repo mismatch."
@@ -1140,6 +1160,9 @@ def main() -> None:
     out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
+    trace_dir = out_dir / "trace"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_events_path = trace_dir / "trace_events.jsonl"
     if not hasattr(cfg, "train") or cfg.train is None:
         cfg.train = {}
     cfg.train.out_dir = str(out_dir)
@@ -1178,7 +1201,12 @@ def main() -> None:
     baseline_cfg = cfg.baseline if hasattr(cfg, "baseline") else cfg.get("baseline", {})
     layout_input["require_main_evaluator"] = bool(baseline_cfg.get("require_main_evaluator", True))
     layout_input["allow_fallback_evaluator"] = bool(baseline_cfg.get("allow_fallback_evaluator", False))
-    heuragenix_root = _resolve_heuragenix_root(args.heuragenix_root or baseline_cfg.get("heuragenix_root"), project_root)
+    heuragenix_root = _resolve_heuragenix_root(
+        args.heuragenix_root or baseline_cfg.get("heuragenix_root"),
+        project_root,
+        trace_events_path=trace_events_path,
+        run_id=run_id,
+    )
     if not heuragenix_root.exists():
         raise FileNotFoundError(
             "Cannot find HeurAgenix directory.\n"
@@ -1218,8 +1246,6 @@ def main() -> None:
     baseline_name = str(baseline_cfg.get("name", baseline_method))
     fallback_method = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
     start_time = time.time()
-    trace_dir = out_dir / "trace"
-    trace_dir.mkdir(parents=True, exist_ok=True)
     llm_usage_path = trace_dir / "llm_usage.jsonl"
     llm_usage_path_compat = out_dir / "llm_usage.jsonl"
 

@@ -1860,9 +1860,14 @@ def train_version_c(
 
                 stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
 
-                no_drift_cfg = getattr(cfg, "no_drift", None)
-                if no_drift_cfg is None:
-                    no_drift_cfg = getattr(stable_hw_cfg, "no_drift", None)
+                # v5.4 strict: single source of truth
+                if getattr(cfg, "no_drift", None) not in (None, {}, ""):
+                    raise ValueError(
+                        "P0(v5.4): legacy root-level cfg.no_drift is forbidden at runtime. "
+                        "Use cfg.stable_hw.no_drift only."
+                    )
+
+                no_drift_cfg = getattr(stable_hw_cfg, "no_drift", {}) or {}
                 stable_hw_state["_contract_no_drift"] = bool(getattr(no_drift_cfg, "enabled", False)) if no_drift_cfg else False
                 norm = getattr(stable_hw_cfg, "normalize", None)
                 stable_hw_state["_contract_ref_update"] = (
