@@ -11,6 +11,14 @@ This is still discrete search (not gradient-based), but it matches the
 idea that the chiplet configuration is also an optimization variable.
 """
 
+import sys
+from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import itertools
 import math
 

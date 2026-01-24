@@ -5,7 +5,14 @@
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 
 from utils.trace_schema import TRACE_FIELDS
 from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS

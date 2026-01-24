@@ -11,6 +11,14 @@ hardware cost to ensure the end-to-end pipeline (model + hw proxy)
 works correctly without a real dataset.
 """
 
+import sys
+from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import argparse
 from typing import Dict, Any
 
