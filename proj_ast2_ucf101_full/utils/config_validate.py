@@ -1028,8 +1028,9 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
         contract["overrides"] = overrides
         cfg["_contract"] = contract
-    except Exception:
-        # never break runtime; but contract evidence may be incomplete -> audits will catch via smoke
-        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "[P0][v5.4] Failed to compute contract_overrides; trace would become non-auditable."
+        ) from exc
 
     return _stamp_contract(cfg)

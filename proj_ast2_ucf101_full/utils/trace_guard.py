@@ -356,29 +356,25 @@ def init_trace_dir_v54(
     trace_dir = Path(base_dir) / str(run_id)
     resolved_config = None
     if cfg is not None:
-        try:
-            resolved_config = OmegaConf.to_container(cfg, resolve=True)
-        except Exception:
-            resolved_config = None
+        resolved_config = OmegaConf.to_container(cfg, resolve=True)
+        if not isinstance(resolved_config, dict):
+            raise RuntimeError("[P0][v5.4] resolved_config must be a dict for auditable trace_header.")
     requested_cfg_yaml = None
-    try:
+    if cfg is not None:
         requested_cfg_yaml = getattr(getattr(cfg, "train", None), "requested_cfg_yaml", None)
-    except Exception:
-        requested_cfg_yaml = None
     requested_config = None
     if cfg is not None:
-        try:
-            contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
-            if contract is None and hasattr(cfg, "get"):
-                contract = cfg.get("_contract", {})
-            if contract is None:
-                contract = {}
-            snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
-                contract, "requested_config_snapshot", {}
-            )
-            requested_config = OmegaConf.to_container(snapshot, resolve=False)
-        except Exception:
-            requested_config = {}
+        contract = cfg.get("_contract", {}) if isinstance(cfg, dict) else getattr(cfg, "_contract", None)
+        if contract is None and hasattr(cfg, "get"):
+            contract = cfg.get("_contract", {})
+        if contract is None:
+            contract = {}
+        snapshot = contract.get("requested_config_snapshot", {}) if isinstance(contract, dict) else getattr(
+            contract, "requested_config_snapshot", {}
+        )
+        requested_config = OmegaConf.to_container(snapshot, resolve=False)
+        if not isinstance(requested_config, dict):
+            raise RuntimeError("[P0][v5.4] requested_config must be a dict for auditable trace_header.")
     meta = init_trace_dir(
         trace_dir=trace_dir,
         signature=signature_v54 or signature,
@@ -392,9 +388,12 @@ def init_trace_dir_v54(
     snapshot_path = Path(meta["eval_config_snapshot"])
     if cfg is not None:
         try:
-            snapshot_path.write_text(OmegaConf.to_yaml(cfg), encoding="utf-8")
-        except Exception:
-            snapshot_path.write_text(str(cfg), encoding="utf-8")
+            snapshot_txt = OmegaConf.to_yaml(cfg)
+        except Exception as exc:
+            raise RuntimeError(
+                "[P0][v5.4] Failed to snapshot eval_config; trace would be non-auditable."
+            ) from exc
+        snapshot_path.write_text(snapshot_txt, encoding="utf-8")
     return meta
 
 
