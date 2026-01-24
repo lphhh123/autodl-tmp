@@ -106,7 +106,7 @@ def _append_trace_events_from_csv(trace_events_path: Path, trace_csv: Path, run_
 
             append_trace_event_v54(
                 trace_events_path,
-                "step",
+                "layout_step",
                 payload={
                     "iter": int(iter_id),
                     "stage": stage,

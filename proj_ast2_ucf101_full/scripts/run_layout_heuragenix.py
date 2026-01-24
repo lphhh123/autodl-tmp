@@ -757,7 +757,7 @@ def _write_trace_and_pareto(
                 if rec_stage != "init":
                     append_trace_event_v54(
                         trace_events_path,
-                        "step",
+                        "layout_step",
                         payload={
                             "iter": int(iter_id),
                             "stage": rec_stage,
@@ -1197,11 +1197,22 @@ def main() -> None:
     problem = str(baseline_cfg.get("problem", "wafer_layout"))
     internal_out = out_dir / "heuragenix_internal"
     internal_out.mkdir(parents=True, exist_ok=True)
-    internal_data_root = internal_out / "data"
+    heuragenix_cfg = getattr(cfg, "heuragenix", None)
+    data_root_cfg = getattr(heuragenix_cfg, "data_root", None) if heuragenix_cfg else None
+    output_root_cfg = getattr(heuragenix_cfg, "output_root", None) if heuragenix_cfg else None
+    internal_data_root = (
+        Path(data_root_cfg).expanduser().resolve() if data_root_cfg else (internal_out / "data").resolve()
+    )
     internal_data_root.mkdir(parents=True, exist_ok=True)
     (internal_data_root / problem / "test_data").mkdir(parents=True, exist_ok=True)
     (internal_out / problem).mkdir(parents=True, exist_ok=True)
     internal_data_base = internal_data_root
+    output_root = (
+        Path(output_root_cfg).expanduser().resolve() if output_root_cfg else (internal_out / "output").resolve()
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    data_root_requested = os.path.abspath(str(data_root_cfg)) if data_root_cfg else ""
+    output_root_requested = os.path.abspath(str(output_root_cfg)) if output_root_cfg else ""
     heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
     selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
     num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
@@ -1282,6 +1293,8 @@ def main() -> None:
     effective_config["heuragenix_runtime"] = {
         "internal_data_root": str(internal_data_root),
         "internal_out_root": str(internal_out),
+        "data_root": str(internal_data_root),
+        "output_root": str(output_root),
         "llm_config_path": None,
     }
     contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
@@ -1334,6 +1347,8 @@ def main() -> None:
                     "heuragenix_root": str(get_nested(requested_config, "baseline.heuragenix_root", "")),
                     "heuristic_dir": str(get_nested(requested_config, "baseline.heuristic_dir", "")),
                     "llm_config_file": str(get_nested(requested_config, "baseline.llm_config_file", "")),
+                    "data_root": str(data_root_requested),
+                    "output_root": str(output_root_requested),
                     "stable_hw_enabled": _req_bool("stable_hw.enabled"),
                     "no_drift_enabled": _req_bool("stable_hw.no_drift.enabled"),
                     "no_double_scale_enabled": _req_bool("stable_hw.no_double_scale.enabled"),
@@ -1346,6 +1361,8 @@ def main() -> None:
                     "heuragenix_root": str(heuragenix_root.resolve()),
                     "heuristic_dir": str(heuristic_dir),
                     "llm_config_file": str(llm_eff),
+                    "data_root": str(internal_data_root.resolve()),
+                    "output_root": str(output_root.resolve()),
                     "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
                     "no_drift_enabled": bool(
                         getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
@@ -1446,11 +1463,6 @@ def main() -> None:
         code_root=str(_PROJECT_ROOT),
     )
 
-    # AMLT_OUTPUT_DIR is the output root directory.
-    # internal_base layout: <AMLT_OUTPUT_DIR>/<problem>/<test_data>/<result_dir>/<engine>/...
-    output_root = internal_out / "output"
-    output_root.mkdir(parents=True, exist_ok=True)
-
     fallback_used = False
     log_text = ""
     llm_config = None
@@ -1498,7 +1510,7 @@ def main() -> None:
     ).strip(os.pathsep)
     # ---- v5.4 bridge: do not forcibly override user-provided AMLT_*; make roots explicit ----
     if not str(env.get("AMLT_OUTPUT_DIR", "")).strip():
-        env["AMLT_OUTPUT_DIR"] = str(internal_out)
+        env["AMLT_OUTPUT_DIR"] = str(output_root)
     if not str(env.get("AMLT_DATA_DIR", "")).strip():
         env["AMLT_DATA_DIR"] = str(internal_data_root)
 
