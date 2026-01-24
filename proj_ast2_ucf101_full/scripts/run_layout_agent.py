@@ -43,6 +43,7 @@ from mapping.segments import Segment
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.config_utils import get_nested
+from utils.contract_seal import assert_cfg_sealed_or_violate
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_guard import (
@@ -51,6 +52,7 @@ from utils.trace_guard import (
     finalize_trace_dir,
     update_trace_summary,
 )
+from utils.trace_contract_v54 import TraceContractV54
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
 
@@ -194,15 +196,9 @@ def run_layout_agent(
     layout_input = load_layout_input(Path(layout_input_path))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    base_out = Path(getattr(cfg, "output_dir", out_dir))
+    base_out.mkdir(parents=True, exist_ok=True)
     # ---- v5.4: canonical trace events (JSONL) ----
-    trace_dir = out_dir / "trace"
-    trace_dir.mkdir(parents=True, exist_ok=True)
-    llm_usage_path = trace_dir / "llm_usage.jsonl"
-    llm_usage_path_compat = out_dir / "llm_usage.jsonl"
-    if not llm_usage_path.exists():
-        llm_usage_path.write_text("", encoding="utf-8")
-    trace_path = trace_dir / "trace.csv"
-    trace_path_compat = out_dir / "trace.csv"
     if run_id is None:
         run_id = stable_hash(
             {
@@ -218,8 +214,8 @@ def run_layout_agent(
         overrides={"seed_global": int(seed), "seed_problem": int(seed)},
     )
     meta = init_trace_dir_v54(
-        base_dir=out_dir,
-        run_id="trace",
+        base_dir=base_out,
+        run_id=run_id,
         cfg=cfg,
         signature=sig,
         signature_v54=sig,
@@ -231,10 +227,18 @@ def run_layout_agent(
             "seed_id": int(seed),
             "requested": {"method": "layout_agent"},
             "effective": {"method": "layout_agent"},
+            "seal_check_policy": {"kind": "per_step", "interval": 1},
         },
         required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
     )
     trace_dir = meta["trace_dir"]
+    out_dir = trace_dir
+    llm_usage_path = trace_dir / "llm_usage.jsonl"
+    llm_usage_path_compat = base_out / "llm_usage.jsonl"
+    if not llm_usage_path.exists():
+        llm_usage_path.write_text("", encoding="utf-8")
+    trace_path = trace_dir / "trace.csv"
+    trace_path_compat = base_out / "trace.csv"
     trace_events_path = trace_dir / "trace_events.jsonl"
     with (trace_dir / "trace_header.json").open("r", encoding="utf-8") as f:
         header_payload = json.load(f)
@@ -245,6 +249,17 @@ def run_layout_agent(
         event_type="trace_header",
         payload=header_payload,
         strict=True,
+    )
+    trace_contract = TraceContractV54
+    seal_digest = str(get_nested(cfg, "contract.seal_digest", "") or "")
+    assert_cfg_sealed_or_violate(
+        cfg=cfg,
+        seal_digest=seal_digest,
+        trace_events_path=trace_events_path,
+        phase="layout_agent",
+        step=0,
+        fatal=True,
+        trace_contract=trace_contract,
     )
 
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
@@ -381,6 +396,15 @@ def run_layout_agent(
         detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
         budget_exhausted = False
         try:
+            assert_cfg_sealed_or_violate(
+                cfg=cfg,
+                seal_digest=seal_digest,
+                trace_events_path=trace_events_path,
+                phase="layout_agent.before_detailed_place",
+                step=1,
+                fatal=True,
+                trace_contract=trace_contract,
+            )
             result = run_detailed_place(
                 sites_xy=sites_xy,
                 assign_seed=assign_leg,
@@ -399,6 +423,15 @@ def run_layout_agent(
                 llm_usage_path=llm_usage_path,
                 recordings_path=out_dir / "recordings.jsonl",
                 trace_events_path=trace_events_path,
+            )
+            assert_cfg_sealed_or_violate(
+                cfg=cfg,
+                seal_digest=seal_digest,
+                trace_events_path=trace_events_path,
+                phase="layout_agent.after_detailed_place",
+                step=2,
+                fatal=True,
+                trace_contract=trace_contract,
             )
         except _BudgetExceeded:
             budget_exhausted = True

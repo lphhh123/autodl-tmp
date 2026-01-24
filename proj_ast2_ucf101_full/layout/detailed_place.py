@@ -40,6 +40,8 @@ from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config_utils import get_nested
 from utils.contract_seal import assert_cfg_sealed_or_violate
+from utils.trace_contract_v54 import TraceContractV54
+from utils.trace_guard import append_trace_event_v54
 
 EVAL_VERSION = "v5.4"
 TIME_UNIT = "ms"
@@ -245,6 +247,18 @@ def run_detailed_place(
         )
     if not getattr(cfg, "contract", None) or not getattr(cfg.contract, "seal_digest", None):
         raise RuntimeError("v5.4 CONTRACT: missing seal_digest; boot not completed.")
+    trace_contract = TraceContractV54
+    seal_digest = str(get_nested(cfg, "contract.seal_digest", "") or "")
+    if trace_events_path is not None:
+        assert_cfg_sealed_or_violate(
+            cfg=cfg,
+            seal_digest=seal_digest,
+            trace_events_path=trace_events_path,
+            phase="layout_detailed_place",
+            step=0,
+            fatal=True,
+            trace_contract=trace_contract,
+        )
     # ---- deterministic seeds ----
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
     rng = np.random.default_rng(base_seed)
@@ -327,6 +341,19 @@ def run_detailed_place(
             llm_init_error = repr(e)
     fallback_reason = "llm_init_failed" if (planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error) else ""
     llm_fail_count = 1 if fallback_reason else 0
+    if fallback_reason and trace_events_path is not None:
+        append_trace_event_v54(
+            trace_events_path,
+            "contract_override",
+            payload={
+                "phase": "layout_detailed_place",
+                "reason": "planner_fallback",
+                "requested": {"planner.type": planner_type},
+                "effective": {"planner.type": "heuristic"},
+                "details": {"fallback_reason": fallback_reason},
+            },
+            step=0,
+        )
 
     # ---- SA params ----
     steps = int(_cfg_get(cfg, "steps", 0))
@@ -502,13 +529,14 @@ def run_detailed_place(
 
                 for step in range(steps):
                     if trace_events_path is not None:
-                        seal_digest = str(get_nested(cfg, "contract.seal_digest", "") or "").strip()
                         assert_cfg_sealed_or_violate(
                             cfg=cfg,
                             seal_digest=seal_digest,
                             trace_events_path=trace_events_path,
-                            step=int(step),
-                            strict=True,
+                            phase="layout_detailed_place",
+                            step=int(step) + 1,
+                            fatal=True,
+                            trace_contract=trace_contract,
                         )
                     step_start = time.perf_counter()
                     eval_calls_before = eval_calls_cum

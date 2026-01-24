@@ -355,6 +355,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         "no_double_scale",
         "hard_gating",
         "accuracy_guard",
+        "no_drift_enabled",
+        "locked_acc_ref_enabled",
+        "hard_gating_enabled",
+        "acc_first_enabled",
+        "no_double_scale_enabled",
+        "acc_first_hard_gating_enabled",
     ]
 
     # -----------------------------------------------------------------------------
@@ -371,6 +377,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             "no_double_scale",
             "accuracy_guard",
             "hard_gating",
+            "no_drift_enabled",
+            "locked_acc_ref_enabled",
+            "hard_gating_enabled",
+            "acc_first_enabled",
+            "no_double_scale_enabled",
+            "acc_first_hard_gating_enabled",
             "layout.optimize_layout",
             "layout.num_slots",
             "layout.wafer_radius_mm",

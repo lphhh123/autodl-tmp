@@ -20,6 +20,7 @@ ALLOWED_EVENT_TYPES_V54 = {
     "ref_update",
     "finalize",
     "contract_violation",
+    "contract_override",
 
     # non-contract-critical / legacy (allowed but not strictly keyed here)
     "step",
@@ -126,6 +127,7 @@ REQUIRED_EVENT_PAYLOAD_KEYS_V54 = {
     "ref_update": REQUIRED_REF_UPDATE_KEYS,
     "finalize": REQUIRED_FINALIZE_KEYS,
     "contract_violation": ["reason", "expected_seal_digest", "actual_seal_digest"],
+    "contract_override": ["reason", "requested", "effective", "details"],
 
     # Allow free-form payload for these (legacy / non-contract-critical)
     "step": [],
