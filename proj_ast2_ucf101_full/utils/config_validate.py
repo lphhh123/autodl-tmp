@@ -977,6 +977,37 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         contract = cfg.setdefault("_contract", {})
         requested = contract.get("requested_config_snapshot", {}) or {}
         overrides = contract.setdefault("overrides", []) or []
+        # ---- SPEC_E: sanitize contract overrides to auditable schema ----
+        raw_overrides = contract.get("overrides", []) or []
+        sanitized = []
+        for it in raw_overrides:
+            if not isinstance(it, dict):
+                continue
+            # already compliant
+            if all(k in it for k in ("path", "requested", "effective", "reason")):
+                sanitized.append(
+                    {
+                        "path": str(it["path"]),
+                        "requested": it["requested"],
+                        "effective": it["effective"],
+                        "reason": str(it["reason"]),
+                    }
+                )
+                continue
+            # legacy shape from older scripts: key_path/old/new
+            if all(k in it for k in ("key_path", "old", "new")):
+                sanitized.append(
+                    {
+                        "path": str(it["key_path"]),
+                        "requested": it["old"],
+                        "effective": it["new"],
+                        "reason": str(it.get("reason", "legacy_override")),
+                    }
+                )
+                continue
+            # unknown shape -> drop (fail-closed semantics: do not emit unauditable evidence)
+            continue
+        overrides = sanitized
 
         # prevent duplicates
         existing = set()

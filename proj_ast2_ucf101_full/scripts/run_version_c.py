@@ -55,17 +55,18 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
     return cur
 
 
-def _record_override(cfg, key_path, old, new, reason):
-    overrides = get_nested(cfg, "_contract.overrides", None)
-    if overrides is None:
-        set_nested(cfg, "_contract.overrides", [])
-        overrides = get_nested(cfg, "_contract.overrides", [])
-    overrides.append(
+def _record_override(cfg: dict, key_path: str, old, new, reason: str = "cli_override"):
+    """
+    SPEC_E: override entry must be auditable: path/requested/effective/reason
+    """
+    cfg.setdefault("_contract", {})
+    ov = cfg["_contract"].setdefault("overrides", [])
+    ov.append(
         {
-            "key_path": key_path,
-            "old": old,
-            "new": new,
-            "reason": reason,
+            "path": str(key_path),
+            "requested": old,
+            "effective": new,
+            "reason": str(reason),
         }
     )
 
