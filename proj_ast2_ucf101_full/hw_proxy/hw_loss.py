@@ -128,7 +128,7 @@ def compute_hw_loss(
         else:
 
             # ---- cache policy: ONLY for no-grad paths ----
-            use_cached = bool(getattr(iso_cfg, "use_cached_hw_mats", True))
+            use_cached = bool(getattr(iso_cfg, "use_cached_hw_mats", False))
             # NOTE: want_grad is computed at function entry from differentiable inputs.
             # Do NOT override want_grad based on global torch.is_grad_enabled().
             if want_grad:
@@ -138,13 +138,17 @@ def compute_hw_loss(
             if use_cached and (stable_hw_state is not None) and (mapping_sig is not None):
                 cache = stable_hw_state.setdefault("discrete_cache", {}).setdefault("hw_mats", {})
 
+            def _tensor_sig(t: torch.Tensor) -> dict:
+                tt = t.detach().to("cpu", dtype=torch.float32).contiguous()
+                h = hashlib.sha1(tt.numpy().tobytes()).hexdigest()
+                return {"shape": list(tt.shape), "sha1": h}
+
             def _effspec_to_hashable(v):
                 # NOTE: hash 用于缓存命中；必须包含 tensor + 标量 + 列表等，否则会错用缓存导致跑偏
                 if torch.is_tensor(v):
-                    t = v.detach()
-                    if t.numel() == 0:
-                        return 0.0
-                    return float(t.mean().cpu().item())
+                    if v.numel() == 0:
+                        return {"shape": list(v.shape), "sha1": hashlib.sha1(b"").hexdigest()}
+                    return _tensor_sig(v)
                 if isinstance(v, (int, float)):
                     return float(v)
                 if isinstance(v, (list, tuple)):
