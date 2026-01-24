@@ -12,8 +12,7 @@ from utils.trace_contract_v54 import (
     ALLOWED_EVENT_TYPES_V54,
     REQUIRED_EVENT_PAYLOAD_KEYS_V54,
     SCHEMA_VERSION_V54,
-    compute_snapshot_sha256_v54,
-    strip_seal_fields_v54,
+    compute_effective_cfg_digest_v54,
 )
 from utils.config_utils import get_nested
 from .trace_schema import TRACE_FIELDS
@@ -278,6 +277,17 @@ def init_trace_dir(
             requested_path.write_text("# config_requested placeholder (v5.4)\n", encoding="utf-8")
 
     # ---- v5.4 contract: requested/effective snapshots + sha256 + seal_digest ----
+    def _strip_seal_digest(obj: dict) -> dict:
+        if not isinstance(obj, dict):
+            return obj
+        o = dict(obj)
+        c = o.get("contract", None)
+        if isinstance(c, dict) and "seal_digest" in c:
+            c2 = dict(c)
+            c2.pop("seal_digest", None)
+            o["contract"] = c2
+        return o
+
     if requested_config is None and requested_cfg_yaml:
         requested_snapshot_text = str(requested_cfg_yaml)
     else:
@@ -289,15 +299,22 @@ def init_trace_dir(
     requested_snapshot_path.write_text(requested_snapshot_text, encoding="utf-8")
     requested_config_sha256 = hashlib.sha256(requested_snapshot_text.encode("utf-8")).hexdigest()
 
-    effective_snapshot_obj = strip_seal_fields_v54(resolved_cfg_obj or {})
+    effective_snapshot_obj = _strip_seal_digest(resolved_cfg_obj or {})
     effective_snapshot_text = yaml.safe_dump(
-        effective_snapshot_obj,
+        effective_snapshot_obj or {},
         sort_keys=False,
         allow_unicode=True,
     )
     effective_snapshot_path.write_text(effective_snapshot_text, encoding="utf-8")
-    effective_config_text_sha256 = hashlib.sha256(effective_snapshot_text.encode("utf-8")).hexdigest()
-    seal_digest = compute_snapshot_sha256_v54(effective_snapshot_obj)
+    computed_seal_digest = compute_effective_cfg_digest_v54(effective_snapshot_obj)
+    cfg_seal = str(get_nested(resolved_cfg_obj, "contract.seal_digest", "") or "").strip()
+    if cfg_seal and cfg_seal != str(computed_seal_digest):
+        raise RuntimeError(
+            "[v5.4 P0][HardGate-C] cfg.contract.seal_digest mismatches computed seal. "
+            f"cfg={cfg_seal} computed={computed_seal_digest}. Refuse to write non-auditable trace."
+        )
+
+    seal_digest = str(computed_seal_digest)
 
     # 1) trace_header.json（结构化元信息）
     # ---- contract_overrides: v5.4 合同证据，必须可审计 ----
@@ -322,8 +339,7 @@ def init_trace_dir(
         "requested_config_snapshot": requested_snap,
         "effective_config_snapshot": effective_snap,
         "requested_config_sha256": requested_config_sha256,
-        "effective_config_text_sha256": effective_config_text_sha256,
-        "effective_config_sha256": effective_config_text_sha256,
+        "effective_config_sha256": seal_digest,
         "seal_digest": seal_digest,
     }
     header_payload.update(
@@ -354,8 +370,7 @@ def init_trace_dir(
     manifest["requested_config_snapshot"] = requested_snapshot_path.name
     manifest["effective_config_snapshot"] = effective_snapshot_path.name
     manifest["requested_config_sha256"] = requested_config_sha256
-    manifest["effective_config_text_sha256"] = effective_config_text_sha256
-    manifest["effective_config_sha256"] = effective_config_text_sha256
+    manifest["effective_config_sha256"] = seal_digest
     manifest["seal_digest"] = seal_digest
     if extra_manifest:
         manifest.update(extra_manifest)
@@ -398,8 +413,7 @@ def init_trace_dir_v54(
         resolved_config = OmegaConf.to_container(cfg, resolve=True)
         if not isinstance(resolved_config, dict):
             raise RuntimeError("[P0][v5.4] resolved_config must be a dict for auditable trace_header.")
-        effective_snapshot_obj = strip_seal_fields_v54(resolved_config)
-        seal_digest = compute_snapshot_sha256_v54(effective_snapshot_obj)
+        seal_digest = compute_effective_cfg_digest_v54(resolved_config)
         if not hasattr(cfg, "contract") or getattr(cfg, "contract", None) is None:
             try:
                 cfg.contract = {}

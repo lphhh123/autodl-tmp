@@ -43,7 +43,7 @@ from utils.config_utils import get_nested
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_guard import (
-    init_trace_dir,
+    init_trace_dir_v54,
     append_trace_event_v54,
     finalize_trace_dir,
     update_trace_summary,
@@ -1318,9 +1318,12 @@ def main() -> None:
         "llm_config_path": None,
     }
     contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
-    init_trace_dir(
-        trace_dir,
+    init_trace_dir_v54(
+        base_dir=out_dir,
+        run_id="trace",
+        cfg=cfg,
         signature=signature,
+        signature_v54=signature,
         run_meta={
             "heuristic": method_label,
             "method": method,
@@ -1331,9 +1334,7 @@ def main() -> None:
             "heuristic_dir": str(heuristic_dir),
             "llm_config_file": str(llm_config_effective),
         },
-        required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
-        resolved_config=effective_config,
-        requested_config=requested_config,
+        required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
     trace_header_written = False
