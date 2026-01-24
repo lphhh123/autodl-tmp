@@ -39,14 +39,7 @@ def main():
     parser.add_argument("--out_dir", type=str, default=None, help="Output directory (v5.4 contract)")
     parser.add_argument("--out", type=str, default=None, help="Alias of --out_dir (backward compat)")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--allow_legacy", action="store_true", help="Allow running legacy AST2 script.")
     args = parser.parse_args()
-    if not args.allow_legacy:
-        raise SystemExit(
-            "[v5.4] This script is LEGACY (AST2). Refusing to run by default.\n"
-            "Use scripts/run_version_c.py for v5.4 experiments.\n"
-            "If you really want legacy, pass --allow_legacy."
-        )
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
     seed = int(args.seed)
@@ -57,8 +50,6 @@ def main():
     auto_out = f"outputs/ast2_auto"
     out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    legacy_notice = "THIS IS NOT v5.4 CONTRACT RUN; TRACE NOT AUDITABLE AS v5.4.\n"
-    (out_dir / "LEGACY_MODE.txt").write_text(legacy_notice, encoding="utf-8")
     cfg.out_dir = str(out_dir)
     if not hasattr(cfg, "train") or cfg.train is None:
         cfg.train = {}
@@ -67,27 +58,32 @@ def main():
         cfg.train.seed = seed
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
-    if not hasattr(cfg, "_contract") or cfg._contract is None:
-        cfg._contract = {}
-    overrides = cfg._contract.get("overrides", []) or []
-    overrides.append(
-        {
-            "path": "train.mode",
-            "requested": "ast2",
-            "effective": "single",
-            "reason": "mode_alias_ast2_to_single",
-        }
-    )
-    overrides.append(
-        {
-            "path": "contract.version",
-            "requested": "v5.4",
-            "effective": "legacy_ast2",
-            "reason": "explicit_allow_legacy",
-        }
-    )
-    cfg._contract["overrides"] = overrides
     cfg = validate_and_fill_defaults(cfg, mode="single")
+    # ---- v5.4 quick contract self-check (fail-fast before training) ----
+    try:
+        from utils.config_validate import get_nested
+        from utils.signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
+        from utils.trace_guard import build_trace_header_payload_v54
+        from utils.trace_contract_v54 import TraceContractV54
+
+        requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+        effective_config = OmegaConf.to_container(cfg, resolve=True)
+        contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+        signature = build_signature_v54(cfg, method_name="ast2_single_device")
+        payload = build_trace_header_payload_v54(
+            signature=signature,
+            requested_config=requested_config,
+            effective_config=effective_config,
+            contract_overrides=contract_overrides,
+            requested={"method": "ast2_single_device"},
+            effective={"method": "ast2_single_device"},
+            no_drift_enabled=bool(get_nested(cfg, "stable_hw.no_drift.enabled", False)),
+            acc_ref_source=str(get_nested(cfg, "stable_hw.locked_acc_ref.source", "none")),
+            seal_digest=str(get_nested(cfg, "contract.seal_digest", "")),
+        )
+        TraceContractV54.validate_event("trace_header", payload)
+    except Exception as exc:
+        raise RuntimeError(f"v5.4 contract self-check failed: {exc}") from exc
     seed_everything(seed)
     with (out_dir / "config_used.yaml").open("w", encoding="utf-8") as f:
         f.write(Path(args.cfg).read_text(encoding="utf-8"))
@@ -109,7 +105,7 @@ def main():
     resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
     from utils.stable_hash import stable_hash
 
-    print("[CFG] mode =", "ast2")
+    print("[CFG] mode =", "single")
     print("[CFG] stable_hw.enabled =", bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)))
     print(
         "[CFG] stable_hw.lambda_hw_schedule.lambda_hw_max =",
