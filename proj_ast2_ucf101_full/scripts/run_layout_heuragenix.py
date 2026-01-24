@@ -2038,6 +2038,13 @@ def main() -> None:
         "llm_config_requested": str(llm_config_requested),
         "llm_config_effective": str(llm_config_effective),
         "fallback_reason": ";".join(fallback_reasons) if fallback_reasons else "",
+        "run_meta": {
+            "requested_data_root": str(data_root_requested),
+            "effective_data_root": str(internal_data_root.resolve()),
+            "requested_output_root": str(output_root_requested),
+            "effective_output_root": str(output_root.resolve()),
+            "wrapper_out_dir": str(out_dir.resolve()),
+        },
     }
     (out_dir / "run_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False),

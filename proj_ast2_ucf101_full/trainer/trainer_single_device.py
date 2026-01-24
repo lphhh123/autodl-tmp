@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from functools import partial
@@ -300,6 +301,18 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         acc_now_value: float,
         lambda_hw_eff_value: float,
     ) -> Dict[str, Any]:
+        def _sanitize_hw_metric(metric: Any) -> Dict[str, Any]:
+            defaults = {"latency_ms": None, "peak_mem_mb": None, "power_w": None}
+            payload: Dict[str, Any] = {}
+            if isinstance(metric, dict):
+                payload.update(metric)
+            for key, default in defaults.items():
+                payload.setdefault(key, default)
+            for key, value in list(payload.items()):
+                if isinstance(value, float) and math.isnan(value):
+                    payload[key] = None
+            return payload
+
         hw_dbg = stable_state.get("hw_dbg", stable_state.get("hw_debug", {})) or {}
         loss_scalar = _to_scalar(loss_value, 0.0)
         hw_loss_raw = _to_scalar(hw_loss_value, 0.0)
@@ -346,9 +359,9 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
             "no_drift_enabled": bool(
                 getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", True)
             ),
-            "hw_metric_raw": dict(hw_dbg.get("raw_metric") or {}),
-            "hw_metric_ref": dict(hw_dbg.get("ref_metric") or {}),
-            "hw_metric_normed": dict(hw_dbg.get("normed_metric") or {}),
+            "hw_metric_raw": _sanitize_hw_metric(hw_dbg.get("raw_metric")),
+            "hw_metric_ref": _sanitize_hw_metric(hw_dbg.get("ref_metric")),
+            "hw_metric_normed": _sanitize_hw_metric(hw_dbg.get("normed_metric")),
             "hw_loss_raw": float(hw_loss_raw),
             "hw_loss_used": float(hw_loss_raw) if float(lambda_hw_eff_scalar) > 0.0 else 0.0,
             "lambda_hw_effective": float(lambda_hw_eff_scalar),
