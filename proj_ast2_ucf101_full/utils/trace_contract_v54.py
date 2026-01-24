@@ -159,5 +159,12 @@ class TraceContractV54:
 
 def compute_effective_cfg_digest_v54(cfg) -> str:
     snap = TraceContractV54.encode_config_snapshot(cfg, resolve=True)
+    # --- prevent self-referential seal pollution ---
+    if isinstance(snap, dict):
+        c = snap.get("contract", None)
+        if isinstance(c, dict) and "seal_digest" in c:
+            c2 = dict(c)
+            c2.pop("seal_digest", None)
+            snap["contract"] = c2
     s = stable_json_dumps(snap).encode("utf-8")
     return hashlib.sha256(s).hexdigest()

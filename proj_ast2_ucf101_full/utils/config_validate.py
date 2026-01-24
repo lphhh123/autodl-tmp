@@ -11,6 +11,9 @@ from omegaconf import OmegaConf
 from .config_utils import get_nested, set_nested
 from .config import AttrDict
 
+# NOTE(v5.4): strict=True is the ONLY valid behavior for new runs.
+# non-strict exists solely for legacy compatibility and MUST write evidence into _contract.overrides.
+
 # 仅对“必需”字段做强制默认，避免过度约束
 REQ_VERSION_C_HW_DEFAULTS = {
     # wafer / site
@@ -88,11 +91,6 @@ def _sync_layout_to_hw(cfg: Any) -> None:
         ("layout.lambda_comm_extra", "hw.lambda_comm_extra"),
         ("layout.lambda_thermal", "hw.lambda_thermal"),
     ]
-    STRICT = bool(get_nested(cfg, "_contract.strict", False))
-    if STRICT:
-        for src, _ in pairs:
-            if get_nested(cfg, src, None) is not None:
-                raise ValueError(f"v5.4 strict: legacy key '{src}' is forbidden; use hw.* instead.")
     for src, dst in pairs:
         v = get_nested(cfg, src, None)
         if v is not None and get_nested(cfg, dst, None) is None:
@@ -298,7 +296,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             cfg_to_stamp.contract = AttrDict({})
         cfg_to_stamp.contract.version = "v5.4"
         cfg_to_stamp.contract.validated = True
-        cfg_to_stamp.contract.validated_by = "utils.config_validate.validate_and_fill_defaults"
+        cfg_to_stamp.contract.validated_by = "validate_and_fill_defaults"
         cfg_to_stamp.contract.strict = bool(get_nested(cfg_to_stamp, "_contract.strict", False))
         from .trace_contract_v54 import compute_effective_cfg_digest_v54
         cfg_to_stamp.contract.seal_digest = compute_effective_cfg_digest_v54(cfg_to_stamp)
@@ -675,69 +673,49 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     # v5.4 contract: once filled, STOP. Do not apply legacy defaults.
 
-    # ===== v5.4 defaults: NoDrift + frozen HW refs =====
+    # ------------------------------------------------------------------
+    # [v5.4 CONTRACT HARDEN] NoDrift ⇔ normalize.ref_update must be frozen
+    # - strict: mismatch => FAIL-FAST (no silent fix)
+    # - non-strict: fix allowed BUT MUST be recorded in _contract.overrides
+    # ------------------------------------------------------------------
     if getattr(cfg, "stable_hw", None) is not None and bool(getattr(cfg.stable_hw, "enabled", False)):
-        # v5.4 contract: no_drift is defined only once (root preferred).
-        root_no_drift = getattr(cfg, "no_drift", None)
-        nested_no_drift = getattr(cfg.stable_hw, "no_drift", None)
+        STRICT = bool(get_nested(cfg, "_contract.strict", True))
 
-        if root_no_drift is not None and nested_no_drift is not None:
-            raise ValueError(
-                "no_drift must be defined only once (root preferred). Remove one of: "
-                "no_drift OR stable_hw.no_drift"
+        nd_enabled = bool(get_nested(cfg, "stable_hw.no_drift.enabled", True))
+        ref_update_eff = str(get_nested(cfg, "stable_hw.normalize.ref_update", "frozen") or "frozen").lower()
+
+        # Requested value (for evidence chain)
+        req_snap = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+
+        def _req_get(path, default=None):
+            cur = req_snap
+            for k in path.split("."):
+                if not isinstance(cur, dict) or k not in cur:
+                    return default
+                cur = cur[k]
+            return cur
+
+        ref_update_req = _req_get("stable_hw.normalize.ref_update", None)
+        if ref_update_req is not None:
+            ref_update_req = str(ref_update_req).lower()
+
+        if nd_enabled and ref_update_eff != "frozen":
+            if STRICT:
+                raise ValueError(
+                    "[v5.4 P0][NoDrift] stable_hw.no_drift.enabled=True requires "
+                    "stable_hw.normalize.ref_update='frozen'. "
+                    f"Got effective={ref_update_eff}, requested={ref_update_req}."
+                )
+            # non-strict: force + record
+            set_nested(cfg, "stable_hw.normalize.ref_update", "frozen")
+            cfg._contract.overrides.append(
+                {
+                    "path": "stable_hw.normalize.ref_update",
+                    "requested": ref_update_req,
+                    "effective": "frozen",
+                    "reason": "no_drift_requires_frozen_ref_update",
+                }
             )
-
-        # Only create nested default when root is absent AND nested is absent
-        if root_no_drift is None and nested_no_drift is None:
-            cfg.stable_hw.no_drift = SimpleNamespace(enabled=True)
-            nested_no_drift = cfg.stable_hw.no_drift
-
-        # Determine enabled flag from root (dict-style) or nested (bool/dict-style)
-        no_drift_enabled = True
-        if root_no_drift is not None:
-            no_drift_enabled = (
-                bool(getattr(root_no_drift, "enabled", True))
-                if hasattr(root_no_drift, "enabled")
-                else bool(root_no_drift)
-            )
-        else:
-            if hasattr(nested_no_drift, "enabled"):
-                no_drift_enabled = bool(nested_no_drift.enabled)
-            else:
-                no_drift_enabled = bool(nested_no_drift)
-
-        if not hasattr(cfg.stable_hw, "normalize") or cfg.stable_hw.normalize is None:
-            cfg.stable_hw.normalize = SimpleNamespace(enabled=True)
-
-        if not hasattr(cfg.stable_hw.normalize, "ref_update") or cfg.stable_hw.normalize.ref_update is None:
-            cfg.stable_hw.normalize.ref_update = "frozen"
-
-        # NoDrift priority: enforce frozen even if user mistakenly sets ema
-        if no_drift_enabled:
-            cfg.stable_hw.normalize.ref_update = "frozen"
-
-        # Canonicalize: always expose dict-style stable_hw.no_drift with .enabled for downstream code.
-        _cur_nd = getattr(cfg.stable_hw, "no_drift", None)
-        if _cur_nd is None or not hasattr(_cur_nd, "enabled"):
-            cfg.stable_hw.no_drift = SimpleNamespace(enabled=bool(no_drift_enabled))
-        else:
-            _cur_nd.enabled = bool(no_drift_enabled)
-
-        v = str(cfg.stable_hw.normalize.ref_update).lower()
-        if v not in ("frozen", "ema"):
-            raise ValueError(
-                "stable_hw.normalize.ref_update must be 'frozen' or 'ema', got: "
-                f"{cfg.stable_hw.normalize.ref_update}"
-            )
-
-        print(
-            "[v5.4][cfg] locked_acc_ref source = "
-            f"{'root' if getattr(cfg, 'locked_acc_ref', None) is not None else 'stable_hw'}"
-        )
-        print(
-            "[v5.4][cfg] no_drift source = "
-            f"{'root' if getattr(cfg, 'no_drift', None) is not None else 'stable_hw'}"
-        )
 
     # --- v5.4 contract: metric name must be consistent ---
     try:
@@ -1008,6 +986,62 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             ("layout.optimize_layout", "hw.optimize_layout"),
         ],
     )
+
+    def _get_dict_path(d: dict, path: str):
+        cur = d
+        for k in path.split("."):
+            if not isinstance(cur, dict) or k not in cur:
+                return "__MISSING__"
+            cur = cur[k]
+        return cur
+
+    def _auto_record_contract_diffs(cfg_to_record, paths):
+        req = get_nested(cfg_to_record, "_contract.requested_config_snapshot", {}) or {}
+        eff = OmegaConf.to_container(cfg_to_record, resolve=True)
+        existing = set()
+        for it in (get_nested(cfg_to_record, "_contract.overrides", []) or []):
+            if isinstance(it, dict) and "path" in it:
+                existing.add(str(it["path"]))
+
+        for p in paths:
+            r = _get_dict_path(req, p)
+            e = _get_dict_path(eff, p)
+            if r != e and p not in existing:
+                cfg_to_record._contract.overrides.append(
+                    {
+                        "path": p,
+                        "requested": None if r == "__MISSING__" else r,
+                        "effective": None if e == "__MISSING__" else e,
+                        "reason": "auto_contract_diff_v5.4",
+                    }
+                )
+
+    _contract_sensitive_paths = [
+        # hard gate A/B/C核心语义
+        "contract.strict",
+        "stable_hw.enabled",
+        "stable_hw.normalize.enabled",
+        "stable_hw.normalize.kind",
+        "stable_hw.normalize.ref_update",
+        "stable_hw.lambda_hw_schedule.enabled",
+        "stable_hw.lambda_hw_schedule.kind",
+        "stable_hw.lambda_hw_schedule.lambda_hw_min",
+        "stable_hw.lambda_hw_schedule.lambda_hw_max",
+        "stable_hw.accuracy_guard.enabled",
+        "stable_hw.accuracy_guard.acc_drop_max",
+        "stable_hw.locked_acc_ref.enabled",
+        "stable_hw.locked_acc_ref.source",
+        "stable_hw.locked_acc_ref.expected_acc1",
+        "stable_hw.locked_acc_ref.path",
+        "stable_hw.no_drift.enabled",
+        "stable_hw.no_drift.mode",
+        "stable_hw.no_double_scale",          # bool 或 dict
+        "stable_hw.no_double_scale.enabled",  # 若存在
+        # 训练侧关键门
+        "train.acc_drop_max",
+        "training.twostage",
+    ]
+    _auto_record_contract_diffs(cfg, _contract_sensitive_paths)
 
     # ===========================
     # v5.4 CONTRACT: auto-record requested vs effective for CRITICAL paths
