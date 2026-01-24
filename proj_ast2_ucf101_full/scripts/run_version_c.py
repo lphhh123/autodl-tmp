@@ -20,6 +20,9 @@ from utils.config import load_config
 from utils.config_utils import get_nested, set_nested
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
+from utils.trace_contract_v54 import TraceContractV54
+from utils.trace_guard import build_trace_header_payload_v54
+from utils.trace_signature_v54 import build_signature_v54
 from trainer.trainer_version_c import train_version_c
 
 
@@ -174,6 +177,26 @@ def main():
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
+    # ---- v5.4 quick contract self-check (fail-fast before training) ----
+    try:
+        requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+        effective_config = OmegaConf.to_container(cfg, resolve=True)
+        contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+        signature = build_signature_v54(cfg, method_name="version_c_train")
+        payload = build_trace_header_payload_v54(
+            signature=signature,
+            requested_config=requested_config,
+            effective_config=effective_config,
+            contract_overrides=contract_overrides,
+            requested={"method": "version_c_train"},
+            effective={"method": "version_c_train"},
+            no_drift_enabled=bool(get_nested(cfg, "stable_hw.no_drift.enabled", False)),
+            acc_ref_source=str(get_nested(cfg, "stable_hw.locked_acc_ref.source", "none")),
+            seal_digest=str(get_nested(cfg, "contract.seal_digest", "")),
+        )
+        TraceContractV54.validate_event("trace_header", payload)
+    except Exception as exc:
+        raise RuntimeError(f"v5.4 contract self-check failed: {exc}") from exc
 
     out_dir_path = Path(out_dir)
 

@@ -12,6 +12,13 @@ from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.heuristic_only import HeuristicOnlyHyperHeuristic
 from src.util.util import load_function
 
+if os.environ.get("V54_ALLOW_RAW_HEURAGENIX", "0") != "1":
+    raise RuntimeError(
+        "v5.4 contract: Do NOT run HeurAgenix entrypoints directly (non-auditable). "
+        "Use proj_ast2_ucf101_full/scripts/run_layout_heuragenix.py which emits v5.4 trace+seal. "
+        "If you explicitly want non-v5.4 runs, set V54_ALLOW_RAW_HEURAGENIX=1."
+    )
+
 
 def _list_problems():
     problems_dir = Path(__file__).parent / "src" / "problems"

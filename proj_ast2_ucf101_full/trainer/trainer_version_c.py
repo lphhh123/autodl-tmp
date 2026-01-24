@@ -565,16 +565,17 @@ def train_version_c(
     layout_export_dir: Optional[str] = None,
     seed: Optional[int] = None,
 ):
-    # ===== v5.4 contract gate: forbid running with unvalidated cfg =====
-    if (
-        (not hasattr(cfg, "contract"))
-        or (not bool(getattr(cfg.contract, "validated", False)))
-        or (getattr(cfg.contract, "version", None) != "v5.4")
-    ):
+    # --- [v5.4 HARD GATE D] trainer must refuse non-bootstrapped cfg ---
+    c = getattr(cfg, "contract", None)
+    if c is None or getattr(c, "validated", False) is not True or str(getattr(c, "version", "")) != "v5.4":
         raise RuntimeError(
-            "[P0][v5.4] cfg is not validated/stamped by validate_and_fill_defaults(). "
-            "Do NOT call train_version_c() with raw load_config(); use scripts/run_version_c.py "
-            "or call validate_and_fill_defaults(cfg) explicitly."
+            "v5.4 P0: cfg is not contract-validated (missing contract.validated/version). "
+            "Use scripts/run_version_c.py (OneCommand) to start runs."
+        )
+    vb = str(getattr(c, "validated_by", "") or "")
+    if vb not in ("validate_and_fill_defaults", "contract_bootstrap_v5.4"):
+        raise RuntimeError(
+            f"v5.4 P0: cfg.validated_by={vb!r} is not an approved bootstrap marker."
         )
     seal_digest = getattr(getattr(cfg, "contract", None), "seal_digest", None)
     if not seal_digest:
