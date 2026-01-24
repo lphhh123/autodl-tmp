@@ -122,6 +122,14 @@ def build_dataloaders(cfg):
 
 
 def train_single_device(cfg, out_dir: str | Path | None = None):
+    ctr = getattr(cfg, "_contract", None)
+    if ctr is None or not bool(getattr(ctr, "stamped_v54", False)):
+        raise RuntimeError(
+            "v5.4 CONTRACT: cfg not validated/stamped. "
+            "Call validate_and_fill_defaults(...) via SPEC_D OneCommand entrypoint."
+        )
+    if not getattr(cfg, "contract", None) or not getattr(cfg.contract, "seal_digest", None):
+        raise RuntimeError("v5.4 CONTRACT: missing seal_digest; boot not completed.")
     contract = getattr(cfg, "contract", None)
     if contract is None or not bool(getattr(contract, "validated", False)):
         raise RuntimeError(

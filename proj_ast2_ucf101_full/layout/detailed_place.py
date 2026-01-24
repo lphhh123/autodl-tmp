@@ -237,6 +237,14 @@ def run_detailed_place(
     recordings_path: Optional[Path] = None,
     trace_events_path: Optional[Path] = None,
 ) -> DetailedPlaceResult:
+    ctr = getattr(cfg, "_contract", None)
+    if ctr is None or not bool(getattr(ctr, "stamped_v54", False)):
+        raise RuntimeError(
+            "v5.4 CONTRACT: cfg not validated/stamped. "
+            "Call validate_and_fill_defaults(...) via SPEC_D OneCommand entrypoint."
+        )
+    if not getattr(cfg, "contract", None) or not getattr(cfg.contract, "seal_digest", None):
+        raise RuntimeError("v5.4 CONTRACT: missing seal_digest; boot not completed.")
     # ---- deterministic seeds ----
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
     rng = np.random.default_rng(base_seed)
