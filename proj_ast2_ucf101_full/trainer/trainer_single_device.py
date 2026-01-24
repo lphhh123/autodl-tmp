@@ -30,6 +30,7 @@ from utils.trace_guard import (
     finalize_trace_dir,
     update_trace_summary,
     build_baseline_trace_summary,
+    build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hash import stable_hash
@@ -161,49 +162,54 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 cur = cur[key]
             return cur
 
-        append_trace_event_v54(
-            trace_events_path,
-            "trace_header",
-            payload={
-                "requested_config": requested_cfg,
-                "effective_config": effective_cfg,
-                "contract_overrides": contract_overrides,
-                "requested": {
-                    "mode": "single_device",
-                    "stable_hw_enabled": bool(_get_req("stable_hw.enabled", None))
-                    if _get_req("stable_hw.enabled", None) is not None
-                    else None,
-                    "locked_acc_ref_enabled": bool(_get_req("stable_hw.locked_acc_ref.enabled", None))
-                    if _get_req("stable_hw.locked_acc_ref.enabled", None) is not None
-                    else None,
-                    "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
-                    if _get_req("stable_hw.no_drift.enabled", None) is not None
-                    else None,
-                    "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
-                    if _get_req("stable_hw.no_double_scale.enabled", None) is not None
-                    else None,
-                },
-                "effective": {
-                    "mode": "single_device",
-                    "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                    "locked_acc_ref_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "enabled", False)
-                    ),
-                    "no_drift_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-                    ),
-                    "no_double_scale_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                    ),
-                },
-                "signature": sig,
+        trace_header_payload = build_trace_header_payload_v54(
+            signature=sig,
+            requested_config=requested_cfg,
+            effective_config=effective_cfg,
+            contract_overrides=contract_overrides,
+            requested={
+                "mode": "single_device",
+                "stable_hw_enabled": bool(_get_req("stable_hw.enabled", None))
+                if _get_req("stable_hw.enabled", None) is not None
+                else None,
+                "locked_acc_ref_enabled": bool(_get_req("stable_hw.locked_acc_ref.enabled", None))
+                if _get_req("stable_hw.locked_acc_ref.enabled", None) is not None
+                else None,
+                "no_drift_enabled": bool(_get_req("stable_hw.no_drift.enabled", None))
+                if _get_req("stable_hw.no_drift.enabled", None) is not None
+                else None,
+                "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
+                if _get_req("stable_hw.no_double_scale.enabled", None) is not None
+                else None,
+            },
+            effective={
+                "mode": "single_device",
+                "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
+                "locked_acc_ref_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "enabled", False)
+                ),
                 "no_drift_enabled": bool(
                     getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
                 ),
-                "acc_ref_source": str(
-                    getattr(getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})), "source", "unknown")
+                "no_double_scale_enabled": bool(
+                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
                 ),
             },
+            no_drift_enabled=bool(
+                getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+            ),
+            acc_ref_source=str(
+                getattr(
+                    getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})),
+                    "source",
+                    "unknown",
+                )
+            ),
+        )
+        append_trace_event_v54(
+            trace_events_path,
+            "trace_header",
+            payload=trace_header_payload,
             run_id=run_id,
             step=0,
         )

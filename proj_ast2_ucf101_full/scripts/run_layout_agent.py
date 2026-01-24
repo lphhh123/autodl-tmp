@@ -51,6 +51,7 @@ from utils.trace_guard import (
     finalize_trace_dir,
     update_trace_summary,
     build_baseline_trace_summary,
+    build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
@@ -240,23 +241,28 @@ def run_layout_agent(
         requested_config=requested_config,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
+    trace_header_payload = build_trace_header_payload_v54(
+        signature=sig,
+        requested_config=requested_config,
+        effective_config=effective_config,
+        contract_overrides=contract_overrides,
+        requested={"mode": "layout_agent"},
+        effective={"mode": "layout_agent"},
+        no_drift_enabled=bool(
+            getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
+        ),
+        acc_ref_source=str(
+            getattr(
+                getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})),
+                "source",
+                "none",
+            )
+        ),
+    )
     append_trace_event_v54(
         trace_events_path,
         "trace_header",
-        payload={
-            "requested_config": requested_config,
-            "effective_config": effective_config,
-            "contract_overrides": contract_overrides,
-            "requested": {"mode": "layout_agent"},
-            "effective": {"mode": "layout_agent"},
-            "signature": sig,
-            "no_drift_enabled": bool(
-                getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-            ),
-            "acc_ref_source": str(
-                getattr(getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})), "source", "none")
-            ),
-        },
+        payload=trace_header_payload,
         run_id=run_id,
         step=0,
     )

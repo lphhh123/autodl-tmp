@@ -19,7 +19,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 
-from utils.trace_guard import init_trace_dir, finalize_trace_dir, append_trace_event_v54
+from utils.trace_guard import (
+    init_trace_dir,
+    finalize_trace_dir,
+    append_trace_event_v54,
+    build_trace_header_payload_v54,
+)
 from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
@@ -197,19 +202,20 @@ def main() -> None:
         resolved_config=cfg_min,
     )
     trace_events_path = trace_dir / "trace_events.jsonl"
+    trace_header_payload = build_trace_header_payload_v54(
+        signature=sig,
+        requested_config={},
+        effective_config={},
+        contract_overrides=[],
+        requested={"mode": "smoke_steps0"},
+        effective={"mode": "smoke_steps0"},
+        no_drift_enabled=True,
+        acc_ref_source="manual",
+    )
     append_trace_event_v54(
         trace_events_path,
         "trace_header",
-        payload={
-            "requested_config": {},
-            "effective_config": {},
-            "contract_overrides": [],
-            "requested": {"mode": "smoke_steps0"},
-            "effective": {"mode": "smoke_steps0"},
-            "signature": sig,
-            "no_drift_enabled": True,
-            "acc_ref_source": "manual",
-        },
+        payload=trace_header_payload,
         run_id=run_id,
         step=0,
     )

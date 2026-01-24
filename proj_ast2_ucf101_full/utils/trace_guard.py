@@ -722,3 +722,33 @@ def finalize_trace_dir(trace_events_path: Path, *, reason: str, steps_done: int,
     csv_path = trace_dir / "trace.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"Missing required trace.csv at {csv_path}")
+
+
+def build_trace_header_payload_v54(
+    *,
+    signature: dict,
+    requested_config,
+    effective_config,
+    contract_overrides,
+    requested: dict,
+    effective: dict,
+    no_drift_enabled: bool,
+    acc_ref_source: str,
+) -> dict:
+    return {
+        "requested_config": requested_config,
+        "effective_config": effective_config,
+        "contract_overrides": contract_overrides,
+        "requested": requested,
+        "effective": effective,
+        "signature": signature,
+        "acc_first_hard_gating_enabled": bool(signature.get("acc_first_hard_gating_enabled", False)),
+        "locked_acc_ref_enabled": bool(signature.get("locked_acc_ref_enabled", False)),
+        "acc_ref_source": str(acc_ref_source),
+        "no_drift_enabled": bool(no_drift_enabled),
+        "no_double_scale_enabled": bool(signature.get("no_double_scale_enabled", False)),
+        "seed_global": int(signature.get("seed_global", 0)),
+        "seed_problem": int(signature.get("seed_problem", 0)),
+        "config_fingerprint": str(signature.get("config_fingerprint", "")),
+        "git_commit_or_version": str(signature.get("git_commit_or_version", "")),
+    }
