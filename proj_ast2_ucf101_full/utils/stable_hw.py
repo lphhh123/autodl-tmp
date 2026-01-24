@@ -817,6 +817,63 @@ def update_train_acc1_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc1: float) -
 
 
 # ===== v5.4: Locked HW refs (NoDrift for proxy refs) =====
+def extract_hw_refs_from_baseline(baseline_stats: dict) -> dict:
+    """
+    Parse baseline_stats.json into hw ref values.
+    Required outputs:
+      latency_ref_ms, energy_ref_mj, mem_ref_mb, comm_ref
+    Accept multiple alias schemas to be robust, but in strict mode caller should reject placeholders.
+    """
+    if not isinstance(baseline_stats, dict):
+        raise ValueError("[v5.4 P0] baseline_stats must be a dict")
+
+    # preferred containers (order matters)
+    hw = (
+        baseline_stats.get("hw_ref")
+        or baseline_stats.get("baseline_hw_refs")
+        or baseline_stats.get("baseline_hw_stats")
+        or baseline_stats.get("last_hw_stats")
+        or {}
+    )
+    if not isinstance(hw, dict):
+        raise ValueError("[v5.4 P0] baseline_stats missing hw_ref/baseline_hw_stats/last_hw_stats dict")
+
+    def _pick(*keys):
+        for k in keys:
+            v = hw.get(k, None)
+            if v is not None:
+                return v
+        return None
+
+    lat = _pick("latency_ref_ms", "latency_ms", "lat_ms", "ref_latency_ms")
+    ene = _pick("energy_ref_mj", "energy_mj", "ene_mj", "ref_energy_mj")
+    mem = _pick("mem_ref_mb", "mem_peak_mb", "mem_mb", "ref_mem_mb")
+    com = _pick("comm_ref", "comm_ref_ms", "comm_ms", "ref_comm_ms")
+
+    missing = [
+        name
+        for name, v in {
+            "latency_ref_ms": lat,
+            "energy_ref_mj": ene,
+            "mem_ref_mb": mem,
+            "comm_ref": com,
+        }.items()
+        if v is None
+    ]
+    if missing:
+        raise ValueError(
+            f"[v5.4 P0] baseline_stats missing keys: {missing}. "
+            "Need latency/energy/mem/comm refs for StableHW NoDrift."
+        )
+
+    return {
+        "latency_ref_ms": float(lat),
+        "energy_ref_mj": float(ene),
+        "mem_ref_mb": float(mem),
+        "comm_ref": float(com),
+    }
+
+
 def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], stable_hw_cfg: Any = None) -> None:
     """
     v5.4 contract:

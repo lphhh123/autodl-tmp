@@ -277,32 +277,34 @@ def compute_hw_loss(
     no_drift_enabled = _as_enabled(no_drift_cfg, default=True)
     stable_hw_state["no_drift_enabled"] = no_drift_enabled
 
-    def _pos_ref(state_key: str, default_val: float, allow_zero: bool = False) -> float:
-        # 1) Prefer existing stable ref (critical for NoDrift + LockedRef)
-        if state_key in stable_hw_state:
-            try:
-                ex = float(stable_hw_state[state_key])
-            except Exception:
-                ex = None
-            if ex is not None and math.isfinite(ex) and (ex > 0.0 or (allow_zero and ex >= 0.0)):
-                return ex
+    def _pos_ref(stable_hw_state: dict, key: str, default_ref: float, no_drift_enabled: bool) -> float:
+        cur = stable_hw_state.get(key, None)
+        if cur is None:
             if no_drift_enabled:
-                raise ValueError(f"[NoDrift] stable_hw_state[{state_key}] exists but invalid: {stable_hw_state[state_key]}")
+                raise RuntimeError(
+                    f"[v5.4 P0] NoDrift enabled but missing {key}. "
+                    "Refusing silent fallback. Provide stable_hw.baseline_stats_path (real baseline) "
+                    "or ensure refs are initialized in stable_hw_state before compute_hw_loss."
+                )
+            # non-NoDrift: allow fallback, but make it explicit and stable
+            cur = float(default_ref if default_ref is not None else 1.0)
+            stable_hw_state[key] = cur
 
-        # 2) Fallback to cfg default and initialize state (only when missing)
-        v = float(default_val)
-        if not math.isfinite(v) or (v <= 0.0 and not (allow_zero and v >= 0.0)):
-            v = 1.0 if not allow_zero else 0.0
-        stable_hw_state[state_key] = v
-        return v
+        cur = float(cur)
+        return cur if cur > 0 else 1.0
 
-    ref_T = _pos_ref("ref_T", getattr(hw_cfg, "latency_ref_ms", 1.0))
-    ref_M = _pos_ref("ref_M", getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0)))
-    ref_E = _pos_ref("ref_E", getattr(hw_cfg, "energy_ref_mj", 1.0))
-    ref_C = _pos_ref("ref_C", getattr(hw_cfg, "comm_ref_ms", 1.0))
-    ref_A = _pos_ref("ref_A", getattr(hw_cfg, "area_ref_mm2", 1.0))
-    ref_B = _pos_ref("ref_B", getattr(hw_cfg, "bw_ref_gbps", 1.0))
-    ref_P = _pos_ref("ref_P", getattr(hw_cfg, "power_ref_w", 1.0))
+    ref_T = _pos_ref(stable_hw_state, "ref_T", getattr(hw_cfg, "latency_ref_ms", 1.0), no_drift_enabled)
+    ref_M = _pos_ref(
+        stable_hw_state,
+        "ref_M",
+        getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0)),
+        no_drift_enabled,
+    )
+    ref_E = _pos_ref(stable_hw_state, "ref_E", getattr(hw_cfg, "energy_ref_mj", 1.0), no_drift_enabled)
+    ref_C = _pos_ref(stable_hw_state, "ref_C", getattr(hw_cfg, "comm_ref_ms", 1.0), no_drift_enabled)
+    ref_A = _pos_ref(stable_hw_state, "ref_A", getattr(hw_cfg, "area_ref_mm2", 1.0), no_drift_enabled)
+    ref_B = _pos_ref(stable_hw_state, "ref_B", getattr(hw_cfg, "bw_ref_gbps", 1.0), no_drift_enabled)
+    ref_P = _pos_ref(stable_hw_state, "ref_P", getattr(hw_cfg, "power_ref_w", 1.0), no_drift_enabled)
 
     # Keep setdefault (does NOT overwrite), useful if other code expects these keys
     stable_hw_state.setdefault("ref_T", ref_T)

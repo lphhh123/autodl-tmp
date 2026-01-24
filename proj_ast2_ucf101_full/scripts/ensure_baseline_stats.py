@@ -49,7 +49,7 @@ def _is_valid_baseline_stats(obj: Dict[str, Any]) -> bool:
     hw = obj.get("last_hw_stats") or obj.get("hw_ref") or obj.get("baseline_hw_stats")
     if not isinstance(hw, dict):
         return False
-    for k in ("latency_ms", "energy_mj", "mem_peak_mb"):
+    for k in ("latency_ms", "energy_mj", "mem_peak_mb", "comm_ms"):
         if k not in hw:
             return False
     return True
@@ -104,7 +104,7 @@ def main() -> None:
         "is_placeholder": True,
         "placeholder_reason": "auto_created_by_ensure_baseline_stats_when_missing",
         "val_acc1": 0.0,
-        "last_hw_stats": {"lat_ms": 1.0, "power_mw": 1.0, "mem_mb": 1.0},
+        "last_hw_stats": {"latency_ms": 1.0, "energy_mj": 1.0, "mem_peak_mb": 1.0, "comm_ms": 1.0},
         "acc_ref": 0.0,
         "note": "placeholder baseline_stats (NOT real). Replace with a real baseline run.",
     }
