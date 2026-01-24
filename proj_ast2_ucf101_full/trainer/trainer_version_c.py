@@ -1591,6 +1591,7 @@ def train_version_c(
                         "gate": gate,
                         "acc_ref": float(acc_ref_val),
                         "acc_now": float(acc_now),
+                        "acc_used": float(acc_used_value if acc_used_value is not None else acc_now),
                         "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
                         "acc_drop_max": float(acc_drop_max),
                         "acc_used_source": acc_used_source,

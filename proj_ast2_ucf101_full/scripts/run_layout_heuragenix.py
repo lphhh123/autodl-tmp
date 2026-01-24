@@ -2096,6 +2096,17 @@ def main() -> None:
         )
     except Exception:
         pass
+    trace_events_file = trace_events_path
+    run_manifest_file = out_dir / "run_manifest.json"
+    missing_outputs = [
+        str(path)
+        for path in (trace_events_file, run_manifest_file)
+        if not Path(path).exists()
+    ]
+    if missing_outputs:
+        raise RuntimeError(
+            "[v5.4 contract] Missing required outputs: " + ", ".join(missing_outputs)
+        )
     if require_main and evaluator_source != "main_project":
         raise RuntimeError(report["error"])
 
