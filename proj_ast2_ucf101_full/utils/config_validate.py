@@ -246,11 +246,28 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         set_nested(cfg, "_contract.overrides", [])
 
     # ---- v5.4 strict gate (Hard Gate A) ----
-    # strict 默认开启：只要是 version_c / layout（法定入口）就必须 strict
+    # v5.4 strict 默认开启；若显式关闭必须进入证据链 overrides
     if get_nested(cfg, "_contract.strict", None) is None:
-        set_nested(cfg, "_contract.strict", bool(mode in ("version_c", "layout")))
+        set_nested(cfg, "_contract.strict", True)
+        cfg._contract.overrides.append(
+            {
+                "path": "_contract.strict",
+                "requested": None,
+                "effective": True,
+                "reason": "default_strict_v54",
+            }
+        )
 
     STRICT = bool(get_nested(cfg, "_contract.strict", False))
+    if not STRICT:
+        cfg._contract.overrides.append(
+            {
+                "path": "_contract.strict",
+                "requested": False,
+                "effective": False,
+                "reason": "explicit_strict_disable",
+            }
+        )
 
     def _fail_on_legacy(path: str, hint: str):
         v = get_nested(cfg, path, None)
@@ -880,13 +897,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         force_disable_ok = bool(get_nested(cfg, "stable_hw.force_disable_ok", False))
 
         stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
-        # v5.4 allows locked_acc_ref at root-level OR under stable_hw (legacy), but not both.
-        locked_root = get_nested(cfg, "locked_acc_ref", None)
-        if locked_root is not None:
-            locked_en = bool(locked_root.get("enabled", False))
-        else:
-            locked_nested = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
-            locked_en = bool(locked_nested.get("enabled", False))
+        locked_nested = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+        locked_en = bool(locked_nested.get("enabled", False))
 
         if (not stable_en) and (not force_disable_ok):
             raise ValueError(
@@ -900,9 +912,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 "If you are intentionally running an ablation, set stable_hw.force_disable_ok=true explicitly."
             )
 
-        locked_cfg = get_nested(cfg, "locked_acc_ref", None)
-        if locked_cfg is None:
-            locked_cfg = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
+        locked_cfg = get_nested(cfg, "stable_hw.locked_acc_ref", {}) or {}
         if bool(locked_cfg.get("enabled", False)) and (not force_disable_ok):
             strict = bool(locked_cfg.get("strict", True))
             src = str(locked_cfg.get("source", "baseline_stats"))

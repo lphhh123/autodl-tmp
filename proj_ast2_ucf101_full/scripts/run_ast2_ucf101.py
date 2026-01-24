@@ -49,13 +49,7 @@ def main():
         )
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
-    cfg = validate_and_fill_defaults(cfg, mode="ast2")
     seed = int(args.seed)
-    seed_everything(seed)
-    if hasattr(cfg, "train"):
-        cfg.train.seed = seed
-    if hasattr(cfg, "training"):
-        cfg.training.seed = seed
     rid = OmegaConf.select(cfg, "train.run_id")
     if not rid:
         OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
@@ -64,8 +58,27 @@ def main():
     out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg.out_dir = str(out_dir)
+    if not hasattr(cfg, "train") or cfg.train is None:
+        cfg.train = {}
     if hasattr(cfg, "train"):
         cfg.train.out_dir = str(out_dir)
+        cfg.train.seed = seed
+    if hasattr(cfg, "training"):
+        cfg.training.seed = seed
+    if not hasattr(cfg, "_contract") or cfg._contract is None:
+        cfg._contract = {}
+    overrides = cfg._contract.get("overrides", []) or []
+    overrides.append(
+        {
+            "path": "train.mode",
+            "requested": "ast2",
+            "effective": "single",
+            "reason": "mode_alias_ast2_to_single",
+        }
+    )
+    cfg._contract["overrides"] = overrides
+    cfg = validate_and_fill_defaults(cfg, mode="single")
+    seed_everything(seed)
     with (out_dir / "config_used.yaml").open("w", encoding="utf-8") as f:
         f.write(Path(args.cfg).read_text(encoding="utf-8"))
     try:
@@ -107,9 +120,6 @@ def main():
         print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
-    if hasattr(cfg, "train"):
-        cfg.train.cfg_hash = cfg_hash
-        cfg.train.cfg_path = str(args.cfg)
     train_single_device(cfg, out_dir=out_dir)
 
 

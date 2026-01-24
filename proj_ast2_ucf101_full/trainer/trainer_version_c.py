@@ -583,11 +583,18 @@ def train_version_c(
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
-    if out_dir:
-        cfg.out_dir = str(out_dir)
-        cfg.train.out_dir = str(out_dir)
+    if out_dir is not None:
+        expected_out_dir = str(getattr(getattr(cfg, "train", None), "out_dir", "") or "")
+        if expected_out_dir and str(out_dir) != expected_out_dir:
+            raise RuntimeError(
+                f"v5.4 P0: out_dir mismatch after seal (cfg.train.out_dir={expected_out_dir}, cli={out_dir})"
+            )
     if seed is not None:
-        cfg.train.seed = int(seed)
+        cfg_seed = int(getattr(getattr(cfg, "train", None), "seed", 0) or getattr(cfg.training, "seed", 0) or 0)
+        if int(seed) != cfg_seed:
+            raise RuntimeError(
+                f"v5.4 P0: seed mismatch after seal (cfg.train.seed={cfg_seed}, cli={seed})"
+            )
     # ---- v5.4: allow config-driven export (OneCommand) ----
     if not export_layout_input:
         export_layout_input = bool(getattr(cfg, "export_layout_input", False))
@@ -596,8 +603,6 @@ def train_version_c(
     if layout_export_dir is None:
         layout_export_dir = getattr(cfg, "export_dir", None)
         layout_export_dir_source = "cfg"
-    else:
-        cfg.export_dir = layout_export_dir
 
     cfg_export_dir = str(layout_export_dir or "").strip()
     if not cfg_export_dir:
@@ -607,16 +612,16 @@ def train_version_c(
     # out_dir: training outputs root
     out_dir = Path(getattr(cfg.train, "out_dir", "") or "outputs/version_c")
     out_dir.mkdir(parents=True, exist_ok=True)
-    cfg_hash = getattr(getattr(cfg, "train", None), "cfg_hash", "") or ""
-    cfg_path = getattr(getattr(cfg, "train", None), "cfg_path", "") or ""
     seed = int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0)
     run_id = stable_hash(
         {
             "mode": "version_c_train",
-            "cfg_hash": str(cfg_hash),
+            "seal_digest": str(seal_digest),
             "seed": int(seed),
         }
     )
+    cfg_hash = str(seal_digest)
+    cfg_path = str(getattr(cfg, "cfg_path", "") or getattr(getattr(cfg, "train", None), "cfg_path", "") or "")
     signature = build_signature_v54(cfg, method_name="ours_version_c")
     signature_v54 = signature
     # ---- v5.4 trace dir contract: out_dir/trace/<run_id>/... ----
@@ -680,6 +685,8 @@ def train_version_c(
         nds_en = _boolish(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None))
         logger.info(
             f"[v5.4 contract] train.mode={getattr(cfg.train, 'mode', None)} "
+            f"strict={getattr(getattr(cfg, 'contract', None), 'strict', None)} "
+            f"seal_digest={seal_digest} "
             f"stable_hw.enabled={getattr(cfg.stable_hw, 'enabled', None)} "
             f"stable_hw.locked_acc_ref.enabled={getattr(getattr(cfg.stable_hw, 'locked_acc_ref', None), 'enabled', None)} "
             f"stable_hw.no_drift.enabled={getattr(getattr(cfg.stable_hw, 'no_drift', None), 'enabled', None)} "
@@ -1934,8 +1941,8 @@ def train_version_c(
 
         write_run_manifest(
             out_dir=str(out_dir),
-            cfg_path=str(cfg.train.cfg_path),
-            cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+            cfg_path=cfg_path,
+            cfg_hash=cfg_hash,
             run_id=run_id,
             seed=int(seed),
             git_sha=git_sha,

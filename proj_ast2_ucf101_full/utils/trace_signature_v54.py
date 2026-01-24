@@ -89,6 +89,15 @@ def build_signature_v54(
     if _get(cfg, "stable_hw", None) is None:
         raise ValueError("missing cfg.stable_hw; call validate_and_fill_defaults() first")
 
+    strict = bool(_get_path(cfg, "contract.strict", _get_path(cfg, "_contract.strict", False)))
+    if strict:
+        for legacy_key in ("locked_acc_ref", "no_drift", "no_double_scale", "accuracy_guard", "hard_gating"):
+            if _get(cfg, legacy_key, None) is not None:
+                raise ValueError(
+                    f"P0(v5.4 strict): legacy root-level {legacy_key} forbidden; "
+                    "use cfg.stable_hw.* only"
+                )
+
     fp = compute_config_fingerprint_v54(cfg)
 
     seed_global = int(_get_path(cfg, "seed", _get_path(cfg, "train.seed", 0)) or 0)
@@ -125,19 +134,13 @@ def build_signature_v54(
     acc_first_hard_gating_enabled = _boolish(_get_path(cfg, "stable_hw.accuracy_guard.enabled", None))
 
     locked_acc_ref_enabled = _get_path(cfg, "stable_hw.locked_acc_ref.enabled", None)
-    if locked_acc_ref_enabled is None:
-        locked_acc_ref_enabled = _get_path(cfg, "locked_acc_ref.enabled", None)
     locked_acc_ref_enabled = _boolish(locked_acc_ref_enabled)
 
     acc_ref_source = _get_path(cfg, "stable_hw.locked_acc_ref.source", None)
     if acc_ref_source is None:
-        acc_ref_source = _get_path(cfg, "locked_acc_ref.source", None)
-    if acc_ref_source is None:
-        raise ValueError("missing locked_acc_ref.source (or stable_hw.locked_acc_ref.source)")
+        raise ValueError("missing stable_hw.locked_acc_ref.source")
 
     no_drift_enabled = _get_path(cfg, "stable_hw.no_drift.enabled", None)
-    if no_drift_enabled is None:
-        no_drift_enabled = _get_path(cfg, "no_drift.enabled", None)
     no_drift_enabled = _boolish(no_drift_enabled)
 
     no_double_scale_enabled = _parse_no_double_scale(cfg)

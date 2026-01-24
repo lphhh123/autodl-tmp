@@ -252,6 +252,8 @@ def init_trace_dir(
     manifest_path = trace_dir / "manifest.json"
     snapshot_path = trace_dir / "eval_config_snapshot.yaml"
     requested_path = trace_dir / "config_requested.yaml"
+    requested_snapshot_path = trace_dir / "requested_config_snapshot.yaml"
+    effective_snapshot_path = trace_dir / "effective_config_snapshot.yaml"
     events_path = trace_dir / "trace_events.jsonl"
 
     # 0) Write resolved config snapshot (YAML)
@@ -273,6 +275,27 @@ def init_trace_dir(
         if not requested_path.exists():
             requested_path.write_text("# config_requested placeholder (v5.4)\n", encoding="utf-8")
 
+    # ---- v5.4 contract: requested/effective snapshots + sha256 + seal_digest ----
+    if requested_config is None and requested_cfg_yaml:
+        requested_snapshot_text = str(requested_cfg_yaml)
+    else:
+        requested_snapshot_text = yaml.safe_dump(
+            requested_cfg_obj or {},
+            sort_keys=False,
+            allow_unicode=True,
+        )
+    requested_snapshot_path.write_text(requested_snapshot_text, encoding="utf-8")
+    requested_config_sha256 = hashlib.sha256(requested_snapshot_text.encode("utf-8")).hexdigest()
+
+    effective_snapshot_text = yaml.safe_dump(
+        resolved_cfg_obj or {},
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    effective_snapshot_path.write_text(effective_snapshot_text, encoding="utf-8")
+    effective_config_sha256 = hashlib.sha256(effective_snapshot_text.encode("utf-8")).hexdigest()
+    seal_digest = effective_config_sha256
+
     # 1) trace_header.json（结构化元信息）
     # ---- contract_overrides: v5.4 合同证据，必须可审计 ----
     if contract_overrides is not None:
@@ -290,6 +313,11 @@ def init_trace_dir(
         "resolved_config": resolved_cfg_obj,
         "contract_overrides": overrides,
         "ts_ms": int(time.time() * 1000),
+        "requested_config_snapshot": requested_snapshot_path.name,
+        "effective_config_snapshot": effective_snapshot_path.name,
+        "requested_config_sha256": requested_config_sha256,
+        "effective_config_sha256": effective_config_sha256,
+        "seal_digest": seal_digest,
     }
     header_payload.update(
         {
@@ -303,14 +331,6 @@ def init_trace_dir(
     header_payload["no_drift_enabled"] = bool(signature.get("no_drift_enabled", True))
     header_payload["acc_ref_source"] = str(signature.get("acc_ref_source", "locked"))
 
-    # ---- v5.4 contract: requested vs effective must be auditable ----
-    snap_sha1 = None
-    if requested_cfg_yaml:
-        snap_path = trace_dir / "requested_config_snapshot.yaml"
-        snap_path.write_text(str(requested_cfg_yaml), encoding="utf-8")
-        snap_sha1 = hashlib.sha1(str(requested_cfg_yaml).encode("utf-8")).hexdigest()
-        header_payload["requested_config_snapshot"] = "requested_config_snapshot.yaml"
-        header_payload["requested_config_sha1"] = snap_sha1
     _write_json(header_path, header_payload)
 
     # 2) manifest.json
@@ -322,9 +342,11 @@ def init_trace_dir(
         "requested_config_path": str(requested_path),
         "created_ts_ms": int(time.time() * 1000),
     }
-    if requested_cfg_yaml:
-        manifest["requested_config_snapshot"] = "requested_config_snapshot.yaml"
-        manifest["requested_config_sha1"] = snap_sha1
+    manifest["requested_config_snapshot"] = requested_snapshot_path.name
+    manifest["effective_config_snapshot"] = effective_snapshot_path.name
+    manifest["requested_config_sha256"] = requested_config_sha256
+    manifest["effective_config_sha256"] = effective_config_sha256
+    manifest["seal_digest"] = seal_digest
     if extra_manifest:
         manifest.update(extra_manifest)
     _write_json(manifest_path, manifest)
@@ -434,6 +456,10 @@ def _assert_event(event_type: str, payload: dict) -> None:
     if event_type == "trace_header":
         if not isinstance(payload["signature"], dict):
             raise TypeError("trace_header.payload.signature must be dict")
+        for field in ("requested_config_snapshot", "effective_config_snapshot", "seal_digest"):
+            val = payload.get(field)
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"trace_header.payload.{field} must be non-empty str")
         # ---- SPEC_E: contract_overrides must be auditable entries ----
         ov = payload.get("contract_overrides", [])
         if not isinstance(ov, list):
@@ -769,8 +795,8 @@ def build_trace_header_payload_v54(
     seal_digest: str,
 ) -> dict:
     payload = {
-        "requested_config_snapshot": requested_config,
-        "effective_config_snapshot": effective_config,
+        "requested_config_snapshot": "requested_config_snapshot.yaml",
+        "effective_config_snapshot": "effective_config_snapshot.yaml",
         "seal_digest": str(seal_digest),
         "contract_overrides": contract_overrides,
         "signature": signature,
