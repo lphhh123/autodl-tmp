@@ -11,19 +11,19 @@ training:
   inner_steps_alpha: 1
   inner_steps_layout: 0
 
-locked_acc_ref:
-  enabled: true
-  source: "manual"
-  acc_ref1: 0.0
-  acc_ref5: 0.0
-
-no_drift:
-  enabled: true
-  stats_path: "${out_dir}/baseline_stats.json"
-
 # === v5.4 StableHW (Acc-First Hard Gating + LockedAccRef + NoDrift + NoDoubleScale) ===
 stable_hw:
   enabled: true
+  locked_acc_ref:
+    enabled: true
+    source: "manual"
+    acc_ref1: 0.0
+    acc_ref5: 0.0
+    strict: true
+  no_drift:
+    enabled: true
+    allow_update: false
+    stats_path: "${out_dir}/baseline_stats.json"
   no_double_scale:
     enabled: true
 

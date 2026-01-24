@@ -1,23 +1,20 @@
 _base_: version_c_ucf101.yaml
 
-locked_acc_ref:
-  enabled: true
-  source: "warmup_best"
-  acc_ref1: 0.0
-  acc_ref5: 0.0
-  # ★ 推荐：如果你有 dense baseline 的 metrics.json，就填这里（强锁定，最符合 v5.4）
-  baseline_stats_path: "outputs/dense_baseline/metrics.json"
-  # ★ 必须 >=1：否则在 baseline_stats_path 为空时永远锁不住 acc_ref
-  freeze_epoch: 1
-
-no_drift:
-  enabled: true
-  stats_path: "${out_dir}/baseline_stats.json"
-
 stable_hw:
   enabled: true
   baseline_stats_path: "outputs/dense_baseline/metrics.json"
   hw_ref_source: "baseline_stats"
+  locked_acc_ref:
+    enabled: true
+    source: "warmup_best"
+    acc_ref1: 0.0
+    acc_ref5: 0.0
+    strict: true
+    freeze_epoch: 1
+  no_drift:
+    enabled: true
+    allow_update: false
+    stats_path: "${out_dir}/baseline_stats.json"
   no_double_scale:
     enabled: true
   force_disable_ok: false

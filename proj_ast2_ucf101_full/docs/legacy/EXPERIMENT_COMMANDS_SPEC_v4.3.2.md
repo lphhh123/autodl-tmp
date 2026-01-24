@@ -1,3 +1,4 @@
+# DEPRECATED: NOT v5.4. Do NOT use for v5.4 runs.
 # Experiment commands (SPEC v4.3.2)
 
 This file lists ready-to-run commands for Phase3 (training/export) and Phase-L (offline EDA-Agent) experiments using the provided configs.

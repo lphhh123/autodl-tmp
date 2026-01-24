@@ -80,10 +80,23 @@ def _get_root_and_stable(cfg_or_stable):
 
 def _get_locked_cfg(cfg_or_stable):
     root, stable = _get_root_and_stable(cfg_or_stable)
-    lock = getattr(root, "locked_acc_ref", None) if root is not None else None
-    if lock is None:
-        lock = getattr(stable, "locked_acc_ref", None)
-    return lock
+
+    # v5.4 strict: forbid legacy root-level fields (Anti-Loop evidence must match signature)
+    contract = getattr(root, "contract", None) if root is not None else None
+    is_v54 = bool(contract) and str(getattr(contract, "version", "")).strip() == "v5.4"
+    strict = bool(contract) and bool(getattr(contract, "strict", False))
+    if is_v54 and strict:
+        if getattr(root, "locked_acc_ref", None) not in (None, {}, ""):
+            raise ValueError(
+                "P0(v5.4): legacy root-level 'locked_acc_ref' is forbidden. "
+                "Move it under cfg.stable_hw.locked_acc_ref to avoid silent semantic drift."
+            )
+        return getattr(stable, "locked_acc_ref", {}) or {}
+
+    # non-strict / legacy compatibility (kept only for old experiments)
+    root_locked = getattr(root, "locked_acc_ref", {}) if root is not None else {}
+    stable_locked = getattr(stable, "locked_acc_ref", {}) if stable is not None else {}
+    return root_locked or stable_locked
 
 
 def _get_no_drift_cfg(cfg_or_stable, stable_hw_cfg=None):
@@ -93,11 +106,21 @@ def _get_no_drift_cfg(cfg_or_stable, stable_hw_cfg=None):
     """
     root, stable = _get_root_and_stable(cfg_or_stable)
 
-    nd = getattr(root, "no_drift", None) if root is not None else None
-    if nd is None:
-        cand = stable_hw_cfg if stable_hw_cfg is not None else stable
-        nd = getattr(cand, "no_drift", None) if cand is not None else None
-    return nd
+    contract = getattr(root, "contract", None) if root is not None else None
+    is_v54 = bool(contract) and str(getattr(contract, "version", "")).strip() == "v5.4"
+    strict = bool(contract) and bool(getattr(contract, "strict", False))
+    if is_v54 and strict:
+        if getattr(root, "no_drift", None) not in (None, {}, ""):
+            raise ValueError(
+                "P0(v5.4): legacy root-level 'no_drift' is forbidden. "
+                "Move it under cfg.stable_hw.no_drift to avoid silent semantic drift."
+            )
+        return getattr(stable, "no_drift", {}) or {}
+
+    root_nd = getattr(root, "no_drift", {}) if root is not None else {}
+    cand = stable_hw_cfg if stable_hw_cfg is not None else stable
+    stable_nd = getattr(cand, "no_drift", {}) if cand is not None else {}
+    return root_nd or stable_nd
 
 
 def _get_accuracy_guard_cfg(cfg_or_stable: Any) -> dict:
