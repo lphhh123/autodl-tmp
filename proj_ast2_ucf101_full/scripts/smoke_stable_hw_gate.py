@@ -1,6 +1,14 @@
 # NOTE: This smoke is bound to SPEC_E v5.4; do not change fields without updating SPEC_E + trace_contract_v54.py
 import argparse
 
+import sys
+from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.stable_hw import (

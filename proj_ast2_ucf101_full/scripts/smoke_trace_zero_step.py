@@ -10,7 +10,14 @@ import argparse
 import csv
 import json
 import time
+import sys
 from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 
 from utils.trace_guard import init_trace_dir, finalize_trace_dir, append_trace_event_v54
 from utils.trace_schema import TRACE_FIELDS
