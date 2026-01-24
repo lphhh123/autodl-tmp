@@ -415,6 +415,20 @@ def _assert_event(event_type: str, payload: dict) -> None:
     if event_type == "trace_header":
         if not isinstance(payload["signature"], dict):
             raise TypeError("trace_header.payload.signature must be dict")
+        # ---- SPEC_E: contract_overrides must be auditable entries ----
+        ov = payload.get("contract_overrides", [])
+        if not isinstance(ov, list):
+            raise ValueError("trace_header.contract_overrides must be a list")
+        for i, it in enumerate(ov):
+            if not isinstance(it, dict):
+                raise ValueError(f"contract_overrides[{i}] must be a dict")
+            for k in ("path", "requested", "effective", "reason"):
+                if k not in it:
+                    raise ValueError(f"contract_overrides[{i}] missing key: {k}")
+            if not isinstance(it["path"], str) or not it["path"].strip():
+                raise ValueError(f"contract_overrides[{i}].path must be non-empty str")
+            if not isinstance(it["reason"], str) or not it["reason"].strip():
+                raise ValueError(f"contract_overrides[{i}].reason must be non-empty str")
         return
 
     if event_type == "gating":

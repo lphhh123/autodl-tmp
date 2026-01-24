@@ -48,6 +48,7 @@ from utils.trace_guard import (
     finalize_trace_dir,
     update_trace_summary,
     build_baseline_trace_summary,
+    build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.trace_schema import TRACE_FIELDS
@@ -1327,67 +1328,42 @@ def main() -> None:
         nonlocal trace_header_written
         if trace_header_written:
             return
-        def _req_bool(path: str):
-            value = get_nested(requested_config, path, None)
-            if value is None:
-                return None
-            return bool(value)
-
+        requested_selection = get_nested(requested_config, "baseline.selection_mode", "")
+        effective_selection = get_nested(effective_config, "baseline.selection_mode", "")
+        payload = build_trace_header_payload_v54(
+            signature=signature,
+            requested_config=requested_config,
+            effective_config=effective_config,
+            contract_overrides=contract_overrides,
+            requested={
+                "method": str(requested_method),
+                "selection_mode": str(requested_selection),
+                "llm_config": str(llm_req),
+            },
+            effective={
+                "method": str(effective_method),
+                "selection_mode": str(effective_selection),
+                "llm_config": str(llm_eff),
+            },
+            no_drift_enabled=bool(getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)),
+            acc_ref_source=str(
+                getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
+            ),
+        )
+        # optional extra context (allowed by schema; improves auditability)
+        payload.update(
+            {
+                "heuragenix_root": str(heuragenix_root),
+                "llm_requested": llm_req,
+                "llm_effective": llm_eff,
+                "llm_config_file": llm_eff,
+                "heuristic_dir": str(heuristic_dir),
+            }
+        )
         append_trace_event_v54(
             trace_events_path,
             "trace_header",
-            payload={
-                "requested_config": requested_config,
-                "effective_config": effective_config,
-                "contract_overrides": contract_overrides,
-                "requested": {
-                    "mode": "layout_heuragenix",
-                    "method": str(requested_method),
-                    "llm_config": str(llm_req),
-                    "heuragenix_root": str(get_nested(requested_config, "baseline.heuragenix_root", "")),
-                    "heuristic_dir": str(get_nested(requested_config, "baseline.heuristic_dir", "")),
-                    "llm_config_file": str(get_nested(requested_config, "baseline.llm_config_file", "")),
-                    "data_root": str(data_root_requested),
-                    "output_root": str(output_root_requested),
-                    "stable_hw_enabled": _req_bool("stable_hw.enabled"),
-                    "no_drift_enabled": _req_bool("stable_hw.no_drift.enabled"),
-                    "no_double_scale_enabled": _req_bool("stable_hw.no_double_scale.enabled"),
-                    "locked_acc_ref_enabled": _req_bool("stable_hw.locked_acc_ref.enabled"),
-                },
-                "effective": {
-                    "mode": "layout_heuragenix",
-                    "method": str(effective_method),
-                    "llm_config": str(llm_eff),
-                    "heuragenix_root": str(heuragenix_root.resolve()),
-                    "heuristic_dir": str(heuristic_dir),
-                    "llm_config_file": str(llm_eff),
-                    "data_root": str(internal_data_root.resolve()),
-                    "output_root": str(output_root.resolve()),
-                    "stable_hw_enabled": bool(getattr(getattr(cfg, "stable_hw", None), "enabled", False)),
-                    "no_drift_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-                    ),
-                    "no_double_scale_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
-                    ),
-                    "locked_acc_ref_enabled": bool(
-                        getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "enabled", False)
-                    ),
-                },
-                "heuragenix_root": str(heuragenix_root.resolve()),
-                "llm_config_file": {"requested": str(llm_req), "effective": str(llm_eff)},
-                "heuristic_dir": {
-                    "requested": str(get_nested(requested_config, "baseline.heuristic_dir", "")),
-                    "effective": str(heuristic_dir),
-                },
-                "signature": signature,
-                "no_drift_enabled": bool(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-                ),
-                "acc_ref_source": str(
-                    getattr(getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None), "source", "none")
-                ),
-            },
+            payload=payload,
             run_id=run_id,
             step=0,
         )
