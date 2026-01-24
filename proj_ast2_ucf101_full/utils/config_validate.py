@@ -728,6 +728,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     iso.setdefault("cache_mapping_layout", True)
     iso.setdefault("track_live_segments", False)
     iso.setdefault("allow_cache_fallback", True)
+    iso.setdefault("use_cached_hw_mats", False)
 
     # ===== v5.4 NoDoubleScale: stable_hw enabled => legacy lambda_hw MUST be 0 (warn + override) =====
     stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))

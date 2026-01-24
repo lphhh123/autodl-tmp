@@ -816,11 +816,9 @@ def train_version_c(
         no_drift_enabled = bool(
             (no_drift_cfg.get("enabled", True) if isinstance(no_drift_cfg, dict) else getattr(no_drift_cfg, "enabled", True))
         )
-        allow_train_ema_fallback = (
-            guard_ctrl_cfg.get("allow_train_ema_fallback", None)
-            if isinstance(guard_ctrl_cfg, dict)
-            else getattr(guard_ctrl_cfg, "allow_train_ema_fallback", None)
-        )
+        allow_train_ema_fallback = get_nested(cfg, "stable_hw.allow_train_ema_fallback", None)
+        if allow_train_ema_fallback is None:
+            allow_train_ema_fallback = get_nested(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
         if stable_hw_cfg is not None:
             nd_cfg = getattr(stable_hw_cfg, "no_drift", None)
             if isinstance(nd_cfg, bool):
@@ -874,6 +872,13 @@ def train_version_c(
                 cur = cur[key]
             return cur
 
+        req_fb = _get_req("stable_hw.allow_train_ema_fallback", None)
+        if req_fb is None:
+            req_fb = _get_req("stable_hw.accuracy_guard.allow_train_ema_fallback", None)
+        eff_fb = get_nested(cfg, "stable_hw.allow_train_ema_fallback", None)
+        if eff_fb is None:
+            eff_fb = get_nested(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
+
         append_trace_event_v54(
             trace_events_path,
             "trace_header",
@@ -895,9 +900,7 @@ def train_version_c(
                     "no_double_scale_enabled": bool(_get_req("stable_hw.no_double_scale.enabled", None))
                     if _get_req("stable_hw.no_double_scale.enabled", None) is not None
                     else None,
-                    "allow_train_ema_fallback": _get_req(
-                        "stable_hw.accuracy_guard.controller.allow_train_ema_fallback", None
-                    ),
+                    "allow_train_ema_fallback": req_fb,
                 },
                 "effective": {
                     "mode": "version_c",
@@ -907,9 +910,7 @@ def train_version_c(
                     "no_double_scale_enabled": bool(
                         getattr(getattr(getattr(cfg, "stable_hw", None), "no_double_scale", None), "enabled", False)
                     ),
-                    "allow_train_ema_fallback": bool(allow_train_ema_fallback)
-                    if allow_train_ema_fallback is not None
-                    else None,
+                    "allow_train_ema_fallback": bool(eff_fb) if eff_fb is not None else None,
                 },
                 "stable_hw_effective": {
                     "enabled": bool(stable_hw_state.get("stable_hw_enabled", False)),
@@ -932,9 +933,6 @@ def train_version_c(
                     else None,
                     "lambda_hw": float(_get_req("hw.lambda_hw", 0.0))
                     if _get_req("hw.lambda_hw", None) is not None
-                    else None,
-                    "hard_gating": bool(_get_req("accuracy_guard.hard_gating", None))
-                    if _get_req("accuracy_guard.hard_gating", None) is not None
                     else None,
                 },
                 "signature": signature,
@@ -1053,23 +1051,37 @@ def train_version_c(
                 )
                 stable_hw_state["discrete_frozen_init_mapping"] = False
 
-                # ---- P0 guard: never allow discrete gate to cause empty-cache crash ----
                 if (not allow_discrete_updates) and (cache.get("mapping") is None or cache.get("layout") is None):
-                    logger.info(
-                        "[StableHW] Discrete gate is closed but cache is empty; initializing mapping/layout once."
-                    )
+                    gm = str(stable_hw_state.get("guard_mode", "")).upper()
 
-                    # ---- v5.4 contract: explicit auditable fallback (requested vs effective) ----
-                    cached_mapping = cache.get("mapping")
-                    cached_layout = cache.get("layout")
-                    prev_reason = str(stable_hw_state.get("decision_reason", "") or "")
-                    fb_reason = "fallback_cache_empty_force_enable_discrete_updates"
-                    stable_hw_state["decision_reason"] = (prev_reason + "|" + fb_reason) if prev_reason else fb_reason
-                    stable_hw_state["discrete_frozen_init_mapping"] = True
-                    stable_hw_state["gating_reason_code"] = fb_reason
-
-                    allow_discrete_updates = True
-                    stable_hw_state["allow_discrete_updates"] = True
+                    # Only allow cache init during WARMUP (Acc-First, no HW influence anyway)
+                    if gm == "WARMUP":
+                        stable_hw_state["gating_reason_code"] = "warmup_cache_init"
+                        allow_discrete_updates = True
+                        stable_hw_state["allow_discrete_updates"] = True
+                    else:
+                        # v5.4: RECOVERY/VIOLATE must be read-only; cache-empty means run is not auditable => fail-fast
+                        append_trace_event_v54(
+                            trace_events_path,
+                            "boundary",
+                            payload={
+                                "candidate_id": int(outer),
+                                "boundary_type": "stable_hw_cache_empty",
+                                "violated_fields": [
+                                    "stable_hw.accuracy_guard.controller.freeze_discrete_updates",
+                                    "stable_hw.discrete_isolation.cache_mapping_layout",
+                                ],
+                                "severity": "P0",
+                                "action": "fail_fast",
+                            },
+                            run_id=run_id,
+                            step=int(outer),
+                        )
+                        raise RuntimeError(
+                            "[v5.4 P0] stable_hw guard_mode is not WARMUP but discrete cache is empty "
+                            "(mapping/layout missing). This would silently bypass RECOVERY read-only semantics. "
+                            "Fix: run warmup to populate cache, or resume from a run directory with valid cache."
+                        )
 
                 allow_discrete = allow_discrete_updates
                 update_alpha = base_update_alpha and allow_discrete

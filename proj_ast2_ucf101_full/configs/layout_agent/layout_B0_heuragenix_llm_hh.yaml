@@ -2,7 +2,7 @@ _base_: base_layout.yaml
 
 baseline:
   name: heuragenix
-  heuragenix_root: HeurAgenix
+  heuragenix_root: ../HeurAgenix
   problem: wafer_layout
   heuristic_dir: basic_heuristics
   method: llm_hh
