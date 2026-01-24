@@ -174,7 +174,6 @@ def main():
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
-    cfg.train.requested_cfg_yaml = requested_cfg_yaml
 
     out_dir_path = Path(out_dir)
 
@@ -237,10 +236,10 @@ def main():
     #   trainer will use (cli flag) OR (cfg.export_layout_input) as source of truth.
     train_version_c(
         cfg,
-        out_dir=str(out_dir),
+        out_dir=None,
         export_layout_input=export_layout_input,
         layout_export_dir=export_dir,  # None -> trainer uses cfg.export_dir (and then fallback)
-        seed=args.seed,
+        seed=None,
     )
 
 

@@ -148,8 +148,10 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
         metrics_path = out_dir / "metrics.json"
         sig = build_signature_v54(cfg, method_name="train_single_device")
         signature_v54 = sig
+        cfg_hash = str(seal_digest)
+        cfg_path = str(getattr(cfg, "cfg_path", "") or getattr(getattr(cfg, "train", None), "cfg_path", "") or "")
         run_id = stable_hash(
-            {"mode": "single_device_train", "seed": int(seed), "cfg_hash": str(getattr(cfg.train, "cfg_hash", ""))}
+            {"mode": "single_device_train", "seed": int(seed), "seal_digest": str(seal_digest)}
         )
         trace_base = out_dir / "trace"
         trace_meta = init_trace_dir_v54(
@@ -653,7 +655,7 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                 hw_stats_out = dict(last_hw_stats or {})
                 hw_stats_out.update(
                     {
-                        "cfg_hash": str(getattr(cfg.train, "cfg_hash", "")),
+                        "cfg_hash": cfg_hash,
                         "seed": int(getattr(cfg.train, "seed", 0)),
                     }
                 )
@@ -706,8 +708,8 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
 
         write_run_manifest(
             out_dir=str(out_dir),
-            cfg_path=str(cfg.train.cfg_path),
-            cfg_hash=str(getattr(cfg.train, "cfg_hash", "")),
+            cfg_path=cfg_path,
+            cfg_hash=cfg_hash,
             run_id=run_id,
             seed=seed,
             git_sha=git_sha,
