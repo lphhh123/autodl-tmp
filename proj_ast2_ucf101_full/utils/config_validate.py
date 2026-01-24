@@ -78,6 +78,76 @@ def _apply_defaults(cfg: Any, defaults: Dict[str, Any]) -> None:
             set_nested(cfg, k, v)
 
 
+def _strip_contract(obj: Any) -> Any:
+    # 递归移除 _contract，保证 requested/effective 可稳定对比，避免证据被 _contract 噪声污染
+    if isinstance(obj, dict):
+        return {k: _strip_contract(v) for k, v in obj.items() if k != "_contract"}
+    if isinstance(obj, list):
+        return [_strip_contract(x) for x in obj]
+    return obj
+
+
+def _flatten_diff(path: str, req: Any, eff: Any, out: list[tuple[str, Any, Any]]) -> None:
+    # req 缺失：用哨兵 "__MISSING__" 记录（门禁可审计）
+    if isinstance(req, dict) and isinstance(eff, dict):
+        keys = sorted(set(req.keys()) | set(eff.keys()))
+        for k in keys:
+            _flatten_diff(
+                f"{path}.{k}" if path else str(k),
+                req.get(k, "__MISSING__"),
+                eff.get(k, "__MISSING__"),
+                out,
+            )
+        return
+    if isinstance(req, list) and isinstance(eff, list):
+        n = max(len(req), len(eff))
+        for i in range(n):
+            _flatten_diff(
+                f"{path}[{i}]",
+                req[i] if i < len(req) else "__MISSING__",
+                eff[i] if i < len(eff) else "__MISSING__",
+                out,
+            )
+        return
+    # 叶子：值不同则记录
+    if req != eff:
+        out.append((path, req, eff))
+
+
+def _augment_contract_overrides(contract: Any) -> None:
+    if isinstance(contract, dict):
+        req = contract.get("requested_config_snapshot", None) or {}
+        eff = contract.get("effective_config_snapshot", None) or {}
+        overrides = contract.setdefault("overrides", [])
+    else:
+        req = getattr(contract, "requested_config_snapshot", None) or {}
+        eff = getattr(contract, "effective_config_snapshot", None) or {}
+        if getattr(contract, "overrides", None) is None:
+            contract.overrides = []
+        overrides = contract.overrides
+    diffs: list[tuple[str, Any, Any]] = []
+    _flatten_diff("", req, eff, diffs)
+
+    existing = set()
+    for o in overrides or []:
+        if isinstance(o, dict):
+            p = o.get("path")
+            if p:
+                existing.add(p)
+
+    for (p, r, e) in diffs:
+        if p in existing:
+            continue
+        overrides.append(
+            {
+                "path": p,
+                "requested": r,
+                "effective": e,
+                "reason": "auto_diff_requested_vs_effective",
+            }
+        )
+
+
 def _sync_layout_to_hw(cfg: Any) -> None:
     """
     兼容旧配置：如果用户写了 layout.*，同步到 hw.*。
@@ -239,7 +309,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     if cfg_contract is None:
         set_nested(cfg, "_contract", {})
     if get_nested(cfg, "_contract.requested_config_snapshot", None) is None:
-        set_nested(cfg, "_contract.requested_config_snapshot", OmegaConf.to_container(cfg, resolve=False))
+        requested_snapshot_raw = OmegaConf.to_container(cfg, resolve=False)
+        set_nested(cfg, "_contract.requested_config_snapshot", _strip_contract(requested_snapshot_raw))
     if get_nested(cfg, "_contract.overrides", None) is None:
         set_nested(cfg, "_contract.overrides", [])
 
@@ -276,15 +347,6 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         "accuracy_guard",
     ]
 
-    cfg_dict = cfg if isinstance(cfg, dict) else {}
-    req = cfg_dict if isinstance(cfg_dict, dict) else {}
-    found = [k for k in FORBIDDEN_LEGACY_ROOT_KEYS_V54 if k in req]
-    if bool(get_nested(cfg, "contract.strict", False) or get_nested(cfg, "_contract.strict", False)) and found:
-        raise RuntimeError(
-            "[v5.4 P0][HardGate-A] legacy/root-level keys are forbidden in strict mode: "
-            + ", ".join(found)
-            + ". Move them under cfg.stable_hw.* (canonical) and re-run."
-        )
     # -----------------------------------------------------------------------------
 
     def _fail_on_legacy(path: str, hint: str):
@@ -320,6 +382,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         cfg_to_stamp.contract.strict = bool(get_nested(cfg_to_stamp, "_contract.strict", False))
         from .trace_contract_v54 import compute_effective_cfg_digest_v54
         cfg_to_stamp.contract.seal_digest = compute_effective_cfg_digest_v54(cfg_to_stamp)
+        set_nested(cfg_to_stamp, "_contract.stamped_v54", True)
         return cfg_to_stamp
     # ---- v5.4: infer train.mode for backward compatibility ----
     train_mode = get_nested(cfg, "train.mode", None)
@@ -1156,5 +1219,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         raise RuntimeError(
             "[P0][v5.4] Failed to compute contract_overrides; trace would become non-auditable."
         ) from exc
+
+    effective_snapshot_raw = OmegaConf.to_container(cfg, resolve=True)
+    cfg._contract.effective_config_snapshot = _strip_contract(effective_snapshot_raw)
+    from utils.trace_guard import _sha256_json
+    cfg._contract.requested_config_sha256 = _sha256_json(cfg._contract.requested_config_snapshot)
+    cfg._contract.effective_config_sha256 = _sha256_json(cfg._contract.effective_config_snapshot)
+    _augment_contract_overrides(cfg._contract)
 
     return _stamp_contract(cfg)

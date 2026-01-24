@@ -565,6 +565,14 @@ def train_version_c(
     layout_export_dir: Optional[str] = None,
     seed: Optional[int] = None,
 ):
+    ctr = getattr(cfg, "_contract", None)
+    if ctr is None or not bool(getattr(ctr, "stamped_v54", False)):
+        raise RuntimeError(
+            "v5.4 CONTRACT: cfg not validated/stamped. "
+            "Call validate_and_fill_defaults(...) via SPEC_D OneCommand entrypoint."
+        )
+    if not getattr(cfg, "contract", None) or not getattr(cfg.contract, "seal_digest", None):
+        raise RuntimeError("v5.4 CONTRACT: missing seal_digest; boot not completed.")
     # --- [v5.4 HARD GATE D] trainer must refuse non-bootstrapped cfg ---
     c = getattr(cfg, "contract", None)
     if c is None or getattr(c, "validated", False) is not True or str(getattr(c, "version", "")) != "v5.4":

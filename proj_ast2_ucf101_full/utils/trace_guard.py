@@ -20,6 +20,12 @@ from .stable_hash import stable_hash
 
 FINALIZED_FLAG = "finalized.flag"
 
+
+def _sha256_json(obj: Any) -> str:
+    payload = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _write_json(path: Path, obj: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -329,32 +335,32 @@ def init_trace_dir(
     requested_snap = requested_config
     effective_snap = effective_snapshot_obj
 
-    header_payload = {
-        "schema": SCHEMA_VERSION_V54,
-        "signature": signature,
-        "run_meta": run_meta,
-        "resolved_config": resolved_cfg_obj,
-        "contract_overrides": overrides,
-        "ts_ms": int(time.time() * 1000),
-        "requested_config_snapshot": requested_snap,
-        "effective_config_snapshot": effective_snap,
-        "requested_config_sha256": requested_config_sha256,
-        "effective_config_sha256": seal_digest,
-        "seal_digest": seal_digest,
-    }
+    trace_header_payload = build_trace_header_payload_v54(
+        signature=signature,
+        requested_config=requested_snap,
+        effective_config=effective_snap,
+        contract_overrides=overrides,
+        requested=run_meta.get("requested", {}),
+        effective=run_meta.get("effective", {}),
+        no_drift_enabled=bool(signature.get("no_drift_enabled", True)),
+        acc_ref_source=str(signature.get("acc_ref_source", "locked")),
+        seal_digest=seal_digest,
+    )
+    header_payload = dict(trace_header_payload)
     header_payload.update(
         {
+            "schema": SCHEMA_VERSION_V54,
+            "run_meta": run_meta,
+            "resolved_config": resolved_cfg_obj,
+            "ts_ms": int(time.time() * 1000),
+            "requested_config_sha256": requested_config_sha256,
+            "effective_config_sha256": seal_digest,
             "requested_config": requested_cfg_obj,
             "effective_config": resolved_cfg_obj,
-            "requested": run_meta.get("requested", {}),
-            "effective": run_meta.get("effective", {}),
         }
     )
     header_payload.setdefault("requested_config", requested_snap)
     header_payload.setdefault("effective_config", effective_snap)
-    # ---- SPEC_E header required (top-level) ----
-    header_payload["no_drift_enabled"] = bool(signature.get("no_drift_enabled", True))
-    header_payload["acc_ref_source"] = str(signature.get("acc_ref_source", "locked"))
 
     # HardGate-B：trace_header.json 必须满足可审计 schema（缺字段/类型漂移直接 fail-fast）
     _assert_event("trace_header", header_payload)
