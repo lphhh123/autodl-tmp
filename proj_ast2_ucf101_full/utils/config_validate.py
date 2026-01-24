@@ -78,13 +78,23 @@ def _apply_defaults(cfg: Any, defaults: Dict[str, Any]) -> None:
             set_nested(cfg, k, v)
 
 
-def _strip_contract(obj: Any) -> Any:
-    # 递归移除 _contract，保证 requested/effective 可稳定对比，避免证据被 _contract 噪声污染
-    if isinstance(obj, dict):
-        return {k: _strip_contract(v) for k, v in obj.items() if k != "_contract"}
-    if isinstance(obj, list):
-        return [_strip_contract(x) for x in obj]
-    return obj
+def _strip_contract(container: Any) -> Any:
+    """
+    Produce LEGAL config snapshots for evidence-chain:
+      - remove all meta keys starting with "_contract"
+      - remove top-level key "contract" (meta, not training semantics)
+    """
+    if not isinstance(container, dict):
+        return container
+    out = {}
+    for k, v in container.items():
+        if isinstance(k, str) and (k.startswith("_contract") or k == "contract"):
+            continue
+        if isinstance(v, dict):
+            out[k] = _strip_contract(v)
+        else:
+            out[k] = v
+    return out
 
 
 def _flatten_diff(path: str, req: Any, eff: Any, out: list[tuple[str, Any, Any]]) -> None:
@@ -381,7 +391,11 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         cfg_to_stamp.contract.validated_by = "validate_and_fill_defaults"
         cfg_to_stamp.contract.strict = bool(get_nested(cfg_to_stamp, "_contract.strict", False))
         from .trace_contract_v54 import compute_effective_cfg_digest_v54
-        cfg_to_stamp.contract.seal_digest = compute_effective_cfg_digest_v54(cfg_to_stamp)
+        # LEGAL: seal_digest = sha256(effective_config_snapshot) with meta stripped
+        effective = get_nested(cfg_to_stamp, "_contract.effective_config_snapshot", None)
+        if effective is None:
+            effective = _strip_contract(OmegaConf.to_container(cfg_to_stamp, resolve=True))
+        cfg_to_stamp.contract.seal_digest = compute_effective_cfg_digest_v54(effective)
         set_nested(cfg_to_stamp, "_contract.stamped_v54", True)
         return cfg_to_stamp
     # ---- v5.4: infer train.mode for backward compatibility ----

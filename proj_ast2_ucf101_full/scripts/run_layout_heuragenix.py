@@ -1226,6 +1226,26 @@ def main() -> None:
             + "\n".join(f"  - {p}" for p in missing)
         )
     _ensure_heuragenix_syspath(heuragenix_root)
+    requested_heuragenix_root = args.heuragenix_root or baseline_cfg.get("heuragenix_root") or ""
+    requested_heuragenix_root_path = (
+        Path(requested_heuragenix_root).expanduser().resolve() if requested_heuragenix_root else None
+    )
+    heuragenix_io = {
+        "requested": {
+            "heuragenix_repo_root": str(requested_heuragenix_root_path) if requested_heuragenix_root_path else "",
+            "data_root": str((requested_heuragenix_root_path / "data").resolve())
+            if requested_heuragenix_root_path
+            else "",
+            "output_root": str((requested_heuragenix_root_path / "output").resolve())
+            if requested_heuragenix_root_path
+            else "",
+        },
+        "effective": {
+            "heuragenix_repo_root": str(heuragenix_root.resolve()),
+            "data_root": str((heuragenix_root / "data").resolve()),
+            "output_root": str((heuragenix_root / "output").resolve()),
+        },
+    }
     (out_dir / "heuragenix_resolution.json").write_text(
         json.dumps(
             {
@@ -1370,6 +1390,7 @@ def main() -> None:
             "run_id": run_id,
             "seed_id": int(seed),
             "mode": "layout_heuragenix",
+            "heuragenix_io": heuragenix_io,
             "heuragenix_output_problem_dir": str((output_root / problem).resolve()),
             "heuristic_dir": str(heuristic_dir),
             "llm_config_file": str(llm_config_effective),

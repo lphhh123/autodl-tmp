@@ -2,6 +2,7 @@
 # Contract: SPEC_E_AntiLoop_Contracts_and_Smoke_v5.4.md (Appendix A)
 
 import hashlib
+from typing import Any
 
 from omegaconf import OmegaConf
 
@@ -170,11 +171,33 @@ def assert_trace_header_v54(payload: dict, strict: bool = True) -> None:
             raise ValueError(f"trace_header.signature missing required fields: {missing}")
 
 
-def compute_effective_cfg_digest_v54(cfg) -> str:
-    snap = TraceContractV54.encode_config_snapshot(cfg, resolve=True)
-    if isinstance(snap, dict):
-        snap = strip_seal_fields_v54(snap)
-    return compute_snapshot_sha256_v54(snap)
+def compute_effective_cfg_digest_v54(cfg_or_snapshot: Any) -> str:
+    """
+    v5.4 LEGAL seal digest:
+      sha256( effective_config_snapshot )
+    where effective_config_snapshot is a resolved dict with ALL meta stripped:
+      - remove top-level keys starting with "_contract"
+      - remove top-level key "contract" entirely (meta, not training semantics)
+    """
+
+    def _to_plain(obj: Any) -> Any:
+        if OmegaConf is not None and OmegaConf.is_config(obj):
+            return OmegaConf.to_container(obj, resolve=True)
+        return obj
+
+    def _strip_meta(d: Any) -> Any:
+        if not isinstance(d, dict):
+            return d
+        out = {}
+        for k, v in d.items():
+            if isinstance(k, str) and (k.startswith("_contract") or k == "contract"):
+                continue
+            out[k] = _strip_meta(v) if isinstance(v, dict) else v
+        return out
+
+    plain = _to_plain(cfg_or_snapshot)
+    plain = _strip_meta(plain)
+    return compute_snapshot_sha256_v54(plain)
 
 
 def strip_seal_fields_v54(snapshot: dict) -> dict:
