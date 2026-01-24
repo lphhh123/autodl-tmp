@@ -35,6 +35,7 @@ from utils.trace_guard import (
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config import AttrDict
+from utils.config_validate import validate_and_fill_defaults
 from utils.config_utils import get_nested
 from utils.stable_hw import (
     apply_accuracy_guard,
@@ -46,6 +47,7 @@ from utils.stable_hw import (
     update_train_acc1_ema,
     update_hw_refs_from_stats,
 )
+from utils.trace_payload_v54 import make_gating_payload_v54
 
 
 def _as_float(val, name: str) -> float:
@@ -120,6 +122,7 @@ def build_dataloaders(cfg):
 
 
 def train_single_device(cfg, out_dir: str | Path | None = None):
+    cfg = validate_and_fill_defaults(cfg, mode="single")
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
@@ -360,40 +363,35 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                     hw_metric_raw = _hw_dict_or_nan(stable_state, "hw_metric_raw")
                     hw_metric_normed = _hw_dict_or_nan(stable_state, "hw_metric_normed")
                     hw_scale_schema_version = str(stable_state.get("hw_scale_schema_version", "v1"))
+                    gate_ok = gate == "allow_hw"
+                    gate_reason = (
+                        "single_device_no_hw_metrics"
+                        if (hw_metric_ref.get("latency_ms") != hw_metric_ref.get("latency_ms"))
+                        else ("hw_enabled" if gate_ok else "hw_cut_or_warmup_or_recovery")
+                    )
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
-                        payload={
-                            # ===== REQUIRED BY CONTRACT =====
-                            "candidate_id": int(epoch),
-                            "gate": gate,
-                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
-                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
-                            "acc_drop": acc_drop,
-                            "acc_drop_max": acc_drop_max,
-                            "acc_used_source": str(stable_state.get("acc_used_source", "val") or "val"),
-                            "acc_used_value": float(stable_state.get("acc_used_value", 0.0) or 0.0),
-                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
-                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
-                            "hw_loss_raw": 0.0,
-                            "hw_loss_used": 0.0,
-                            "total_loss_scalar": float(loss_scalar),
-                            "total_loss_acc_part": float(loss_scalar),
-                            "total_loss_hw_part": 0.0,
-                            "hw_metric_ref": hw_metric_ref,
-                            "hw_metric_raw": hw_metric_raw,
-                            "hw_metric_normed": hw_metric_normed,
-                            "hw_scale_schema_version": hw_scale_schema_version,
-
-                            # ===== STRONGLY RECOMMENDED (auditable) =====
-                            "epoch": int(epoch),
-                            "guard_mode": str(stable_state.get("guard_mode", "")),
-                            "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
-                            "reason_code": "single_device_no_hw_metrics"
-                            if (hw_metric_ref.get("latency_ms") != hw_metric_ref.get("latency_ms"))
-                            else ("hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery"),
-                            "reason": dict(getattr(stable_decision, "reason", {}) or {}),
-                        },
+                        payload=make_gating_payload_v54(
+                            cfg=cfg,
+                            stable_state=stable_state,
+                            epoch=epoch,
+                            step=step,
+                            loss_scalar=loss_scalar,
+                            gate_ok=gate_ok,
+                            gate_reason=gate_reason,
+                            overrides={
+                                "gate": gate,
+                                "acc_drop": acc_drop,
+                                "acc_drop_max": acc_drop_max,
+                                "hw_metric_ref": hw_metric_ref,
+                                "hw_metric_raw": hw_metric_raw,
+                                "hw_metric_normed": hw_metric_normed,
+                                "hw_scale_schema_version": hw_scale_schema_version,
+                                "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
+                                "reason": dict(getattr(stable_decision, "reason", {}) or {}),
+                            },
+                        ),
                         run_id=run_id,
                         step=int(epoch),
                     )
@@ -520,38 +518,31 @@ def train_single_device(cfg, out_dir: str | Path | None = None):
                         loss_scalar = float(loss_value)
                     else:
                         loss_scalar = 0.0
+                    gate_ok = gate == "allow_hw"
+                    gate_reason = "hw_enabled" if gate_ok else "hw_cut_or_warmup_or_recovery"
                     append_trace_event_v54(
                         trace_events_path,
                         "gating",
-                        payload={
-                            # ===== REQUIRED BY CONTRACT =====
-                            "candidate_id": int(epoch),
-                            "gate": gate,
-                            "acc_ref": float(stable_state.get("acc_ref", 0.0) or 0.0),
-                            "acc_now": float(stable_state.get("acc_now", 0.0) or 0.0),
-                            "acc_drop": acc_drop,
-                            "acc_drop_max": acc_drop_max,
-                            "acc_used_source": str(stable_state.get("acc_used_source", "val") or "val"),
-                            "acc_used_value": float(stable_state.get("acc_used_value", 0.0) or 0.0),
-                            "lambda_hw_base": float(stable_state.get("lambda_hw_base", 0.0) or 0.0),
-                            "lambda_hw_effective": float(stable_state.get("lambda_hw_effective", 0.0) or 0.0),
-                            "hw_loss_raw": 0.0,
-                            "hw_loss_used": 0.0,
-                            "total_loss_scalar": float(loss_scalar),
-                            "total_loss_acc_part": float(loss_scalar),
-                            "total_loss_hw_part": 0.0,
-                            "hw_metric_ref": {},
-                            "hw_metric_raw": {},
-                            "hw_metric_normed": {},
-                            "hw_scale_schema_version": "v1",
-
-                            # ===== STRONGLY RECOMMENDED (auditable) =====
-                            "epoch": int(epoch),
-                            "guard_mode": str(stable_state.get("guard_mode", "")),
-                            "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
-                            "reason_code": "hw_enabled" if gate == "allow_hw" else "hw_cut_or_warmup_or_recovery",
-                            "reason": dict(getattr(stable_decision, "reason", {}) or {}),
-                        },
+                        payload=make_gating_payload_v54(
+                            cfg=cfg,
+                            stable_state=stable_state,
+                            epoch=epoch,
+                            step=step,
+                            loss_scalar=loss_scalar,
+                            gate_ok=gate_ok,
+                            gate_reason=gate_reason,
+                            overrides={
+                                "gate": gate,
+                                "acc_drop": acc_drop,
+                                "acc_drop_max": acc_drop_max,
+                                "hw_metric_ref": {},
+                                "hw_metric_raw": {},
+                                "hw_metric_normed": {},
+                                "hw_scale_schema_version": "v1",
+                                "allow_discrete_updates": bool(stable_state.get("allow_discrete_updates", True)),
+                                "reason": dict(getattr(stable_decision, "reason", {}) or {}),
+                            },
+                        ),
                         run_id=run_id,
                         step=int(epoch),
                     )

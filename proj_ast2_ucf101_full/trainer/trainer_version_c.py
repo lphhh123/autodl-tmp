@@ -42,6 +42,7 @@ from utils.trace_guard import (
     build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
+from utils.trace_payload_v54 import make_gating_payload_v54
 from utils.config import AttrDict
 from utils.config_utils import get_nested
 from utils.stable_hw import (
@@ -1656,40 +1657,51 @@ def train_version_c(
                     }
                     hw_normed = {k: (hw_used[k] / max(eps, hw_ref[k])) for k in hw_ref.keys()}
 
-                    payload = {
-                        "candidate_id": int(outer),
-                        "gate": gate,
-                        "acc_ref": float(acc_ref_val),
-                        "acc_now": float(acc_now),
-                        "acc_used": float(acc_used_value if acc_used_value is not None else acc_now),
-                        "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
-                        "acc_drop_max": float(acc_drop_max),
-                        "acc_used_source": acc_used_source,
-                        "acc_used_value": float(acc_used_value if acc_used_value is not None else acc_now),
-                        "reason_code": reason_code,
-                        "lambda_hw_effective": float(lambda_hw_eff),
-                        "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
-                        "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
-                        "hw_loss_raw": float(hw_loss_norm or 0.0),
-                        "hw_loss_used": float(hw_loss_used or 0.0),
-                        "total_loss_scalar": float(total_loss.item())
-                        if hasattr(total_loss, "item")
-                        else float(total_loss or 0.0),
-                        "total_loss_acc_part": float(acc_part),
-                        "total_loss_hw_part": float(hw_part),
-                        "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
-                        "total_loss": float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0),
-                        "reason": dict(getattr(stable_decision, "reason", {}) or {}),
-                        "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
-                        "hw_scale_schema_version": "v5.4_ratio_v1",
-                        "hw_metric_ref": hw_ref,
-                        "hw_metric_raw": hw_raw,
-                        "hw_metric_normed": hw_normed,
-                        "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
-                        "epoch": int(epoch),
-                        "outer_iter": int(outer_iter),
-                        "global_step": int(global_step),
-                    }
+                    total_loss_scalar = float(total_loss.item()) if hasattr(total_loss, "item") else float(total_loss or 0.0)
+                    payload = make_gating_payload_v54(
+                        cfg=cfg,
+                        stable_state=stable_hw_state,
+                        epoch=epoch,
+                        step=global_step,
+                        loss_scalar=total_loss_scalar,
+                        gate_ok=gate == "allow_hw",
+                        gate_reason=reason_code,
+                        overrides={
+                            "candidate_id": int(outer),
+                            "gate": gate,
+                            "acc_ref": float(acc_ref_val),
+                            "acc_now": float(acc_now),
+                            "acc_used": float(acc_used_value if acc_used_value is not None else acc_now),
+                            "acc_drop": float(stable_hw_state.get("acc_drop", 0.0)),
+                            "acc_drop_max": float(acc_drop_max),
+                            "acc_used_source": acc_used_source,
+                            "acc_used_value": float(acc_used_value if acc_used_value is not None else acc_now),
+                            "lambda_hw_effective": float(lambda_hw_eff),
+                            "guard_mode": str(getattr(stable_decision, "guard_mode", "")),
+                            "lambda_hw_base": float(getattr(stable_decision, "lambda_hw_base", 0.0) or 0.0),
+                            "hw_loss_raw": float(hw_loss_norm or 0.0),
+                            "hw_loss_used": float(hw_loss_used or 0.0),
+                            "total_loss_scalar": total_loss_scalar,
+                            "total_loss_acc_part": float(acc_part),
+                            "total_loss_hw_part": float(hw_part),
+                            "acc_loss": float(acc_loss.item()) if hasattr(acc_loss, "item") else float(acc_loss or 0.0),
+                            "total_loss": total_loss_scalar,
+                            "reason": dict(getattr(stable_decision, "reason", {}) or {}),
+                            "allow_discrete_updates": bool(stable_hw_state.get("allow_discrete_updates", True)),
+                            "hw_scale_schema_version": "v5.4_ratio_v1",
+                            "hw_metric_ref": hw_ref,
+                            "hw_metric_raw": hw_raw,
+                            "hw_metric_normed": hw_normed,
+                            "hw_metric_used": hw_used,
+                            "hw_metric_used_sanitized": hw_used,
+                            "hw_metric_key_order": list(hw_ref.keys()),
+                            "violate_streak": int(stable_hw_state.get("violate_streak", 0) or 0),
+                            "epoch": int(epoch),
+                            "outer_iter": int(outer_iter),
+                            "global_step": int(global_step),
+                            "notes": "version_c",
+                        },
+                    )
                     missing_keys = [k for k in REQUIRED_GATING_KEYS if k not in payload]
                     if missing_keys:
                         raise KeyError(f"gating payload missing keys: {missing_keys}")

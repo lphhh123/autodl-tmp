@@ -31,6 +31,7 @@ from utils.trace_guard import (
     init_trace_dir_v54,
     build_trace_header_payload_v54,
 )
+from utils.trace_payload_v54 import make_gating_payload_v54
 from utils.trace_signature_v54 import REQUIRED_SIGNATURE_FIELDS, build_signature_v54
 
 
@@ -152,6 +153,44 @@ def main() -> int:
         },
         run_id=str(run_id),
         step=1,
+    )
+    append_trace_event_v54(
+        trace_events_path,
+        "gating",
+        payload=make_gating_payload_v54(
+            cfg=cfg,
+            stable_state={
+                "acc_ref": 0.9,
+                "acc_now": 0.88,
+                "acc_used_value": 0.88,
+                "acc_used_source": "val",
+                "acc_ref_source": "locked",
+                "acc_drop": 0.02,
+                "acc_drop_max": 0.05,
+                "lambda_hw_effective": 0.1,
+                "hw_loss_raw": 0.01,
+                "hw_loss_used": 0.01,
+                "total_loss_hw_part": 0.001,
+                "total_loss_acc_part": 0.1,
+                "total_loss": 0.101,
+                "hw_scale_schema_version": "v1",
+                "hw_metric_ref": {"latency_ms": 1.0, "memory_mb": 1.0, "power_w": 1.0},
+                "hw_metric_raw": {"latency_ms": 1.1, "memory_mb": 1.2, "power_w": 1.3},
+                "hw_metric_normed": {"latency_ms": 1.1, "memory_mb": 1.2, "power_w": 1.3},
+            },
+            epoch=0,
+            step=0,
+            loss_scalar=0.101,
+            gate_ok=True,
+            gate_reason="smoke",
+            overrides={
+                "gate": "allow_hw",
+                "candidate_id": "smoke_candidate",
+                "notes": "smoke_trace_events_contract",
+            },
+        ),
+        run_id=str(run_id),
+        step=2,
     )
 
     finalize_trace_dir(
