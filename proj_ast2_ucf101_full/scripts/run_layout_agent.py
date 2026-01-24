@@ -46,12 +46,10 @@ from utils.config_utils import get_nested
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.trace_guard import (
-    init_trace_dir,
+    init_trace_dir_v54,
     append_trace_event_v54,
     finalize_trace_dir,
     update_trace_summary,
-    build_baseline_trace_summary,
-    build_trace_header_payload_v54,
 )
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 
@@ -219,53 +217,34 @@ def run_layout_agent(
         method_name="ours_layout_agent",
         overrides={"seed_global": int(seed), "seed_problem": int(seed)},
     )
-    requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
-    try:
-        requested_config = OmegaConf.to_container(requested_config, resolve=False)
-    except Exception:
-        requested_config = {}
-    effective_config = OmegaConf.to_container(cfg, resolve=True)
-    contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
-    init_trace_dir(
-        trace_dir,
+    meta = init_trace_dir_v54(
+        base_dir=out_dir,
+        run_id="trace",
+        cfg=cfg,
         signature=sig,
+        signature_v54=sig,
         run_meta={
             "heuristic": "ours_layout_agent",
             "layout_input": str(layout_input_path),
-            "mode": "layout_agent",
+            "mode": "layout",
             "run_id": run_id,
             "seed_id": int(seed),
+            "requested": {"method": "layout_agent"},
+            "effective": {"method": "layout_agent"},
         },
-        required_signature_keys=REQUIRED_SIGNATURE_FIELDS,
-        resolved_config=OmegaConf.to_container(cfg, resolve=True),
-        requested_config=requested_config,
+        required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
     )
+    trace_dir = meta["trace_dir"]
     trace_events_path = trace_dir / "trace_events.jsonl"
-    trace_header_payload = build_trace_header_payload_v54(
-        signature=sig,
-        requested_config=requested_config,
-        effective_config=effective_config,
-        contract_overrides=contract_overrides,
-        requested={"mode": "layout_agent"},
-        effective={"mode": "layout_agent"},
-        no_drift_enabled=bool(
-            getattr(getattr(getattr(cfg, "stable_hw", None), "no_drift", None), "enabled", False)
-        ),
-        acc_ref_source=str(
-            getattr(
-                getattr(getattr(cfg, "stable_hw", AttrDict({})), "locked_acc_ref", AttrDict({})),
-                "source",
-                "none",
-            )
-        ),
-        seal_digest=str(getattr(getattr(cfg, "contract", AttrDict({})), "seal_digest", "")),
-    )
+    with (trace_dir / "trace_header.json").open("r", encoding="utf-8") as f:
+        header_payload = json.load(f)
     append_trace_event_v54(
-        trace_events_path,
-        "trace_header",
-        payload=trace_header_payload,
+        trace_events_path=trace_events_path,
         run_id=run_id,
         step=0,
+        event_type="trace_header",
+        payload=header_payload,
+        strict=True,
     )
 
     detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
@@ -419,6 +398,7 @@ def run_layout_agent(
                 chip_tdp=chip_tdp,
                 llm_usage_path=llm_usage_path,
                 recordings_path=out_dir / "recordings.jsonl",
+                trace_events_path=trace_events_path,
             )
         except _BudgetExceeded:
             budget_exhausted = True

@@ -356,6 +356,8 @@ def init_trace_dir(
     header_payload["no_drift_enabled"] = bool(signature.get("no_drift_enabled", True))
     header_payload["acc_ref_source"] = str(signature.get("acc_ref_source", "locked"))
 
+    # HardGate-B：trace_header.json 必须满足可审计 schema（缺字段/类型漂移直接 fail-fast）
+    _assert_event("trace_header", header_payload)
     _write_json(header_path, header_payload)
 
     # 2) manifest.json
@@ -574,11 +576,13 @@ def append_trace_event_v54(
     step: Optional[int] = None,
     epoch: Optional[int] = None,
     outer_iter: Optional[int] = None,
+    strict: bool = True,
 ):
     if payload is None:
         payload = {}
 
-    _assert_event(event_type, payload)
+    if strict:
+        _assert_event(event_type, payload)
 
     path = Path(path)
     flag = path.parent / FINALIZED_FLAG
