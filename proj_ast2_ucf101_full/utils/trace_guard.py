@@ -306,6 +306,10 @@ def init_trace_dir(
             c = resolved_cfg_obj.get("_contract", None)
             if isinstance(c, dict):
                 overrides = c.get("overrides", []) or []
+    requested_snap = requested_config
+    effective_snap = resolved_cfg_obj
+    seal_digest = str(get_nested(resolved_cfg_obj, "contract.seal_digest", "")) or str(seal_digest)
+
     header_payload = {
         "schema": SCHEMA_VERSION_V54,
         "signature": signature,
@@ -313,8 +317,8 @@ def init_trace_dir(
         "resolved_config": resolved_cfg_obj,
         "contract_overrides": overrides,
         "ts_ms": int(time.time() * 1000),
-        "requested_config_snapshot": requested_snapshot_path.name,
-        "effective_config_snapshot": effective_snapshot_path.name,
+        "requested_config_snapshot": requested_snap,
+        "effective_config_snapshot": effective_snap,
         "requested_config_sha256": requested_config_sha256,
         "effective_config_sha256": effective_config_sha256,
         "seal_digest": seal_digest,
@@ -327,6 +331,8 @@ def init_trace_dir(
             "effective": run_meta.get("effective", {}),
         }
     )
+    header_payload.setdefault("requested_config", requested_snap)
+    header_payload.setdefault("effective_config", effective_snap)
     # ---- SPEC_E header required (top-level) ----
     header_payload["no_drift_enabled"] = bool(signature.get("no_drift_enabled", True))
     header_payload["acc_ref_source"] = str(signature.get("acc_ref_source", "locked"))
@@ -456,10 +462,13 @@ def _assert_event(event_type: str, payload: dict) -> None:
     if event_type == "trace_header":
         if not isinstance(payload["signature"], dict):
             raise TypeError("trace_header.payload.signature must be dict")
-        for field in ("requested_config_snapshot", "effective_config_snapshot", "seal_digest"):
+        for field in ("requested_config_snapshot", "effective_config_snapshot"):
             val = payload.get(field)
-            if not isinstance(val, str) or not val.strip():
-                raise ValueError(f"trace_header.payload.{field} must be non-empty str")
+            if not isinstance(val, (dict, str)) or (isinstance(val, str) and not val.strip()):
+                raise ValueError(f"trace_header.payload.{field} must be non-empty")
+        seal_val = payload.get("seal_digest")
+        if not isinstance(seal_val, str) or not seal_val.strip():
+            raise ValueError("trace_header.payload.seal_digest must be non-empty str")
         # ---- SPEC_E: contract_overrides must be auditable entries ----
         ov = payload.get("contract_overrides", [])
         if not isinstance(ov, list):
@@ -794,24 +803,34 @@ def build_trace_header_payload_v54(
     acc_ref_source: str,
     seal_digest: str,
 ) -> dict:
-    payload = {
-        "requested_config_snapshot": "requested_config_snapshot.yaml",
-        "effective_config_snapshot": "effective_config_snapshot.yaml",
-        "seal_digest": str(seal_digest),
-        "contract_overrides": contract_overrides,
-        "signature": signature,
-        "requested_config": requested_config,
-        "effective_config": effective_config,
-        "requested": requested,
-        "effective": effective,
-        "acc_first_hard_gating_enabled": bool(signature.get("acc_first_hard_gating_enabled", False)),
-        "locked_acc_ref_enabled": bool(signature.get("locked_acc_ref_enabled", False)),
-        "acc_ref_source": str(acc_ref_source),
-        "no_drift_enabled": bool(no_drift_enabled),
-        "no_double_scale_enabled": bool(signature.get("no_double_scale_enabled", False)),
-        "seed_global": int(signature.get("seed_global", 0)),
-        "seed_problem": int(signature.get("seed_problem", 0)),
-        "config_fingerprint": str(signature.get("config_fingerprint", "")),
-        "git_commit_or_version": str(signature.get("git_commit_or_version", "")),
-    }
+    payload = {}
+    payload["signature"] = dict(signature or {})
+
+    # canonical snapshots required by HardGate-B
+    payload["requested_config_snapshot"] = requested_config
+    payload["effective_config_snapshot"] = effective_config
+    payload["contract_overrides"] = list(contract_overrides or [])
+
+    # seal digest must be present in header evidence chain
+    payload["seal_digest"] = str(payload["signature"].get("seal_digest", "") or seal_digest or "")
+    if not payload["seal_digest"] and isinstance(effective_config, dict):
+        payload["seal_digest"] = str(get_nested(effective_config, "contract.seal_digest", "") or "")
+
+    # optional backward-compatible aliases
+    payload["requested_config"] = requested_config
+    payload["effective_config"] = effective_config
+
+    payload["requested"] = dict(requested or {})
+    payload["effective"] = dict(effective or {})
+
+    # keep existing booleans used by SPEC_E validators
+    payload["no_drift_enabled"] = bool(no_drift_enabled)
+    payload["no_double_scale_enabled"] = bool(signature.get("no_double_scale_enabled", False))
+    payload["acc_ref_source"] = str(acc_ref_source)
+    payload["locked_acc_ref_enabled"] = bool(signature.get("locked_acc_ref_enabled", False))
+    payload["acc_first_hard_gating_enabled"] = bool(signature.get("acc_first_hard_gating_enabled", False))
+    payload["git_commit_or_version"] = str(signature.get("git_commit_or_version", ""))
+    payload["config_fingerprint"] = str(signature.get("config_fingerprint", ""))
+    payload["seed_global"] = int(signature.get("seed_global", 0))
+    payload["seed_problem"] = int(signature.get("seed_problem", 0))
     return payload

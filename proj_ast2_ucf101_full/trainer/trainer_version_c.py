@@ -35,7 +35,6 @@ from utils.stable_hash import stable_hash
 from utils.trace_contract_v54 import (
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
-    compute_effective_cfg_digest_v54,
 )
 from utils.trace_guard import (
     init_trace_dir_v54,
@@ -49,6 +48,7 @@ from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FI
 from utils.trace_payload_v54 import make_gating_payload_v54
 from utils.config import AttrDict
 from utils.config_utils import get_nested
+from utils.contract_seal import assert_cfg_sealed_or_violate
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -647,21 +647,7 @@ def train_version_c(
     trace_header_written = False
     steps_done_for_finalize = 0
     try:
-        def _assert_cfg_sealed():
-            cur = compute_effective_cfg_digest_v54(cfg)
-            if cur != seal_digest:
-                append_trace_event_v54(
-                    trace_events_path,
-                    "contract_violation",
-                    {
-                        "reason": "cfg_mutated_after_seal",
-                        "expected_seal_digest": str(seal_digest),
-                        "actual_seal_digest": str(cur),
-                    },
-                )
-                raise RuntimeError("v5.4 P0: cfg mutated after seal (NoDrift/Trace evidence invalid)")
-
-        _assert_cfg_sealed()
+        assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=0)
         # layout_export_dir: ONLY for exporting layout_input.json (optional)
         layout_export_dir = Path(layout_export_dir) if layout_export_dir else None
         if layout_export_dir is not None:
@@ -1029,7 +1015,7 @@ def train_version_c(
         total_epochs = 0
         try:
             for outer in range(cfg.training.outer_epochs):
-                _assert_cfg_sealed()
+                assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=outer)
                 ran_epochs += 1
                 total_epochs += 1
                 stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False

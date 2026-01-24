@@ -171,6 +171,7 @@ def build_signature_v54(
         "no_double_scale_enabled": no_double_scale_enabled,
         "action_families": moves_enabled,  # optional
     }
+    sig["seal_digest"] = str(_get_path(cfg, "contract.seal_digest", "") or "")
 
     if overrides:
         sig.update(overrides)
