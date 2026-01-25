@@ -539,17 +539,21 @@ def run_layout_agent(
 
         # ---- v5.4: enforce budget fairness artifact (budget.json) ----
         try:
+            actual_calls = int(getattr(evaluator, "evaluator_calls", 0) if evaluator else 0)
             budget = {
                 "run_id": run_id,
                 "primary_limit": {"type": "eval_calls", "limit": int(total_eval_budget)},
                 "secondary_limit": {"type": "wall_time_s", "limit": float(max_wallclock_sec)},
+                "actual_eval_calls": actual_calls,
+                "effective_eval_calls": actual_calls,
+                "cache_hits_total": 0,
+                "wall_time_s": float(time.time() - start_time),
                 "planned_total_eval_budget": int(total_eval_budget),
                 "planned_search_eval_budget": int(search_eval_budget),
-                "actual_evaluator_calls": int(getattr(evaluator, "evaluator_calls", 0) if evaluator else 0),
-                "actual_wallclock_sec": float(time.time() - start_time),
                 "seed_id": int(seed) if "seed" in locals() else None,
                 "method": "ours",
                 "budget_exhausted": bool(budget_exhausted),
+                "actual_evaluator_calls": actual_calls,
             }
             (out_dir / "budget.json").write_text(
                 json.dumps(budget, indent=2, ensure_ascii=False), encoding="utf-8"
