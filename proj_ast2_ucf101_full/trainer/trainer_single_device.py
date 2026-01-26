@@ -284,8 +284,8 @@ def train_single_device(
             try:
                 with (out_path / "stable_hw_state.json").open("w", encoding="utf-8") as f:
                     json.dump(stable_state, f, indent=2)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     def _to_scalar(val, default: float = 0.0) -> float:
         if hasattr(val, "detach"):
