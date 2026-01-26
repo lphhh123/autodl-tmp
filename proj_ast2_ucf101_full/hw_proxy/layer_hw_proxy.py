@@ -212,9 +212,8 @@ class _TabularBundle:
         x = self.build_x(rows, device=device)
         y = self.model(x).squeeze(-1)
         if self.target_mode.lower() == "log":
-            # NOTE: proxy_retrain/proxy_utils.py uses log(x + eps), not log(1 + x)
-            # so the inverse must be exp(y) - eps (not torch.expm1).
-            y = torch.exp(y) - 1e-6
+            # train_one_proxy uses log1p_safe => invert with expm1
+            y = torch.expm1(y)
             y = torch.clamp(y, min=1e-6)
         return torch.clamp(y, min=0.0)
 
