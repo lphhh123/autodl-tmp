@@ -211,9 +211,9 @@ class _TabularBundle:
         x = self.build_x(rows, device=device)
         y = self.model(x).squeeze(-1)
         if self.target_mode.lower() == "log":
-            # model predicts log1p(target); invert with expm1
-            y = torch.expm1(y)
-            y = torch.clamp(y, min=0.0)
+            # exp(log(x+eps)) - eps ; keep strictly positive
+            y = torch.exp(y) - 1e-6
+            y = torch.clamp(y, min=1e-6)
         return torch.clamp(y, min=0.0)
 
 
@@ -331,8 +331,7 @@ class _Tabular3Proxy:
             rows_eng.append(r)
         energy_mj = self.eng.predict(rows_eng, device=device)
 
-        # energy_mj [mJ], ms [ms] => power_w [W] because mJ/ms = W
-        power_w = energy_mj / (ms + 1e-6)
+        power_w = energy_mj * 1000.0 / (ms + 1e-6)
         power_w = torch.clamp(power_w, min=0.0)
         return torch.clamp(ms, min=0.0), torch.clamp(mem_mb, min=0.0), power_w
 
@@ -491,7 +490,7 @@ class LayerHwProxy:
             pred = self.predict_layers_batch(layers_cfg)
             lat_ms = float(np.sum(pred["lat_ms"]))
             mem_mb = float(np.max(pred["mem_mb"])) if pred["mem_mb"].size > 0 else 0.0
-            energy_mj = float(np.sum(pred["power_w"] * pred["lat_ms"])) if pred["power_w"].size > 0 else 0.0
+            energy_mj = float(np.sum(pred["power_w"] * pred["lat_ms"])) / 1000.0 if pred["power_w"].size > 0 else 0.0
             return {"latency_ms": lat_ms, "mem_mb": mem_mb, "energy_mj": energy_mj}
 
         base_latency = float(model_info.get("latency_ms_ref", 1.0))
