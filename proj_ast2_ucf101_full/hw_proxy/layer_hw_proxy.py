@@ -330,6 +330,20 @@ class _Tabular3Proxy:
             # keep only universally-available context features (runs/warmup exist in dataset)
             r["runs"] = float(run_ctx.get("runs", 10))
             r["warmup"] = float(run_ctx.get("warmup", 5))
+            r["ms_pred"] = ms[i]
+            r["mem_pred"] = mem_mb[i]
+
+            bs = float(r.get("bs", 1.0))
+            L_eff = float(r.get("L_eff", 1.0))
+            embed_dim = float(r.get("embed_dim", 1.0))
+            num_heads = float(r.get("num_heads", 1.0))
+            mlp_ratio = float(r.get("mlp_ratio", 4.0))
+
+            tokens = bs * L_eff
+            r["tokens"] = tokens
+            r["mlp_hidden"] = mlp_ratio * embed_dim
+            r["work_proxy"] = tokens * embed_dim * (1.0 + num_heads)
+            r["stress_proxy"] = mem_mb[i] / (ms[i] + 1e-6)
             rows_pwr.append(r)
 
         power_w = self.pwr.predict(rows_pwr, device=device)
