@@ -62,65 +62,12 @@ def main():
     ap.add_argument("--hidden", type=str, default="256,256,128")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--patience", type=int, default=12)
-    ap.add_argument(
-        "--stack_proxy_features",
-        action="store_true",
-        help="If set, augment df with ms_pred/mem_pred computed from proxy_ms.pt and proxy_peak_mem_mb.pt in out_dir.",
-    )
 
     args = ap.parse_args()
     seed_everything(args.seed)
 
     df = pd.read_csv(args.csv)
     assert args.target_col in df.columns, f"target_col {args.target_col} not in columns"
-
-    # ---------- optional stacking features for power proxy ----------
-    if args.stack_proxy_features and args.target_col == "avg_power_w":
-        ms_ckpt = os.path.join(args.out_dir, "proxy_ms_event.pt")
-        if not os.path.isfile(ms_ckpt):
-            ms_ckpt = os.path.join(args.out_dir, "proxy_ms.pt")
-        mem_ckpt = os.path.join(args.out_dir, "proxy_peak_mem_mb.pt")
-
-        if not os.path.isfile(ms_ckpt):
-            raise FileNotFoundError(f"missing ms proxy ckpt: {ms_ckpt}")
-        if not os.path.isfile(mem_ckpt):
-            raise FileNotFoundError(f"missing mem proxy ckpt: {mem_ckpt}")
-
-        def _run_saved_proxy(ckpt_path: str, df_in: pd.DataFrame) -> np.ndarray:
-            ck = torch.load(ckpt_path, map_location="cpu")
-            num_cols_ck = ck["num_cols"]
-            cat_cols_ck = ck["cat_cols"]
-            X, _bundle = build_design_matrix(
-                df_in,
-                num_cols_ck,
-                cat_cols_ck,
-                cat_vocab=ck["cat_vocab"],
-                standardize=True,
-                stats=ck["stats"],
-            )
-            device_local = "cuda" if torch.cuda.is_available() else "cpu"
-            hidden = ck["model_hidden"]
-            dropout = ck.get("dropout", 0.1)
-            model_local = MLPRegressor(input_dim=ck["input_dim"], hidden=hidden, dropout=dropout).to(device_local)
-            model_local.load_state_dict(ck["model_state"])
-            pred_log = _predict(model_local, X, device=device_local)
-
-            if ck.get("target_mode", "log") == "log":
-                pred_raw = expm1_safe(pred_log, eps=1e-6)
-            else:
-                pred_raw = pred_log
-            return pred_raw.astype(np.float32)
-
-        df["ms_pred"] = _run_saved_proxy(ms_ckpt, df)
-        df["mem_pred"] = _run_saved_proxy(mem_ckpt, df)
-
-        df["tokens"] = (df.get("bs", 1).astype(float) * df.get("L_eff", 1).astype(float)).astype(float)
-        df["mlp_hidden"] = (df.get("mlp_ratio", 4.0).astype(float) * df.get("embed_dim", 1).astype(float)).astype(float)
-        df["work_proxy"] = (
-            df["tokens"] * df.get("embed_dim", 1).astype(float) * (1.0 + df.get("num_heads", 1).astype(float))
-        ).astype(float)
-        df["stress_proxy"] = (df["mem_pred"].astype(float) / (df["ms_pred"].astype(float) + 1e-6)).astype(float)
-    # ---------- end stacking ----------
 
     # 清理：只保留 target 非空、非负（你如果要容忍 0，可以自己改）
     df = df.replace([np.inf, -np.inf], np.nan)
