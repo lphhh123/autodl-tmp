@@ -22,10 +22,14 @@ REQUIRED_FILES: List[str] = [
 def ensure_proxy_ckpts_dir(project_root: Path, device_name: str, dst_dir: Path) -> None:
     """
     Ensure dst_dir exists and contains REQUIRED_FILES for THIS device_name.
-    Always guarantees correctness:
-      - uses per-device dst_dir (proxy_ckpts/<device_name>/)
-      - uses marker to detect mismatch
-      - overwrites files from src_dir if mismatch or missing
+
+    Supported source layouts (priority):
+      (A) <project_root>/proxy_ckpts/<device_name>/*.pt           (full/proxy_retrain output style)
+      (B) <project_root>/<proxy_ckpts_3090|4090|2080ti>/*.pt      (code-only bundled style)
+      (C) <project_root>/proxy_retrain/full/proxy_ckpts/<device_name>/*.pt
+      (D) <project_root>/full/proxy_ckpts/<device_name>/*.pt
+
+    dst_dir is expected to be <some_root>/proxy_ckpts/<device_name>/  (materialized standard layout).
     """
     project_root = Path(project_root).resolve()
     dst_dir = Path(dst_dir).resolve()
@@ -36,19 +40,28 @@ def ensure_proxy_ckpts_dir(project_root: Path, device_name: str, dst_dir: Path) 
             f"Supported: {sorted(DEVICE_TO_SRC_DIR.keys())}"
         )
 
-    src_dir = (project_root / DEVICE_TO_SRC_DIR[device_name]).resolve()
-    if not src_dir.is_dir():
-        raise RuntimeError(
-            f"[ProxyCkptResolveError] src_dir not found: {src_dir}\n"
-            f"Expected a trained proxy directory at: {project_root}/{DEVICE_TO_SRC_DIR[device_name]}"
-        )
+    candidates = []
+    candidates.append(project_root / "proxy_ckpts" / device_name)
+    candidates.append(project_root / "proxy_retrain" / "full" / "proxy_ckpts" / device_name)
+    candidates.append(project_root / "full" / "proxy_ckpts" / device_name)
+    candidates.append(project_root / DEVICE_TO_SRC_DIR[device_name])
 
-    missing_src = [f for f in REQUIRED_FILES if not (src_dir / f).is_file()]
-    if missing_src:
-        raise RuntimeError(
-            f"[ProxyCkptResolveError] missing files in {src_dir}: {missing_src}\n"
-            f"Please re-run proxy training to generate {REQUIRED_FILES}."
-        )
+    src_dir = None
+    for c in candidates:
+        if c.is_dir() and all((c / f).is_file() for f in REQUIRED_FILES):
+            src_dir = c.resolve()
+            break
+
+    if src_dir is None:
+        msg = [
+            f"[ProxyCkptResolveError] cannot find trained proxy ckpts for device={device_name}",
+            f"project_root={project_root}",
+            "searched candidate source dirs (must contain REQUIRED_FILES):",
+        ]
+        for c in candidates:
+            msg.append(f"  - {c}  (exists={c.is_dir()})")
+        msg.append(f"REQUIRED_FILES={REQUIRED_FILES}")
+        raise RuntimeError("\n".join(msg))
 
     dst_dir.mkdir(parents=True, exist_ok=True)
 
@@ -56,13 +69,12 @@ def ensure_proxy_ckpts_dir(project_root: Path, device_name: str, dst_dir: Path) 
     if marker.is_file():
         old = marker.read_text(encoding="utf-8").strip()
         if old != device_name:
-            # mismatch => clear and recreate
             shutil.rmtree(dst_dir)
             dst_dir.mkdir(parents=True, exist_ok=True)
 
-    # Always copy (overwrite) to guarantee correct device content
-    for f in REQUIRED_FILES:
-        shutil.copy2(src_dir / f, dst_dir / f)
+    if src_dir != dst_dir:
+        for f in REQUIRED_FILES:
+            shutil.copy2(src_dir / f, dst_dir / f)
 
     marker.write_text(device_name, encoding="utf-8")
 

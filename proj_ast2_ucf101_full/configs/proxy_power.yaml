@@ -1,4 +1,3 @@
 hw:
   gpu_yaml: ./configs/gpu_data.yaml
-  weight_dir: ./proxy_ckpts
   proxy_weight_dir: ./proxy_ckpts

@@ -11,173 +11,106 @@ if str(_PROJECT_ROOT) not in sys.path:
 import argparse
 import json
 import time
-from typing import Dict, List, Tuple
+from typing import Dict
 
-import numpy as np
 import yaml
 
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 from utils.config import load_config
+from utils.proxy_ckpt_links import REQUIRED_FILES, ensure_proxy_ckpts_dir
 
 
-def _resolve_proxy_config(cfg) -> Tuple[str, str]:
-    hw_cfg = getattr(cfg, "hw", None)
-    proxy_cfg = getattr(cfg, "proxy", None)
-    gpu_yaml = ""
-    weight_dir = ""
-    if hw_cfg is not None:
-        gpu_yaml = str(getattr(hw_cfg, "gpu_yaml", "") or "")
-        weight_dir = str(
-            getattr(hw_cfg, "weight_dir", "") or getattr(hw_cfg, "proxy_weight_dir", "") or ""
-        )
-    if not gpu_yaml and proxy_cfg is not None:
-        gpu_yaml = str(getattr(proxy_cfg, "gpu_yaml", "") or "")
-    if not weight_dir and proxy_cfg is not None:
-        weight_dir = str(getattr(proxy_cfg, "weight_dir", "") or "")
-    return gpu_yaml, weight_dir
-
-
-def _load_device_map(gpu_yaml: str) -> Tuple[List[str], Dict[str, Dict]]:
-    with open(gpu_yaml, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    if isinstance(data, dict) and "chip_types" in data:
-        device_map = {entry["name"]: entry for entry in data["chip_types"] if "name" in entry}
-        device_names = list(device_map.keys())
-        return device_names, device_map
-    if isinstance(data, dict):
-        device_names = list(data.keys())
-        return device_names, dict(data)
-    raise RuntimeError(f"Unexpected gpu_yaml format in {gpu_yaml}")
-
-
-def _build_sanity_layers(device_cfg: Dict) -> List[Dict]:
-    base = {
-        "keep_ratio": 1.0,
-        "complexity_ratio": 1.0,
-        "precision": 1.0,
-        "device_cfg": device_cfg,
-        "cfg": "sanity",
-    }
-    return [
-        {
-            **base,
-            "layer_type": 1,
-            "layer_kind": "attn",
-            "flops": 1.2e9,
-            "bytes": 6.0e6,
-            "seq_len": 128,
-            "L_patch": 128,
-            "embed_dim": 256,
-            "num_heads": 4,
-            "mlp_ratio": 4.0,
-        },
-        {
-            **base,
-            "layer_type": 2,
-            "layer_kind": "mlp",
-            "flops": 9.0e8,
-            "bytes": 2.5e6,
-            "seq_len": 196,
-            "L_patch": 196,
-            "embed_dim": 384,
-            "num_heads": 6,
-            "mlp_ratio": 3.0,
-        },
-        {
-            **base,
-            "layer_type": 0,
-            "layer_kind": "patch_embed",
-            "flops": 2.0e8,
-            "bytes": 1.2e6,
-            "seq_len": 64,
-            "L_patch": 64,
-            "embed_dim": 128,
-            "num_heads": 2,
-            "mlp_ratio": 2.0,
-        },
-    ]
-
-
-def _check_predictions(device_name: str, pred: Dict[str, np.ndarray]) -> Dict[str, float]:
-    lat_ms = np.asarray(pred.get("lat_ms", []), dtype=np.float32)
-    mem_mb = np.asarray(pred.get("mem_mb", []), dtype=np.float32)
-    power_w = np.asarray(pred.get("power_w", []), dtype=np.float32)
-
-    for key, arr in {"lat_ms": lat_ms, "mem_mb": mem_mb, "power_w": power_w}.items():
-        if not np.all(np.isfinite(arr)):
-            raise RuntimeError(f"[ProxyCheckFailed] {device_name} {key} has non-finite values")
-        if np.any(arr < 0):
-            raise RuntimeError(f"[ProxyCheckFailed] {device_name} {key} has negative values")
-
-    lat_sum = float(np.sum(lat_ms)) if lat_ms.size else 0.0
-    mem_max = float(np.max(mem_mb)) if mem_mb.size else 0.0
-    energy_mj = float(np.sum(power_w * lat_ms)) / 1000.0 if power_w.size else 0.0
-    return {"lat_ms_sum": lat_sum, "mem_mb_max": mem_max, "energy_mj_sum": energy_mj}
 
 
 def check_all_proxies(cfg, out_dir: Path) -> Dict[str, Dict]:
-    gpu_yaml, weight_dir = _resolve_proxy_config(cfg)
-    if not gpu_yaml:
-        raise RuntimeError("Missing gpu_yaml: set cfg.hw.gpu_yaml or cfg.proxy.gpu_yaml")
-    if not weight_dir:
-        raise RuntimeError(
-            "Missing proxy weight_dir: set cfg.hw.weight_dir or cfg.hw.proxy_weight_dir or cfg.proxy.weight_dir"
-        )
+    project_root = Path(__file__).resolve().parents[1]
 
-    device_names, device_map = _load_device_map(gpu_yaml)
-    if not device_names:
-        raise RuntimeError(f"No chip_types found in {gpu_yaml}")
+    root = Path(str(cfg.hw.proxy_weight_dir)).resolve()
+    root.mkdir(parents=True, exist_ok=True)
 
-    root = Path(weight_dir)
-    has_device_subdirs = any((root / dev).is_dir() for dev in device_names)
-    results: Dict[str, Dict] = {}
+    gpu_yaml = str(cfg.hw.gpu_yaml)
+    with open(gpu_yaml, "r", encoding="utf-8") as f:
+        y = yaml.safe_load(f) or {}
+    chip_types = y.get("chip_types", [])
+    device_names = [ct["name"] for ct in chip_types]
+
+    results = {}
+
     for dev in device_names:
-        required = ["proxy_ms.pt", "proxy_peak_mem_mb.pt", "proxy_energy_mj.pt"]
-        ckpt_dir = root / dev
-        if has_device_subdirs:
-            missing = [name for name in required if not (ckpt_dir / name).is_file()]
-            if missing:
-                missing_list = ", ".join(missing)
-                raise RuntimeError(
-                    f"[ProxyMissing] device={dev} missing [{missing_list}] under root={root} (dir={ckpt_dir})"
-                )
-        else:
-            ckpt_dir = root
-            missing = [name for name in required if not (ckpt_dir / name).is_file()]
-            if missing:
-                missing_list = ", ".join(missing)
-                raise RuntimeError(
-                    f"[ProxyMissing] device={dev} missing [{missing_list}] under root={root} (dir={ckpt_dir})"
-                )
-        device_cfg = device_map.get(dev, {})
+        dst_dir = root / dev
+        ensure_proxy_ckpts_dir(project_root=project_root, device_name=dev, dst_dir=dst_dir)
+
+        missing = [fn for fn in REQUIRED_FILES if not (dst_dir / fn).is_file()]
+        if missing:
+            raise RuntimeError(
+                f"[ProxyMissingAfterMaterialize] device={dev} missing={missing} under dst_dir={dst_dir} root={root}"
+            )
+
         proxy = LayerHwProxy(
             device_name=dev,
             gpu_yaml=gpu_yaml,
             weight_dir=str(root),
-            run_ctx={"device": dev, "cfg": "sanity"},
+            run_ctx={"img": 224, "bs": 1},
         )
-        layers_cfg = _build_sanity_layers(device_cfg)
-        pred = proxy.predict_layers_batch(layers_cfg)
-        lat_ms = np.asarray(pred.get("lat_ms", []), dtype=np.float32)
-        mem_mb = np.asarray(pred.get("mem_mb", []), dtype=np.float32)
-        power_w = np.asarray(pred.get("power_w", []), dtype=np.float32)
-        print(f"[proxy_ms_mem] device={dev} ckpt_dir={ckpt_dir}")
-        for idx in range(len(layers_cfg)):
-            energy_mj = float(power_w[idx] * lat_ms[idx] / 1000.0) if idx < power_w.size else 0.0
-            print(
-                "[proxy_ms_mem] "
-                f"device={dev} layer={idx} latency_ms={float(lat_ms[idx]):.4f} "
-                f"peak_mem_mb={float(mem_mb[idx]):.4f} energy_mj={energy_mj:.4f}"
-            )
-        summary = _check_predictions(dev, pred)
+
+        layers = [
+            {
+                "layer_kind": "patch_embed",
+                "flops": 1e9,
+                "bytes": 5e8,
+                "embed_dim": 768,
+                "num_heads": 12,
+                "mlp_ratio": 4.0,
+                "seq_len": 196,
+                "precision": 1.0,
+                "keep_ratio": 1.0,
+            },
+            {
+                "layer_kind": "attn",
+                "flops": 3e9,
+                "bytes": 2e9,
+                "embed_dim": 768,
+                "num_heads": 12,
+                "mlp_ratio": 4.0,
+                "seq_len": 196,
+                "precision": 1.0,
+                "keep_ratio": 1.0,
+            },
+            {
+                "layer_kind": "mlp",
+                "flops": 4e9,
+                "bytes": 3e9,
+                "embed_dim": 768,
+                "num_heads": 12,
+                "mlp_ratio": 4.0,
+                "seq_len": 196,
+                "precision": 1.0,
+                "keep_ratio": 1.0,
+            },
+        ]
+        pred = proxy.predict_layers_batch(layers)
+        lat = pred["lat_ms"].tolist()
+        mem = pred["mem_mb"].tolist()
+        pw = pred["power_w"].tolist()
+
+        def _ok(xs):
+            return all((x == x) and (x >= 0.0) and (x < 1e12) for x in xs)
+
+        if not (_ok(lat) and _ok(mem) and _ok(pw)):
+            raise RuntimeError(f"[ProxySanityFail] device={dev} pred(lat,mem,power)={(lat, mem, pw)}")
+
         results[dev] = {
-            "ckpt_dir": str(ckpt_dir),
-            "passed": True,
-            **summary,
+            "ckpt_dir": str(dst_dir),
+            "lat_ms": lat,
+            "mem_mb": mem,
+            "power_w": pw,
         }
 
-    out_path = out_dir / "proxy_ckpt_check.json"
-    out_path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "proxy_ckpt_check.json").write_text(
+        json.dumps(results, indent=2),
+        encoding="utf-8",
+    )
+    print("[run_proxy_ms_mem] OK devices:", list(results.keys()))
     return results
 
 

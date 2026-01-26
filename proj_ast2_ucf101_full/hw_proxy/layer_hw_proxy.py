@@ -418,7 +418,7 @@ class LayerHwProxy:
 
     def _load_model(self, path: Path, in_dim: int) -> LayerProxyModel:
         if not path.is_file():
-            raise RuntimeError(f"[ProxyMissing] legacy proxy weight not found: {path}")
+            raise RuntimeError(f"[ProxyMissingLegacy] missing legacy proxy weight: {path}")
         model = LayerProxyModel(in_dim)
         model.load_state_dict(torch.load(path, map_location="cpu"))
         return model
