@@ -12,11 +12,11 @@ def run(cmd):
 
 
 def main():
-    # 你给的数据（4090）
-    csv_ms_mem = "./proxy_retrain/layer_dataset_4090.csv"  # 字段包含ms、peak_mem_mb
-    csv_power = "./proxy_retrain/layer_power_dataset_4090.csv"  # 字段包含ms_event、energy_mj、avg_power_w
+    # 你给的数据（3090）
+    csv_ms_mem = "./proxy_retrain/layer_dataset_3090.csv"  # 字段包含ms、peak_mem_mb
+    csv_power = "./proxy_retrain/layer_power_dataset_3090.csv"  # 字段包含ms_event、energy_mj、avg_power_w
 
-    out_dir = "./proxy_ckpts_4090"
+    out_dir = "./proxy_ckpts_3090"
     os.makedirs(out_dir, exist_ok=True)
 
     py = sys.executable
