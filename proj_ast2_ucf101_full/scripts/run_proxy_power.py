@@ -9,11 +9,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 # -----------------------------------------------------
 
 import argparse
-import json
 import time
 
 from utils.config import load_config
-from hw_proxy.proxy_train import train_layer_proxies_from_csv
+
+from scripts.run_proxy_ms_mem import check_all_proxies
 
 
 def main():
@@ -25,31 +25,16 @@ def main():
 
     cfg = load_config(args.cfg)
 
+    if args.calib_csv or str(getattr(getattr(cfg, "hw", None), "calib_csv", "") or ""):
+        print("[proxy_power][WARN] calib_csv is ignored; running proxy checkpoint sanity check only.")
+
     cfg_stem = Path(args.cfg).stem
     auto_out = Path("outputs/proxy_power") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) if args.out_dir else auto_out
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    calib_csv = args.calib_csv or str(getattr(getattr(cfg, "hw", None), "calib_csv", "") or "")
-    if not calib_csv:
-        raise RuntimeError("Missing calib_csv: please provide --calib_csv or set cfg.hw.calib_csv")
-
-    weight_dir = str(getattr(getattr(cfg, "hw", None), "proxy_weight_dir", "") or "")
-    if not weight_dir:
-        raise RuntimeError("Missing cfg.hw.proxy_weight_dir (where to save latency/mem/power proxy weights)")
-    Path(weight_dir).mkdir(parents=True, exist_ok=True)
-
-    meta = train_layer_proxies_from_csv(
-        calib_csv=calib_csv,
-        out_dir=weight_dir,
-        in_dim=None,
-        device="cpu",
-        epochs=int(getattr(getattr(cfg, "hw", None), "proxy_train_epochs", 200) or 200),
-        lr=float(getattr(getattr(cfg, "hw", None), "proxy_train_lr", 1e-3) or 1e-3),
-    )
-
-    (out_dir / "proxy_train_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    print("[proxy_power] done:", meta)
+    results = check_all_proxies(cfg, out_dir)
+    print("[proxy_power] done:", results)
 
 
 if __name__ == "__main__":
