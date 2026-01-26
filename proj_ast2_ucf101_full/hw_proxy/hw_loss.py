@@ -112,7 +112,7 @@ def compute_hw_loss(
             force_use_cached_mapping = False
 
         if (force_use_cached_mapping and (not want_grad)) and mapping is not None:
-            cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy)
+            cost = mapping_solver.build_cost_matrix(segments, eff_specs, hw_proxy, alpha=alpha)
             fixed = mapping_solver.evaluate_fixed_mapping(
                 mapping=mapping,
                 segments=segments,
@@ -182,7 +182,13 @@ def compute_hw_loss(
                 mem_mb_mat = cache[key]["mem_mb"].to(device=device)
                 power_w_mat = cache[key]["power_w"].to(device=device)
             else:
-                cost = mapping_solver.build_cost_matrix_torch(segments, eff_specs, hw_proxy, device=device)
+                cost = mapping_solver.build_cost_matrix_torch(
+                    segments,
+                    eff_specs,
+                    hw_proxy,
+                    device=device,
+                    alpha=alpha,
+                )
                 lat_ms_mat = cost["lat_ms"]
                 mem_mb_mat = cost["mem_mb"]
                 power_w_mat = cost["power_w"]

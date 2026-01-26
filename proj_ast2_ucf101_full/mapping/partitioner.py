@@ -93,13 +93,19 @@ class PartitionPlanner:
                 candidates.append(ln)
         return candidates
 
-    def _evaluate(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, torch.Tensor], Dict]:
-        cost = self.mapping_solver.build_cost_matrix(segments, eff_specs, self.hw_proxy)
+    def _evaluate(
+        self,
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        alpha: Optional[torch.Tensor] = None,
+    ) -> Tuple[float, Dict[str, torch.Tensor], Dict]:
+        cost = self.mapping_solver.build_cost_matrix(segments, eff_specs, self.hw_proxy, alpha=alpha)
         mapping_obj = self.mapping_solver.solve_mapping(
             segments,
             eff_specs,
             self.hw_proxy,
             layout_positions=self.wafer_layout.current_pos_continuous(),
+            alpha=alpha,
         )
         objective, hw_stats = self._compute_objective(segments, mapping_obj, cost)
         return objective, cost, mapping_obj
@@ -195,7 +201,7 @@ class PartitionPlanner:
     ) -> Dict[str, Any]:
         layer_nodes = build_layer_nodes_from_model(model, model_info=model_info)
         segments_base = self._build_coarse(layer_nodes, alpha)
-        objective_base, cost_base, mapping_base = self._evaluate(segments_base, eff_specs)
+        objective_base, cost_base, mapping_base = self._evaluate(segments_base, eff_specs, alpha=alpha)
         if not use_fine_split:
             graph_rewrite_plan = {"splits": []}
             mapping_sig = _mapping_signature(segments_base, mapping_base.get("mapping", []), graph_rewrite_plan)
@@ -226,7 +232,7 @@ class PartitionPlanner:
                 split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
         accepted = self._select_accepted_splits(split_trials)
         segments_final, graph_rewrite = self._apply_split_plans(segments_base, accepted, layer_nodes)
-        objective_final, _, mapping_final = self._evaluate(segments_final, eff_specs)
+        objective_final, _, mapping_final = self._evaluate(segments_final, eff_specs, alpha=alpha)
         graph_rewrite_plan = {"splits": graph_rewrite.splits}
         mapping_sig = _mapping_signature(segments_final, mapping_final.get("mapping", []), graph_rewrite_plan)
         return {
