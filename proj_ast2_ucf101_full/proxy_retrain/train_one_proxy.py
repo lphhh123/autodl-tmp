@@ -90,15 +90,6 @@ def main():
             ck = torch.load(ckpt_path, map_location="cpu")
             num_cols_ck = ck["num_cols"]
             cat_cols_ck = ck["cat_cols"]
-            # --- schema alignment: ensure df has all columns expected by the ckpt ---
-            # Different datasets may not share identical columns (e.g., power CSV may miss peak_mem_mb used by ms proxy).
-            # Fill missing numeric/categorical columns with safe defaults to avoid KeyError in build_design_matrix.
-            for c in num_cols_ck:
-                if c not in df_in.columns:
-                    df_in[c] = 0.0
-            for c in cat_cols_ck:
-                if c not in df_in.columns:
-                    df_in[c] = "NA"
             X, _bundle = build_design_matrix(
                 df_in,
                 num_cols_ck,
