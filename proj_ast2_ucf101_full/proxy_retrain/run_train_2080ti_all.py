@@ -50,29 +50,25 @@ def main():
         "--out_dir", out_dir,
         "--target_col", "energy_mj",
         "--target_mode", "log",
-        # remove leakage-like strong signals from FEATURES
-        "--drop_cols", "cfg,device,avg_power_w,ms_event",
+        "--drop_cols", "cfg,device",
         "--seed", "2024",
     ])
 
-    # 4) avg power (avg_power_w) —— log-space
-    # Drop ms_event and energy_mj to avoid leakage (energy≈power*ms)
-    run([
-        py, "-m", "proxy_retrain.train_one_proxy",
-        "--csv", csv_power,
-        "--out_dir", out_dir,
-        "--target_col", "avg_power_w",
-        "--target_mode", "log",
-        "--drop_cols", "cfg,device,ms_event,energy_mj",
-        "--seed", "2024",
-    ])
+    # 可选：如果你也想单独训 avg_power_w（功耗）（列名正确，保留）
+    # run([
+    #     py, "-m", "proxy_retrain.train_one_proxy",
+    #     "--csv", csv_power,
+    #     "--out_dir", out_dir,
+    #     "--target_col", "avg_power_w",
+    #     "--target_mode", "log",
+    #     "--seed", "2024",
+    # ])
 
     print("\n[ALL DONE] check out_dir:", out_dir)
     print("Expected files:")
     print("  proxy_ms.pt, report_ms.json")  # 对应修改：ms_event → ms
     print("  proxy_peak_mem_mb.pt, report_peak_mem_mb.json")
     print("  proxy_energy_mj.pt, report_energy_mj.json")
-    print("  proxy_avg_power_w.pt, report_avg_power_w.json")
 
 
 if __name__ == "__main__":

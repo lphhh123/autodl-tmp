@@ -16,7 +16,6 @@ REQUIRED_FILES: List[str] = [
     "proxy_ms.pt",
     "proxy_peak_mem_mb.pt",
     "proxy_energy_mj.pt",
-    "proxy_avg_power_w.pt",
 ]
 
 
