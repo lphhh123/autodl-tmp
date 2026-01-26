@@ -8,6 +8,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 
 from proxy_retrain.proxy_utils import (
     seed_everything,
@@ -32,6 +33,23 @@ def _prepare_xy(df: pd.DataFrame, target_col: str, target_mode: str) -> np.ndarr
         return y.astype(np.float32)
     else:
         raise ValueError(f"Unknown target_mode={target_mode}")
+
+
+def ranking_loss(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """
+    Pairwise ranking loss using the difference between predicted and actual rankings.
+    Args:
+        preds (torch.Tensor): The model predictions (size: [batch_size, 1] or [batch_size]).
+        targets (torch.Tensor): The true values (size: [batch_size, 1] or [batch_size]).
+    Returns:
+        torch.Tensor: The ranking loss.
+    """
+    preds = preds.view(-1)
+    targets = targets.view(-1)
+    diffs = preds.unsqueeze(1) - preds.unsqueeze(0)
+    target_diffs = targets.unsqueeze(1) - targets.unsqueeze(0)
+    loss = F.relu(-target_diffs * diffs)
+    return loss.mean()
 
 
 @torch.no_grad()
@@ -62,6 +80,7 @@ def main():
     ap.add_argument("--hidden", type=str, default="256,256,128")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--patience", type=int, default=12)
+    ap.add_argument("--rank_loss_weight", type=float, default=0.1)
     ap.add_argument(
         "--stack_proxy_features",
         action="store_true",
@@ -187,7 +206,9 @@ def main():
             yb = torch.from_numpy(y_train[b]).to(device)
 
             pred = model(xb)
-            loss = huber_loss(pred, yb, delta=1.0)
+            mse_loss = huber_loss(pred, yb, delta=1.0)
+            rank_loss = ranking_loss(pred, yb)
+            loss = mse_loss + args.rank_loss_weight * rank_loss
 
             opt.zero_grad()
             loss.backward()
