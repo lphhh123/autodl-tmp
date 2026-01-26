@@ -32,6 +32,7 @@ def check_all_proxies(cfg, out_dir: Path) -> Dict[str, Dict]:
     with open(gpu_yaml, "r", encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
     chip_types = y.get("chip_types", [])
+    chip_map = {ct["name"]: ct for ct in chip_types if "name" in ct}
     device_names = [ct["name"] for ct in chip_types]
 
     results = {}
@@ -98,6 +99,17 @@ def check_all_proxies(cfg, out_dir: Path) -> Dict[str, Dict]:
 
         if not (_ok(lat) and _ok(mem) and _ok(pw)):
             raise RuntimeError(f"[ProxySanityFail] device={dev} pred(lat,mem,power)={(lat, mem, pw)}")
+
+        yaml_chip_entry = chip_map.get(dev, {})
+        tdp = float(yaml_chip_entry.get("tdp_w", 300.0))
+        for i, (ms, pw_i) in enumerate(zip(lat, pw)):
+            if pw_i > 5.0 * tdp:
+                implied_energy_mj = pw_i * ms
+                print(
+                    "[WARN][ProxyPowerOutOfRange] "
+                    f"device={dev} layer#{i} power_w={pw_i:.3f} tdp_w={tdp:.1f} "
+                    f"lat_ms={ms:.6f} implied_energy_mj={implied_energy_mj:.3f}"
+                )
 
         results[dev] = {
             "ckpt_dir": str(dst_dir),
