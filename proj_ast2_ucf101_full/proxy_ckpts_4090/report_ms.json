@@ -1,0 +1,75 @@
+{
+  "csv": "/root/autodl-tmp/proxy_retrain/layer_dataset_4090.csv",
+  "target_col": "ms",
+  "target_mode": "log",
+  "seed": 2024,
+  "n_train": 17474,
+  "n_val": 2194,
+  "n_test": 2172,
+  "features": {
+    "num_cols": [
+      "img",
+      "bs",
+      "keep_ratio",
+      "L_patch",
+      "L_eff",
+      "peak_mem_mb",
+      "depth",
+      "embed_dim",
+      "num_heads",
+      "mlp_ratio",
+      "complexity_ratio",
+      "head_dim",
+      "tp_world_size"
+    ],
+    "cat_cols": [
+      "device",
+      "cfg",
+      "layer_type",
+      "prec",
+      "status"
+    ],
+    "input_dim": 46
+  },
+  "metrics": {
+    "train": {
+      "mape": 0.03699659876887279,
+      "p95_ape": 0.09451610577724533,
+      "p99_ape": 0.1332028398334293,
+      "max_ape": 0.6693477900761435,
+      "spearman_rho": 0.9972374559182169,
+      "kendall_tau": 0.9629219504201113,
+      "pairwise_acc": 0.9825193007720309
+    },
+    "val": {
+      "mape": 0.039051227909670416,
+      "p95_ape": 0.09932354029511088,
+      "p99_ape": 0.15002959594901813,
+      "max_ape": 0.6994672533052461,
+      "spearman_rho": 0.997271336772504,
+      "kendall_tau": 0.9626607960246311,
+      "pairwise_acc": 0.9797537619699043
+    },
+    "test": {
+      "mape": 0.038990144477061124,
+      "p95_ape": 0.1003188683707135,
+      "p99_ape": 0.1392145901346942,
+      "max_ape": 0.6116866560028835,
+      "spearman_rho": 0.996937718549346,
+      "kendall_tau": 0.9608076644256747,
+      "pairwise_acc": 0.980560162152202
+    }
+  },
+  "nonphysical": {
+    "train_count_le_0": 0,
+    "val_count_le_0": 0,
+    "test_count_le_0": 0,
+    "train_min": 0.06091751158237457,
+    "val_min": 0.06157384812831879,
+    "test_min": 0.06078526750206947
+  },
+  "notes": [
+    "MAPE 是必要但不充分：请重点看 spearman/pairwise_acc。",
+    "若出现 <=0 的预测，请优先使用 log-space（本脚本默认）并检查数据与特征范围。"
+  ]
+}
