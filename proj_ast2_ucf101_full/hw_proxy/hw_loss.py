@@ -216,7 +216,8 @@ def compute_hw_loss(
             per_slot_mem.scatter_add_(0, map_idx, chosen_mem)
             mem_mb = torch.max(per_slot_mem)
 
-            energy_mj = torch.sum(chosen_power * chosen_lat) / 1000.0
+            # chosen_power [W], chosen_lat [ms] => energy_mj [mJ]
+            energy_mj = torch.sum(chosen_power * chosen_lat)
 
             comm_ms = torch.zeros((), device=device, dtype=torch.float32)
             if layout_positions is not None and "peak_bw" in eff_specs:

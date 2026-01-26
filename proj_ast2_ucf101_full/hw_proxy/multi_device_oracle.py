@@ -63,7 +63,8 @@ class MultiDeviceHwOracle:
         latency_ms = float(pred["lat_ms"][0])
         mem_mb = float(pred["mem_mb"][0])
         power_w = float(pred["power_w"][0])
-        energy_mj = power_w * latency_ms / 1000.0
+        # power_w [W], latency_ms [ms] => energy_mj [mJ]
+        energy_mj = power_w * latency_ms
         return {
             "latency_ms": latency_ms,
             "peak_mem_mb": mem_mb,
