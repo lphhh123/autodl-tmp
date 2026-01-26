@@ -31,11 +31,86 @@ class MappingSolver:
     def __init__(self, strategy: str, mem_limit_factor: float):
         self.strategy = strategy
         self.mem_limit_factor = mem_limit_factor
+        self._logged_slot_devices = False
 
-    def build_cost_matrix(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor], proxy: LayerHwProxy) -> Dict[str, torch.Tensor]:
+    def build_cost_matrix(
+        self,
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        proxy: LayerHwProxy,
+        alpha: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         layers_cfg = []
         S = eff_specs["peak_flops"].shape[0]
         kind_to_type = {"patch_embed": 0, "attn": 1, "mlp": 2}
+        if hasattr(proxy, "predict_layer_on_device") and alpha is not None:
+            chip_types = list(getattr(proxy, "chip_types", []) or [])
+            if not chip_types:
+                chip_types = list(getattr(proxy, "proxies", {}).keys())
+            if not chip_types:
+                raise RuntimeError("[ProxyMissing] Multi-device proxy has no chip_types configured.")
+            T = len(chip_types)
+            alpha_cpu = alpha.detach().cpu()
+            if int(alpha_cpu.shape[1]) < T:
+                raise RuntimeError(
+                    f"[ProxyMissing] alpha has shape {tuple(alpha_cpu.shape)} but needs >= {T} chip types."
+                )
+
+            big_cost = 1e6
+            lat_rows = []
+            mem_rows = []
+            power_rows = []
+            for seg in segments:
+                layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
+                base_row = {
+                    "layer_type": layer_type,
+                    "flops": seg.flops,
+                    "bytes": seg.bytes,
+                    "embed_dim": seg.embed_dim,
+                    "num_heads": seg.num_heads,
+                    "mlp_ratio": seg.mlp_ratio,
+                    "seq_len": seg.seq_len,
+                    "precision": seg.precision,
+                    "layer_kind": getattr(seg, "kind", "other"),
+                    "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
+                }
+                per_dev_lat = []
+                per_dev_mem = []
+                per_dev_power = []
+                for dev in chip_types:
+                    device_cfg = proxy.get_device_cfg(dev) if hasattr(proxy, "get_device_cfg") else {}
+                    pred = proxy.predict_layer_on_device(base_row, device_name=dev, device_cfg=device_cfg)
+                    per_dev_lat.append(float(pred["latency_ms"]))
+                    per_dev_mem.append(float(pred["peak_mem_mb"]))
+                    per_dev_power.append(float(pred["avg_power_w"]))
+
+                per_dev_lat_t = torch.tensor(per_dev_lat, dtype=torch.float32)
+                per_dev_mem_t = torch.tensor(per_dev_mem, dtype=torch.float32)
+                per_dev_power_t = torch.tensor(per_dev_power, dtype=torch.float32)
+                slot_lat = []
+                slot_mem = []
+                slot_power = []
+                for s in range(S):
+                    slot_alpha = alpha_cpu[s]
+                    expected_lat = torch.sum(slot_alpha[:T] * per_dev_lat_t)
+                    expected_mem = torch.sum(slot_alpha[:T] * per_dev_mem_t)
+                    expected_power = torch.sum(slot_alpha[:T] * per_dev_power_t)
+                    if int(slot_alpha.shape[0]) > T:
+                        expected_lat = expected_lat + slot_alpha[-1] * big_cost
+                        expected_mem = expected_mem + slot_alpha[-1] * big_cost
+                        expected_power = expected_power + slot_alpha[-1] * big_cost
+                    slot_lat.append(expected_lat)
+                    slot_mem.append(expected_mem)
+                    slot_power.append(expected_power)
+                lat_rows.append(torch.stack(slot_lat))
+                mem_rows.append(torch.stack(slot_mem))
+                power_rows.append(torch.stack(slot_power))
+
+            lat = torch.stack(lat_rows)
+            mem = torch.stack(mem_rows)
+            power = torch.stack(power_rows)
+            return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+
         for seg in segments:
             layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
             for s in range(S):
@@ -72,11 +147,88 @@ class MappingSolver:
         eff_specs: Dict[str, torch.Tensor],
         proxy: LayerHwProxy,
         device: torch.device,
+        alpha: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Differentiable cost matrix (eff_specs stay as tensors)."""
         layers_cfg = []
         S = int(eff_specs["peak_flops"].shape[0])
         kind_to_type = {"patch_embed": 0, "attn": 1, "mlp": 2}
+
+        if hasattr(proxy, "predict_layer_on_device") and alpha is not None:
+            chip_types = list(getattr(proxy, "chip_types", []) or [])
+            if not chip_types:
+                chip_types = list(getattr(proxy, "proxies", {}).keys())
+            if not chip_types:
+                raise RuntimeError("[ProxyMissing] Multi-device proxy has no chip_types configured.")
+            T = len(chip_types)
+            if int(alpha.shape[1]) < T:
+                raise RuntimeError(
+                    f"[ProxyMissing] alpha has shape {tuple(alpha.shape)} but needs >= {T} chip types."
+                )
+
+            if not self._logged_slot_devices:
+                slot_choice = torch.argmax(alpha[:, :T], dim=1).detach().cpu().tolist()
+                slot_names = [chip_types[idx] for idx in slot_choice]
+                counts: Dict[str, int] = {}
+                for name in slot_names:
+                    counts[name] = counts.get(name, 0) + 1
+                print(f"[MappingSolver] slot device_name distribution: {counts}")
+                self._logged_slot_devices = True
+
+            big_cost = torch.tensor(1e6, device=device, dtype=torch.float32)
+            lat_rows = []
+            mem_rows = []
+            power_rows = []
+            for seg in segments:
+                layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
+                base_row = {
+                    "layer_type": layer_type,
+                    "flops": float(seg.flops),
+                    "bytes": float(seg.bytes),
+                    "embed_dim": float(seg.embed_dim),
+                    "num_heads": float(seg.num_heads),
+                    "mlp_ratio": float(seg.mlp_ratio),
+                    "seq_len": float(seg.seq_len),
+                    "precision": float(seg.precision),
+                    "layer_kind": getattr(seg, "kind", "other"),
+                    "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
+                }
+                per_dev_lat = []
+                per_dev_mem = []
+                per_dev_power = []
+                for dev in chip_types:
+                    device_cfg = proxy.get_device_cfg(dev) if hasattr(proxy, "get_device_cfg") else {}
+                    pred = proxy.predict_layer_on_device(base_row, device_name=dev, device_cfg=device_cfg)
+                    per_dev_lat.append(float(pred["latency_ms"]))
+                    per_dev_mem.append(float(pred["peak_mem_mb"]))
+                    per_dev_power.append(float(pred["avg_power_w"]))
+
+                per_dev_lat_t = torch.tensor(per_dev_lat, device=device, dtype=torch.float32)
+                per_dev_mem_t = torch.tensor(per_dev_mem, device=device, dtype=torch.float32)
+                per_dev_power_t = torch.tensor(per_dev_power, device=device, dtype=torch.float32)
+                slot_lat = []
+                slot_mem = []
+                slot_power = []
+                for s in range(S):
+                    slot_alpha = alpha[s]
+                    expected_lat = torch.sum(slot_alpha[:T] * per_dev_lat_t)
+                    expected_mem = torch.sum(slot_alpha[:T] * per_dev_mem_t)
+                    expected_power = torch.sum(slot_alpha[:T] * per_dev_power_t)
+                    if int(slot_alpha.shape[0]) > T:
+                        expected_lat = expected_lat + slot_alpha[-1] * big_cost
+                        expected_mem = expected_mem + slot_alpha[-1] * big_cost
+                        expected_power = expected_power + slot_alpha[-1] * big_cost
+                    slot_lat.append(expected_lat)
+                    slot_mem.append(expected_mem)
+                    slot_power.append(expected_power)
+                lat_rows.append(torch.stack(slot_lat))
+                mem_rows.append(torch.stack(slot_mem))
+                power_rows.append(torch.stack(slot_power))
+
+            lat = torch.stack(lat_rows)
+            mem = torch.stack(mem_rows)
+            power = torch.stack(power_rows)
+            return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
 
         for seg in segments:
             layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
@@ -189,8 +341,17 @@ class MappingSolver:
             "comm_ms": lat_ms.new_tensor(comm_ms),
         }
 
-    def solve_mapping(self, segments: List[Segment], eff_specs: Dict[str, torch.Tensor], proxy: LayerHwProxy, layout_positions: Optional[torch.Tensor] = None, strategy: str = "greedy_local", distance_scale_ms: float = 0.0) -> Dict:
-        cost = self.build_cost_matrix(segments, eff_specs, proxy)
+    def solve_mapping(
+        self,
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        proxy: LayerHwProxy,
+        layout_positions: Optional[torch.Tensor] = None,
+        strategy: str = "greedy_local",
+        distance_scale_ms: float = 0.0,
+        alpha: Optional[torch.Tensor] = None,
+    ) -> Dict:
+        cost = self.build_cost_matrix(segments, eff_specs, proxy, alpha=alpha)
         return self.solve_mapping_from_cost(
             segments=segments,
             eff_specs=eff_specs,

@@ -27,7 +27,9 @@ def _resolve_proxy_config(cfg) -> Tuple[str, str]:
     weight_dir = ""
     if hw_cfg is not None:
         gpu_yaml = str(getattr(hw_cfg, "gpu_yaml", "") or "")
-        weight_dir = str(getattr(hw_cfg, "proxy_weight_dir", "") or "")
+        weight_dir = str(
+            getattr(hw_cfg, "weight_dir", "") or getattr(hw_cfg, "proxy_weight_dir", "") or ""
+        )
     if not gpu_yaml and proxy_cfg is not None:
         gpu_yaml = str(getattr(proxy_cfg, "gpu_yaml", "") or "")
     if not weight_dir and proxy_cfg is not None:
@@ -118,23 +120,35 @@ def check_all_proxies(cfg, out_dir: Path) -> Dict[str, Dict]:
     if not gpu_yaml:
         raise RuntimeError("Missing gpu_yaml: set cfg.hw.gpu_yaml or cfg.proxy.gpu_yaml")
     if not weight_dir:
-        raise RuntimeError("Missing proxy_weight_dir: set cfg.hw.proxy_weight_dir or cfg.proxy.weight_dir")
+        raise RuntimeError(
+            "Missing proxy weight_dir: set cfg.hw.weight_dir or cfg.hw.proxy_weight_dir or cfg.proxy.weight_dir"
+        )
 
     device_names, device_map = _load_device_map(gpu_yaml)
     if not device_names:
         raise RuntimeError(f"No chip_types found in {gpu_yaml}")
 
     root = Path(weight_dir)
+    has_device_subdirs = any((root / dev).is_dir() for dev in device_names)
     results: Dict[str, Dict] = {}
     for dev in device_names:
-        ckpt_dir = root / dev
         required = ["proxy_ms.pt", "proxy_peak_mem_mb.pt", "proxy_energy_mj.pt"]
-        missing = [name for name in required if not (ckpt_dir / name).is_file()]
-        if missing:
-            missing_list = ", ".join(missing)
-            raise RuntimeError(
-                f"[ProxyMissing] device={dev} missing [{missing_list}] under root={root} (dir={ckpt_dir})"
-            )
+        ckpt_dir = root / dev
+        if has_device_subdirs:
+            missing = [name for name in required if not (ckpt_dir / name).is_file()]
+            if missing:
+                missing_list = ", ".join(missing)
+                raise RuntimeError(
+                    f"[ProxyMissing] device={dev} missing [{missing_list}] under root={root} (dir={ckpt_dir})"
+                )
+        else:
+            ckpt_dir = root
+            missing = [name for name in required if not (ckpt_dir / name).is_file()]
+            if missing:
+                missing_list = ", ".join(missing)
+                raise RuntimeError(
+                    f"[ProxyMissing] device={dev} missing [{missing_list}] under root={root} (dir={ckpt_dir})"
+                )
         device_cfg = device_map.get(dev, {})
         proxy = LayerHwProxy(
             device_name=dev,
@@ -144,6 +158,17 @@ def check_all_proxies(cfg, out_dir: Path) -> Dict[str, Dict]:
         )
         layers_cfg = _build_sanity_layers(device_cfg)
         pred = proxy.predict_layers_batch(layers_cfg)
+        lat_ms = np.asarray(pred.get("lat_ms", []), dtype=np.float32)
+        mem_mb = np.asarray(pred.get("mem_mb", []), dtype=np.float32)
+        power_w = np.asarray(pred.get("power_w", []), dtype=np.float32)
+        print(f"[proxy_ms_mem] device={dev} ckpt_dir={ckpt_dir}")
+        for idx in range(len(layers_cfg)):
+            energy_mj = float(power_w[idx] * lat_ms[idx] / 1000.0) if idx < power_w.size else 0.0
+            print(
+                "[proxy_ms_mem] "
+                f"device={dev} layer={idx} latency_ms={float(lat_ms[idx]):.4f} "
+                f"peak_mem_mb={float(mem_mb[idx]):.4f} energy_mj={energy_mj:.4f}"
+            )
         summary = _check_predictions(dev, pred)
         results[dev] = {
             "ckpt_dir": str(ckpt_dir),

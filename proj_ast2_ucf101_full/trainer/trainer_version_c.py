@@ -20,6 +20,7 @@ from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
 from utils.data_ucf101 import UCF101Dataset
 from hw_proxy.hw_loss import compute_hw_loss
 from hw_proxy.layer_hw_proxy import LayerHwProxy
+from hw_proxy.multi_device_oracle import MultiDeviceHwOracle
 from layout.candidate_pool import signature_for_assign
 from layout.evaluator import LayoutEvaluator, LayoutState
 from layout.sites import build_sites
@@ -502,6 +503,7 @@ def _solve_mapping_for_cache(
         layout_positions=wafer_layout.current_pos_continuous(),
         strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
         distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
+        alpha=slot_out["alpha"],
     )
     mapping = mapping_result.get("mapping", [])
     S = int(eff_specs["peak_flops"].shape[0]) if "peak_flops" in eff_specs else int(len(mapping))
@@ -803,22 +805,25 @@ def train_version_c(
         chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
         optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
 
-        hw_proxy = LayerHwProxy(
-            cfg.hw.device_name,
-            cfg.hw.gpu_yaml,
-            cfg.hw.proxy_weight_dir,
-            run_ctx={
-                "img": int(cfg.model.img_size),
-                "bs": int(getattr(cfg.data, "batch_size", 1) or 1),
-                "depth": int(cfg.model.depth),
-                "embed_dim": int(cfg.model.embed_dim),
-                "num_heads": int(cfg.model.num_heads),
-                "mlp_ratio": float(cfg.model.mlp_ratio),
-                "tp_world_size": int(getattr(cfg.hw, "tp_world_size", 1) or 1),
-                "runs": int(getattr(cfg.hw, "proxy_runs", 10) or 10),
-                "warmup": int(getattr(cfg.hw, "proxy_warmup", 5) or 5),
-            },
-        )
+        proxy_weight_dir = str(getattr(cfg.hw, "weight_dir", "") or getattr(cfg.hw, "proxy_weight_dir", ""))
+        if not proxy_weight_dir:
+            raise RuntimeError("[ProxyMissing] cfg.hw.weight_dir or cfg.hw.proxy_weight_dir must be set.")
+        run_ctx = {
+            "img": int(cfg.model.img_size),
+            "bs": int(getattr(cfg.data, "batch_size", 1) or 1),
+            "depth": int(cfg.model.depth),
+            "embed_dim": int(cfg.model.embed_dim),
+            "num_heads": int(cfg.model.num_heads),
+            "mlp_ratio": float(cfg.model.mlp_ratio),
+            "tp_world_size": int(getattr(cfg.hw, "tp_world_size", 1) or 1),
+            "runs": int(getattr(cfg.hw, "proxy_runs", 10) or 10),
+            "warmup": int(getattr(cfg.hw, "proxy_warmup", 5) or 5),
+        }
+        use_multi_proxy = bool(getattr(cfg.hw, "multi_device_proxy", True))
+        if use_multi_proxy:
+            hw_proxy = MultiDeviceHwOracle(cfg.hw.gpu_yaml, weight_dir=proxy_weight_dir, run_ctx=run_ctx)
+        else:
+            hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, proxy_weight_dir, run_ctx=run_ctx)
         mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
         # v5.4: build discrete sites + deterministic initial assign (SPEC_B)
         chip_max_w = max(library.get(n).width_mm for n in cfg.chiplet.candidate_types)
@@ -1306,6 +1311,7 @@ def train_version_c(
                                         layout_positions=wafer_layout.current_pos_continuous(),
                                         strategy=str(getattr(cfg.hw, "mapping_strategy", "greedy_local")),
                                         distance_scale_ms=float(getattr(cfg.hw, "distance_scale_ms", 0.0) or 0.0),
+                                        alpha=chiplet_slots()["alpha"],
                                     )
                                     mapping_for_hw = mapping_res_live.get("mapping", [])
                                     stable_hw_state["discrete_cache"]["mapping_signature"] = str(
@@ -2021,6 +2027,7 @@ def train_version_c(
                 layout_positions=wafer_layout.current_pos_continuous(),
                 strategy=getattr(cfg.hw, "mapping_strategy", "greedy_local"),
                 distance_scale_ms=getattr(cfg.hw, "distance_scale_ms", 0.0),
+                alpha=slot_out["alpha"],
             )
             mapping_canonical = mapping_result["mapping"]
             _export_layout_input(

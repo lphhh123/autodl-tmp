@@ -1,5 +1,5 @@
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import yaml
 
@@ -12,9 +12,15 @@ class MultiDeviceHwOracle:
     This class is used by the mapper and layout code.
     """
 
-    def __init__(self, gpu_yaml: str, chip_types: List[str], weight_dir: str = "proxy_weights"):
+    def __init__(
+        self,
+        gpu_yaml: str,
+        chip_types: Optional[List[str]] = None,
+        weight_dir: str = "proxy_weights",
+        run_ctx: Optional[Dict[str, Any]] = None,
+    ):
         self.gpu_yaml = gpu_yaml
-        self.chip_types = chip_types
+        self.chip_types = list(chip_types) if chip_types is not None else []
         self.weight_dir = weight_dir
         with open(gpu_yaml, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -24,17 +30,45 @@ class MultiDeviceHwOracle:
             self.chip_map = data or {}
         self.defaults = {}
 
-        self.proxies: Dict[str, LayerHwProxy] = {}
-        for dev in chip_types:
-            self.proxies[dev] = LayerHwProxy(dev, gpu_yaml=gpu_yaml, weight_dir=weight_dir, run_ctx=None)
+        if not self.chip_types:
+            self.chip_types = list(self.chip_map.keys())
 
-    def predict_layer_on_device(self, layer_row: Dict[str, Any], device_name: str) -> Dict[str, float]:
+        self.proxies: Dict[str, LayerHwProxy] = {}
+        for dev in self.chip_types:
+            self.proxies[dev] = LayerHwProxy(
+                dev,
+                gpu_yaml=gpu_yaml,
+                weight_dir=weight_dir,
+                run_ctx=run_ctx,
+            )
+
+    def get_device_cfg(self, device_name: str) -> Dict[str, Any]:
+        if device_name not in self.chip_map:
+            raise RuntimeError(
+                f"[ProxyMissing] device_name={device_name} not found in gpu_yaml={self.gpu_yaml}"
+            )
+        return dict(self.chip_map.get(device_name, {}))
+
+    def predict_layer_on_device(
+        self,
+        layer_row: Dict[str, Any],
+        device_name: str,
+        device_cfg: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
         proxy = self.proxies[device_name]
-        pred = proxy.predict_layers_batch([layer_row])
+        cfg = dict(device_cfg) if device_cfg is not None else self.get_device_cfg(device_name)
+        row = dict(layer_row)
+        row["device_cfg"] = cfg
+        pred = proxy.predict_layers_batch([row])
+        latency_ms = float(pred["lat_ms"][0])
+        mem_mb = float(pred["mem_mb"][0])
+        power_w = float(pred["power_w"][0])
+        energy_mj = power_w * latency_ms / 1000.0
         return {
-            "ms": float(pred["lat_ms"][0]),
-            "mem_mb": float(pred["mem_mb"][0]),
-            "power_w": float(pred["power_w"][0]),
+            "latency_ms": latency_ms,
+            "peak_mem_mb": mem_mb,
+            "energy_mj": energy_mj,
+            "avg_power_w": power_w,
         }
 
     # Convenience helpers for mapping / layout
@@ -92,9 +126,9 @@ def estimate_segment_hw_for_device(
 
     for row in segment_layers:
         pred = oracle.predict_layer_on_device(row, device_name=device_name)
-        ms = pred["ms"]
-        mem_mb = pred["mem_mb"]
-        power_w = pred["power_w"]
+        ms = pred["latency_ms"]
+        mem_mb = pred["peak_mem_mb"]
+        power_w = pred["avg_power_w"]
 
         total_ms += ms
         peak_mem_mb = max(peak_mem_mb, mem_mb)

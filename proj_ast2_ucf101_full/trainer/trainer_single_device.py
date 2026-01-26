@@ -269,10 +269,13 @@ def train_single_device(
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
+    proxy_weight_dir = str(getattr(cfg.hw, "weight_dir", "") or getattr(cfg.hw, "proxy_weight_dir", ""))
+    if not proxy_weight_dir:
+        raise RuntimeError("[ProxyMissing] cfg.hw.weight_dir or cfg.hw.proxy_weight_dir must be set.")
     hw_proxy = LayerHwProxy(
         cfg.hw.device_name,
         cfg.hw.gpu_yaml,
-        cfg.hw.proxy_weight_dir,
+        proxy_weight_dir,
         run_ctx={
             "img": int(cfg.model.img_size),
             "bs": int(getattr(cfg.data, "batch_size", 1) or 1),

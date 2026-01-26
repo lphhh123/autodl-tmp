@@ -378,12 +378,13 @@ class LayerHwProxy:
         self.run_ctx.setdefault("device", self.device_name)
         self.run_ctx.setdefault("cfg", "default")
 
-        # Detect NEW .pt ckpts
+        # Detect NEW .pt ckpts (prefer per-device subdir if present)
         ckpt_dir = None
-        if (self.weight_dir / "proxy_ms.pt").is_file():
+        device_dir = self.weight_dir / self.device_name
+        if (device_dir / "proxy_ms.pt").is_file():
+            ckpt_dir = device_dir
+        elif (self.weight_dir / "proxy_ms.pt").is_file():
             ckpt_dir = self.weight_dir
-        elif (self.weight_dir / self.device_name / "proxy_ms.pt").is_file():
-            ckpt_dir = self.weight_dir / self.device_name
 
         self._tabular: Optional[_Tabular3Proxy] = None
         self.lat_model = None
@@ -392,6 +393,12 @@ class LayerHwProxy:
 
         if ckpt_dir is not None:
             self._tabular = _Tabular3Proxy(ckpt_dir)
+            ckpt_files = ["proxy_ms.pt", "proxy_peak_mem_mb.pt", "proxy_energy_mj.pt"]
+            found = [name for name in ckpt_files if (ckpt_dir / name).is_file()]
+            print(
+                "[LayerHwProxy][ckpt] "
+                f"device={self.device_name} ckpt_dir={ckpt_dir} files={found}"
+            )
         else:
             # legacy .pth
             pth_dir = self.weight_dir
@@ -404,6 +411,10 @@ class LayerHwProxy:
             self.lat_model = self._load_model(pth_dir / "latency_proxy.pth", in_dim)
             self.mem_model = self._load_model(pth_dir / "mem_proxy.pth", in_dim)
             self.power_model = self._load_model(pth_dir / "power_proxy.pth", in_dim)
+            print(
+                "[LayerHwProxy][ckpt] "
+                f"device={self.device_name} legacy_dir={pth_dir} files=[latency_proxy.pth, mem_proxy.pth, power_proxy.pth]"
+            )
 
     def _load_model(self, path: Path, in_dim: int) -> LayerProxyModel:
         if not path.is_file():
