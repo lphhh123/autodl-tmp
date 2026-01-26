@@ -26,7 +26,7 @@ class MultiDeviceHwOracle:
 
         self.proxies: Dict[str, LayerHwProxy] = {}
         for dev in chip_types:
-            self.proxies[dev] = LayerHwProxy(dev, gpu_yaml=gpu_yaml, weight_dir=weight_dir)
+            self.proxies[dev] = LayerHwProxy(dev, gpu_yaml=gpu_yaml, weight_dir=weight_dir, run_ctx=None)
 
     def predict_layer_on_device(self, layer_row: Dict[str, Any], device_name: str) -> Dict[str, float]:
         proxy = self.proxies[device_name]
