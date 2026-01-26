@@ -269,22 +269,7 @@ def train_single_device(
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
-    hw_proxy = LayerHwProxy(
-        cfg.hw.device_name,
-        cfg.hw.gpu_yaml,
-        cfg.hw.proxy_weight_dir,
-        run_ctx={
-            "img": int(cfg.model.img_size),
-            "bs": int(getattr(cfg.data, "batch_size", 1) or 1),
-            "depth": int(cfg.model.depth),
-            "embed_dim": int(cfg.model.embed_dim),
-            "num_heads": int(cfg.model.num_heads),
-            "mlp_ratio": float(cfg.model.mlp_ratio),
-            "tp_world_size": int(getattr(cfg.hw, "tp_world_size", 1) or 1),
-            "runs": int(getattr(cfg.hw, "proxy_runs", 10) or 10),
-            "warmup": int(getattr(cfg.hw, "proxy_warmup", 5) or 5),
-        },
-    )
+    hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
     stable_hw_cfg = getattr(cfg, "stable_hw", None)
     stable_state: Dict[str, Any] = {}
     if out_dir is not None:

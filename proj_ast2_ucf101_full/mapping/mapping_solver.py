@@ -47,7 +47,6 @@ class MappingSolver:
                 }
                 layers_cfg.append(
                     {
-                        "layer_kind": getattr(seg, "kind", "other"),
                         "layer_type": layer_type,
                         "flops": seg.flops,
                         "bytes": seg.bytes,
@@ -56,7 +55,6 @@ class MappingSolver:
                         "mlp_ratio": seg.mlp_ratio,
                         "seq_len": seg.seq_len,
                         "precision": seg.precision,
-                        "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
                         "device_cfg": device_cfg,
                     }
                 )
@@ -89,7 +87,6 @@ class MappingSolver:
                 }
                 layers_cfg.append(
                     {
-                        "layer_kind": getattr(seg, "kind", "other"),
                         "layer_type": layer_type,
                         "flops": float(seg.flops),
                         "bytes": float(seg.bytes),
@@ -98,7 +95,6 @@ class MappingSolver:
                         "mlp_ratio": float(seg.mlp_ratio),
                         "seq_len": float(seg.seq_len),
                         "precision": float(seg.precision),
-                        "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
                         "device_cfg": device_cfg,
                     }
                 )

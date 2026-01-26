@@ -803,22 +803,7 @@ def train_version_c(
         chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
         optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
 
-    hw_proxy = LayerHwProxy(
-        cfg.hw.device_name,
-        cfg.hw.gpu_yaml,
-        cfg.hw.proxy_weight_dir,
-        run_ctx={
-            "img": int(cfg.model.img_size),
-            "bs": int(getattr(cfg.data, "batch_size", 1) or 1),
-            "depth": int(cfg.model.depth),
-            "embed_dim": int(cfg.model.embed_dim),
-            "num_heads": int(cfg.model.num_heads),
-            "mlp_ratio": float(cfg.model.mlp_ratio),
-            "tp_world_size": int(getattr(cfg.hw, "tp_world_size", 1) or 1),
-            "runs": int(getattr(cfg.hw, "proxy_runs", 10) or 10),
-            "warmup": int(getattr(cfg.hw, "proxy_warmup", 5) or 5),
-        },
-    )
+        hw_proxy = LayerHwProxy(cfg.hw.device_name, cfg.hw.gpu_yaml, cfg.hw.proxy_weight_dir)
         mapping_solver = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
         # v5.4: build discrete sites + deterministic initial assign (SPEC_B)
         chip_max_w = max(library.get(n).width_mm for n in cfg.chiplet.candidate_types)
