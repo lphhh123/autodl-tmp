@@ -66,7 +66,7 @@ hw:
   mode: "version_c_full"
   device_name: "RTX3090_FP16"
   gpu_yaml: "./configs/gpu_data.yaml"
-  proxy_weight_dir: "./proxy_ckpts_3090"
+  proxy_weight_dir: "./proxy_weights"
   # v5.4: do NOT use legacy direct-sum HW loss; StableHW will control lambda_hw_effective.
   lambda_hw: 0.0
   lambda_T: 1.0e-3
