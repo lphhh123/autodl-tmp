@@ -255,6 +255,8 @@ class _Tabular3Proxy:
         head_dim = float(embed_dim) / max(1.0, float(num_heads))
 
         return {
+            "device": str(cfg.get("device", run_ctx.get("device", "unknown"))),
+            "cfg": str(cfg.get("cfg", run_ctx.get("cfg", "default"))),
             "img": float(run_ctx.get("img", 224)),
             "bs": float(run_ctx.get("bs", 1)),
             "keep_ratio": keep_ratio,
@@ -373,6 +375,8 @@ class LayerHwProxy:
         self.run_ctx.setdefault("tp_world_size", 1)
         self.run_ctx.setdefault("runs", 10)
         self.run_ctx.setdefault("warmup", 5)
+        self.run_ctx.setdefault("device", self.device_name)
+        self.run_ctx.setdefault("cfg", "default")
 
         # Detect NEW .pt ckpts
         ckpt_dir = None
@@ -402,9 +406,10 @@ class LayerHwProxy:
             self.power_model = self._load_model(pth_dir / "power_proxy.pth", in_dim)
 
     def _load_model(self, path: Path, in_dim: int) -> LayerProxyModel:
+        if not path.is_file():
+            raise RuntimeError(f"[ProxyMissing] legacy proxy weight not found: {path}")
         model = LayerProxyModel(in_dim)
-        if path.is_file():
-            model.load_state_dict(torch.load(path, map_location="cpu"))
+        model.load_state_dict(torch.load(path, map_location="cpu"))
         return model
 
     def predict_layers_batch(self, layers_cfg: List[Dict]) -> Dict[str, np.ndarray]:
