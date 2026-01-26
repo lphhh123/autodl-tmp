@@ -5,6 +5,7 @@ Backends:
     proxy_ms.pt
     proxy_peak_mem_mb.pt
     proxy_energy_mj.pt
+    proxy_avg_power_w.pt
 - LEGACY .pth (fallback):
     latency_proxy.pth
     mem_proxy.pth
@@ -211,8 +212,8 @@ class _TabularBundle:
         x = self.build_x(rows, device=device)
         y = self.model(x).squeeze(-1)
         if self.target_mode.lower() == "log":
-            # exp(log(x+eps)) - eps ; keep strictly positive
-            y = torch.exp(y) - 1e-6
+            # train_one_proxy uses log1p_safe => invert with expm1
+            y = torch.expm1(y)
             y = torch.clamp(y, min=1e-6)
         return torch.clamp(y, min=0.0)
 
@@ -224,13 +225,16 @@ class _Tabular3Proxy:
         ms_pt = ckpt_dir / "proxy_ms.pt"
         mem_pt = ckpt_dir / "proxy_peak_mem_mb.pt"
         eng_pt = ckpt_dir / "proxy_energy_mj.pt"
-        if not (ms_pt.is_file() and mem_pt.is_file() and eng_pt.is_file()):
+        pwr_pt = ckpt_dir / "proxy_avg_power_w.pt"
+        if not (ms_pt.is_file() and mem_pt.is_file() and eng_pt.is_file() and pwr_pt.is_file()):
             raise FileNotFoundError(
-                f"[ProxyMissing] expected in {ckpt_dir}: proxy_ms.pt, proxy_peak_mem_mb.pt, proxy_energy_mj.pt"
+                f"[ProxyMissing] expected in {ckpt_dir}: "
+                "proxy_ms.pt, proxy_peak_mem_mb.pt, proxy_energy_mj.pt, proxy_avg_power_w.pt"
             )
         self.ms = _TabularBundle(ms_pt)
         self.mem = _TabularBundle(mem_pt)
         self.eng = _TabularBundle(eng_pt)
+        self.pwr = _TabularBundle(pwr_pt)
 
     @staticmethod
     def _layer_type_str(cfg: Dict[str, Any]) -> str:
@@ -318,21 +322,21 @@ class _Tabular3Proxy:
                 rows_ms.append(r)
             ms = self.ms.predict(rows_ms, device=device)
 
-        # energy -> power
-        rows_eng = []
+        # power directly (avg_power_w proxy) — no leakage features
+        rows_pwr = []
         for i, base in enumerate(rows_base):
-            dc = layers_cfg[i].get("device_cfg", default_device_cfg) or {}
-            avg_power_w = _to_t(dc.get("tdp_w", 200.0), device=device)
             r = dict(base)
-            r["avg_power_w"] = avg_power_w
-            r["ms_event"] = ms[i]
+            # keep only universally-available context features (runs/warmup exist in dataset)
             r["runs"] = float(run_ctx.get("runs", 10))
             r["warmup"] = float(run_ctx.get("warmup", 5))
-            rows_eng.append(r)
-        energy_mj = self.eng.predict(rows_eng, device=device)
+            rows_pwr.append(r)
 
-        power_w = energy_mj * 1000.0 / (ms + 1e-6)
+        power_w = self.pwr.predict(rows_pwr, device=device)
         power_w = torch.clamp(power_w, min=0.0)
+
+        # optional: keep energy proxy available for future use, but DO NOT feed avg_power_w/ms_event
+        # if you want an internal energy estimate, use physics-consistent energy=power*ms (W*ms=mJ)
+        # energy_mj = power_w * ms
         return torch.clamp(ms, min=0.0), torch.clamp(mem_mb, min=0.0), power_w
 
     @torch.no_grad()
@@ -393,7 +397,7 @@ class LayerHwProxy:
 
         if ckpt_dir is not None:
             self._tabular = _Tabular3Proxy(ckpt_dir)
-            ckpt_files = ["proxy_ms.pt", "proxy_peak_mem_mb.pt", "proxy_energy_mj.pt"]
+            ckpt_files = ["proxy_ms.pt", "proxy_peak_mem_mb.pt", "proxy_energy_mj.pt", "proxy_avg_power_w.pt"]
             found = [name for name in ckpt_files if (ckpt_dir / name).is_file()]
             print(
                 "[LayerHwProxy][ckpt] "
@@ -490,7 +494,7 @@ class LayerHwProxy:
             pred = self.predict_layers_batch(layers_cfg)
             lat_ms = float(np.sum(pred["lat_ms"]))
             mem_mb = float(np.max(pred["mem_mb"])) if pred["mem_mb"].size > 0 else 0.0
-            energy_mj = float(np.sum(pred["power_w"] * pred["lat_ms"])) / 1000.0 if pred["power_w"].size > 0 else 0.0
+            energy_mj = float(np.sum(pred["power_w"] * pred["lat_ms"])) if pred["power_w"].size > 0 else 0.0
             return {"latency_ms": lat_ms, "mem_mb": mem_mb, "energy_mj": energy_mj}
 
         base_latency = float(model_info.get("latency_ms_ref", 1.0))
