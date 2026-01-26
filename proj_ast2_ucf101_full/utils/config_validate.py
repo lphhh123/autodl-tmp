@@ -338,6 +338,18 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         )
 
     STRICT = bool(get_nested(cfg, "_contract.strict", False))
+    from pathlib import Path as _Path
+    from utils.proxy_ckpt_links import ensure_proxy_ckpts_dir
+    # ---- v5.4 helper: ensure NEW tabular proxy ckpts dir exists (no command change required) ----
+    try:
+        hw_proxy_dir = get_nested(cfg, "hw.proxy_weight_dir", None)
+        hw_device = get_nested(cfg, "hw.device_name", None)
+        if isinstance(hw_proxy_dir, str) and hw_proxy_dir.startswith("./proxy_ckpts/") and isinstance(hw_device, str):
+            project_root = _Path(__file__).resolve().parents[1]
+            dst_dir = (project_root / hw_proxy_dir).resolve()
+            ensure_proxy_ckpts_dir(project_root, hw_device, dst_dir)
+    except Exception as _e:
+        raise RuntimeError(f"[v5.4][ProxyCkptResolveError] {_e}") from _e
     if not STRICT:
         cfg._contract.overrides.append(
             {
