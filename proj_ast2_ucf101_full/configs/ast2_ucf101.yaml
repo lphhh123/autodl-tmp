@@ -66,8 +66,8 @@ hw:
   mode: "version_c_full"
   device_name: "RTX3090_FP16"
   gpu_yaml: "./configs/gpu_data.yaml"
-  # NEW: tabular .pt proxy root (auto-resolved to per-device dir by validate_and_fill_defaults)
-  proxy_weight_dir: "./proxy_ckpts/${hw.device_name}"
+  # NEW tabular proxy root (real per-device dir will be proxy_ckpts/<device_name>/)
+  proxy_weight_dir: "./proxy_ckpts"
   # v5.4: do NOT use legacy direct-sum HW loss; StableHW will control lambda_hw_effective.
   lambda_hw: 0.0
   lambda_T: 1.0e-3

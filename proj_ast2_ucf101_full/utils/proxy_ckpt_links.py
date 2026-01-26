@@ -21,9 +21,11 @@ REQUIRED_FILES: List[str] = [
 
 def ensure_proxy_ckpts_dir(project_root: Path, device_name: str, dst_dir: Path) -> None:
     """
-    Ensure dst_dir exists and contains REQUIRED_FILES.
-    If missing, copy from project_root/{DEVICE_TO_SRC_DIR[device_name]}.
-    Fail-fast if src folder or files are missing.
+    Ensure dst_dir exists and contains REQUIRED_FILES for THIS device_name.
+    Always guarantees correctness:
+      - uses per-device dst_dir (proxy_ckpts/<device_name>/)
+      - uses marker to detect mismatch
+      - overwrites files from src_dir if mismatch or missing
     """
     project_root = Path(project_root).resolve()
     dst_dir = Path(dst_dir).resolve()
@@ -41,7 +43,6 @@ def ensure_proxy_ckpts_dir(project_root: Path, device_name: str, dst_dir: Path) 
             f"Expected a trained proxy directory at: {project_root}/{DEVICE_TO_SRC_DIR[device_name]}"
         )
 
-    # verify src files
     missing_src = [f for f in REQUIRED_FILES if not (src_dir / f).is_file()]
     if missing_src:
         raise RuntimeError(
@@ -49,17 +50,22 @@ def ensure_proxy_ckpts_dir(project_root: Path, device_name: str, dst_dir: Path) 
             f"Please re-run proxy training to generate {REQUIRED_FILES}."
         )
 
-    # ensure dst
     dst_dir.mkdir(parents=True, exist_ok=True)
 
-    # copy if missing
-    for f in REQUIRED_FILES:
-        src = src_dir / f
-        dst = dst_dir / f
-        if not dst.is_file():
-            shutil.copy2(src, dst)
+    marker = dst_dir / "_DEVICE_NAME.txt"
+    if marker.is_file():
+        old = marker.read_text(encoding="utf-8").strip()
+        if old != device_name:
+            # mismatch => clear and recreate
+            shutil.rmtree(dst_dir)
+            dst_dir.mkdir(parents=True, exist_ok=True)
 
-    # final verify
+    # Always copy (overwrite) to guarantee correct device content
+    for f in REQUIRED_FILES:
+        shutil.copy2(src_dir / f, dst_dir / f)
+
+    marker.write_text(device_name, encoding="utf-8")
+
     missing_dst = [f for f in REQUIRED_FILES if not (dst_dir / f).is_file()]
     if missing_dst:
         raise RuntimeError(
