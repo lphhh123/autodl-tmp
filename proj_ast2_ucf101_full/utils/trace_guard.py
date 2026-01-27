@@ -403,6 +403,31 @@ def init_trace_dir(
     requested_snap = requested_config
     effective_snap = effective_snapshot_obj
 
+    def _clean_overrides(ov):
+        out = []
+        if ov is None:
+            return out
+        for it in ov:
+            if not isinstance(it, dict):
+                continue
+            path = it.get("path", None)
+            reason = it.get("reason", None)
+            if not isinstance(path, str) or not path.strip():
+                continue
+            if not isinstance(reason, str) or not reason.strip():
+                continue
+            out.append(
+                {
+                    "path": path.strip(),
+                    "requested": it.get("requested", None),
+                    "effective": it.get("effective", None),
+                    "reason": reason.strip(),
+                }
+            )
+        return out
+
+    overrides = _clean_overrides(overrides)
+
     trace_header_payload = build_trace_header_payload_v54(
         signature=signature,
         requested_config=requested_snap,

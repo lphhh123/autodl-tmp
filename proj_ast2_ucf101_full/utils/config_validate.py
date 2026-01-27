@@ -142,10 +142,14 @@ def _augment_contract_overrides(contract: Any) -> None:
     for o in overrides or []:
         if isinstance(o, dict):
             p = o.get("path")
-            if p:
-                existing.add(p)
+            if isinstance(p, str) and p.strip():
+                existing.add(p.strip())
 
     for (p, r, e) in diffs:
+        # 防止根 diff 产生空 path
+        if not isinstance(p, str) or not p.strip():
+            continue
+        p = p.strip()
         if p in existing:
             continue
         overrides.append(
@@ -1197,53 +1201,52 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         # ---- SPEC_E: sanitize contract overrides to auditable schema ----
         raw_overrides = contract.get("overrides", []) or []
         sanitized = []
+
+        def _push(path, requested, effective, reason):
+            if not isinstance(path, str):
+                return
+            path = path.strip()
+            if not path:
+                return
+            if not isinstance(reason, str):
+                return
+            reason = reason.strip()
+            if not reason:
+                return
+            sanitized.append(
+                {
+                    "path": path,
+                    "requested": requested,
+                    "effective": effective,
+                    "reason": reason,
+                }
+            )
+
         for it in raw_overrides:
             if not isinstance(it, dict):
                 continue
-            # already compliant
+
+            # compliant shape
             if all(k in it for k in ("path", "requested", "effective", "reason")):
-                path_str = str(it.get("path", "")).strip()
-                reason_str = str(it.get("reason", "")).strip()
-                if not path_str:
-                    # drop unauditable entry (empty path)
-                    continue
-                if not reason_str:
-                    # drop unauditable entry (empty reason)
-                    continue
-                sanitized.append(
-                    {
-                        "path": path_str,
-                        "requested": it["requested"],
-                        "effective": it["effective"],
-                        "reason": reason_str,
-                    }
-                )
+                _push(it.get("path"), it.get("requested"), it.get("effective"), it.get("reason"))
                 continue
-            # legacy shape from older scripts: key_path/old/new
+
+            # legacy shape
             if all(k in it for k in ("key_path", "old", "new")):
-                path_str = str(it.get("key_path", "")).strip()
-                reason_str = str(it.get("reason", "legacy_override")).strip()
-                if not path_str:
-                    continue
-                if not reason_str:
-                    continue
-                sanitized.append(
-                    {
-                        "path": path_str,
-                        "requested": it["old"],
-                        "effective": it["new"],
-                        "reason": reason_str,
-                    }
+                _push(
+                    it.get("key_path"),
+                    it.get("old"),
+                    it.get("new"),
+                    it.get("reason", "legacy_override"),
                 )
                 continue
-            # unknown shape -> drop (fail-closed semantics: do not emit unauditable evidence)
+
+            # unknown shape -> drop
             continue
-        dropped = len(raw_overrides) - len(sanitized)
-        if dropped > 0:
-            print(
-                f"[v5.4 contract] dropped {dropped} unauditable override entries (empty path/reason or unknown schema)"
-            )
-        overrides = sanitized
+
+        # IMPORTANT: write back
+        contract["overrides"] = sanitized
+        overrides = contract["overrides"]
 
         # prevent duplicates
         existing = set()
