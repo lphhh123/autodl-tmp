@@ -6,7 +6,7 @@ import os
 from types import SimpleNamespace
 from pathlib import Path
 
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
 from .config_utils import get_nested, set_nested
 from .config import AttrDict
@@ -177,9 +177,23 @@ def _sync_layout_to_hw(cfg: Any) -> None:
             set_nested(cfg, dst, v)
 
 
+def _new_empty_ns(parent: Any):
+    """
+    Create an empty mapping node compatible with the parent container.
+    - If parent is OmegaConf DictConfig: return OmegaConf.create({})
+    - Else (AttrDict or others): return AttrDict({})
+    """
+    try:
+        if isinstance(parent, DictConfig):
+            return OmegaConf.create({})
+    except Exception:
+        pass
+    return AttrDict({})
+
+
 def _ensure_namespace(cfg: Any, key: str) -> Any:
     if not hasattr(cfg, key) or getattr(cfg, key) is None:
-        setattr(cfg, key, AttrDict({}))
+        setattr(cfg, key, _new_empty_ns(cfg))
     return getattr(cfg, key)
 
 
@@ -414,8 +428,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     def _stamp_contract(cfg_to_stamp: Any) -> Any:
         # ===== v5.4 contract stamp (MUST exist for any v5.4 run) =====
-        if not hasattr(cfg_to_stamp, "contract"):
-            cfg_to_stamp.contract = AttrDict({})
+        try:
+            OmegaConf.set_struct(cfg_to_stamp, False)
+        except Exception:
+            pass
+        if not hasattr(cfg_to_stamp, "contract") or getattr(cfg_to_stamp, "contract") is None:
+            cfg_to_stamp.contract = _new_empty_ns(cfg_to_stamp)
         cfg_to_stamp.contract.version = "v5.4"
         cfg_to_stamp.contract.validated = True
         cfg_to_stamp.contract.validated_by = "validate_and_fill_defaults"
@@ -650,8 +668,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 )
     elif mode == "ast2":
         # minimal defaults for reproducibility
-        if not hasattr(cfg, "train"):
-            cfg.train = AttrDict({})
+        if not hasattr(cfg, "train") or getattr(cfg, "train") is None:
+            cfg.train = _new_empty_ns(cfg)
         if getattr(cfg.train, "seed", None) is None:
             cfg.train.seed = 2024
         return _stamp_contract(cfg)
@@ -669,13 +687,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             },
         )
 
-        if not hasattr(cfg, "objective"):
-            cfg.objective = AttrDict({})
+        if not hasattr(cfg, "objective") or getattr(cfg, "objective") is None:
+            cfg.objective = _new_empty_ns(cfg)
         if getattr(cfg.objective, "sigma_mm", None) is None:
             cfg.objective.sigma_mm = 2.0
 
-        if not hasattr(cfg.objective, "scalar_weights"):
-            cfg.objective.scalar_weights = AttrDict({})
+        if not hasattr(cfg.objective, "scalar_weights") or getattr(cfg.objective, "scalar_weights") is None:
+            cfg.objective.scalar_weights = _new_empty_ns(cfg.objective)
         sw = cfg.objective.scalar_weights
         if getattr(sw, "w_comm", None) is None:
             sw.w_comm = 1.0
@@ -685,8 +703,8 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             sw.w_penalty = 1.0
 
         # optional oscillation metric defaults
-        if not hasattr(cfg, "oscillation"):
-            cfg.oscillation = AttrDict({})
+        if not hasattr(cfg, "oscillation") or getattr(cfg, "oscillation") is None:
+            cfg.oscillation = _new_empty_ns(cfg)
         if getattr(cfg.oscillation, "window", None) is None:
             cfg.oscillation.window = 10
         if getattr(cfg.oscillation, "eps_flat", None) is None:
@@ -719,7 +737,7 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
         # ---- v5.4: unify budget fields for layout pipelines ----
         if not hasattr(cfg, "budget") or cfg.budget is None:
-            cfg.budget = AttrDict({})
+            cfg.budget = _new_empty_ns(cfg)
         budget = cfg.budget
 
         if getattr(budget, "total_eval_budget", None) is None:
