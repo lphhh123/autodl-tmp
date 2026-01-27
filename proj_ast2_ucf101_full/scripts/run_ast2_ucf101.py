@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
+from utils.check_cfg_integrity import check_cfg_integrity
 from utils.seed import seed_everything
 from utils.trace_guard import init_trace_dir_v54
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
@@ -35,20 +36,6 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
     return cur
 
 
-def check_cfg_integrity(cfg):
-    from utils.trace_contract_v54 import compute_effective_cfg_digest_v54
-
-    seal_digest = str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")
-    cur = compute_effective_cfg_digest_v54(cfg)
-    if cur != seal_digest:
-        raise RuntimeError(
-            f"[v5.4 P0] cfg mutated before training start. "
-            f"cur_digest={cur} seal_digest={seal_digest}. "
-            f"Do not write cfg.* after validate_and_fill_defaults()."
-        )
-    return seal_digest
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, default="./configs/ast2_ucf101.yaml")
@@ -58,10 +45,11 @@ def main():
     args = parser.parse_args()
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
+    seed = int(args.seed)
     # ensure train node exists even if YAML has train: null
     if not hasattr(cfg, "train") or OmegaConf.select(cfg, "train") is None:
         OmegaConf.update(cfg, "train", {}, merge=True)
-    seed = int(args.seed)
+    # Ensure `cfg.train.run_id` is set before seal_digest
     if not hasattr(cfg.train, "run_id") or not cfg.train.run_id:
         cfg.train.run_id = uuid.uuid4().hex
     cli_out = args.out_dir or args.out
