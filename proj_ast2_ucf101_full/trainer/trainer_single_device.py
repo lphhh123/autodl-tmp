@@ -195,20 +195,38 @@ def train_single_device(
         raise RuntimeError("v5.4 contract violation: trace_events_path missing for single-device training")
 
     if trace_events_path is not None:
+        def _to_plain(obj, resolve: bool):
+            if obj is None:
+                return None
+            if OmegaConf.is_config(obj):
+                return OmegaConf.to_container(obj, resolve=resolve)
+            return obj
+
         contract_meta = getattr(cfg, "_contract", None)
-        requested_cfg = (
-            getattr(contract_meta, "requested_config_snapshot", None) if contract_meta is not None else None
-        )
+        requested_cfg = getattr(contract_meta, "requested_config_snapshot", None) if contract_meta is not None else None
         if requested_cfg is None:
-            requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
-        effective_cfg = (
-            getattr(contract_meta, "effective_config_snapshot", None) if contract_meta is not None else None
-        )
+            requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", None)
+        requested_cfg = _to_plain(requested_cfg, resolve=False)
+        if requested_cfg is None:
+            requested_cfg = {}
+
+        effective_cfg = getattr(contract_meta, "effective_config_snapshot", None) if contract_meta is not None else None
         if effective_cfg is None:
             effective_cfg = OmegaConf.to_container(cfg, resolve=True)
+        effective_cfg = _to_plain(effective_cfg, resolve=True)
+        if effective_cfg is None:
+            effective_cfg = OmegaConf.to_container(cfg, resolve=True)
+
         contract_overrides = getattr(contract_meta, "overrides", None) if contract_meta is not None else None
         if contract_overrides is None:
-            contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+            contract_overrides = get_nested(cfg, "_contract.overrides", None)
+        contract_overrides = _to_plain(contract_overrides, resolve=False)
+        if contract_overrides is None:
+            contract_overrides = []
+        if isinstance(contract_overrides, dict):
+            contract_overrides = [contract_overrides]
+        elif not isinstance(contract_overrides, list):
+            contract_overrides = []
 
         trace_header_payload = build_trace_header_payload_v54(
             cfg=cfg,

@@ -977,6 +977,57 @@ def build_trace_header_payload_v54(
         requested_config = requested_config_snapshot
     if effective_config is None and effective_config_snapshot is not None:
         effective_config = effective_config_snapshot
+
+    def _to_plain_dict_or_str(x, resolve: bool):
+        if x is None:
+            return None
+        if OmegaConf.is_config(x):
+            x = OmegaConf.to_container(x, resolve=resolve)
+        return x
+
+    def _sanitize_overrides(ov):
+        dropped = 0
+        if ov is None:
+            return [], 0
+        if OmegaConf.is_config(ov):
+            ov = OmegaConf.to_container(ov, resolve=False)
+        if isinstance(ov, dict):
+            ov = [ov]
+        if not isinstance(ov, list):
+            return [], 0
+
+        out = []
+        for it in ov:
+            if OmegaConf.is_config(it):
+                it = OmegaConf.to_container(it, resolve=False)
+            if not isinstance(it, dict):
+                dropped += 1
+                continue
+            row = {
+                "path": it.get("path", ""),
+                "requested": it.get("requested", None),
+                "effective": it.get("effective", None),
+                "reason": it.get("reason", ""),
+            }
+            if not isinstance(row["path"], str) or not row["path"].strip():
+                dropped += 1
+                continue
+            if not isinstance(row["reason"], str) or not row["reason"].strip():
+                dropped += 1
+                continue
+            out.append(row)
+        return out, dropped
+
+    requested_config = _to_plain_dict_or_str(requested_config, resolve=False)
+    effective_config = _to_plain_dict_or_str(effective_config, resolve=True)
+    if requested_config is None:
+        requested_config = {}
+    if effective_config is None:
+        effective_config = {}
+    contract_overrides, dropped = _sanitize_overrides(contract_overrides)
+    if dropped:
+        print(f"[v5.4 contract] dropped {dropped} unauditable override entries (bad type/empty path/reason)")
+
     payload = {}
     payload["signature"] = dict(signature or {})
 
