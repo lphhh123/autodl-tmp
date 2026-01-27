@@ -97,26 +97,41 @@ class UCF101Dataset(Dataset):
         super().__init__()
         self.cfg = cfg
         data_cfg = cfg.data
-        project_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[1]
+        workspace_root = repo_root.parent
         frames_root = Path(getattr(data_cfg, "frames_root", "data/ucf101/frames"))
         splits_root = Path(getattr(data_cfg, "splits_root", "data/ucf101/splits"))
         audio_root = getattr(data_cfg, "audio_root", None)
         if audio_root is not None:
             audio_root = Path(audio_root)
-        if not frames_root.is_absolute():
-            frames_root = project_root / frames_root
-        if not splits_root.is_absolute():
-            splits_root = project_root / splits_root
-        if audio_root is not None and not audio_root.is_absolute():
-            audio_root = project_root / audio_root
+
+        def resolve_root(path_value: Path) -> Path:
+            if path_value.is_absolute():
+                return path_value
+            repo_candidate = repo_root / path_value
+            if repo_candidate.exists():
+                return repo_candidate
+            workspace_candidate = workspace_root / path_value
+            if workspace_candidate.exists():
+                return workspace_candidate
+            return repo_candidate
+
+        frames_root = resolve_root(frames_root)
+        splits_root = resolve_root(splits_root)
+        if audio_root is not None:
+            audio_root = resolve_root(audio_root)
 
         self.root = frames_root
         self.splits_root = splits_root
 
-        split = str(split).lower()
-        if split in ("val", "valid", "validation"):
-            split = "test"
-        self.split = split
+        requested_split = str(split).lower()
+        if requested_split in ("val", "valid", "validation"):
+            split_label = "val"
+            split_mode = "test"
+        else:
+            split_label = requested_split
+            split_mode = requested_split
+        self.split = split_mode
         clip_lens = getattr(cfg.data, "clip_lens", None)
         clip_len = getattr(cfg.data, "clip_len", None)
         num_frames = getattr(cfg.data, "num_frames", None)
@@ -136,15 +151,40 @@ class UCF101Dataset(Dataset):
         self._audio_missing_warned = False
         self.is_train = self.split == "train"
         self.img_size = cfg.data.img_size
-        split_name = "trainlist01.txt" if self.split == "train" else "testlist01.txt"
-        split_file = self.splits_root / split_name
+        if split_label == "train":
+            split_name = getattr(cfg.data, "train_split", "trainlist01.txt")
+        elif split_label == "val":
+            split_name = getattr(cfg.data, "val_split", getattr(cfg.data, "test_split", "testlist01.txt"))
+        else:
+            split_name = getattr(cfg.data, "test_split", getattr(cfg.data, "val_split", "testlist01.txt"))
+        split_path = Path(split_name)
+        tried_split_files: List[Path] = []
+        if split_path.is_absolute():
+            split_file = split_path
+        elif len(split_path.parts) == 1:
+            split_file = self.splits_root / split_path
+        else:
+            split_file = repo_root / split_path
+        tried_split_files.append(split_file)
+        self.split_file = split_file
         if not split_file.is_file():
+            existing_txt = sorted(self.splits_root.glob("*.txt"))
+            existing_preview = [str(p) for p in existing_txt[:30]]
+            tried_paths = [str(p.resolve()) for p in tried_split_files]
             raise FileNotFoundError(
-                f"Split file not found: {split_file} (splits_root={self.splits_root})"
+                "Split file not found for split="
+                f"{split_label}. repo_root={repo_root}, workspace_root={workspace_root}, "
+                f"effective_splits_root={self.splits_root}, tried_split_files={tried_paths}, "
+                f"splits_root_txt_files={existing_preview}. "
+                "Ensure data exists under repo_root/data/ucf101 or workspace_root/data/ucf101, "
+                "or update cfg.data.splits_root/train_split/val_split/test_split."
             )
         print(
             "[UCF101Dataset DEBUG] "
-            f"frames_root={self.root}, splits_root={self.splits_root}, audio_root={self.audio_root}"
+            f"repo_root={repo_root}, workspace_root={workspace_root}, frames_root={self.root}, "
+            f"splits_root={self.splits_root}, split_file={split_file}, audio_root={self.audio_root}, "
+            f"exists(frames)={self.root.exists()}, exists(splits)={self.splits_root.exists()}, "
+            f"exists(split_file)={split_file.exists()}"
         )
 
         self.label_to_idx = _build_deterministic_label_map(self.root, split_file)
