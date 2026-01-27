@@ -23,3 +23,5 @@ ast:
   use_ast_prune: true
 hw:
   mode: none
+stable_hw:
+  enabled: true
