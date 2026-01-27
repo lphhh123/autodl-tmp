@@ -1202,28 +1202,47 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
                 continue
             # already compliant
             if all(k in it for k in ("path", "requested", "effective", "reason")):
+                path_str = str(it.get("path", "")).strip()
+                reason_str = str(it.get("reason", "")).strip()
+                if not path_str:
+                    # drop unauditable entry (empty path)
+                    continue
+                if not reason_str:
+                    # drop unauditable entry (empty reason)
+                    continue
                 sanitized.append(
                     {
-                        "path": str(it["path"]),
+                        "path": path_str,
                         "requested": it["requested"],
                         "effective": it["effective"],
-                        "reason": str(it["reason"]),
+                        "reason": reason_str,
                     }
                 )
                 continue
             # legacy shape from older scripts: key_path/old/new
             if all(k in it for k in ("key_path", "old", "new")):
+                path_str = str(it.get("key_path", "")).strip()
+                reason_str = str(it.get("reason", "legacy_override")).strip()
+                if not path_str:
+                    continue
+                if not reason_str:
+                    continue
                 sanitized.append(
                     {
-                        "path": str(it["key_path"]),
+                        "path": path_str,
                         "requested": it["old"],
                         "effective": it["new"],
-                        "reason": str(it.get("reason", "legacy_override")),
+                        "reason": reason_str,
                     }
                 )
                 continue
             # unknown shape -> drop (fail-closed semantics: do not emit unauditable evidence)
             continue
+        dropped = len(raw_overrides) - len(sanitized)
+        if dropped > 0:
+            print(
+                f"[v5.4 contract] dropped {dropped} unauditable override entries (empty path/reason or unknown schema)"
+            )
         overrides = sanitized
 
         # prevent duplicates
