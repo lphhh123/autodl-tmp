@@ -35,6 +35,20 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
     return cur
 
 
+def check_cfg_integrity(cfg):
+    from utils.trace_contract_v54 import compute_effective_cfg_digest_v54
+
+    seal_digest = str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")
+    cur = compute_effective_cfg_digest_v54(cfg)
+    if cur != seal_digest:
+        raise RuntimeError(
+            f"[v5.4 P0] cfg mutated before training start. "
+            f"cur_digest={cur} seal_digest={seal_digest}. "
+            f"Do not write cfg.* after validate_and_fill_defaults()."
+        )
+    return seal_digest
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, default="./configs/ast2_ucf101.yaml")
@@ -45,12 +59,11 @@ def main():
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
     # ensure train node exists even if YAML has train: null
-    if OmegaConf.select(cfg, "train") is None:
+    if not hasattr(cfg, "train") or OmegaConf.select(cfg, "train") is None:
         OmegaConf.update(cfg, "train", {}, merge=True)
     seed = int(args.seed)
-    rid = OmegaConf.select(cfg, "train.run_id")
-    if not rid:
-        OmegaConf.update(cfg, "train.run_id", uuid.uuid4().hex, merge=True)
+    if not hasattr(cfg.train, "run_id") or not cfg.train.run_id:
+        cfg.train.run_id = uuid.uuid4().hex
     cli_out = args.out_dir or args.out
     auto_out = f"outputs/ast2_auto"
     out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
@@ -151,16 +164,7 @@ def main():
         print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
-    from utils.trace_contract_v54 import compute_effective_cfg_digest_v54
-
-    seal_digest = str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")
-    cur = compute_effective_cfg_digest_v54(cfg)
-    if cur != seal_digest:
-        raise RuntimeError(
-            f"[v5.4 P0] cfg mutated before training start (pre-trainer). "
-            f"cur_digest={cur} seal_digest={seal_digest}. "
-            f"Do not write cfg.* after validate_and_fill_defaults()."
-        )
+    seal_digest = check_cfg_integrity(cfg)
     train_single_device(
         cfg,
         trace_events_path=str(trace_events_path),
