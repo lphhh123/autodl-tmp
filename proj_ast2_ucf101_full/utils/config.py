@@ -3,6 +3,8 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
+from omegaconf import OmegaConf
+
 
 class AttrDict(dict):
     def __getattr__(self, item):
@@ -31,6 +33,14 @@ def _to_attr(d: Any) -> Any:
         return AttrDict({k: _to_attr(v) for k, v in d.items()})
     if isinstance(d, list):
         return [_to_attr(x) for x in d]
+    return d
+
+
+def _to_plain(d: Any) -> Any:
+    if isinstance(d, dict):
+        return {k: _to_plain(v) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_to_plain(x) for x in d]
     return d
 
 
@@ -70,11 +80,12 @@ def _resolve_base_path(child_cfg_path: str, base_value: str) -> str:
     return str(cand1)
 
 
-def load_config(path: str, _seen: Optional[Set[str]] = None) -> AttrDict:
+def _load_config_dict(path: str, _seen: Optional[Set[str]] = None) -> Dict[str, Any]:
     if _seen is None:
         _seen = set()
 
-    abs_path = str(Path(os.path.expanduser(path)).resolve())
+    path = os.path.expanduser(path)
+    abs_path = str(Path(path).resolve())
     if abs_path in _seen:
         raise ValueError(f"[config] cyclic _base_ include detected: {abs_path}")
     _seen.add(abs_path)
@@ -84,9 +95,19 @@ def load_config(path: str, _seen: Optional[Set[str]] = None) -> AttrDict:
     base = cfg.get("_base_")
     if base:
         base_path = _resolve_base_path(abs_path, base)
-        base_cfg = load_config(base_path, _seen=_seen)
+        base_cfg = _load_config_dict(base_path, _seen=_seen)
         cfg.pop("_base_", None)
         merged = _merge_dict(base_cfg, cfg)
-        return _to_attr(merged)
+        return merged
 
-    return _to_attr(cfg)
+    return cfg
+
+
+def load_config(path: str):
+    """
+    Return OmegaConf DictConfig (NOT AttrDict), so OmegaConf.select/to_yaml/to_container work.
+    Supports recursive _base_ merge.
+    """
+    d = _load_config_dict(path)
+    d = _to_plain(d)
+    return OmegaConf.create(d)
