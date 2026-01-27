@@ -44,6 +44,9 @@ def main():
     args = parser.parse_args()
     cfg = load_config(args.cfg)
     cfg.cfg_path = args.cfg
+    # ensure train node exists even if YAML has train: null
+    if OmegaConf.select(cfg, "train") is None:
+        OmegaConf.update(cfg, "train", {}, merge=True)
     seed = int(args.seed)
     rid = OmegaConf.select(cfg, "train.run_id")
     if not rid:
@@ -53,15 +56,12 @@ def main():
     out_dir = Path(cli_out) if cli_out else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg.out_dir = str(out_dir)
-    if not hasattr(cfg, "train") or cfg.train is None:
-        cfg.train = {}
     if hasattr(cfg, "train"):
         cfg.train.out_dir = str(out_dir)
         cfg.train.seed = seed
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
     cfg = validate_and_fill_defaults(cfg, mode="single")
-    seal_digest = str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")
     signature = None
     # ---- v5.4 quick contract self-check (fail-fast before training) ----
     try:
@@ -93,9 +93,9 @@ def main():
     trace_base = out_dir / "trace"
     run_id = str(getattr(getattr(cfg, "train", None), "run_id", "") or "")
     if not run_id:
+        # v5.4: cfg has been sealed; DO NOT mutate cfg here.
+        # Use a local run_id only for trace directory naming.
         run_id = uuid.uuid4().hex
-        if hasattr(cfg, "train") and cfg.train is not None:
-            cfg.train.run_id = run_id
     trace_meta = init_trace_dir_v54(
         base_dir=trace_base,
         run_id=run_id,
@@ -151,6 +151,16 @@ def main():
         print("[CFG]", kp, "=", _cfg_get_path(cfg, kp, default="__MISSING__"))
 
     cfg_hash = stable_hash({"cfg": resolved_text})
+    from utils.trace_contract_v54 import compute_effective_cfg_digest_v54
+
+    seal_digest = str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")
+    cur = compute_effective_cfg_digest_v54(cfg)
+    if cur != seal_digest:
+        raise RuntimeError(
+            f"[v5.4 P0] cfg mutated before training start (pre-trainer). "
+            f"cur_digest={cur} seal_digest={seal_digest}. "
+            f"Do not write cfg.* after validate_and_fill_defaults()."
+        )
     train_single_device(
         cfg,
         trace_events_path=str(trace_events_path),
