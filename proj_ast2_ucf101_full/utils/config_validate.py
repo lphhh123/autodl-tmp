@@ -870,7 +870,6 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     # ---- discrete isolation defaults (v5) ----
     if getattr(stable_hw, "discrete_isolation", None) is None:
-        from omegaconf import OmegaConf
         stable_hw.discrete_isolation = OmegaConf.create({})
     iso = stable_hw.discrete_isolation
     iso.setdefault("enabled", True)
