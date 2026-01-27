@@ -37,7 +37,8 @@ def _to_plain_container(x):
 def _coerce_contract_overrides(overrides):
     """
     Ensure overrides is a list of plain python dicts (not DictConfig).
-    Fail fast with a clear error if schema is broken.
+    Additionally, drop unauditable entries (empty path/reason or missing keys)
+    to avoid failing trace header contracts.
     """
     ov = _to_plain_container(overrides)
     if ov is None:
@@ -51,11 +52,40 @@ def _coerce_contract_overrides(overrides):
         raise TypeError(f"contract_overrides must be list/dict, got {type(ov)}")
 
     out = []
+    dropped = 0
+
     for i, it in enumerate(ov):
         it2 = _to_plain_container(it)
         if not isinstance(it2, dict):
-            raise TypeError(f"contract_overrides[{i}] must be dict after to_container, got {type(it2)}")
-        out.append(it2)
+            dropped += 1
+            continue
+
+        # require keys
+        if not all(k in it2 for k in ("path", "requested", "effective", "reason")):
+            dropped += 1
+            continue
+
+        path_str = str(it2.get("path", "")).strip()
+        reason_str = str(it2.get("reason", "")).strip()
+        if not path_str or not reason_str:
+            dropped += 1
+            continue
+
+        # normalize to clean schema (ensure path/reason are stripped strings)
+        out.append(
+            {
+                "path": path_str,
+                "requested": it2.get("requested"),
+                "effective": it2.get("effective"),
+                "reason": reason_str,
+            }
+        )
+
+    if dropped > 0:
+        print(
+            "[trace_guard] dropped "
+            f"{dropped} unauditable contract_overrides entries before stamping trace_header"
+        )
     return out
 
 
