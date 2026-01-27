@@ -22,6 +22,43 @@ from .stable_hash import stable_hash
 FINALIZED_FLAG = "finalized.flag"
 
 
+def _to_plain_container(x):
+    """
+    Convert OmegaConf containers (DictConfig/ListConfig) to pure Python
+    primitives recursively. Leave normal python types unchanged.
+    """
+    if x is None:
+        return None
+    if OmegaConf.is_config(x):
+        return OmegaConf.to_container(x, resolve=False)
+    return x
+
+
+def _coerce_contract_overrides(overrides):
+    """
+    Ensure overrides is a list of plain python dicts (not DictConfig).
+    Fail fast with a clear error if schema is broken.
+    """
+    ov = _to_plain_container(overrides)
+    if ov is None:
+        return []
+
+    # if a single dict is provided, wrap it
+    if isinstance(ov, dict):
+        ov = [ov]
+
+    if not isinstance(ov, list):
+        raise TypeError(f"contract_overrides must be list/dict, got {type(ov)}")
+
+    out = []
+    for i, it in enumerate(ov):
+        it2 = _to_plain_container(it)
+        if not isinstance(it2, dict):
+            raise TypeError(f"contract_overrides[{i}] must be dict after to_container, got {type(it2)}")
+        out.append(it2)
+    return out
+
+
 def _sha256_json(obj: Any) -> str:
     payload = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -326,13 +363,13 @@ def init_trace_dir(
     # 1) trace_header.json（结构化元信息）
     # ---- contract_overrides: v5.4 合同证据，必须可审计 ----
     if contract_overrides is not None:
-        overrides = list(contract_overrides)
+        overrides = _coerce_contract_overrides(contract_overrides)
     else:
         overrides = []
         if isinstance(resolved_cfg_obj, dict):
             c = resolved_cfg_obj.get("_contract", None)
             if isinstance(c, dict):
-                overrides = c.get("overrides", []) or []
+                overrides = _coerce_contract_overrides(c.get("overrides", []) or [])
     requested_snap = requested_config
     effective_snap = effective_snapshot_obj
 
@@ -475,8 +512,7 @@ def init_trace_dir_v54(
         if requested_config is not None and not isinstance(requested_config, dict):
             raise RuntimeError("[P0][v5.4] requested_config must be a dict for auditable trace_header.")
     contract_overrides = get_nested(cfg, "_contract.overrides", [])
-    if contract_overrides is None:
-        contract_overrides = []
+    contract_overrides = _coerce_contract_overrides(contract_overrides)
     meta = init_trace_dir(
         trace_dir=trace_dir,
         signature=signature_v54 or signature,
