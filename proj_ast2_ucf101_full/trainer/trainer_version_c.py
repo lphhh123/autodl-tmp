@@ -809,9 +809,20 @@ def train_version_c(
         proxy_weight_dir = str(getattr(cfg.hw, "weight_dir", "") or getattr(cfg.hw, "proxy_weight_dir", ""))
         if not proxy_weight_dir:
             raise RuntimeError("[ProxyMissing] cfg.hw.weight_dir or cfg.hw.proxy_weight_dir must be set.")
+        # ---- Proxy run context (IMPORTANT: keep consistent with proxy training features) ----
+        # NOTE: batch_size is under cfg.train.batch_size (NOT cfg.data.batch_size)
+        bs_train = int(getattr(cfg.train, "batch_size", 1) or 1)
+
+        # For VideoViT, forward flattens (B, T, ...) -> (B*T, ...),
+        # so the effective batch seen by attention/MLP is B*T.
+        # This helps keep proxy inputs in the correct scale.
+        nf = int(num_frames) if num_frames is not None else int(getattr(cfg.model, "num_frames", 1) or 1)
+        bs_eff = int(bs_train * max(1, nf))
+
         run_ctx = {
             "img": int(cfg.model.img_size),
-            "bs": int(getattr(cfg.data, "batch_size", 1) or 1),
+            "bs": int(bs_eff),
+            "num_frames": int(nf),
             "depth": int(cfg.model.depth),
             "embed_dim": int(cfg.model.embed_dim),
             "num_heads": int(cfg.model.num_heads),
@@ -819,6 +830,10 @@ def train_version_c(
             "tp_world_size": int(getattr(cfg.hw, "tp_world_size", 1) or 1),
             "runs": int(getattr(cfg.hw, "proxy_runs", 10) or 10),
             "warmup": int(getattr(cfg.hw, "proxy_warmup", 5) or 5),
+            # ---- Stabilize tabular fixed-point (ms<->mem) ----
+            # These priors prevent ms0 from falling far outside training distribution.
+            "proxy_ms_prior_min": float(getattr(cfg.hw, "proxy_ms_prior_min", 0.05) or 0.05),
+            "proxy_ms_prior_max": float(getattr(cfg.hw, "proxy_ms_prior_max", 100.0) or 100.0),
         }
         use_multi_proxy = bool(getattr(cfg.hw, "multi_device_proxy", True))
         if use_multi_proxy:
