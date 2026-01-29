@@ -1,6 +1,7 @@
 """UCF101 dataset with multi-scale sliding windows and optional audio."""
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,37 @@ def _entropy_gray_frame(frame_path: Path, downsample: int = 32, bins: int = 32) 
     return float(entropy)
 
 
+def _entropy_gray_diff(
+    frame_path_a: Path, frame_path_b: Path, downsample: int = 32, bins: int = 32
+) -> float:
+    try:
+        with Image.open(frame_path_a) as ia:
+            a = ia.convert("L")
+            if downsample and downsample > 0:
+                a = a.resize((downsample, downsample))
+            a = np.asarray(a, dtype=np.int16)
+        with Image.open(frame_path_b) as ib:
+            b = ib.convert("L")
+            if downsample and downsample > 0:
+                b = b.resize((downsample, downsample))
+            b = np.asarray(b, dtype=np.int16)
+    except (OSError, ValueError):
+        return 1.0
+    if a.size == 0 or b.size == 0:
+        return 1.0
+    diff = np.abs(a - b).astype(np.uint8)
+    hist, _ = np.histogram(diff.flatten(), bins=bins, range=(0, 255))
+    total = hist.sum()
+    if total <= 0:
+        return 1.0
+    prob = hist.astype(np.float64) / float(total)
+    prob = prob[prob > 0]
+    entropy = -np.sum(prob * np.log(prob + 1e-12))
+    if not np.isfinite(entropy) or entropy <= 0:
+        return 1.0
+    return float(entropy)
+
+
 def _retain_starts_entropy_density_train(
     starts: List[int],
     cover_len: int,
@@ -59,10 +91,12 @@ def _retain_starts_entropy_density_train(
     eval_candidates = int(getattr(ret, "eval_candidates", 128))
     global_frames = int(getattr(ret, "global_frames", 8))
     lambda_dist = float(getattr(ret, "lambda_dist", 0.5))
-    alpha = float(getattr(ret, "alpha", 0.5))
     temporal_delta = int(getattr(ret, "temporal_delta", 1))
     downsample = int(getattr(ret, "downsample", 32))
     bins = int(getattr(ret, "entropy_bins", 32))
+    space_weight = float(getattr(ret, "space_weight", getattr(ret, "alpha", 0.5)))
+    time_weight = float(getattr(ret, "time_weight", 1.0 - space_weight))
+    min_gap = int(getattr(ret, "min_gap", max(1, cover_len // 2)))
 
     T = int(total_frames)
     if T <= 0:
@@ -78,7 +112,12 @@ def _retain_starts_entropy_density_train(
         g_es = []
         for fi in g_idxs:
             fi = max(0, min(fi, T - 1))
-            g_es.append(_entropy_gray_frame(frame_files[fi], downsample=downsample, bins=bins))
+            t_idx = max(0, min(fi + temporal_delta, T - 1))
+            Hs = _entropy_gray_frame(frame_files[fi], downsample=downsample, bins=bins)
+            Ht = _entropy_gray_diff(
+                frame_files[fi], frame_files[t_idx], downsample=downsample, bins=bins
+            )
+            g_es.append(space_weight * Hs + time_weight * Ht)
         H_global = float(np.mean(g_es)) if g_es else 1.0
         if (not np.isfinite(H_global)) or H_global <= 0:
             H_global = 1.0
@@ -93,39 +132,47 @@ def _retain_starts_entropy_density_train(
         candidates = list(starts)
 
     center_offsets = [min(max(int(s + cover_len // 2), 0), T - 1) for s in candidates]
-    H_locals = [
-        _entropy_gray_frame(frame_files[fi], downsample=downsample, bins=bins) for fi in center_offsets
-    ]
-    base_scores = []
-    for H_local in H_locals:
-        ratio = H_local / max(H_global, 1e-6)
-        base_scores.append(alpha * ratio + (1.0 - alpha) * H_local)
+    H_locals: List[float] = []
+    for fi in center_offsets:
+        t_idx = max(0, min(fi + temporal_delta, T - 1))
+        Hs = _entropy_gray_frame(frame_files[fi], downsample=downsample, bins=bins)
+        Ht = _entropy_gray_diff(frame_files[fi], frame_files[t_idx], downsample=downsample, bins=bins)
+        H_locals.append(space_weight * Hs + time_weight * Ht)
 
+    if not H_locals:
+        return []
+
+    anchor_idx = int(np.argmax(H_locals))
+    anchor_start = candidates[anchor_idx]
+
+    rho_scores: List[float] = []
+    for start, H_local in zip(candidates, H_locals):
+        dist_norm = abs(start - anchor_start) / max(cover_len, 1)
+        ratio = H_local / max(H_global, 1e-6)
+        rho_scores.append(ratio * math.exp(-lambda_dist * dist_norm))
+
+    order = sorted(range(len(candidates)), key=lambda i: rho_scores[i], reverse=True)
     selected: List[int] = []
-    selected_set = set()
-    min_gap = max(0, temporal_delta)
-    while candidates and len(selected) < max_windows:
-        best_idx = None
-        best_score = -float("inf")
-        for i, start in enumerate(candidates):
-            if start in selected_set:
+    for idx in order:
+        start = candidates[idx]
+        if not selected:
+            selected.append(start)
+            if len(selected) >= max_windows:
+                break
+            continue
+        if min(abs(start - s) for s in selected) >= min_gap:
+            selected.append(start)
+            if len(selected) >= max_windows:
+                break
+
+    if len(selected) < max_windows:
+        for idx in order:
+            start = candidates[idx]
+            if start in selected:
                 continue
-            if selected:
-                dist = min(abs(start - s) for s in selected)
-                if dist < min_gap:
-                    continue
-                dist_score = dist / max(cover_len, 1)
-            else:
-                dist_score = 1.0
-            score = base_scores[i] + lambda_dist * dist_score
-            if score > best_score:
-                best_score = score
-                best_idx = i
-        if best_idx is None:
-            break
-        chosen = candidates[best_idx]
-        selected.append(chosen)
-        selected_set.add(chosen)
+            selected.append(start)
+            if len(selected) >= max_windows:
+                break
 
     return sorted(selected)
 
@@ -249,7 +296,13 @@ class UCF101Dataset(Dataset):
             split_label = requested_split
             split_mode = requested_split
         self.split = split_mode
-        clip_lens = getattr(cfg.data, "clip_lens", None)
+        self.is_train = self.split == "train"
+        if self.is_train and getattr(cfg.data, "clip_lens_train", None) is not None:
+            clip_lens = getattr(cfg.data, "clip_lens_train")
+        elif (not self.is_train) and getattr(cfg.data, "clip_lens_eval", None) is not None:
+            clip_lens = getattr(cfg.data, "clip_lens_eval")
+        else:
+            clip_lens = getattr(cfg.data, "clip_lens", None)
         clip_len = getattr(cfg.data, "clip_len", None)
         num_frames = getattr(cfg.data, "num_frames", None)
         if clip_lens is None and clip_len is not None:
@@ -266,7 +319,6 @@ class UCF101Dataset(Dataset):
         self.audio_root = Path(audio_root) if audio_root is not None else (self.root / "audio")
         self.audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
         self._audio_missing_warned = False
-        self.is_train = self.split == "train"
         self.img_size = cfg.data.img_size
         if split_label == "train":
             split_name = getattr(cfg.data, "train_split", "trainlist01.txt")

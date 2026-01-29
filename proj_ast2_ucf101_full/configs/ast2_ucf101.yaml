@@ -23,6 +23,8 @@ data:
   test_split: "testlist01.txt"
   val_split: "testlist01.txt"
   clip_lens: [8, 16]
+  clip_lens_train: [16]
+  clip_lens_eval: [8, 16]
   num_frames: 8
   use_audio: false
   train_stride_ratio: 0.5
@@ -38,6 +40,9 @@ data:
     global_frames: 8
     lambda_dist: 0.5
     alpha: 0.5
+    space_weight: 0.5
+    time_weight: 0.5
+    min_gap: 8
     temporal_delta: 1
     downsample: 32
     entropy_bins: 32
@@ -48,7 +53,7 @@ audio:
 train:
   device: "cuda:0"
   epochs: 50
-  batch_size: 8
+  batch_size: 16
   lr: 3e-4
   weight_decay: 0.05
   warmup_epochs: 5
