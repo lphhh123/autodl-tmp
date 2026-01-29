@@ -13,6 +13,123 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
+def _entropy_gray_frame(frame_path: Path, downsample: int = 32, bins: int = 32) -> float:
+    try:
+        with Image.open(frame_path) as img:
+            gray = img.convert("L")
+            if downsample and downsample > 0:
+                gray = gray.resize((downsample, downsample))
+            arr = np.asarray(gray, dtype=np.uint8)
+    except (OSError, ValueError):
+        return 1.0
+
+    if arr.size == 0:
+        return 1.0
+    hist, _ = np.histogram(arr.flatten(), bins=bins, range=(0, 255))
+    total = hist.sum()
+    if total <= 0:
+        return 1.0
+    prob = hist.astype(np.float64) / float(total)
+    prob = prob[prob > 0]
+    entropy = -np.sum(prob * np.log(prob + 1e-12))
+    if not np.isfinite(entropy) or entropy <= 0:
+        return 1.0
+    return float(entropy)
+
+
+def _retain_starts_entropy_density_train(
+    starts: List[int],
+    cover_len: int,
+    frame_files: List[Path],
+    total_frames: int,
+    video_id: str,
+    cfg,
+    hglobal_cache: Optional[Dict[str, float]],
+) -> List[int]:
+    if not starts:
+        return starts
+    ret = getattr(cfg.data, "window_retention", None)
+    if ret is None or not bool(getattr(ret, "enabled", False)):
+        return starts
+
+    max_windows = int(getattr(ret, "max_windows_per_video_per_len", 4))
+    if max_windows <= 0:
+        return []
+
+    eval_candidates = int(getattr(ret, "eval_candidates", 128))
+    global_frames = int(getattr(ret, "global_frames", 8))
+    lambda_dist = float(getattr(ret, "lambda_dist", 0.5))
+    alpha = float(getattr(ret, "alpha", 0.5))
+    temporal_delta = int(getattr(ret, "temporal_delta", 1))
+    downsample = int(getattr(ret, "downsample", 32))
+    bins = int(getattr(ret, "entropy_bins", 32))
+
+    T = int(total_frames)
+    if T <= 0:
+        return starts
+
+    cache_key = str(video_id)
+    if (hglobal_cache is not None) and (cache_key in hglobal_cache):
+        H_global = float(hglobal_cache[cache_key])
+    else:
+        gk = max(1, min(global_frames, T))
+        g_idxs = np.linspace(0, T - 1, gk)
+        g_idxs = np.floor(g_idxs).astype(int).tolist()
+        g_es = []
+        for fi in g_idxs:
+            fi = max(0, min(fi, T - 1))
+            g_es.append(_entropy_gray_frame(frame_files[fi], downsample=downsample, bins=bins))
+        H_global = float(np.mean(g_es)) if g_es else 1.0
+        if (not np.isfinite(H_global)) or H_global <= 0:
+            H_global = 1.0
+        if hglobal_cache is not None:
+            hglobal_cache[cache_key] = float(H_global)
+
+    if len(starts) > eval_candidates:
+        idxs = np.linspace(0, len(starts) - 1, eval_candidates)
+        idxs = np.floor(idxs).astype(int).tolist()
+        candidates = [starts[i] for i in idxs]
+    else:
+        candidates = list(starts)
+
+    center_offsets = [min(max(int(s + cover_len // 2), 0), T - 1) for s in candidates]
+    H_locals = [
+        _entropy_gray_frame(frame_files[fi], downsample=downsample, bins=bins) for fi in center_offsets
+    ]
+    base_scores = []
+    for H_local in H_locals:
+        ratio = H_local / max(H_global, 1e-6)
+        base_scores.append(alpha * ratio + (1.0 - alpha) * H_local)
+
+    selected: List[int] = []
+    selected_set = set()
+    min_gap = max(0, temporal_delta)
+    while candidates and len(selected) < max_windows:
+        best_idx = None
+        best_score = -float("inf")
+        for i, start in enumerate(candidates):
+            if start in selected_set:
+                continue
+            if selected:
+                dist = min(abs(start - s) for s in selected)
+                if dist < min_gap:
+                    continue
+                dist_score = dist / max(cover_len, 1)
+            else:
+                dist_score = 1.0
+            score = base_scores[i] + lambda_dist * dist_score
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        if best_idx is None:
+            break
+        chosen = candidates[best_idx]
+        selected.append(chosen)
+        selected_set.add(chosen)
+
+    return sorted(selected)
+
+
 def _try_load_classind(root: Path) -> Optional[Dict[str, int]]:
     """
     Try to load UCF101 classInd.txt (1-based indices).
@@ -191,6 +308,7 @@ class UCF101Dataset(Dataset):
         self.idx_to_label = {v: k for k, v in self.label_to_idx.items()}
         clips: List[ClipItem] = []
         self._frame_cache: Dict[str, List[Path]] = {}
+        self._hglobal_cache: Dict[str, float] = {}
         with open(split_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -222,6 +340,16 @@ class UCF101Dataset(Dataset):
                             offset = random.randint(0, max(0, stride - 1))
                         max_start = max(total_frames - cover_len + 1, 1)
                         starts = list(range(offset, max_start, stride))
+                    if self.is_train:
+                        starts = _retain_starts_entropy_density_train(
+                            starts=starts,
+                            cover_len=int(cover_len),
+                            frame_files=frame_files,
+                            total_frames=int(total_frames),
+                            video_id=video_id,
+                            cfg=cfg,
+                            hglobal_cache=self._hglobal_cache,
+                        )
                     for start in starts:
                         t_start = start
                         clips.append(

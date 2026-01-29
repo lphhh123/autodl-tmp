@@ -31,6 +31,16 @@ data:
   img_size: 224
   num_workers: 8
   audio_feat_dim: 128
+  window_retention:
+    enabled: true
+    max_windows_per_video_per_len: 4
+    eval_candidates: 128
+    global_frames: 8
+    lambda_dist: 0.5
+    alpha: 0.5
+    temporal_delta: 1
+    downsample: 32
+    entropy_bins: 32
 
 audio:
   feat_dim: 128
