@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import numbers
 from pathlib import Path
 from functools import partial
 from typing import Dict, Any
@@ -59,6 +60,77 @@ def _as_float(val, name: str) -> float:
         return float(val)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"Expected {name} to be numeric, but got {val!r}.") from exc
+
+
+def _split_stats_for_metrics(d: Dict[str, Any]) -> tuple[Dict[str, float], Dict[str, Any]]:
+    """
+    Split stats dict into:
+      - scalars: values castable to float for flat metrics.json
+      - extra: structured values (dict/list/tuple/str/None/others) preserved for audit
+
+    Also converts torch tensors to python scalars when possible.
+    """
+    scalars: Dict[str, float] = {}
+    extra: Dict[str, Any] = {}
+
+    if not d:
+        return scalars, extra
+
+    for k, v in d.items():
+        # torch tensor -> python scalar if possible
+        if torch.is_tensor(v):
+            try:
+                v = v.detach().cpu().item()
+            except Exception:
+                # keep tensor as repr in extra
+                extra[k] = str(v)
+                continue
+
+        # numeric -> scalar
+        if isinstance(v, bool):
+            scalars[k] = float(int(v))
+            continue
+        if isinstance(v, numbers.Number):
+            try:
+                scalars[k] = float(v)
+                continue
+            except Exception:
+                extra[k] = str(v)
+                continue
+
+        # structured -> extra
+        if isinstance(v, (dict, list, tuple, str)) or v is None:
+            extra[k] = v
+            continue
+
+        # fallback -> extra as string
+        extra[k] = str(v)
+
+    # best-effort JSON-serializable extra
+    try:
+        json.dumps(extra)
+    except Exception:
+        def _to_jsonable(x):
+            if torch.is_tensor(x):
+                try:
+                    return float(x.detach().cpu().item())
+                except Exception:
+                    return str(x)
+            if isinstance(x, dict):
+                return {str(kk): _to_jsonable(vv) for kk, vv in x.items()}
+            if isinstance(x, (list, tuple)):
+                return [_to_jsonable(xx) for xx in x]
+            if isinstance(x, bool):
+                return bool(x)
+            if isinstance(x, numbers.Number):
+                return float(x)
+            if isinstance(x, (str, type(None))):
+                return x
+            return str(x)
+
+        extra = _to_jsonable(extra)
+
+    return scalars, extra
 
 
 def _cfg_get(obj, key: str, default=None):
@@ -763,10 +835,19 @@ def train_single_device(
                 metrics["stable_hw"] = stable_fields
                 for k, v in stable_fields.items():
                     metrics[k] = v
-                metrics.update({k: float(v) for k, v in hw_stats.items()})
+
+                # ---- v5.4: hw_stats may contain structured fields (dict/list), do NOT float() everything ----
+                _hw_scalars, _hw_extra = _split_stats_for_metrics(hw_stats or {})
+                metrics.update(_hw_scalars)
+                if _hw_extra:
+                    metrics["hw_stats_extra"] = _hw_extra
+
                 with metrics_path.open("w", encoding="utf-8") as f:
                     json.dump(metrics, f, indent=2)
-                hw_stats_out = dict(last_hw_stats or {})
+
+                # ---- v5.4: persist FULL hw_stats for audit (not only last_hw_stats) ----
+                hw_stats_out = dict(hw_stats or {})
+                hw_stats_out["last_hw_stats"] = dict(last_hw_stats or {})
                 hw_stats_out.update(
                     {
                         "cfg_hash": cfg_hash,
