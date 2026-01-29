@@ -209,7 +209,13 @@ class _TabularBundle:
     def predict(self, rows: List[Dict[str, Any]], device: torch.device) -> torch.Tensor:
         self.model = self.model.to(device)
         x = self.build_x(rows, device=device)
-        y = self.model(x).squeeze(-1)
+        # NOTE:
+        # - MLPRegressor.forward() already does squeeze(-1) and returns shape (B,)
+        # - DO NOT squeeze again here; batch_size=1 would become 0-dim scalar.
+        y = self.model(x)
+
+        # Make sure output is always 1D: (B,)
+        y = y.reshape(-1)
         if self.target_mode.lower() == "log":
             # exp(log(x+eps)) - eps ; keep strictly positive
             y = torch.exp(y) - 1e-6
@@ -309,14 +315,14 @@ class _Tabular3Proxy:
                 r = dict(base)
                 r["ms"] = ms[i]
                 rows_mem.append(r)
-            mem_mb = self.mem.predict(rows_mem, device=device)
+            mem_mb = self.mem.predict(rows_mem, device=device).reshape(-1)
 
             rows_ms = []
             for i, base in enumerate(rows_base):
                 r = dict(base)
                 r["peak_mem_mb"] = mem_mb[i]
                 rows_ms.append(r)
-            ms = self.ms.predict(rows_ms, device=device)
+            ms = self.ms.predict(rows_ms, device=device).reshape(-1)
 
         # energy -> power
         rows_eng = []
@@ -329,7 +335,7 @@ class _Tabular3Proxy:
             r["runs"] = float(run_ctx.get("runs", 10))
             r["warmup"] = float(run_ctx.get("warmup", 5))
             rows_eng.append(r)
-        energy_mj = self.eng.predict(rows_eng, device=device)
+        energy_mj = self.eng.predict(rows_eng, device=device).reshape(-1)
 
         power_w = energy_mj * 1000.0 / (ms + 1e-6)
         power_w = torch.clamp(power_w, min=0.0)
