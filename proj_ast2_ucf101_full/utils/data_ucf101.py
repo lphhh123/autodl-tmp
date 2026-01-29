@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import pickle
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -262,6 +263,28 @@ class ClipItem:
     video_id: str
     total_frames: int
 
+    def to_dict(self) -> dict:
+        # store only JSON-like primitives for torch.load(weights_only=True) compatibility
+        return {
+            "source_path": str(self.source_path),
+            "label": int(self.label),
+            "t_start": int(self.t_start),
+            "cover_len": int(self.cover_len),
+            "video_id": str(self.video_id),
+            "total_frames": int(self.total_frames),
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "ClipItem":
+        return ClipItem(
+            source_path=Path(d["source_path"]),
+            label=int(d["label"]),
+            t_start=int(d["t_start"]),
+            cover_len=int(d["cover_len"]),
+            video_id=str(d["video_id"]),
+            total_frames=int(d["total_frames"]),
+        )
+
 
 class UCF101Dataset(Dataset):
     def __init__(self, cfg, split: str) -> None:
@@ -409,11 +432,31 @@ class UCF101Dataset(Dataset):
         if cache_enabled and cache_path.is_file():
             try:
                 cached = torch.load(cache_path, map_location="cpu")
-                self.clips = cached.get("clips", [])
+                raw_clips = cached.get("clips", [])
+                # v2 cache: list[dict] (recommended)
+                if raw_clips and isinstance(raw_clips[0], dict):
+                    self.clips = [ClipItem.from_dict(x) for x in raw_clips]
+                else:
+                    # backward compatibility: old cache may contain ClipItem objects
+                    self.clips = raw_clips
                 loaded_from_cache = True
                 print(f"[UCF101Dataset] Loaded clips cache: {cache_path}")
-            except (OSError, RuntimeError, ValueError, KeyError) as exc:
-                print(f"[UCF101Dataset] Failed to load clips cache {cache_path}: {exc}")
+            except (pickle.UnpicklingError, OSError, RuntimeError, ValueError, KeyError) as exc:
+                # PyTorch 2.6+ defaults weights_only=True which can reject custom classes in cache.
+                # We do NOT unsafe-load by default. Instead, quarantine the cache and rebuild it.
+                broken_path = cache_path.with_suffix(cache_path.suffix + ".broken")
+                try:
+                    cache_path.rename(broken_path)
+                    print(
+                        f"[UCF101Dataset] Cache incompatible with current torch.load safety rules; "
+                        f"renamed to {broken_path} and will rebuild. err={exc}"
+                    )
+                except Exception as _rename_exc:
+                    print(
+                        f"[UCF101Dataset] Failed to load cache {cache_path} (err={exc}); "
+                        f"also failed to rename (err={_rename_exc}). Will rebuild."
+                    )
+                loaded_from_cache = False
         if loaded_from_cache:
             if len(self.clips) == 0:
                 raise RuntimeError(
@@ -486,7 +529,14 @@ class UCF101Dataset(Dataset):
                 )
             if cache_enabled:
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                torch.save({"clips": self.clips, "meta": cache_key_json}, cache_path)
+                torch.save(
+                    {
+                        "format": "clipitem_v2",
+                        "clips": [c.to_dict() for c in self.clips],
+                        "meta": cache_key_json,
+                    },
+                    cache_path,
+                )
                 print(f"[UCF101Dataset] Saved clips cache: {cache_path}")
 
         if self.is_train:
