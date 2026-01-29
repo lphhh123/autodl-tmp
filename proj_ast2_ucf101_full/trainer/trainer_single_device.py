@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from omegaconf import OmegaConf
 
@@ -122,6 +122,24 @@ def build_dataloaders(cfg):
         generator=generator,
     )
     return train_loader, val_loader
+
+
+def build_test_loader(cfg):
+    test_ds = UCF101Dataset(cfg, split="test")
+    batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
+    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    generator = torch.Generator()
+    generator.manual_seed(base_seed)
+    worker_init = partial(_seed_worker, base_seed=base_seed)
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=cfg.data.num_workers,
+        worker_init_fn=worker_init,
+        generator=generator,
+    )
+    return test_loader
 
 
 def train_single_device(
@@ -245,6 +263,7 @@ def train_single_device(
             step=0,
         )
     train_loader, val_loader = build_dataloaders(cfg)
+    test_loader = None
     model_type = getattr(cfg.training, "model_type", "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
     audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
@@ -421,7 +440,16 @@ def train_single_device(
             "layout_was_cached": True,
         }
 
+    val_cfg = _cfg_get(cfg, "val", None)
+    test_cfg = _cfg_get(cfg, "test", None)
+    fast_val_max_batches = int(_cfg_get(val_cfg, "fast_max_batches", 0) or 0)
+    full_val_every_epochs = int(_cfg_get(val_cfg, "full_every_epochs", 1) or 1)
+    val_log_interval = int(_cfg_get(val_cfg, "log_interval", 50) or 50)
+    val_use_tqdm = bool(_cfg_get(val_cfg, "use_tqdm", True))
+    run_final_test = bool(_cfg_get(test_cfg, "run_final_test", False))
+
     best_acc = 0.0
+    best_state_dict = None
     last_acc = 0.0
     ran_epochs = 0
     early_stop_triggered = False
@@ -588,36 +616,38 @@ def train_single_device(
                         }
                     )
                     log_stats(logger, stats)
-            val_every_epochs = int(getattr(cfg.training, "val_every_epochs", 1) or 1)
-            fast_val_max_batches = getattr(cfg.training, "fast_val_max_batches", None)
-            full_val_every_epochs = int(getattr(cfg.training, "full_val_every_epochs", 0) or 0)
-            val_max_batches_override = getattr(cfg.training, "val_max_batches", None)
-            val_log_interval = int(getattr(cfg.training, "val_log_interval", 0) or 0)
-
             last_acc = None
-            has_val_this_epoch = bool(val_every_epochs > 0 and epoch % val_every_epochs == 0)
-            if has_val_this_epoch:
-                max_batches = None
-                if val_max_batches_override is not None:
-                    max_batches = int(val_max_batches_override)
-                elif full_val_every_epochs > 0 and epoch % full_val_every_epochs == 0:
-                    max_batches = 0
-                elif fast_val_max_batches is not None:
-                    max_batches = int(fast_val_max_batches)
-                last_acc = validate(
-                    model,
-                    val_loader,
-                    device,
-                    logger,
-                    epoch,
-                    cfg,
-                    max_batches=max_batches,
-                    log_interval=val_log_interval,
-                )
-                if last_acc is not None:
-                    best_acc = max(best_acc, last_acc)
+            last_epoch = epoch == cfg.train.epochs - 1
+            full_every = max(1, int(full_val_every_epochs))
+            do_full = last_epoch or (epoch % full_every == 0)
+            if do_full:
+                tag = "full"
+                max_batches = 0
             else:
-                logger.info("Skipping validation at epoch=%s (val_every_epochs=%s)", epoch, val_every_epochs)
+                tag = "fast"
+                max_batches = int(fast_val_max_batches)
+            logger.info(
+                "[VAL] epoch=%s mode=%s max_batches=%s",
+                epoch,
+                tag,
+                "ALL" if max_batches == 0 else max_batches,
+            )
+            last_acc = validate(
+                model,
+                val_loader,
+                device,
+                logger,
+                epoch,
+                cfg,
+                max_batches=max_batches,
+                log_interval=val_log_interval,
+                tag=tag,
+                use_tqdm=val_use_tqdm,
+            )
+            if last_acc is not None and do_full:
+                if last_acc > best_acc:
+                    best_acc = float(last_acc)
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             if stable_hw_enabled:
                 stable_decision, _ = apply_accuracy_guard(
                     epoch=epoch,
@@ -783,6 +813,28 @@ def train_single_device(
             },
         )
 
+    if run_final_test:
+        if test_loader is None:
+            test_loader = build_test_loader(cfg)
+        if best_state_dict is not None:
+            model.load_state_dict(best_state_dict)
+            logger.info("[FINAL TEST] Loaded best checkpoint from full validation acc=%.6f", best_acc)
+        else:
+            logger.info("[FINAL TEST] No best checkpoint captured; using current model state.")
+        test_epoch = int(cfg.train.epochs)
+        validate(
+            model,
+            test_loader,
+            device,
+            logger,
+            test_epoch,
+            cfg,
+            max_batches=0,
+            log_interval=val_log_interval,
+            tag="test",
+            use_tqdm=val_use_tqdm,
+        )
+
 
 def validate(
     model: nn.Module,
@@ -793,6 +845,8 @@ def validate(
     cfg,
     max_batches: int | None = None,
     log_interval: int = 0,
+    tag: str = "full",
+    use_tqdm: bool = True,
 ) -> float:
     model.eval()
     total = 0
@@ -800,10 +854,12 @@ def validate(
     total_batches = len(loader) if hasattr(loader, "__len__") else None
     if max_batches is not None and max_batches > 0 and total_batches is not None:
         total_batches = min(total_batches, max_batches)
-    logger.info("Starting validation epoch=%s, batches=%s", epoch, total_batches)
+    logger.info("Starting validation epoch=%s mode=%s batches=%s", epoch, tag, total_batches)
     with torch.no_grad():
-        val_pbar = tqdm(loader, total=total_batches, desc=f"Val e{epoch}", leave=False)
-        for batch_idx, batch in enumerate(val_pbar, start=1):
+        iterable = enumerate(loader, start=1)
+        if use_tqdm:
+            iterable = tqdm(iterable, total=total_batches, desc=f"Val e{epoch} ({tag})", leave=False)
+        for batch_idx, batch in iterable:
             x = batch["video"].to(device)
             y = batch["label"].to(device)
             if cfg.training.model_type == "video_audio":
@@ -814,7 +870,13 @@ def validate(
             total += y.size(0)
             correct += (pred == y).sum().item()
             if log_interval and batch_idx % log_interval == 0:
-                logger.info("val progress epoch=%s batch=%s acc=%s", epoch, batch_idx, correct / max(1, total))
+                logger.info(
+                    "[VAL PROGRESS] epoch=%s mode=%s batch=%s/%s",
+                    epoch,
+                    tag,
+                    batch_idx,
+                    total_batches if total_batches is not None else "?",
+                )
             if max_batches is not None and max_batches > 0 and batch_idx >= max_batches:
                 break
     acc = correct / max(1, total)

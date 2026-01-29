@@ -116,9 +116,15 @@ training:
   inner_steps_ast: 100
   inner_steps_alpha: 20
   inner_steps_layout: 20
-  fast_val_max_batches: 500
-  full_val_every_epochs: 5
-  val_log_interval: 100
+
+val:
+  fast_max_batches: 500
+  full_every_epochs: 5
+  log_interval: 50
+  use_tqdm: true
+
+test:
+  run_final_test: true
 
 loss:
   lambda_AST: 1.0
