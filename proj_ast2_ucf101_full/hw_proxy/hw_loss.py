@@ -589,8 +589,10 @@ def compute_hw_loss(
         {
             "comm_ms": float(comm_ms_pos.detach().cpu().item()),
             "raw_comm_ms": raw_comm_norm,
-            "latency_ms_sanitized": float(sanitized_latency_ms),
-            "comm_ms_sanitized": _sanitize_scalar(raw_comm_norm, fallback=0.0),
+            # v5.4: "sanitized" should reflect the value actually used in loss after no-reward sanitize + clamp
+            # (avoid referencing undefined variables; avoid unsafe torch.load(weights_only=False) style behavior)
+            "latency_ms_sanitized": float(latency_ms_pos.detach().cpu().item()),
+            "comm_ms_sanitized": float(comm_ms_pos.detach().cpu().item()),
             "clamped_latency_ms": float(latency_ms_pos.detach().cpu().item()),
             "clamped_energy_mj": float(energy_mj_pos.detach().cpu().item()),
             "clamped_mem_mb": float(mem_mb_pos.detach().cpu().item()),

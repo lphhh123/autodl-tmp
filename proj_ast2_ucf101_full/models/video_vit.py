@@ -151,11 +151,18 @@ class VideoViT(nn.Module):
         head_keep = 1.0
         ch_keep = 1.0
         block_keep = 1.0
+        def _safe_float(v) -> float:
+            if v is None:
+                return 0.0
+            if torch.is_tensor(v):
+                return float(v.detach().cpu().item())
+            return float(v)
+
         if sparsity:
-            token_keep = 1.0 - float(sparsity.get("token", 0.0))
-            head_keep = 1.0 - float(sparsity.get("head", 0.0))
-            ch_keep = 1.0 - float(sparsity.get("ch", 0.0))
-            block_keep = 1.0 - float(sparsity.get("block", 0.0))
+            token_keep = 1.0 - _safe_float(sparsity.get("token", 0.0))
+            head_keep = 1.0 - _safe_float(sparsity.get("head", 0.0))
+            ch_keep = 1.0 - _safe_float(sparsity.get("ch", 0.0))
+            block_keep = 1.0 - _safe_float(sparsity.get("block", 0.0))
         info = {
             "L_AST": L_ast_val,
             "token_feat": tokens,
@@ -309,11 +316,18 @@ class VideoAudioAST(nn.Module):
         head_keep = 1.0
         ch_keep = 1.0
         block_keep = 1.0
+        def _safe_float(v) -> float:
+            if v is None:
+                return 0.0
+            if torch.is_tensor(v):
+                return float(v.detach().cpu().item())
+            return float(v)
+
         if sparsity:
-            token_keep = 1.0 - float(sparsity.get("token", 0.0))
-            head_keep = 1.0 - float(sparsity.get("head", 0.0))
-            ch_keep = 1.0 - float(sparsity.get("ch", 0.0))
-            block_keep = 1.0 - float(sparsity.get("block", 0.0))
+            token_keep = 1.0 - _safe_float(sparsity.get("token", 0.0))
+            head_keep = 1.0 - _safe_float(sparsity.get("head", 0.0))
+            ch_keep = 1.0 - _safe_float(sparsity.get("ch", 0.0))
+            block_keep = 1.0 - _safe_float(sparsity.get("block", 0.0))
         info = {
             "L_AST": L_ast_val,
             "token_feat": tokens.view(b, t, self.num_tokens, -1),
