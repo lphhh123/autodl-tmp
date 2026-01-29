@@ -88,10 +88,13 @@ class VideoViT(nn.Module):
         self.ast_pruner: Optional[ASTPruner]
         if self.use_ast:
             grid = (cfg.img_size // cfg.patch_size, cfg.img_size // cfg.patch_size)
-            ast_cfg = cfg.ast_cfg or {}
+            # IMPORTANT (v5.4 contract): do NOT mutate OmegaConf cfg after seal.
+            # Make a plain dict copy even if cfg.ast_cfg is a DictConfig.
+            ast_cfg_raw = cfg.ast_cfg or {}
+            ast_cfg = dict(ast_cfg_raw)
+            ast_cfg.setdefault("patch_grid_h", grid[0])
+            ast_cfg.setdefault("patch_grid_w", grid[1])
             self.ast_pruner = ASTPruner(ast_cfg, cfg.embed_dim, cfg.num_heads, cfg.depth, num_patches)
-            self.ast_pruner.cfg.setdefault("patch_grid_h", grid[0])
-            self.ast_pruner.cfg.setdefault("patch_grid_w", grid[1])
         else:
             self.ast_pruner = None
 

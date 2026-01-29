@@ -87,7 +87,7 @@ class VideoViT(nn.Module):
         self.ast_pruner: Optional[ASTPruner]
         if self.use_ast:
             grid = (cfg.img_size // cfg.patch_size, cfg.img_size // cfg.patch_size)
-            ast_cfg = cfg.ast_cfg or {}
+            ast_cfg = dict(cfg.ast_cfg or {})
             self.ast_pruner = ASTPruner(ast_cfg, cfg.embed_dim, cfg.num_heads, cfg.depth, grid[0], grid[1])
         else:
             self.ast_pruner = None
