@@ -13,6 +13,11 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None
+
 
 def _entropy_gray_frame(frame_path: Path, downsample: int = 32, bins: int = 32) -> float:
     try:
@@ -362,58 +367,64 @@ class UCF101Dataset(Dataset):
         self._frame_cache: Dict[str, List[Path]] = {}
         self._hglobal_cache: Dict[str, float] = {}
         with open(split_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rel_path = line.split()[0]
-                cls_name = rel_path.split("/")[0]
-                if cls_name not in self.label_to_idx:
-                    continue
-                label = self.label_to_idx[cls_name]
-                video_stem = Path(rel_path).stem
-                source_path = self.root / cls_name / video_stem
-                if not source_path.is_dir():
-                    continue
-                frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
-                if not frame_files:
-                    continue
-                total_frames = len(frame_files)
-                video_id = video_stem
-                self._frame_cache[video_id] = frame_files
-                stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
-                for cover_len in self.clip_lens:
-                    stride = max(1, int(cover_len * stride_ratio))
-                    if total_frames <= cover_len:
-                        starts = [0]
-                    else:
-                        offset = 0
-                        if self.is_train and getattr(cfg.data, "clip_jitter", False):
-                            offset = random.randint(0, max(0, stride - 1))
-                        max_start = max(total_frames - cover_len + 1, 1)
-                        starts = list(range(offset, max_start, stride))
-                    if self.is_train:
-                        starts = _retain_starts_entropy_density_train(
-                            starts=starts,
-                            cover_len=int(cover_len),
-                            frame_files=frame_files,
-                            total_frames=int(total_frames),
+            lines = [ln.strip() for ln in f if ln.strip()]
+        it = lines
+        if tqdm is not None:
+            it = tqdm(lines, desc=f"Building {split_label} clips", total=len(lines))
+        else:
+            print(f"[UCF101Dataset] Building {split_label} clips... total_lines={len(lines)}")
+        progress_every = int(getattr(cfg.data, "progress_every", 200))
+        for i, line in enumerate(it):
+            rel_path = line.split()[0]
+            if tqdm is None and (i % progress_every == 0):
+                print(f"[UCF101Dataset] {split_label} progress {i}/{len(lines)}")
+            cls_name = rel_path.split("/")[0]
+            if cls_name not in self.label_to_idx:
+                continue
+            label = self.label_to_idx[cls_name]
+            video_stem = Path(rel_path).stem
+            source_path = self.root / cls_name / video_stem
+            if not source_path.is_dir():
+                continue
+            frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
+            if not frame_files:
+                continue
+            total_frames = len(frame_files)
+            video_id = video_stem
+            self._frame_cache[video_id] = frame_files
+            stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
+            for cover_len in self.clip_lens:
+                stride = max(1, int(cover_len * stride_ratio))
+                if total_frames <= cover_len:
+                    starts = [0]
+                else:
+                    offset = 0
+                    if self.is_train and getattr(cfg.data, "clip_jitter", False):
+                        offset = random.randint(0, max(0, stride - 1))
+                    max_start = max(total_frames - cover_len + 1, 1)
+                    starts = list(range(offset, max_start, stride))
+                if self.is_train:
+                    starts = _retain_starts_entropy_density_train(
+                        starts=starts,
+                        cover_len=int(cover_len),
+                        frame_files=frame_files,
+                        total_frames=int(total_frames),
+                        video_id=video_id,
+                        cfg=cfg,
+                        hglobal_cache=self._hglobal_cache,
+                    )
+                for start in starts:
+                    t_start = start
+                    clips.append(
+                        ClipItem(
+                            source_path=source_path,
+                            label=label,
+                            t_start=t_start,
+                            cover_len=cover_len,
                             video_id=video_id,
-                            cfg=cfg,
-                            hglobal_cache=self._hglobal_cache,
+                            total_frames=total_frames,
                         )
-                    for start in starts:
-                        t_start = start
-                        clips.append(
-                            ClipItem(
-                                source_path=source_path,
-                                label=label,
-                                t_start=t_start,
-                                cover_len=cover_len,
-                                video_id=video_id,
-                                total_frames=total_frames,
-                            )
-                        )
+                    )
         self.clips = clips
         if len(self.clips) == 0:
             raise RuntimeError(

@@ -33,6 +33,7 @@ data:
   img_size: 224
   num_workers: 8
   audio_feat_dim: 128
+  progress_every: 200
   window_retention:
     enabled: true
     max_windows_per_video_per_len: 4

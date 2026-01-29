@@ -22,6 +22,7 @@ data:
   eval_stride_ratio: 0.5
   clip_jitter: true
   use_audio: false
+  progress_every: 50
 ast:
   use_ast_prune: true
 hw:
