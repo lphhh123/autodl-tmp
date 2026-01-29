@@ -67,6 +67,58 @@ from utils.stable_hw import (
 # In RECOVERY we only allow continuous model training and cached evaluations.
 
 
+def _to_jsonable(obj: Any) -> Any:
+    """
+    Recursively convert common runtime objects (torch/numpy/path/etc.) into JSON-serializable
+    Python types. This is used for writing stable_hw_state.json.
+    """
+    # Fast path for primitives
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+
+    # pathlib.Path
+    if isinstance(obj, Path):
+        return str(obj)
+
+    # numpy scalars / arrays
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # torch Tensor
+    if torch.is_tensor(obj):
+        t = obj.detach().cpu()
+        # scalar tensor
+        if t.numel() == 1:
+            return t.item()
+        # vector / matrix / higher-dim
+        return t.tolist()
+
+    # omegaconf containers (defensive)
+    try:
+        from omegaconf import DictConfig, ListConfig  # local import to avoid hard dependency issues
+        if isinstance(obj, (DictConfig, ListConfig)):
+            return OmegaConf.to_container(obj, resolve=True)
+    except Exception:
+        pass
+
+    # dict
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            # JSON keys must be str/int/float/bool/None; enforce str for safety
+            out[str(k)] = _to_jsonable(v)
+        return out
+
+    # list / tuple / set
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(x) for x in obj]
+
+    # fallback: string repr
+    return str(obj)
+
+
 def _get_objective_cfg(cfg) -> dict:
     """
     Unify objective config access across training/export/layout scripts.
@@ -1914,8 +1966,9 @@ def train_version_c(
                 )
 
                 stable_state_path = log_path.parent / "stable_hw_state.json"
+                stable_hw_state_json = _to_jsonable(stable_hw_state)
                 stable_state_path.write_text(
-                    json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
+                    json.dumps(stable_hw_state_json, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
                 if early_stop_triggered or ran_epochs == 0:
