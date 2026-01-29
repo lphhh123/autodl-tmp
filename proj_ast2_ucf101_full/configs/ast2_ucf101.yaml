@@ -138,6 +138,7 @@ partition:
   max_new_segments: 32
 
 stable_hw:
+  enabled: true
   no_double_scale:
     enabled: true
   discrete_ops:
