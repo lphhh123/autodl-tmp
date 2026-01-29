@@ -363,9 +363,10 @@ def train_single_device(
         gate = "allow_hw"
         if float(lambda_hw_eff_scalar) <= 0.0 or guard_mode in ("VIOLATE", "RECOVERY", "WARMUP"):
             gate = "reject_hw"
-        acc_ref = float(stable_state.get("acc_ref", 0.0))
+        acc_ref = _to_scalar(stable_state.get("acc_ref"), 0.0)   # allow None during warmup
         acc_now = float(acc_now_value)
-        acc_used = float(stable_state.get("acc_used", stable_state.get("acc_used_value", acc_now)))
+        acc_used_raw = stable_state.get("acc_used", stable_state.get("acc_used_value", None))
+        acc_used = _to_scalar(acc_used_raw, acc_now)            # if None -> fall back to acc_now
         acc_drop = float(stable_state.get("acc_drop", 0.0) or 0.0)
         acc_drop_max = stable_state.get("acc_drop_max", None)
         if acc_drop_max is None:
@@ -467,7 +468,7 @@ def train_single_device(
                 if not bool(stable_state.get("allow_discrete_updates", True)):
                     freeze_epochs += 1
                 if trace_dir is not None:
-                    acc_now = float(last_acc) if last_acc is not None else float(stable_state.get("acc_ref", 0.0))
+                    acc_now = float(last_acc) if last_acc is not None else _to_scalar(stable_state.get("acc_ref"), 0.0)
                     gating_payload = _build_gating_payload(
                         epoch=epoch,
                         inner_step=0,
@@ -588,7 +589,7 @@ def train_single_device(
                 stable_state = stable_decision.state
                 if trace_dir is not None:
                     inner_step = int(step) if "step" in locals() else 0
-                    acc_now = float(last_acc) if last_acc is not None else float(stable_state.get("acc_ref", 0.0))
+                    acc_now = float(last_acc) if last_acc is not None else _to_scalar(stable_state.get("acc_ref"), 0.0)
                     gating_payload = _build_gating_payload(
                         epoch=epoch,
                         inner_step=inner_step,
