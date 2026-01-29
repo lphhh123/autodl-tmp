@@ -13,6 +13,55 @@ from typing import Any, Dict, Optional
 from .git_version import get_git_commit_or_version
 
 
+def _to_jsonable(obj: Any) -> Any:
+    """
+    Recursively convert common runtime objects (torch/numpy/path/etc.) into JSON-serializable
+    Python types. Used for writing run_manifest.json safely.
+    """
+    # primitives
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+
+    # Path
+    if isinstance(obj, Path):
+        return str(obj)
+
+    # numpy
+    try:
+        import numpy as np  # local import
+        if isinstance(obj, np.generic):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+
+    # torch
+    try:
+        import torch  # local import
+        if torch.is_tensor(obj):
+            t = obj.detach().cpu()
+            if t.numel() == 1:
+                return t.item()
+            return t.tolist()
+    except Exception:
+        pass
+
+    # dict
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            out[str(k)] = _to_jsonable(v)
+        return out
+
+    # list / tuple / set
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(x) for x in obj]
+
+    # fallback
+    return str(obj)
+
+
 def _sha256_text(s: str) -> str:
     h = hashlib.sha256()
     h.update(s.encode("utf-8", errors="ignore"))
@@ -142,5 +191,6 @@ def write_run_manifest(
     manifest["stable_hw_ref_update_mode"] = st.get("ref_update_mode", "DISABLED")
     manifest["stable_hw_hw_ref_source"] = st.get("hw_ref_source", None)
 
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest_json = _to_jsonable(manifest)
+    manifest_path.write_text(json.dumps(manifest_json, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
