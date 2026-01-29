@@ -1,0 +1,19 @@
+_base_: ./layout_L4_region_pareto_llm_mixed_pick.yaml
+budget:
+  total_eval_budget: 80
+  max_wallclock_sec: 120
+detailed_place:
+  steps: 20
+  planner:
+    type: mixed
+    mixed:
+      every_n_steps: 1
+      k_actions: 2
+    timeout_sec: 5
+    max_retry: 0
+    queue_enabled: true
+    feasibility_check: true
+  candidate_pool:
+    diversity_enabled: true
+    raw_target_size: 32
+    final_size: 16
