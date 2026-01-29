@@ -38,7 +38,6 @@ from layout.regions import build_regions
 from layout.sites import build_sites
 from layout.trace_metrics import compute_trace_metrics_from_csv
 from mapping.mapping_solver import MappingSolver
-from utils.config import AttrDict
 from mapping.segments import Segment
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
@@ -615,6 +614,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.cfg)
+    OmegaConf.set_struct(cfg, False)
     # auto out_dir if not provided
     cfg_stem = Path(args.cfg).stem
     auto_out = Path("outputs/layout_agent") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -624,7 +624,12 @@ def main():
 
     # sync cfg.train.out_dir
     if not hasattr(cfg, "train") or cfg.train is None:
-        cfg.train = AttrDict({})
+        cfg.train = OmegaConf.create({})
+    elif not OmegaConf.is_config(cfg.train):
+        if isinstance(cfg.train, dict):
+            cfg.train = OmegaConf.create(cfg.train)
+        else:
+            cfg.train = OmegaConf.create(dict(cfg.train))
     cfg.train.out_dir = str(out_dir)
     cfg.out_dir = str(out_dir)
 
