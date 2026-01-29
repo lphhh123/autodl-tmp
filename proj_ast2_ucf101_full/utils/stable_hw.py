@@ -990,13 +990,65 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
         if requested_no_drift:
             stable_hw_state["_force_ref_update_mode"] = "frozen"
             stable_hw_state["no_drift_effective"] = True
-            stable_hw_state["hw_ref_source"] = "missing_baseline_frozen_init_on_first_observation"
-            # leave refs as None => first valid observation initializes once
+            # explicit + auditable: initialized from cfg.hw defaults (drift-free because frozen)
+            stable_hw_state["hw_ref_source"] = "missing_baseline_frozen_init_from_cfg_hw_defaults"
             stable_hw_state.setdefault("hw_refs", {})
-            stable_hw_state["hw_refs"].setdefault("latency_ref_ms", None)
-            stable_hw_state["hw_refs"].setdefault("energy_ref_mj", None)
-            stable_hw_state["hw_refs"].setdefault("mem_ref_mb", None)
-            stable_hw_state["hw_refs"].setdefault("comm_ref", None)
+
+            hw_cfg = getattr(cfg, "hw", None)
+
+            def _get_float(attr: str, default: float) -> float:
+                v = getattr(hw_cfg, attr, default) if hw_cfg is not None else default
+                try:
+                    v = float(default if v is None else v)
+                except Exception:
+                    v = float(default)
+                return v
+
+            # latency/energy/mem/comm refs
+            latency_ref = _get_float("latency_ref_ms", 1.0)
+            energy_ref = _get_float("energy_ref_mj", 1.0)
+
+            # mem has multiple aliases in configs
+            if hw_cfg is not None:
+                mem_v = getattr(hw_cfg, "memory_ref_mb", None)
+                if mem_v is None:
+                    mem_v = getattr(hw_cfg, "mem_ref_mb", None)
+                if mem_v is None:
+                    mem_v = getattr(hw_cfg, "mem_ref_mb", 1.0)
+            else:
+                mem_v = 1.0
+            try:
+                mem_ref = float(1.0 if mem_v is None else mem_v)
+            except Exception:
+                mem_ref = 1.0
+
+            # comm has multiple aliases
+            if hw_cfg is not None:
+                comm_v = getattr(hw_cfg, "comm_ref_ms", None)
+                if comm_v is None:
+                    comm_v = getattr(hw_cfg, "comm_ref", None)
+            else:
+                comm_v = None
+            try:
+                comm_ref = float(1.0 if comm_v is None else comm_v)
+            except Exception:
+                comm_ref = 1.0
+
+            stable_hw_state["hw_refs"]["latency_ref_ms"] = latency_ref
+            stable_hw_state["hw_refs"]["energy_ref_mj"] = energy_ref
+            stable_hw_state["hw_refs"]["mem_ref_mb"] = mem_ref
+            stable_hw_state["hw_refs"]["comm_ref"] = comm_ref
+
+            # top-level refs consumed by hw_proxy/hw_loss.py::_pos_ref (NoDrift requires existence)
+            stable_hw_state["ref_T"] = latency_ref
+            stable_hw_state["ref_E"] = energy_ref
+            stable_hw_state["ref_M"] = mem_ref
+            stable_hw_state["ref_C"] = comm_ref
+
+            # hw_loss also requires these refs when NoDrift is enabled
+            stable_hw_state["ref_A"] = _get_float("area_ref_mm2", 1.0)
+            stable_hw_state["ref_B"] = _get_float("bw_ref_gbps", 1.0)
+            stable_hw_state["ref_P"] = _get_float("power_ref_w", 1.0)
             return
 
         # NoDrift not requested: allow legacy behavior (EMA)
