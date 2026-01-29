@@ -5,3 +5,8 @@ data:
 train:
   epochs: 1
   out_dir: outputs/SMOKE/ast2_ucf101
+
+training:
+  val_max_batches: 200
+  val_log_interval: 50
+  val_every_epochs: 1

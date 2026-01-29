@@ -10,6 +10,9 @@ training:
   inner_steps_ast: 1
   inner_steps_alpha: 1
   inner_steps_layout: 0
+  val_max_batches: 200
+  val_log_interval: 50
+  val_every_epochs: 1
 
 # === v5.4 StableHW (Acc-First Hard Gating + LockedAccRef + NoDrift + NoDoubleScale) ===
 stable_hw:
