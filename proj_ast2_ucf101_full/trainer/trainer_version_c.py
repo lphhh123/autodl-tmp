@@ -33,6 +33,7 @@ from utils.eval_utils import eval_acc1
 from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
+from utils.safe_json import safe_dump, safe_dumps
 from utils.trace_contract_v54 import (
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
@@ -65,58 +66,6 @@ from utils.stable_hw import (
 # Discrete updates include: partition updates, device mapping updates, layout optimize updates,
 # channel rewires, and any track_live/refine steps that alter assignments/signatures.
 # In RECOVERY we only allow continuous model training and cached evaluations.
-
-
-def _to_jsonable(obj: Any) -> Any:
-    """
-    Recursively convert common runtime objects (torch/numpy/path/etc.) into JSON-serializable
-    Python types. This is used for writing stable_hw_state.json.
-    """
-    # Fast path for primitives
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-
-    # pathlib.Path
-    if isinstance(obj, Path):
-        return str(obj)
-
-    # numpy scalars / arrays
-    if isinstance(obj, np.generic):
-        return obj.item()
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-
-    # torch Tensor
-    if torch.is_tensor(obj):
-        t = obj.detach().cpu()
-        # scalar tensor
-        if t.numel() == 1:
-            return t.item()
-        # vector / matrix / higher-dim
-        return t.tolist()
-
-    # omegaconf containers (defensive)
-    try:
-        from omegaconf import DictConfig, ListConfig  # local import to avoid hard dependency issues
-        if isinstance(obj, (DictConfig, ListConfig)):
-            return OmegaConf.to_container(obj, resolve=True)
-    except Exception:
-        pass
-
-    # dict
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            # JSON keys must be str/int/float/bool/None; enforce str for safety
-            out[str(k)] = _to_jsonable(v)
-        return out
-
-    # list / tuple / set
-    if isinstance(obj, (list, tuple, set)):
-        return [_to_jsonable(x) for x in obj]
-
-    # fallback: string repr
-    return str(obj)
 
 
 def _get_objective_cfg(cfg) -> dict:
@@ -502,7 +451,7 @@ def _export_layout_input(
 
     out_path = export_dir / "layout_input.json"
     with out_path.open("w", encoding="utf-8") as f:
-        json.dump(layout_input, f, indent=2)
+        safe_dump(layout_input, f, indent=2)
 
     # === v5.4 contract: ALWAYS materialize canonical copies (no silent failure) ===
     project_root = Path(__file__).resolve().parents[1]  # proj_ast2_ucf101_full/
@@ -518,8 +467,8 @@ def _export_layout_input(
     run_root_dir.mkdir(parents=True, exist_ok=True)
 
     # Write canonical copies deterministically
-    canonical_a3_path.write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
-    run_root_path.write_text(json.dumps(layout_input, indent=2), encoding="utf-8")
+    canonical_a3_path.write_text(safe_dumps(layout_input, indent=2), encoding="utf-8")
+    run_root_path.write_text(safe_dumps(layout_input, indent=2), encoding="utf-8")
 
     return out_path
 
@@ -764,7 +713,7 @@ def train_version_c(
                 },
             }
             manifest["gating_policy_summary"] = gating_summary
-            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+            manifest_path.write_text(safe_dumps(manifest, indent=2), encoding="utf-8")
 
         loader = build_dataloader(cfg)
         # ---- build val/test loader for stable_hw accuracy_guard ----
@@ -988,7 +937,7 @@ def train_version_c(
             # init_hw_refs_from_baseline_stats accepts stable_hw_cfg but NOT output_dir
             init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
         (out_dir / "stable_hw_state.json").write_text(
-            json.dumps(stable_hw_state, indent=2, ensure_ascii=False),
+            safe_dumps(stable_hw_state, indent=2),
             encoding="utf-8",
         )
         stable_hw_state.setdefault("gating_reason_code", "")
@@ -1586,27 +1535,32 @@ def train_version_c(
                         stats.update(hw_stats)
                         log_stats(logger, stats)
                         with log_path.open("a", encoding="utf-8") as f:
-                            f.write(json.dumps({
-                                "step": int(global_step),
-                                "outer": int(outer),
-                                "loss": float(loss.item()),
-                                "lat_ms": float(
-                                    hw_stats.get(
-                                        "raw_latency_ms",
-                                        hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
-                                    )
-                                ),
-                                "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
-                                "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
-                                "lambda_hw": float(lambda_hw_eff),
-                                "stable_hw": stable_hw_log_fields(stable_hw_state, cfg),
-                                "mapping_updated": step_mapping_updated,
-                                "layout_updated": step_layout_updated,
-                                "mapping_cache_hit": (not step_mapping_updated),
-                                "layout_cache_hit": (not step_layout_updated),
-                                "mapping_signature": cache["mapping_signature"],
-                                "layout_signature": cache["layout_signature"],
-                            }) + "\n")
+                            f.write(
+                                safe_dumps(
+                                    {
+                                        "step": int(global_step),
+                                        "outer": int(outer),
+                                        "loss": float(loss.item()),
+                                        "lat_ms": float(
+                                            hw_stats.get(
+                                                "raw_latency_ms",
+                                                hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
+                                            )
+                                        ),
+                                        "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
+                                        "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
+                                        "lambda_hw": float(lambda_hw_eff),
+                                        "stable_hw": stable_hw_log_fields(stable_hw_state, cfg),
+                                        "mapping_updated": step_mapping_updated,
+                                        "layout_updated": step_layout_updated,
+                                        "mapping_cache_hit": (not step_mapping_updated),
+                                        "layout_cache_hit": (not step_layout_updated),
+                                        "mapping_signature": cache["mapping_signature"],
+                                        "layout_signature": cache["layout_signature"],
+                                    }
+                                )
+                                + "\n"
+                            )
                     global_step += 1
 
                 # Step B: alpha refinement
@@ -1966,9 +1920,8 @@ def train_version_c(
                 )
 
                 stable_state_path = log_path.parent / "stable_hw_state.json"
-                stable_hw_state_json = _to_jsonable(stable_hw_state)
                 stable_state_path.write_text(
-                    json.dumps(stable_hw_state_json, indent=2, ensure_ascii=False),
+                    safe_dumps(stable_hw_state, indent=2),
                     encoding="utf-8",
                 )
                 if early_stop_triggered or ran_epochs == 0:
@@ -2061,7 +2014,7 @@ def train_version_c(
         for k, v in stable_fields.items():
             metrics[k] = v
         with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
-            json.dump(metrics, f, ensure_ascii=False, indent=2)
+            safe_dump(metrics, f, indent=2)
         hw_stats_out = dict(last_hw_stats or {})
         hw_stats_out.update(
             {
@@ -2070,7 +2023,7 @@ def train_version_c(
             }
         )
         with (out_dir / "hw_stats.json").open("w", encoding="utf-8") as f:
-            json.dump(hw_stats_out, f, indent=2, ensure_ascii=False)
+            safe_dump(hw_stats_out, f, indent=2)
         if export_layout_input:
             export_dir_path = Path(layout_export_dir or "outputs/P3")
             slot_out = chiplet_slots(hard=False)
