@@ -406,10 +406,12 @@ def compute_hw_loss(
         "raw_energy_mj": raw_energy_mj,
         "raw_mem_mb": raw_mem_mb,
         "raw_comm_norm": raw_comm_norm,
+        "raw_comm_ms": raw_comm_norm,
         "latency_ms": used_latency_ms,
         "energy_mj": used_energy_mj,
         "mem_mb": used_mem_mb,
         "comm_norm": used_comm_norm,
+        "comm_ms": used_comm_norm,
 
         # v5.4 audit keys (write-stable, used by trainer trace)
         "proxy_raw_latency_ms": raw_latency_ms,
