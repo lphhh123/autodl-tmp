@@ -1424,7 +1424,12 @@ def train_version_c(
                             alpha=alpha,
                         )
                         last_hw_stats = hw_stats
-                        sum_latency += float(hw_stats.get("latency_ms", 0.0))
+                        sum_latency += float(
+                            hw_stats.get(
+                                "raw_latency_ms",
+                                hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
+                            )
+                        )
                         sum_energy += float(hw_stats.get("energy_mj", 0.0))
                         sum_mem += float(hw_stats.get("mem_mb", 0.0))
                         sum_comm += float(hw_stats.get("comm_ms", 0.0))
@@ -1533,7 +1538,12 @@ def train_version_c(
                                 "step": int(global_step),
                                 "outer": int(outer),
                                 "loss": float(loss.item()),
-                                "lat_ms": float(hw_stats.get("latency_ms", 0.0)),
+                                "lat_ms": float(
+                                    hw_stats.get(
+                                        "raw_latency_ms",
+                                        hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
+                                    )
+                                ),
                                 "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
                                 "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
                                 "lambda_hw": float(lambda_hw_eff),

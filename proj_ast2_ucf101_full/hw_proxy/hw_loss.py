@@ -13,33 +13,6 @@ import torch.nn.functional as F
 from utils.stable_hash import stable_hash
 
 
-def sanitize_latency(latency_ms: float, min_ms: float = 1e-3) -> Tuple[float, float]:
-    penalty = 0.0
-    if latency_ms is None:
-        return min_ms, penalty
-    if isinstance(latency_ms, (int, float)):
-        if math.isnan(latency_ms) or math.isinf(latency_ms):
-            return min_ms, penalty
-        # HARD floor: never allow negative latency to become "better"
-        if latency_ms < 0:
-            penalty = penalty + abs(float(latency_ms)) * 10.0  # strong penalty
-            latency_ms = 0.0
-        return max(float(latency_ms), float(min_ms)), penalty
-    return min_ms, penalty
-
-
-def _sanitize_latency_ms(x: float, min_ms: float = 1e-3) -> float:
-    # No reward for negative/invalid latency: clamp to min_ms
-    if x is None:
-        return min_ms
-    if isinstance(x, (int, float)):
-        if math.isnan(x) or math.isinf(x):
-            return min_ms
-        return max(float(x), float(min_ms))
-    # fallback
-    return min_ms
-
-
 def _sanitize_scalar(x: float, fallback: float = 0.0) -> float:
     if x is None:
         return fallback
@@ -256,16 +229,33 @@ def compute_hw_loss(
 
     # ---- Non-negative guard: prevent "negative latency reward" ----
     eps_ratio = float(getattr(stable_hw_cfg, "eps_ratio", 1e-9) if stable_hw_cfg is not None else 1e-9)
-    min_latency_ms = float(
-        getattr(stable_hw_cfg, "min_latency_ms", getattr(getattr(cfg, "stable_hw", None), "min_latency_ms", 1e-3))
+    eps_floor = float(
+        getattr(
+            stable_hw_cfg,
+            "eps_floor",
+            getattr(getattr(cfg, "hw", None), "eps_floor", 1e-6),
+        )
     )
 
-    # keep raw for logging (may be negative)
-    raw_latency_ms = float(latency_ms.detach().cpu().item())
-    raw_energy_mj = float(energy_mj.detach().cpu().item())
-    raw_mem_mb = float(mem_mb.detach().cpu().item())
-    raw_comm_ms = float(comm_ms.detach().cpu().item())
-    sanitized_latency_ms, latency_penalty = sanitize_latency(raw_latency_ms, min_ms=min_latency_ms)
+    raw_latency_t = latency_ms
+    raw_energy_t = energy_mj
+    raw_mem_t = mem_mb
+    raw_comm_t = comm_ms
+
+    def _assert_nonneg_finite(name: str, value: torch.Tensor) -> None:
+        if torch.any(~torch.isfinite(value)) or torch.any(value < 0):
+            raise RuntimeError(f"proxy produced NaN or negative {name}")
+
+    _assert_nonneg_finite("latency", raw_latency_t)
+    _assert_nonneg_finite("energy", raw_energy_t)
+    _assert_nonneg_finite("memory", raw_mem_t)
+    _assert_nonneg_finite("comm", raw_comm_t)
+
+    # keep raw for logging
+    raw_latency_ms = float(raw_latency_t.detach().cpu().item())
+    raw_energy_mj = float(raw_energy_t.detach().cpu().item())
+    raw_mem_mb = float(raw_mem_t.detach().cpu().item())
+    raw_comm_ms = float(raw_comm_t.detach().cpu().item())
 
     def _as_enabled(v, default: bool = True) -> bool:
         if v is None:
@@ -352,10 +342,7 @@ def compute_hw_loss(
         "C": float(comm_ms.min().detach().cpu().item()),
     }
 
-    raw_latency_ms = float(latency_ms.detach().cpu().item())
-    raw_energy_mj = float(energy_mj.detach().cpu().item())
-    raw_mem_mb = float(mem_mb.detach().cpu().item())
-    raw_comm_norm = float(comm_ms.detach().cpu().item())
+    raw_comm_norm = raw_comm_ms
 
     def _penalty_from_raw(x: float) -> float:
         # 合同审计：sanitize 发生时必须能追溯 penalty_added（即便 used 被 ref 替代）
@@ -377,10 +364,11 @@ def compute_hw_loss(
     mem_mb_pos = _sanitize_no_reward(mem_mb, ref_M_t)
     comm_ms_pos = _sanitize_no_reward(comm_ms, ref_C_t)
 
-    latency_ms_pos = torch.clamp(latency_ms_pos, min=max(float(eps_ratio), float(min_latency_ms)))
-    energy_mj_pos = torch.clamp(energy_mj_pos, min=eps_ratio)
-    mem_mb_pos = torch.clamp(mem_mb_pos, min=eps_ratio)
-    comm_ms_pos = torch.clamp(comm_ms_pos, min=eps_ratio)
+    eps_floor = max(float(eps_ratio), float(eps_floor))
+    latency_ms_pos = torch.clamp(latency_ms_pos, min=eps_floor)
+    energy_mj_pos = torch.clamp(energy_mj_pos, min=eps_floor)
+    mem_mb_pos = torch.clamp(mem_mb_pos, min=eps_floor)
+    comm_ms_pos = torch.clamp(comm_ms_pos, min=eps_floor)
 
     used_latency_ms = float(latency_ms_pos.detach().cpu().item())
     used_energy_mj = float(energy_mj_pos.detach().cpu().item())
