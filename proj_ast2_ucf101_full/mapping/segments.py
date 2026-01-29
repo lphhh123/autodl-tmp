@@ -209,6 +209,21 @@ def build_layer_nodes_from_model(model: VideoViT, model_info: Optional[Dict[str,
 
 
 def build_coarse_segments(layer_nodes: List[LayerNode], alpha: torch.Tensor, partition_cfg: Any = None) -> List[Segment]:
+    """
+    Build coarse segments for version_c partitioning.
+
+    IMPORTANT (proxy adaptation):
+    New tabular HW proxy ckpts are trained with categorical vocab:
+        layer_type in {"patch_embed", "attn", "mlp"}  (3 classes)
+    Therefore coarse segments MUST NOT use kind="other", otherwise tabular proxy will crash with
+        ProxyVocabMismatch col=layer_type value='other'.
+
+    For coarse segments spanning multiple blocks, we classify the segment kind as:
+        "attn" if accumulated attn_flops >= accumulated mlp_flops else "mlp"
+
+    Also propagate a reasonable keep_factors["token_keep"] = average token_keep across included blocks,
+    so keep_ratio isn't silently stuck at 1.0 for coarse segments.
+    """
     empty_idx = alpha.shape[1] - 1
     p_active = 1.0 - alpha[:, empty_idx]
     active_threshold = float(getattr(partition_cfg, "active_threshold", 0.5)) if partition_cfg else 0.5
@@ -222,54 +237,84 @@ def build_coarse_segments(layer_nodes: List[LayerNode], alpha: torch.Tensor, par
 
     segments: List[Segment] = []
     seg_id = 0
+
     acc_flops = 0.0
     acc_bytes = 0.0
     acc_layers: List[int] = []
-    for ln in layer_nodes:
-        acc_flops += ln.flops
-        acc_bytes += ln.bytes
-        acc_layers.append(ln.id)
-        if acc_flops >= F_target:
-            segments.append(
-                Segment(
-                    id=seg_id,
-                    layer_ids=acc_layers.copy(),
-                    flops=acc_flops,
-                    bytes=acc_bytes,
-                    seq_len=ln.seq_len,
-                    embed_dim=ln.embed_dim,
-                    num_heads=ln.num_heads,
-                    mlp_ratio=ln.mlp_ratio,
-                    precision=ln.precision,
-                    traffic_in_bytes=ln.traffic_in_bytes,
-                    traffic_out_bytes=ln.traffic_out_bytes,
-                    kind="other",
-                    block_idx=None,
-                    keep_factors=None,
-                )
-            )
-            seg_id += 1
-            acc_flops = 0.0
-            acc_bytes = 0.0
-            acc_layers = []
-    if acc_layers:
-        ln = layer_nodes[-1]
+
+    # --- NEW: accumulate attn/mlp flops to decide segment kind for proxy vocab ---
+    acc_attn_flops = 0.0
+    acc_mlp_flops = 0.0
+
+    # --- NEW: accumulate token_keep to provide keep_factors for coarse segs ---
+    acc_token_keep_sum = 0.0
+    acc_token_keep_n = 0
+
+    def _flush_segment(last_ln: LayerNode):
+        nonlocal seg_id, acc_flops, acc_bytes, acc_layers
+        nonlocal acc_attn_flops, acc_mlp_flops, acc_token_keep_sum, acc_token_keep_n
+
+        if not acc_layers:
+            return
+
+        # decide kind in {"attn","mlp"} to match new proxy vocab
+        kind = "attn" if acc_attn_flops >= acc_mlp_flops else "mlp"
+
+        # avg token_keep; fallback 1.0 if missing
+        token_keep = (acc_token_keep_sum / max(1, acc_token_keep_n)) if acc_token_keep_n > 0 else 1.0
+        keep_factors = {"token_keep": float(token_keep)}
+
         segments.append(
             Segment(
                 id=seg_id,
                 layer_ids=acc_layers.copy(),
                 flops=acc_flops,
                 bytes=acc_bytes,
-                seq_len=ln.seq_len,
-                embed_dim=ln.embed_dim,
-                num_heads=ln.num_heads,
-                mlp_ratio=ln.mlp_ratio,
-                precision=ln.precision,
-                traffic_in_bytes=ln.traffic_in_bytes,
-                traffic_out_bytes=ln.traffic_out_bytes,
-                kind="other",
+                seq_len=last_ln.seq_len,
+                embed_dim=last_ln.embed_dim,
+                num_heads=last_ln.num_heads,
+                mlp_ratio=last_ln.mlp_ratio,
+                precision=last_ln.precision,
+                traffic_in_bytes=last_ln.traffic_in_bytes,
+                traffic_out_bytes=last_ln.traffic_out_bytes,
+                kind=kind,
                 block_idx=None,
-                keep_factors=None,
+                keep_factors=keep_factors,
             )
         )
+        seg_id += 1
+
+        # reset accumulators
+        acc_flops = 0.0
+        acc_bytes = 0.0
+        acc_layers = []
+        acc_attn_flops = 0.0
+        acc_mlp_flops = 0.0
+        acc_token_keep_sum = 0.0
+        acc_token_keep_n = 0
+
+    for ln in layer_nodes:
+        acc_flops += float(ln.flops)
+        acc_bytes += float(ln.bytes)
+        acc_layers.append(int(ln.id))
+
+        # accumulate attn/mlp flops if present; LayerNode defines attn_flops/mlp_flops in this project
+        acc_attn_flops += float(getattr(ln, "attn_flops", 0.0))
+        acc_mlp_flops += float(getattr(ln, "mlp_flops", 0.0))
+
+        # accumulate token_keep if present
+        kf = getattr(ln, "keep_factors", None) or {}
+        if "token_keep" in kf:
+            try:
+                acc_token_keep_sum += float(kf["token_keep"])
+                acc_token_keep_n += 1
+            except Exception:
+                pass
+
+        if acc_flops >= F_target:
+            _flush_segment(ln)
+
+    if acc_layers:
+        _flush_segment(layer_nodes[-1])
+
     return segments
