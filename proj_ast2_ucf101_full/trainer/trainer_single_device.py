@@ -588,15 +588,43 @@ def train_single_device(
                         }
                     )
                     log_stats(logger, stats)
-            last_acc = validate(model, val_loader, device, logger, epoch, cfg)
-            best_acc = max(best_acc, last_acc)
+            val_every_epochs = int(getattr(cfg.training, "val_every_epochs", 1) or 1)
+            fast_val_max_batches = getattr(cfg.training, "fast_val_max_batches", None)
+            full_val_every_epochs = int(getattr(cfg.training, "full_val_every_epochs", 0) or 0)
+            val_max_batches_override = getattr(cfg.training, "val_max_batches", None)
+            val_log_interval = int(getattr(cfg.training, "val_log_interval", 0) or 0)
+
+            last_acc = None
+            has_val_this_epoch = bool(val_every_epochs > 0 and epoch % val_every_epochs == 0)
+            if has_val_this_epoch:
+                max_batches = None
+                if val_max_batches_override is not None:
+                    max_batches = int(val_max_batches_override)
+                elif full_val_every_epochs > 0 and epoch % full_val_every_epochs == 0:
+                    max_batches = 0
+                elif fast_val_max_batches is not None:
+                    max_batches = int(fast_val_max_batches)
+                last_acc = validate(
+                    model,
+                    val_loader,
+                    device,
+                    logger,
+                    epoch,
+                    cfg,
+                    max_batches=max_batches,
+                    log_interval=val_log_interval,
+                )
+                if last_acc is not None:
+                    best_acc = max(best_acc, last_acc)
+            else:
+                logger.info("Skipping validation at epoch=%s (val_every_epochs=%s)", epoch, val_every_epochs)
             if stable_hw_enabled:
                 stable_decision, _ = apply_accuracy_guard(
                     epoch=epoch,
                     stable_hw_cfg=cfg,
                     stable_hw_state=stable_state,
                     val_metric_or_none=float(last_acc) if last_acc is not None else None,
-                    has_val_this_epoch=True,
+                    has_val_this_epoch=bool(last_acc is not None),
                     train_ema_or_none=float(stable_state.get("train_acc1_ema", 0.0))
                     if stable_state.get("train_acc1_ema") is not None
                     else None,
@@ -658,7 +686,7 @@ def train_single_device(
                 stable_fields = stable_hw_log_fields(stable_state, cfg)
                 metrics = {
                     "epoch": int(epoch),
-                    "acc1": float(last_acc),
+                    "acc1": float(last_acc) if last_acc is not None else None,
                     "best_acc1": float(best_acc),
                     "loss": float(loss.item()),
                     "sparsity_token": float(info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item()),
@@ -756,15 +784,26 @@ def train_single_device(
         )
 
 
-def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger, epoch: int, cfg) -> float:
+def validate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    logger,
+    epoch: int,
+    cfg,
+    max_batches: int | None = None,
+    log_interval: int = 0,
+) -> float:
     model.eval()
     total = 0
     correct = 0
     total_batches = len(loader) if hasattr(loader, "__len__") else None
+    if max_batches is not None and max_batches > 0 and total_batches is not None:
+        total_batches = min(total_batches, max_batches)
     logger.info("Starting validation epoch=%s, batches=%s", epoch, total_batches)
     with torch.no_grad():
         val_pbar = tqdm(loader, total=total_batches, desc=f"Val e{epoch}", leave=False)
-        for batch in val_pbar:
+        for batch_idx, batch in enumerate(val_pbar, start=1):
             x = batch["video"].to(device)
             y = batch["label"].to(device)
             if cfg.training.model_type == "video_audio":
@@ -774,6 +813,10 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger,
             pred = logits.argmax(dim=1)
             total += y.size(0)
             correct += (pred == y).sum().item()
+            if log_interval and batch_idx % log_interval == 0:
+                logger.info("val progress epoch=%s batch=%s acc=%s", epoch, batch_idx, correct / max(1, total))
+            if max_batches is not None and max_batches > 0 and batch_idx >= max_batches:
+                break
     acc = correct / max(1, total)
     logger.info(f"[val] epoch {epoch} acc={acc:.4f}")
     logger.info("Finished validation epoch=%s", epoch)
