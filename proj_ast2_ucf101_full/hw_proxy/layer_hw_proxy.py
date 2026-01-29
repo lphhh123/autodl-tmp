@@ -377,6 +377,7 @@ class LayerHwProxy:
         self.run_ctx.setdefault("warmup", 5)
         self.run_ctx.setdefault("device", self.device_name)
         self.run_ctx.setdefault("cfg", "default")
+        self._warned_no_layers_cfg = False
 
         # Detect NEW .pt ckpts (prefer per-device subdir if present)
         ckpt_dir = None
@@ -496,6 +497,11 @@ class LayerHwProxy:
         base_latency = float(model_info.get("latency_ms_ref", 1.0))
         base_mem = float(model_info.get("mem_mb_ref", 1.0))
         base_energy = float(model_info.get("energy_mj_ref", 1.0))
+        if not self._warned_no_layers_cfg:
+            print(
+                "[LayerHwProxy][warn] model_info missing layers_cfg; using ref_* fallback (lat/mem/energy may look constant)."
+            )
+            self._warned_no_layers_cfg = True
         scale = max(1e-6, token_keep * head_keep * ch_keep * block_keep)
         return {
             "latency_ms": base_latency * scale,

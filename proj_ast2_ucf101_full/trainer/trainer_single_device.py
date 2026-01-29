@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from omegaconf import OmegaConf
 
@@ -513,7 +514,14 @@ def train_single_device(
             stable_state.setdefault("lambda_hw_base", float(stable_state.get("lambda_hw_base", 0.0)))
             model.train()
             last_hw_stats = None
-            for step, batch in enumerate(train_loader):
+            total_steps = len(train_loader) if hasattr(train_loader, "__len__") else None
+            train_pbar = tqdm(
+                enumerate(train_loader),
+                total=total_steps,
+                desc=f"Train e{epoch}",
+                leave=True,
+            )
+            for step, batch in train_pbar:
                 x = batch["video"].to(device)
                 y = batch["label"].to(device)
                 if epoch == 0 and step == 0:
@@ -555,6 +563,13 @@ def train_single_device(
                         metric = get_accuracy_metric_key(stable_hw_cfg)
                         if metric in ("train_acc1_ema", "train_ema"):
                             update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
+                    train_pbar.set_postfix(
+                        {
+                            "loss": f"{loss.item():.4f}",
+                            "acc1": f"{acc1.item():.4f}",
+                            "sparsity": f"{info['gates'].get('sparsity', {}).get('token', torch.tensor(0)).item():.4f}",
+                        }
+                    )
                     stats = {
                         "epoch": epoch,
                         "step": step,
@@ -567,9 +582,9 @@ def train_single_device(
                     }
                     stats.update(
                         {
-                            "total_latency_ms": float(hw_stats.get("latency_ms", 0.0)),
-                            "peak_mem_mb": float(hw_stats.get("mem_mb", 0.0)),
-                            "comm_ms": float(hw_stats.get("comm_ms", 0.0)),
+                            "total_latency_ms": float(hw_stats.get("raw_latency_ms", hw_stats.get("latency_ms", 0.0))),
+                            "peak_mem_mb": float(hw_stats.get("raw_mem_mb", hw_stats.get("mem_mb", 0.0))),
+                            "comm_ms": float(hw_stats.get("comm_ms", hw_stats.get("comm_norm", 0.0))),
                         }
                     )
                     log_stats(logger, stats)
@@ -745,8 +760,11 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger,
     model.eval()
     total = 0
     correct = 0
+    total_batches = len(loader) if hasattr(loader, "__len__") else None
+    logger.info("Starting validation epoch=%s, batches=%s", epoch, total_batches)
     with torch.no_grad():
-        for batch in loader:
+        val_pbar = tqdm(loader, total=total_batches, desc=f"Val e{epoch}", leave=False)
+        for batch in val_pbar:
             x = batch["video"].to(device)
             y = batch["label"].to(device)
             if cfg.training.model_type == "video_audio":
@@ -758,4 +776,5 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, logger,
             correct += (pred == y).sum().item()
     acc = correct / max(1, total)
     logger.info(f"[val] epoch {epoch} acc={acc:.4f}")
+    logger.info("Finished validation epoch=%s", epoch)
     return float(acc)
