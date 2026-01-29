@@ -1,31 +1,4 @@
-_base_: ./ast2_ucf101.yaml
-training:
-  mode: single_device_ast
-  outer_epochs: 1
-  inner_steps_ast: 1
-  inner_steps_alpha: 0
-  inner_steps_layout: 0
+_base_: ast2_ucf101.yaml
 train:
   epochs: 1
-  batch_size: 1
-data:
-  frames_root: "data/ucf101/frames"
-  splits_root: "data/ucf101/splits"
-  train_split: "trainlist01.txt"
-  test_split: "testlist01.txt"
-  val_split: "testlist01.txt"
-  clip_lens: [8, 16]
-  clip_lens_train: [16]
-  clip_lens_eval: [8, 16]
-  num_frames: 8
-  train_stride_ratio: 0.5
-  eval_stride_ratio: 0.5
-  clip_jitter: true
-  use_audio: false
-  progress_every: 50
-ast:
-  use_ast_prune: true
-hw:
-  mode: none
-stable_hw:
-  enabled: true
+  out_dir: outputs/SMOKE/ast2_ucf101

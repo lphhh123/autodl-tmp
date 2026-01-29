@@ -1,0 +1,9 @@
+_base_: ./layout_L0_heuristic.yaml
+budget:
+  total_eval_budget: 40
+  max_wallclock_sec: 60
+detailed_place:
+  steps: 10
+  candidate_pool:
+    raw_target_size: 24
+    final_size: 12
