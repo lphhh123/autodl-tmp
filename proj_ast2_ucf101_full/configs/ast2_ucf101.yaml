@@ -150,13 +150,14 @@ stable_hw:
     enabled: true
     freeze_baseline_stats: false
   normalize:
-    enabled: false
+    enabled: true
     use_baseline_stats: false
     baseline_stats_path: ""
     scheme: "none"
     ref_update: "frozen"
   lambda_hw_schedule:
-    enabled: false
+    enabled: true
+    lambda_hw_max: 0.2
     start_epoch: 0
     end_epoch: 0
     warmup_epochs: 0
