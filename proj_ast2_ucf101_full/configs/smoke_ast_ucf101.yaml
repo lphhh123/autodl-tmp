@@ -1,4 +1,7 @@
 _base_: ast2_ucf101.yaml
+data:
+  cache_enabled: true
+  cache_dir: outputs/cache/ucf101
 train:
   epochs: 1
   out_dir: outputs/SMOKE/ast2_ucf101
