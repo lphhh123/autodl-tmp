@@ -325,7 +325,7 @@ class MappingSolver:
                 d1, d2 = mapping[k], mapping[k + 1]
                 if d1 == d2:
                     continue
-                dist = float(torch.norm(layout_positions[d1] - layout_positions[d2]))
+                dist = float(torch.norm((layout_positions[d1] - layout_positions[d2]).detach()))
                 traffic = float(getattr(segments[k], "traffic_out_bytes", 0.0))
                 eff_bw = (
                     min(_to_pyfloat(eff_specs["peak_bw"][d1]), _to_pyfloat(eff_specs["peak_bw"][d2]))
