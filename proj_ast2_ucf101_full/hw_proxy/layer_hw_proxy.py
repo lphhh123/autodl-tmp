@@ -288,12 +288,32 @@ class _Tabular3Proxy:
         run_ctx: Dict[str, Any],
         device: torch.device,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # ---- Fixed-point stabilizer priors ----
+        # Proxy training data typically has ms in ~[0.05ms, <10ms] range (device dependent).
+        # If ms0 is far below training distribution, mem(ms)->ms(mem) fixed-point can diverge.
+        min_ms_prior = float(run_ctx.get("proxy_ms_prior_min", 0.05))
+        max_ms_prior = float(run_ctx.get("proxy_ms_prior_max", 100.0))
+
+        # ---- Per-row physical memory caps (MB) ----
+        # Clamp predicted peak_mem_mb to device memory size to avoid impossible values (e.g., > 24GB).
+        mem_caps = []
+        for cfg in layers_cfg:
+            dc = cfg.get("device_cfg", default_device_cfg) or {}
+            if "mem_gb" in dc and dc["mem_gb"] is not None:
+                cap_mb = float(dc["mem_gb"]) * 1024.0
+            else:
+                cap_mb = float(dc.get("mem_size_mb", dc.get("mem_mb", 24000.0)))
+            mem_caps.append(_to_t(cap_mb, device=device))
+        mem_cap_t = torch.stack(mem_caps, dim=0).reshape(-1)
+
         rows_base = []
         for cfg in layers_cfg:
             rows_base.append(self._base_row(cfg, run_ctx))
 
         # init ms using roofline estimate (keeps dependence on eff_specs tensors)
         ms0 = []
+        min_ms_t = _to_t(min_ms_prior, device=device)
+        max_ms_t = _to_t(max_ms_prior, device=device)
         for cfg in layers_cfg:
             dc = cfg.get("device_cfg", default_device_cfg) or {}
             flops = _to_t(cfg.get("flops", 0.0), device=device)
@@ -305,11 +325,13 @@ class _Tabular3Proxy:
             if torch.any(peak_bw > 0):
                 t_mem = bytes_ / (peak_bw + 1e-9)
             ms_est = (t_comp + t_mem) * 1e3
-            ms0.append(torch.clamp(ms_est, min=1e-4))
-        ms = torch.stack(ms0, dim=0)
+            # IMPORTANT: clamp ms0 into a reasonable prior range to stabilize fixed-point iteration
+            ms0.append(torch.clamp(ms_est, min=min_ms_t, max=max_ms_t))
+        ms = torch.stack(ms0, dim=0).reshape(-1)
 
         # fixed-point: mem(ms) -> ms(mem) x2
         for _ in range(2):
+            # ms -> mem
             rows_mem = []
             for i, base in enumerate(rows_base):
                 r = dict(base)
@@ -317,12 +339,19 @@ class _Tabular3Proxy:
                 rows_mem.append(r)
             mem_mb = self.mem.predict(rows_mem, device=device).reshape(-1)
 
+            # Clamp mem into [0, device_mem_cap]
+            mem_mb = torch.clamp(mem_mb, min=0.0)
+            mem_mb = torch.minimum(mem_mb, mem_cap_t)
+
+            # mem -> ms
             rows_ms = []
             for i, base in enumerate(rows_base):
                 r = dict(base)
                 r["peak_mem_mb"] = mem_mb[i]
                 rows_ms.append(r)
             ms = self.ms.predict(rows_ms, device=device).reshape(-1)
+            # Clamp ms into the same reasonable prior range
+            ms = torch.clamp(ms, min=min_ms_t, max=max_ms_t)
 
         # energy -> power
         rows_eng = []
