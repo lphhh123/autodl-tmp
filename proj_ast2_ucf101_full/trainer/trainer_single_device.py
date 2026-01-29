@@ -442,8 +442,17 @@ def train_single_device(
 
     val_cfg = _cfg_get(cfg, "val", None)
     test_cfg = _cfg_get(cfg, "test", None)
+
     fast_val_max_batches = int(_cfg_get(val_cfg, "fast_max_batches", 0) or 0)
-    full_val_every_epochs = int(_cfg_get(val_cfg, "full_every_epochs", 1) or 1)
+    fast_val_every_epochs = int(_cfg_get(val_cfg, "fast_every_epochs", 1) or 1)
+
+    # full_every_epochs:
+    #   0 => never run full during training (except maybe last epoch if full_on_last_epoch=True)
+    #  >0 => run full every N epochs (and maybe last epoch)
+    full_val_every_epochs = int(_cfg_get(val_cfg, "full_every_epochs", 0) or 0)
+    full_val_max_batches = int(_cfg_get(val_cfg, "full_max_batches", 0) or 0)
+
+    full_on_last_epoch = bool(_cfg_get(val_cfg, "full_on_last_epoch", True))
     val_log_interval = int(_cfg_get(val_cfg, "log_interval", 50) or 50)
     val_use_tqdm = bool(_cfg_get(val_cfg, "use_tqdm", True))
     run_final_test = bool(_cfg_get(test_cfg, "run_final_test", False))
@@ -618,32 +627,47 @@ def train_single_device(
                     log_stats(logger, stats)
             last_acc = None
             last_epoch = epoch == cfg.train.epochs - 1
-            full_every = max(1, int(full_val_every_epochs))
-            do_full = last_epoch or (epoch % full_every == 0)
-            if do_full:
-                tag = "full"
-                max_batches = 0
+
+            # decide whether to run full/fast/skip
+            do_full = False
+            if full_on_last_epoch and last_epoch:
+                do_full = True
+            elif full_val_every_epochs and full_val_every_epochs > 0:
+                do_full = (epoch % int(full_val_every_epochs) == 0)
+
+            do_fast = False
+            if (not do_full) and fast_val_every_epochs and fast_val_every_epochs > 0:
+                do_fast = (epoch % int(fast_val_every_epochs) == 0)
+
+            if not (do_full or do_fast):
+                logger.info("[VAL] epoch=%s skipped (do_full=%s do_fast=%s)", epoch, do_full, do_fast)
             else:
-                tag = "fast"
-                max_batches = int(fast_val_max_batches)
-            logger.info(
-                "[VAL] epoch=%s mode=%s max_batches=%s",
-                epoch,
-                tag,
-                "ALL" if max_batches == 0 else max_batches,
-            )
-            last_acc = validate(
-                model,
-                val_loader,
-                device,
-                logger,
-                epoch,
-                cfg,
-                max_batches=max_batches,
-                log_interval=val_log_interval,
-                tag=tag,
-                use_tqdm=val_use_tqdm,
-            )
+                if do_full:
+                    tag = "full"
+                    max_batches = int(full_val_max_batches)  # 0 => ALL
+                else:
+                    tag = "fast"
+                    max_batches = int(fast_val_max_batches)
+
+                logger.info(
+                    "[VAL] epoch=%s mode=%s max_batches=%s",
+                    epoch,
+                    tag,
+                    "ALL" if max_batches == 0 else max_batches,
+                )
+                last_acc = validate(
+                    model,
+                    val_loader,
+                    device,
+                    logger,
+                    epoch,
+                    cfg,
+                    max_batches=max_batches,
+                    log_interval=val_log_interval,
+                    tag=tag,
+                    use_tqdm=val_use_tqdm,
+                    tqdm_leave=(tag in ("full", "test")),
+                )
             if last_acc is not None and do_full:
                 if last_acc > best_acc:
                     best_acc = float(last_acc)
@@ -833,6 +857,7 @@ def train_single_device(
             log_interval=val_log_interval,
             tag="test",
             use_tqdm=val_use_tqdm,
+            tqdm_leave=True,
         )
 
 
@@ -847,6 +872,7 @@ def validate(
     log_interval: int = 0,
     tag: str = "full",
     use_tqdm: bool = True,
+    tqdm_leave: bool = False,
 ) -> float:
     model.eval()
     total = 0
@@ -855,10 +881,22 @@ def validate(
     if max_batches is not None and max_batches > 0 and total_batches is not None:
         total_batches = min(total_batches, max_batches)
     logger.info("Starting validation epoch=%s mode=%s batches=%s", epoch, tag, total_batches)
+
     with torch.no_grad():
         iterable = enumerate(loader, start=1)
+        pbar = None
         if use_tqdm:
-            iterable = tqdm(iterable, total=total_batches, desc=f"Val e{epoch} ({tag})", leave=False)
+            pbar = tqdm(
+                iterable,
+                total=total_batches,
+                desc=f"Val e{epoch} ({tag})",
+                leave=bool(tqdm_leave),
+            )
+            iterable = pbar
+
+        # if user didn't set log_interval, still refresh postfix occasionally
+        refresh_every = int(log_interval) if int(log_interval) > 0 else 20
+
         for batch_idx, batch in iterable:
             x = batch["video"].to(device)
             y = batch["label"].to(device)
@@ -866,20 +904,29 @@ def validate(
                 logits = model(x, batch["audio"].to(device))
             else:
                 logits = model(x)
+
             pred = logits.argmax(dim=1)
             total += y.size(0)
             correct += (pred == y).sum().item()
+
+            if pbar is not None and (batch_idx == 1 or batch_idx % refresh_every == 0):
+                acc_now = correct / max(1, total)
+                pbar.set_postfix({"acc1": f"{acc_now:.4f}", "seen": total})
+
             if log_interval and batch_idx % log_interval == 0:
                 logger.info(
-                    "[VAL PROGRESS] epoch=%s mode=%s batch=%s/%s",
+                    "[VAL PROGRESS] epoch=%s mode=%s batch=%s/%s acc1=%.4f",
                     epoch,
                     tag,
                     batch_idx,
                     total_batches if total_batches is not None else "?",
+                    correct / max(1, total),
                 )
+
             if max_batches is not None and max_batches > 0 and batch_idx >= max_batches:
                 break
+
     acc = correct / max(1, total)
-    logger.info(f"[val] epoch {epoch} acc={acc:.4f}")
-    logger.info("Finished validation epoch=%s", epoch)
+    logger.info("[val] epoch=%s mode=%s acc=%.4f", epoch, tag, acc)
+    logger.info("Finished validation epoch=%s mode=%s", epoch, tag)
     return float(acc)
