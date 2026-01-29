@@ -111,7 +111,13 @@ class PartitionPlanner:
         return objective, cost, mapping_obj
 
     # SPEC v4 §10.6 simulate split
-    def _simulate_split_for_layer(self, ln: LayerNode, segments: List[Segment], eff_specs: Dict[str, torch.Tensor]) -> Tuple[bool, float, List[Segment], Dict, Dict[str, Any]]:
+    def _simulate_split_for_layer(
+        self,
+        ln: LayerNode,
+        segments: List[Segment],
+        eff_specs: Dict[str, torch.Tensor],
+        alpha: Optional[torch.Tensor],
+    ) -> Tuple[bool, float, List[Segment], Dict, Dict[str, Any]]:
         segments_split = []
         split_applied = False
         local_plan = None
@@ -163,8 +169,8 @@ class PartitionPlanner:
             }
         if not split_applied:
             return False, 0.0, segments, {}, {}
-        obj_base, cost_base, map_base = self._evaluate(segments, eff_specs)
-        obj_split, cost_split, map_split = self._evaluate(segments_split, eff_specs)
+        obj_base, cost_base, map_base = self._evaluate(segments, eff_specs, alpha=alpha)
+        obj_split, cost_split, map_split = self._evaluate(segments_split, eff_specs, alpha=alpha)
         gain_ratio = (obj_base - obj_split) / max(1e-6, obj_base)
         local_plan["group_to_slot"] = map_split.get("mapping", [])[:2] if map_split.get("mapping") else []
         return True, gain_ratio, segments_split, map_split, local_plan
@@ -227,6 +233,7 @@ class PartitionPlanner:
                 ln,
                 segments_base,
                 eff_specs,
+                alpha=alpha,
             )
             if ok:
                 split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
