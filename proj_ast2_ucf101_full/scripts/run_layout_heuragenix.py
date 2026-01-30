@@ -2186,7 +2186,7 @@ def main() -> None:
     report.update(
         {
             "method": "heuragenix",
-            "seed": int(seed_id),
+            "seed": int(seed),
             "objective_hash": str(objective_hash),
             "trace_dir": str(trace_dir.absolute()),
             "artifacts": {
