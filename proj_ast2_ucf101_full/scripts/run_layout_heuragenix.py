@@ -1121,6 +1121,24 @@ def _write_subprocess_logs(
     return {"stdout": str(stdout_path), "stderr": str(stderr_path)}
 
 
+def _read_tail_text(path: Path, max_lines: int = 120, max_chars: int = 6000) -> str:
+    """
+    Read last `max_lines` lines of a text file. Clamp to `max_chars` characters.
+    Always returns a safe string (never raises).
+    """
+    try:
+        if path is None or (not path.exists()):
+            return f"<missing log: {path}>"
+        txt = path.read_text(encoding="utf-8", errors="replace")
+        lines = txt.splitlines()
+        tail = "\n".join(lines[-max_lines:]) if lines else ""
+        if len(tail) > max_chars:
+            tail = tail[-max_chars:]
+        return tail
+    except Exception as e:
+        return f"<failed to read log {path}: {e!r}>"
+
+
 def _collect_subprocess_outputs(
     out_dir: Path,
     problem: str,
@@ -1756,15 +1774,35 @@ def main() -> None:
                         },
                     )
                     # Do NOT continue to collect outputs if both primary and fallback failed.
+                    stderr_path = Path(fb_log_paths["stderr"])
+                    stdout_path = Path(fb_log_paths["stdout"])
+                    stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
+                    stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
+
                     raise RuntimeError(
-                        "[HeurAgenix] subprocess failed (primary and fallback). "
-                        f"See logs: {fb_log_paths['stderr']} and {fb_log_paths['stdout']}"
+                        "[HeurAgenix] subprocess failed (primary and fallback).\n"
+                        f"stderr_log: {stderr_path}\n"
+                        f"stdout_log: {stdout_path}\n"
+                        "----- stderr tail (last ~160 lines) -----\n"
+                        f"{stderr_tail}\n"
+                        "----- stdout tail (last ~80 lines) -----\n"
+                        f"{stdout_tail}\n"
                     )
             else:
                 # No fallback configured; stop here and point to logs
+                stderr_path = Path(log_paths["stderr"])
+                stdout_path = Path(log_paths["stdout"])
+                stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
+                stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
+
                 raise RuntimeError(
-                    "[HeurAgenix] subprocess failed and no fallback configured. "
-                    f"See logs: {log_paths['stderr']} and {log_paths['stdout']}"
+                    "[HeurAgenix] subprocess failed and no fallback configured.\n"
+                    f"stderr_log: {stderr_path}\n"
+                    f"stdout_log: {stdout_path}\n"
+                    "----- stderr tail (last ~160 lines) -----\n"
+                    f"{stderr_tail}\n"
+                    "----- stdout tail (last ~80 lines) -----\n"
+                    f"{stdout_tail}\n"
                 )
 
     recordings_found = True
