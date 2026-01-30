@@ -26,7 +26,7 @@ import subprocess
 import shutil
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -76,6 +76,66 @@ FAIRNESS_OVERRIDES = {
 }
 
 
+def _resolve_cli_path(p: Union[str, Path], base: Path) -> Path:
+    """
+    Resolve a CLI path argument into an absolute path.
+    HeurAgenix runs in a subprocess with cwd=heuragenix_root; relative paths otherwise
+    resolve under the HeurAgenix repo and can silently break llm_config/case paths.
+    """
+    pp = Path(p).expanduser()
+    if pp.is_absolute():
+        return pp
+    return (base / pp).resolve()
+
+
+def _pick_first_env(env: Dict[str, str], keys: Iterable[str]) -> str:
+    for k in keys:
+        v = env.get(k, "")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _ensure_heuragenix_llm_env(
+    env: Dict[str, str],
+    llm_cfg: Optional[Dict[str, Any]],
+    require_llm: bool,
+) -> None:
+    """
+    HeurAgenix api_model expects OPENAI_API_KEY in environment.
+    Map Ark/Doubao keys to OPENAI_API_KEY and fail fast if llm_hh is requested
+    without a usable key (prevents silent fallback to random_hh).
+    """
+    env.setdefault("V54_ALLOW_RAW_HEURAGENIX", "1")
+
+    if not llm_cfg:
+        if require_llm:
+            raise RuntimeError("[v5.4] llm_hh requested but llm_cfg is None")
+        return
+
+    llm_type = str(llm_cfg.get("type", "")).strip()
+    if llm_type in ("api_model", "openai", "explicit_url", "vllm"):
+        if not env.get("OPENAI_API_KEY", "").strip():
+            mapped = _pick_first_env(
+                env,
+                keys=[
+                    "VOLC_ARK_API_KEY",
+                    "ARK_API_KEY",
+                    "DOUBAO_API_KEY",
+                    "VOLC_API_KEY",
+                    "OPENAI_API_KEY",
+                ],
+            )
+            if mapped:
+                env["OPENAI_API_KEY"] = mapped
+
+    if require_llm and not env.get("OPENAI_API_KEY", "").strip():
+        raise RuntimeError(
+            "[v5.4] llm_hh requires OPENAI_API_KEY for HeurAgenix api_model client. "
+            "Set one of: OPENAI_API_KEY / VOLC_ARK_API_KEY / ARK_API_KEY / DOUBAO_API_KEY."
+        )
+
+
 def _cfg_get(obj, key: str, default=None):
     if obj is None:
         return default
@@ -90,6 +150,7 @@ def _build_run_signature(cfg: Any, method_name: str, seed_global: int) -> Dict[s
     signature = build_signature_v54(cfg, method_name=method_name, overrides=ov)
     signature.setdefault("cwd", os.getcwd())
     return signature
+
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
@@ -1222,13 +1283,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    cfg = load_config(args.cfg)
+    base = Path.cwd().resolve()
+    cfg_path = _resolve_cli_path(args.cfg, base)
+    layout_input_path = _resolve_cli_path(args.layout_input, base)
+    cfg = load_config(str(cfg_path))
     print(
         "[V5.4 CONTRACT] This run emits v5.4 trace/run_manifest; do NOT run HeurAgenix directly for baselines."
     )
     cfg_stem = Path(args.cfg).stem
     auto_out = Path("outputs/layout_heuragenix") / f"{cfg_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
-    out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
+    raw_out_dir = Path(args.out_dir) if args.out_dir else Path(getattr(getattr(cfg, "train", None), "out_dir", "") or auto_out)
+    out_dir = _resolve_cli_path(raw_out_dir, base)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
     trace_dir = out_dir / "trace"
@@ -1242,7 +1307,7 @@ def main() -> None:
 
     # dump config_used
     try:
-        (out_dir / "config_used.yaml").write_text(Path(args.cfg).read_text(encoding="utf-8"), encoding="utf-8")
+        (out_dir / "config_used.yaml").write_text(Path(cfg_path).read_text(encoding="utf-8"), encoding="utf-8")
     except Exception:
         pass
     # dump resolved config
@@ -1255,11 +1320,11 @@ def main() -> None:
         "argv": sys.argv,
         "out_dir": str(out_dir),
         "cfg_path": str(args.cfg),
+        "cfg_path_resolved": str(cfg_path),
         "seed": int(args.seed),
     }
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    layout_input_path = Path(args.layout_input)
     layout_input = _load_layout_input(layout_input_path)
 
     seed = int(args.seed)
@@ -1452,7 +1517,7 @@ def main() -> None:
                 adapted = internal_out / "llm_config_adapted.json"
                 with open(adapted, "w", encoding="utf-8") as f:
                     json.dump(js, f, indent=2, ensure_ascii=False)
-                llm_config = adapted
+                llm_config = adapted.resolve()
             llm_config_effective = str(llm_config) if llm_config else ""
         init_trace_dir_v54(
             base_dir=out_dir,
@@ -1585,7 +1650,8 @@ def main() -> None:
         )
         output_dir = output_root / problem / case_name / "result" / method
         case_stem = case_name
-    
+        case_path = (internal_data_base / problem / "test_data" / case_file).resolve()
+
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
@@ -1597,7 +1663,17 @@ def main() -> None:
             env["AMLT_OUTPUT_DIR"] = str(output_root)
         if not str(env.get("AMLT_DATA_DIR", "")).strip():
             env["AMLT_DATA_DIR"] = str(internal_data_root)
-    
+
+        llm_cfg_dict = None
+        try:
+            if llm_config is not None and Path(llm_config).exists():
+                llm_cfg_dict = json.loads(Path(llm_config).read_text(encoding="utf-8"))
+        except Exception:
+            llm_cfg_dict = None
+        _ensure_heuragenix_llm_env(env, llm_cfg_dict, require_llm=(method == "llm_hh"))
+        if run_mode == "inprocess":
+            os.environ.update(env)
+
         print(f"[bridge] AMLT_DATA_DIR={env['AMLT_DATA_DIR']}")
         print(f"[bridge] AMLT_OUTPUT_DIR={env['AMLT_OUTPUT_DIR']}")
         timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
@@ -1647,7 +1723,7 @@ def main() -> None:
                 "-d",
                 heuristic_dir,
                 "-t",
-                case_file,
+                str(case_path),
                 "-n",
                 f"{iters_sf}",
                 "-m",
@@ -1664,7 +1740,7 @@ def main() -> None:
             if max_steps is not None:
                 launch_cmd.extend(["--max_steps", str(max_steps)])
             if method == "llm_hh" and llm_config is not None:
-                launch_cmd.extend(["-l", str(llm_config)])
+                launch_cmd.extend(["-l", str(Path(llm_config).resolve())])
             # keep subprocess behavior consistent with inprocess
             llm_timeout_s = int(baseline_cfg.get("llm_timeout_s", 30))
             max_llm_failures = int(baseline_cfg.get("max_llm_failures", 2))
@@ -1730,7 +1806,7 @@ def main() -> None:
                         "-d",
                         heuristic_dir,
                         "-t",
-                        case_file,
+                        str(case_path),
                         "-n",
                         f"{iters_sf}",
                         "-m",
