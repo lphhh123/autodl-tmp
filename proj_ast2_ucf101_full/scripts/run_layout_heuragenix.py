@@ -1514,6 +1514,9 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
+    # v5.4 contract gate: HeurAgenix forbids running its entrypoints unless this is explicitly enabled.
+    # Wrapper is the auditable entrypoint that emits v5.4 trace/manifest, so allow the subprocess.
+    env["V54_ALLOW_RAW_HEURAGENIX"] = "1"
     # ---- v5.4 bridge: do not forcibly override user-provided AMLT_*; make roots explicit ----
     if not str(env.get("AMLT_OUTPUT_DIR", "")).strip():
         env["AMLT_OUTPUT_DIR"] = str(output_root)
