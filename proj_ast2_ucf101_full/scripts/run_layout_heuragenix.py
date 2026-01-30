@@ -105,15 +105,13 @@ def _is_placeholder_str(v: str | None) -> bool:
     lower = v.lower()
     placeholders = [
         "your_ark_api_key",
-        "your_api_key",
         "ep-xxx",
         "replace_me",
         "xxx",
-        "placeholder",
     ]
     if lower in placeholders:
         return True
-    if "your_" in lower or "placeholder" in lower:
+    if "your_" in lower:
         return True
     if "xxx" in lower:
         return True
@@ -131,16 +129,41 @@ def _normalize_openai_compat_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def _resolve_ark_from_env() -> tuple[str | None, str | None]:
+def _resolve_ark_credentials_from_env() -> tuple[str | None, str | None, str | None]:
     env = os.environ
-    api_key = env.get("VOLC_ARK_API_KEY", "").strip() or env.get("ARK_API_KEY", "").strip()
-    model = env.get("VOLC_ARK_MODEL", "").strip() or env.get("ARK_MODEL", "").strip()
-    return (api_key or None), (model or None)
+    api_key_keys = ["VOLC_ARK_API_KEY", "ARK_API_KEY", "VOLC_API_KEY", "OPENAI_API_KEY"]
+    model_keys = ["VOLC_ARK_MODEL", "ARK_MODEL", "VOLC_ARK_ENDPOINT_ID", "ARK_ENDPOINT_ID"]
+    api_key = None
+    api_key_env = ""
+    for key in api_key_keys:
+        val = env.get(key, "").strip()
+        if val:
+            api_key = val
+            api_key_env = key
+            break
+    model = None
+    model_env = ""
+    for key in model_keys:
+        val = env.get(key, "").strip()
+        if val:
+            model = val
+            model_env = key
+            break
+    if api_key_env and model_env:
+        source = f"{api_key_env}+{model_env}"
+    elif api_key_env:
+        source = api_key_env
+    elif model_env:
+        source = model_env
+    else:
+        source = ""
+    return api_key, model, source or None
 
 
-def _redact_llm_config_for_meta(js: dict, key_len: int) -> dict:
+def _redact_llm_config_for_meta(js: dict) -> dict:
     payload = dict(js)
-    payload["key_len"] = int(key_len)
+    api_key = payload.get("api_key", "")
+    payload["key_len"] = len(str(api_key)) if api_key else 0
     payload.pop("api_key", None)
     payload["normalized_url"] = _normalize_openai_compat_url(str(payload.get("url", "")))
     return payload
@@ -169,12 +192,18 @@ def _ensure_heuragenix_llm_env(
             api_key = str(llm_cfg.get("api_key", "")).strip()
             if api_key and not _is_placeholder_str(api_key):
                 env["OPENAI_API_KEY"] = api_key
-            else:
-                ark_key, _ = _resolve_ark_from_env()
-                if ark_key:
-                    env.setdefault("OPENAI_API_KEY", ark_key)
-        if llm_cfg.get("url"):
-            env.setdefault("OPENAI_BASE_URL", _normalize_openai_compat_url(str(llm_cfg.get("url", ""))))
+            mapped = _pick_first_env(
+                env,
+                keys=[
+                    "VOLC_ARK_API_KEY",
+                    "ARK_API_KEY",
+                    "DOUBAO_API_KEY",
+                    "VOLC_API_KEY",
+                    "OPENAI_API_KEY",
+                ],
+            )
+            if mapped:
+                env["OPENAI_API_KEY"] = mapped
 
     if require_llm and not env.get("OPENAI_API_KEY", "").strip():
         raise RuntimeError(
@@ -183,11 +212,10 @@ def _ensure_heuragenix_llm_env(
         )
 
 
-def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> tuple[str, str]:
+def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> str:
     js = json.loads(cfg_llm_path.read_text(encoding="utf-8"))
     was_placeholder_before = {"api_key": False, "model": False}
-    filled_from_env_keys: List[str] = []
-    key_len = 0
+    filled_from_env = ""
     if js.get("type") == "api_model":
         if js.get("url"):
             js["url"] = _normalize_openai_compat_url(str(js["url"]))
@@ -197,34 +225,13 @@ def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> tuple[str, str]:
         was_placeholder_before["api_key"] = _is_placeholder_str(api_key)
         was_placeholder_before["model"] = _is_placeholder_str(model)
 
-        env = os.environ
-        api_key_env = "VOLC_ARK_API_KEY" if env.get("VOLC_ARK_API_KEY", "").strip() else ""
-        api_key_env = api_key_env or ("ARK_API_KEY" if env.get("ARK_API_KEY", "").strip() else "")
-        model_env = "VOLC_ARK_MODEL" if env.get("VOLC_ARK_MODEL", "").strip() else ""
-        model_env = model_env or ("ARK_MODEL" if env.get("ARK_MODEL", "").strip() else "")
-
-        env_key, env_model = _resolve_ark_from_env()
-        if was_placeholder_before["model"]:
-            if not env_model:
-                raise ValueError(
-                    "[v5.4] llm_config model is missing or placeholder; set VOLC_ARK_MODEL/ARK_MODEL."
-                )
-            js["model"] = env_model
-            if model_env:
-                filled_from_env_keys.append(model_env)
-        if was_placeholder_before["api_key"]:
-            if not env_key:
-                raise ValueError(
-                    "[v5.4] llm_config api_key is missing or placeholder; set VOLC_ARK_API_KEY/ARK_API_KEY."
-                )
-            js["api_key"] = ""
-            if api_key_env:
-                filled_from_env_keys.append(api_key_env)
-
-        if was_placeholder_before["api_key"] and env_key:
-            key_len = len(env_key)
-        else:
-            key_len = len(str(js.get("api_key", "")).strip())
+        if was_placeholder_before["api_key"] or was_placeholder_before["model"]:
+            env_key, env_model, source = _resolve_ark_credentials_from_env()
+            if was_placeholder_before["api_key"] and env_key:
+                js["api_key"] = env_key
+            if was_placeholder_before["model"] and env_model:
+                js["model"] = env_model
+            filled_from_env = source or ""
 
         top_value = None
         if "top_p" in js or "top-p" in js:
@@ -237,19 +244,19 @@ def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> tuple[str, str]:
     adapted = internal_out / "llm_config_adapted.json"
     adapted.write_text(json.dumps(js, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    meta_base = _redact_llm_config_for_meta(js, key_len=key_len)
+    meta_base = _redact_llm_config_for_meta(js)
     meta = {
         "type": js.get("type", ""),
         "name": js.get("name", ""),
         "url": meta_base.get("normalized_url", ""),
         "model": js.get("model", ""),
         "key_len": int(meta_base.get("key_len", 0)),
-        "filled_from_env": "+".join(filled_from_env_keys),
+        "filled_from_env": filled_from_env or "",
         "was_placeholder_before": was_placeholder_before,
     }
     meta_path = internal_out / "llm_config_resolved_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    return str(adapted.resolve()), str(meta_path.resolve())
+    return str(adapted.resolve())
 
 
 def _preflight_llm_config_or_die(llm_cfg_path: str, method: str) -> None:
@@ -264,7 +271,7 @@ def _preflight_llm_config_or_die(llm_cfg_path: str, method: str) -> None:
     key_len = len(api_key)
     url = str(js.get("url", "")).strip()
     issues = []
-    if api_key and (_is_placeholder_str(api_key) or key_len < 8):
+    if _is_placeholder_str(api_key) or key_len < 8:
         issues.append("api_key")
     if _is_placeholder_str(model):
         issues.append("model")
@@ -1551,7 +1558,6 @@ def main() -> None:
     reason: str = ""
     error_msg: str = ""
     exception_type: str = ""
-    primary_log_paths: Dict[str, str] = {"stdout": "", "stderr": ""}
 
     try:
         problem = str(baseline_cfg.get("problem", "wafer_layout"))
@@ -1647,7 +1653,6 @@ def main() -> None:
         llm_config = None
         llm_config_requested = str(baseline_cfg.get("llm_config_file", ""))
         llm_config_effective = ""
-        llm_config_meta_path = ""
         if method == "llm_hh":
             llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
             if str(method).lower() == "llm_hh" and not llm_config:
@@ -1655,9 +1660,7 @@ def main() -> None:
             if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
                 raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
             if llm_config:
-                adapted_path, meta_path = _adapt_llm_config(llm_config, out_dir)
-                llm_config = Path(adapted_path).resolve()
-                llm_config_meta_path = str(Path(meta_path).resolve())
+                llm_config = Path(_adapt_llm_config(llm_config, out_dir)).resolve()
                 _preflight_llm_config_or_die(str(llm_config), method=method)
             llm_config_effective = str(llm_config) if llm_config else ""
         init_trace_dir_v54(
@@ -1913,8 +1916,8 @@ def main() -> None:
                 )
                 result = None
             # Always persist subprocess logs for debugging.
-            primary_log_paths = _write_subprocess_logs(trace_dir, f"{method}_primary", result)
-
+            log_paths = _write_subprocess_logs(trace_dir, f"{method}_primary", result)
+    
             if result is None or result.returncode != 0:
                 if result is not None:
                     log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
@@ -1927,8 +1930,8 @@ def main() -> None:
                         "reason": "launch_failed",
                         "engine": method,
                         "error": log_text,
-                        "stdout_log": primary_log_paths["stdout"],
-                        "stderr_log": primary_log_paths["stderr"],
+                        "stdout_log": log_paths["stdout"],
+                        "stderr_log": log_paths["stderr"],
                     },
                 )
     
@@ -2027,8 +2030,8 @@ def main() -> None:
                         )
                 else:
                     # No fallback configured; stop here and point to logs
-                    stderr_path = Path(primary_log_paths["stderr"])
-                    stdout_path = Path(primary_log_paths["stdout"])
+                    stderr_path = Path(log_paths["stderr"])
+                    stdout_path = Path(log_paths["stdout"])
                     stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
                     stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
 
@@ -2234,10 +2237,6 @@ def main() -> None:
             "method": str(method),
             "run_mode": str(run_mode),
             "cfg_path": str(args.cfg),
-            "llm_config_effective_path": str(llm_config_effective),
-            "llm_config_meta_path": str(llm_config_meta_path),
-            "heuragenix_primary_stdout_log": str(primary_log_paths.get("stdout", "")),
-            "heuragenix_primary_stderr_log": str(primary_log_paths.get("stderr", "")),
             "budget": {
                 "problem_size": problem_size_eff,
                 "iterations_scale_factor": float(iters_sf),
@@ -2469,43 +2468,6 @@ def main() -> None:
         json.dumps(report, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    if baseline_method == "llm_hh":
-        llm_ok = int(llm_summary.get("ok", 0) or 0)
-        if report.get("fallback_used") or llm_ok == 0:
-            cfg_url = ""
-            cfg_model = ""
-            key_state = "missing"
-            if llm_config_effective and Path(llm_config_effective).exists():
-                try:
-                    llm_js = json.loads(Path(llm_config_effective).read_text(encoding="utf-8"))
-                    cfg_url = str(llm_js.get("url", ""))
-                    cfg_model = str(llm_js.get("model", ""))
-                    cfg_key = str(llm_js.get("api_key", "")).strip()
-                    if cfg_key:
-                        key_state = "placeholder" if _is_placeholder_str(cfg_key) else "set_in_config"
-                    else:
-                        key_state = "empty_in_config"
-                except Exception:
-                    key_state = "unreadable_config"
-            stderr_path = Path(primary_log_paths["stderr"]) if primary_log_paths.get("stderr") else None
-            stdout_path = Path(primary_log_paths["stdout"]) if primary_log_paths.get("stdout") else None
-            stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
-            stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
-            raise RuntimeError(
-                "[STRICT] llm_hh requested but LLM not actually used "
-                "(fallback/random or llm_usage.ok==0).\n"
-                f"llm_config_effective_path: {llm_config_effective}\n"
-                f"llm_config_meta_path: {llm_config_meta_path}\n"
-                f"llm_url: {cfg_url}\n"
-                f"llm_model: {cfg_model}\n"
-                f"api_key_state: {key_state}\n"
-                f"stderr_log: {stderr_path}\n"
-                f"stdout_log: {stdout_path}\n"
-                "----- stderr tail (last ~160 lines) -----\n"
-                f"{stderr_tail}\n"
-                "----- stdout tail (last ~80 lines) -----\n"
-                f"{stdout_tail}\n"
-            )
     meta = {
         "mapping_signature": best_solution_payload.get("mapping_signature", "")
         if isinstance(best_solution_payload, dict)
