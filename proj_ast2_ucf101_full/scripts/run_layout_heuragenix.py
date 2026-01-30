@@ -842,7 +842,18 @@ def _write_trace_and_pareto(
         w = csv.DictWriter(f, fieldnames=["comm_norm", "therm_norm"], restval="")
         w.writeheader()
         for p in pareto.points:
-            w.writerow({"comm_norm": float(p.get("comm_norm", 0.0)), "therm_norm": float(p.get("therm_norm", 0.0))})
+            # p is usually layout.pareto.ParetoPoint (dataclass), but keep dict-compat just in case
+            if hasattr(p, "comm_norm") and hasattr(p, "therm_norm"):
+                comm = float(p.comm_norm)
+                therm = float(p.therm_norm)
+            elif isinstance(p, dict):
+                comm = float(p.get("comm_norm", 0.0))
+                therm = float(p.get("therm_norm", 0.0))
+            else:
+                # unexpected type; best-effort
+                comm = float(getattr(p, "comm_norm", 0.0))
+                therm = float(getattr(p, "therm_norm", 0.0))
+            w.writerow({"comm_norm": comm, "therm_norm": therm})
 
     info = {
         "steps_written": len(hx_rows),
