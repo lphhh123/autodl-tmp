@@ -1340,6 +1340,9 @@ def main() -> None:
     llm_usage_path = trace_dir / "llm_usage.jsonl"
     llm_usage_path_compat = out_dir / "llm_usage.jsonl"
     run_ok: bool = True
+    reason: str = ""
+    error_msg: str = ""
+    exception_type: str = ""
 
     try:
         problem = str(baseline_cfg.get("problem", "wafer_layout"))
@@ -1791,7 +1794,11 @@ def main() -> None:
                         stdout_path = Path(fb_log_paths["stdout"])
                         stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
                         stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
-    
+
+                        run_ok = False
+                        reason = "heuragenix_subprocess_failed"
+                        error_msg = "subprocess failed (primary and fallback)"
+                        exception_type = "RuntimeError"
                         raise RuntimeError(
                             "[HeurAgenix] subprocess failed (primary and fallback).\n"
                             f"stderr_log: {stderr_path}\n"
@@ -1807,7 +1814,11 @@ def main() -> None:
                     stdout_path = Path(log_paths["stdout"])
                     stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
                     stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
-    
+
+                    run_ok = False
+                    reason = "heuragenix_subprocess_failed"
+                    error_msg = "subprocess failed (no fallback configured)"
+                    exception_type = "RuntimeError"
                     raise RuntimeError(
                         "[HeurAgenix] subprocess failed and no fallback configured.\n"
                         f"stderr_log: {stderr_path}\n"
@@ -2079,6 +2090,10 @@ def main() -> None:
                 f"HeurAgenix evaluator fallback detected: evaluator_source={evaluator_source}. "
                 f"evaluator_import_error={evaluator_import_error}"
             )
+        if report.get("error") and not error_msg:
+            error_msg = str(report.get("error", ""))
+        if report.get("error") and not reason:
+            reason = "report_error"
         total_wall_s = float(time.time() - start_time)
         max_steps_done = int(trace_summary.get("n_rows", 0))
         eval_calls_total = int(ec.get("eval_calls_total", 0))
@@ -2156,8 +2171,12 @@ def main() -> None:
             f"Internal: {src_root}\nGuide-mirror: {guide_root}\n",
             encoding="utf-8",
         )
-    except Exception:
+    except Exception as e:
         run_ok = False
+        if not reason:
+            reason = "exception"
+        error_msg = str(e)
+        exception_type = type(e).__name__
         raise
     fallback_reasons = []
     if fallback_used:
@@ -2220,7 +2239,9 @@ def main() -> None:
                 "effective_eval_calls_total": int(effective_eval_calls_total),
             },
             "ok": bool(run_ok),
-            "reason": str(reason),
+            "reason": str(reason) if reason else "",
+            "error": str(error_msg) if error_msg else "",
+            "exception_type": str(exception_type) if exception_type else "",
         }
     )
     (out_dir / "report.json").write_text(
