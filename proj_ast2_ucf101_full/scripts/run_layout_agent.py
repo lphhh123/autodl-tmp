@@ -392,7 +392,25 @@ def run_layout_agent(
         layout_state.assign = assign_leg
 
         # Stage5: detailed place
-        detailed_cfg = cfg.detailed_place if hasattr(cfg, "detailed_place") else {}
+        from omegaconf import OmegaConf
+
+        # Keep detailed_place parameters at root (so detailed_place.py can read keys like cfg.steps/cfg.planner/etc),
+        # but inject v5.4 contract stamps so contract checks remain STRICT and valid.
+        detailed_cfg_raw = cfg.detailed_place if hasattr(cfg, "detailed_place") and cfg.detailed_place is not None else OmegaConf.create({})
+
+        # Build a stamped view for detailed_place: merge contract/_contract from top-level cfg into detailed_cfg.
+        # NOTE: OmegaConf.merge keeps detailed_cfg keys intact while providing cfg._contract + cfg.contract for v5.4 checks.
+        detailed_cfg = OmegaConf.merge(
+            OmegaConf.create(
+                {
+                    "_contract": OmegaConf.to_container(getattr(cfg, "_contract", {}), resolve=True),
+                    "contract": OmegaConf.to_container(getattr(cfg, "contract", {}), resolve=True),
+                    # propagate global seed so detailed_place determinism stays consistent
+                    "seed": int(getattr(cfg, "seed", 0) or 0),
+                }
+            ),
+            detailed_cfg_raw,
+        )
         budget_exhausted = False
         try:
             assert_cfg_sealed_or_violate(
