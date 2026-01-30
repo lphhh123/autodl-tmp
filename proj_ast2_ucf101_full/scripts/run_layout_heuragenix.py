@@ -1104,6 +1104,23 @@ def _run_heuragenix_inprocess(
     return out_dir
 
 
+def _write_subprocess_logs(
+    trace_dir: Path,
+    tag: str,
+    result: subprocess.CompletedProcess | None,
+) -> Dict[str, str]:
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = trace_dir / f"heuragenix_subprocess_{tag}.stdout.log"
+    stderr_path = trace_dir / f"heuragenix_subprocess_{tag}.stderr.log"
+    if result is None:
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+    else:
+        stdout_path.write_text((result.stdout or ""), encoding="utf-8")
+        stderr_path.write_text((result.stderr or ""), encoding="utf-8")
+    return {"stdout": str(stdout_path), "stderr": str(stderr_path)}
+
+
 def _collect_subprocess_outputs(
     out_dir: Path,
     problem: str,
@@ -1121,7 +1138,32 @@ def _collect_subprocess_outputs(
     internal_out = out_dir / "heuragenix_internal"
     internal_base = internal_out / "output" / problem / case_stem / result_dir / engine
     if not internal_base.exists():
-        raise FileNotFoundError(f"[HeurAgenix] internal output not found: {internal_base}")
+        # Try to detect actual engine dir produced by HeurAgenix (e.g., llm_hh vs random_hh)
+        cand_root = internal_out / "output" / problem / case_stem / result_dir
+        cands = sorted([p for p in cand_root.glob("*") if p.is_dir()])
+        if len(cands) == 1:
+            detected = cands[0]
+            (out_dir / "heuragenix_engine_detected.json").write_text(
+                json.dumps(
+                    {
+                        "expected_engine": engine,
+                        "detected_engine": detected.name,
+                        "internal_base_expected": str(internal_base),
+                        "internal_base_detected": str(detected),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            internal_base = detected
+        else:
+            existing = [p.name for p in cands]
+            raise FileNotFoundError(
+                f"[HeurAgenix] internal output not found: {internal_base}. "
+                f"Existing engines under {cand_root}: {existing}. "
+                f"Check subprocess logs under {out_dir / 'trace'} (heuragenix_subprocess_*.stderr.log)."
+            )
 
     mirror = out_dir / problem / case_stem / result_dir / engine
     mirror.mkdir(parents=True, exist_ok=True)
@@ -1514,8 +1556,7 @@ def main() -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
-    # v5.4 contract gate: HeurAgenix forbids running its entrypoints unless this is explicitly enabled.
-    # Wrapper is the auditable entrypoint that emits v5.4 trace/manifest, so allow the subprocess.
+    # HeurAgenix entrypoints are gated by v5.4 contract; wrapper is the auditable entrypoint.
     env["V54_ALLOW_RAW_HEURAGENIX"] = "1"
     # ---- v5.4 bridge: do not forcibly override user-provided AMLT_*; make roots explicit ----
     if not str(env.get("AMLT_OUTPUT_DIR", "")).strip():
@@ -1620,13 +1661,27 @@ def main() -> None:
                 },
             )
             result = None
+        # Always persist subprocess logs for debugging.
+        log_paths = _write_subprocess_logs(trace_dir, f"{method}_primary", result)
+
         if result is None or result.returncode != 0:
             if result is not None:
                 log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+            else:
+                log_text = "subprocess returned None"
             _append_llm_usage(
                 llm_usage_path,
-                {"ok": False, "reason": "launch_failed", "engine": method, "error": log_text},
+                {
+                    "ok": False,
+                    "reason": "launch_failed",
+                    "engine": method,
+                    "error": log_text,
+                    "stdout_log": log_paths["stdout"],
+                    "stderr_log": log_paths["stderr"],
+                },
             )
+
+            # Try wrapper-level fallback method if configured
             if method != fallback_method:
                 fallback_used = True
                 method = fallback_method
@@ -1657,6 +1712,7 @@ def main() -> None:
                 ]
                 if max_steps is not None:
                     launch_cmd.extend(["--max_steps", str(max_steps)])
+
                 try:
                     result = subprocess.run(
                         launch_cmd,
@@ -1680,13 +1736,36 @@ def main() -> None:
                         },
                     )
                     result = None
+
+                fb_log_paths = _write_subprocess_logs(trace_dir, f"{method}_fallback", result)
+
                 if result is None or result.returncode != 0:
                     if result is not None:
                         log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+                    else:
+                        log_text = "subprocess returned None"
                     _append_llm_usage(
                         llm_usage_path,
-                        {"ok": False, "reason": "fallback_launch_failed", "engine": method, "error": log_text},
+                        {
+                            "ok": False,
+                            "reason": "fallback_launch_failed",
+                            "engine": method,
+                            "error": log_text,
+                            "stdout_log": fb_log_paths["stdout"],
+                            "stderr_log": fb_log_paths["stderr"],
+                        },
                     )
+                    # Do NOT continue to collect outputs if both primary and fallback failed.
+                    raise RuntimeError(
+                        "[HeurAgenix] subprocess failed (primary and fallback). "
+                        f"See logs: {fb_log_paths['stderr']} and {fb_log_paths['stdout']}"
+                    )
+            else:
+                # No fallback configured; stop here and point to logs
+                raise RuntimeError(
+                    "[HeurAgenix] subprocess failed and no fallback configured. "
+                    f"See logs: {log_paths['stderr']} and {log_paths['stdout']}"
+                )
 
     recordings_found = True
     recordings_missing = False
