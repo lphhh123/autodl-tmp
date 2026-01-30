@@ -44,7 +44,16 @@ class BaseEnv:
         self.data_path = data_path
         self.data_name = data_path
         self.problem = problem or ""
+        # 1) load instance first
         self.instance_data = self.load_data(data_path)
+
+        # 2) allow subclass to initialize attributes needed by init_solution()
+        # (e.g., problem size, RNG/seed, derived constants)
+        setup_fn = getattr(self, "setup_from_instance_data", None)
+        if callable(setup_fn):
+            setup_fn(self.instance_data)
+
+        # 3) now it is safe to build initial solution
         self.current_solution = self.init_solution()
         self.solution = self.current_solution
         self.recordings: List[Dict[str, Any]] = []

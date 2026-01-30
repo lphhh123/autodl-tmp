@@ -86,38 +86,45 @@ class Env(BaseEnv):
         assert "slots" in d and "sites" in d and "mapping" in d, f"bad instance: {data_path}"
         return d
 
-    def __init__(self, data_name: str):
-        super().__init__(data_name)
-
+    def setup_from_instance_data(self, instance_data: dict) -> None:
+        """
+        Called by BaseEnv.__init__ AFTER load_data() and BEFORE init_solution().
+        Must initialize attributes used by init_solution(), especially:
+        - S, Ns
+        - seed/_seed_id
+        - rng
+        """
         self.problem = "wafer_layout"
         self._step_id = 0
         self._stage = "llm_hh"
-        seed_info = self.instance_data.get("seed", {}) or {}
+
+        seed_info = instance_data.get("seed", {}) or {}
         assign_seed = seed_info.get("assign_seed", 0)
         if isinstance(assign_seed, int):
             self._seed_id = int(assign_seed)
         else:
             self._seed_id = int(seed_info.get("seed_id", 0))
         self.seed = int(self._seed_id)
+
         _random.seed(self.seed)
         np.random.seed(self.seed)
         self.rng = _random.Random(self._seed_id)
 
-        slots = self.instance_data.get("slots", {})
-        sites = self.instance_data.get("sites", {})
+        slots = instance_data.get("slots", {}) or {}
+        sites = instance_data.get("sites", {}) or {}
         self.S = int(slots.get("S", len(slots.get("tdp", slots.get("slot_tdp_w", [])))))
         self.Ns = int(sites.get("Ns", len(sites.get("sites_xy", []))))
         self.problem_size = self.S
         self.construction_steps = self.S
 
-        obj = self.instance_data.get("objective_cfg", {}) or self.instance_data.get("objective", {})
+        obj = instance_data.get("objective_cfg", {}) or instance_data.get("objective", {})
         self.sigma_mm = float(obj.get("sigma_mm", 20.0))
         w = obj.get("scalar_weights", {}) or {}
         self.w_comm = float(w.get("w_comm", 0.7))
         self.w_therm = float(w.get("w_therm", 0.3))
         self.w_penalty = float(w.get("w_penalty", w.get("w_dup", 0.1) + w.get("w_boundary", 0.2)))
 
-        base = self.instance_data.get("baseline", {}) or {}
+        base = instance_data.get("baseline", {}) or {}
         self.base_comm = float(base.get("L_comm", 1.0)) if base.get("L_comm", 0.0) else 1.0
         self.base_therm = float(base.get("L_therm", 1.0)) if base.get("L_therm", 0.0) else 1.0
 
@@ -130,14 +137,18 @@ class Env(BaseEnv):
         self._rec_path = None
         self._best_path = None
 
-        self._require_main_evaluator = bool(self.instance_data.get("require_main_evaluator", True))
-        self._allow_fallback_evaluator = bool(self.instance_data.get("allow_fallback_evaluator", False))
-        if bool(self.instance_data.get("force_main_evaluator", False)):
+        self._require_main_evaluator = bool(instance_data.get("require_main_evaluator", True))
+        self._allow_fallback_evaluator = bool(instance_data.get("allow_fallback_evaluator", False))
+        if bool(instance_data.get("force_main_evaluator", False)):
             self._require_main_evaluator = True
 
         self._evaluator_source = "main_project"
         self._evaluator_import_error = ""
         self._evaluator = None
+
+    def __init__(self, data_name: str):
+        # BaseEnv will load instance_data, call setup_from_instance_data(), then init_solution()
+        super().__init__(data_name, problem="wafer_layout")
         self._layout_state = None
         self._init_evaluator()
         self._max_eval_calls = int(self.instance_data.get("max_eval_calls", 0) or 0)
@@ -325,11 +336,7 @@ class Env(BaseEnv):
         self.problem_state = self.get_problem_state()
 
     def reset(self, output_dir: str = None):
-        super().reset(output_dir=output_dir)
-        self._step_id = 0
-        self._sa_T = float(self.temp_init)
-        ms = int(self.instance_data.get("max_steps", 0) or 0)
-        self.max_steps = ms if ms > 0 else None
+        # Make sure RNG/seed are updated BEFORE init_solution() is called inside BaseEnv.reset()
         seed_obj = self.instance_data.get("seed", {}) or {}
         seed = int(seed_obj.get("seed_id", getattr(self, "_seed_id", 0)) or 0)
         self.seed = seed
@@ -339,6 +346,12 @@ class Env(BaseEnv):
         np.random.seed(seed)
         self.rng = _random.Random(seed)
 
+        super().reset(output_dir=output_dir)
+
+        self._step_id = 0
+        self._sa_T = float(self.temp_init)
+        ms = int(self.instance_data.get("max_steps", 0) or 0)
+        self.max_steps = ms if ms > 0 else None
         self._rec_path = os.path.join(self.output_dir, "recordings.jsonl")
         self._best_path = os.path.join(self.output_dir, "best_solution.json")
         os.makedirs(self.output_dir, exist_ok=True)
