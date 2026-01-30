@@ -16,9 +16,8 @@ baseline:
   require_main_evaluator: true
   allow_fallback_evaluator: false
   run_mode: subprocess
+  llm_config_file: configs/llm/api_model_ark.json
 
 budget:
   total_eval_budget: 2000
   max_wallclock_sec: 1800
-
-llm_config_file: configs/llm/api_model_ark.json
