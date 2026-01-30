@@ -666,7 +666,7 @@ def _assert_proxy_sanitize_event(payload: Dict[str, Any]) -> None:
     float(payload["penalty_added"])
 
 
-def append_trace_event_v54(
+def _append_trace_event_v54_impl(
     path: Path,
     event_type: str,
     payload: Optional[dict] = None,
@@ -706,6 +706,48 @@ def append_trace_event_v54(
             "event_type": str(event_type),
             "payload": payload,
         },
+    )
+
+
+def append_trace_event_v54(
+    path: Optional[Path] = None,
+    event_type: Optional[str] = None,
+    payload: Optional[dict] = None,
+    run_id: Optional[str] = None,
+    step: Optional[int] = None,
+    epoch: Optional[int] = None,
+    outer_iter: Optional[int] = None,
+    strict: bool = True,
+    trace_events_path: Optional[Path] = None,
+    **_ignored_kwargs,
+):
+    """
+    v5.4 canonical trace events appender.
+
+    Compatibility:
+      - old call style: append_trace_event_v54(path, event_type, ...)
+      - new call style: append_trace_event_v54(trace_events_path=..., event_type=..., ...)
+
+    This is NOT a downgrade: strict contract checks are preserved via _assert_event().
+    """
+    # Prefer explicit trace_events_path (used by layout scripts)
+    if trace_events_path is not None:
+        path = trace_events_path
+
+    if path is None:
+        raise TypeError("append_trace_event_v54() missing required argument: 'path' (or 'trace_events_path')")
+    if event_type is None:
+        raise TypeError("append_trace_event_v54() missing required argument: 'event_type'")
+
+    return _append_trace_event_v54_impl(
+        path=Path(path),
+        event_type=str(event_type),
+        payload=payload,
+        run_id=run_id,
+        step=step,
+        epoch=epoch,
+        outer_iter=outer_iter,
+        strict=bool(strict),
     )
 
 
