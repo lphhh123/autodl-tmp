@@ -1339,459 +1339,477 @@ def main() -> None:
     start_time = time.time()
     llm_usage_path = trace_dir / "llm_usage.jsonl"
     llm_usage_path_compat = out_dir / "llm_usage.jsonl"
+    run_ok: bool = True
 
-    problem = str(baseline_cfg.get("problem", "wafer_layout"))
-    internal_out = out_dir / "heuragenix_internal"
-    internal_out.mkdir(parents=True, exist_ok=True)
-    heuragenix_cfg = getattr(cfg, "heuragenix", None)
-    data_root_cfg = getattr(heuragenix_cfg, "data_root", None) if heuragenix_cfg else None
-    output_root_cfg = getattr(heuragenix_cfg, "output_root", None) if heuragenix_cfg else None
-    internal_data_root = (
-        Path(data_root_cfg).expanduser().resolve() if data_root_cfg else (internal_out / "data").resolve()
-    )
-    internal_data_root.mkdir(parents=True, exist_ok=True)
-    (internal_data_root / problem / "test_data").mkdir(parents=True, exist_ok=True)
-    (internal_out / problem).mkdir(parents=True, exist_ok=True)
-    internal_data_base = internal_data_root
-    output_root = (
-        Path(output_root_cfg).expanduser().resolve() if output_root_cfg else (internal_out / "output").resolve()
-    )
-    output_root.mkdir(parents=True, exist_ok=True)
-    data_root_requested = os.path.abspath(str(data_root_cfg)) if data_root_cfg else ""
-    output_root_requested = os.path.abspath(str(output_root_cfg)) if output_root_cfg else ""
-    heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
-    selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
-    num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
-    rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
-    iters_sf = float(baseline_cfg.get("iterations_scale_factor", 2.0))
-    max_steps = baseline_cfg.get("max_steps", None)
-    S = int(infer_problem_size(layout_input))
-    if max_steps is not None and int(max_steps) >= 0:
-        max_steps = int(max_steps)
-        iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
-    else:
-        max_steps = None
-    effective_max_steps = (
-        int(max_steps)
-        if max_steps is not None and int(max_steps) >= 0
-        else int(max(1, round(float(iters_sf) * max(1, S))))
-    )
-    budget_cfg = getattr(cfg, "budget", None) or {}
-    total_eval_budget = int(getattr(budget_cfg, "total_eval_budget", 0) or 0)
-    max_wallclock_sec = float(getattr(budget_cfg, "max_wallclock_sec", 0.0) or 0.0)
-
-    if total_eval_budget and effective_max_steps:
-        effective_max_steps = int(min(effective_max_steps, total_eval_budget))
-    if effective_max_steps:
-        max_steps = int(effective_max_steps)
-
-    layout_input["max_eval_calls"] = int(total_eval_budget)
-    layout_input["max_steps"] = int(effective_max_steps)
-    seed_payload = layout_input.get("seed", {})
-    if isinstance(seed_payload, dict):
-        seed_payload["seed_id"] = int(args.seed)
-        seed_payload["rng_seed"] = int(args.seed)
-        layout_input["seed"] = seed_payload
-    else:
-        layout_input["seed"] = int(args.seed)
-
-    work_dir, case_name, case_file = _prepare_work_dir(
-        out_dir,
-        heuragenix_root,
-        layout_input,
-        seed,
-        internal_data_base,
-        seed_assign,
-        baseline_cfg,
-    )
-
-    layout_hash = None
     try:
-        layout_hash = hashlib.sha256(layout_input_path.read_bytes()).hexdigest()
-    except Exception:
-        layout_hash = None
-    resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
-    objective_cfg = _build_objective_cfg(cfg)
-    baseline_payload = dict(baseline_cfg) if isinstance(baseline_cfg, dict) else baseline_cfg
-    extra = {
-        "repo_root": str(_PROJECT_ROOT),
-        "problem_name": str(baseline_cfg.get("problem", "wafer_layout")),
-        "layout_input_hash": layout_hash,
-        "steps": int(effective_max_steps),
-        "budget": int(rollout_budget),
-        "case_stem": str(case_name),
-        "seed": int(seed),
-        "seed_assign": [int(x) for x in seed_assign],
-        "objective_cfg": objective_cfg,
-        "baseline": baseline_payload,
-        "trace_events": str(out_dir / "trace" / "trace_events.jsonl"),
-    }
-    cfg_hash = stable_hash({"cfg": resolved_text})
-    # ---- v5.4: canonical trace events (JSONL) ----
-    trace_path = trace_dir / "trace.csv"
-    signature = _build_run_signature(cfg, method_name=method_label, seed_global=int(seed))
-    llm_config = None
-    llm_config_requested = str(baseline_cfg.get("llm_config_file", ""))
-    llm_config_effective = ""
-    if method == "llm_hh":
-        llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
-        if str(method).lower() == "llm_hh" and not llm_config:
-            raise SystemExit("[v5.4] llm_hh requires an explicit --llm_config_file (no implicit fallback).")
-        if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
-            raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
-        if llm_config:
-            with open(llm_config, "r", encoding="utf-8") as f:
-                js = json.load(f)
-            if "top-p" in js and "top_p" not in js:
-                js["top_p"] = js.pop("top-p")
-            adapted = internal_out / "llm_config_adapted.json"
-            with open(adapted, "w", encoding="utf-8") as f:
-                json.dump(js, f, indent=2, ensure_ascii=False)
-            llm_config = adapted
-        llm_config_effective = str(llm_config) if llm_config else ""
-    init_trace_dir_v54(
-        base_dir=out_dir,
-        run_id="trace",
-        cfg=cfg,
-        signature=signature,
-        signature_v54=signature,
-        run_meta={
-            "heuristic": method_label,
-            "method": method,
-            "run_id": run_id,
-            "seed_id": int(seed),
-            "mode": "layout_heuragenix",
-            "heuragenix_io": heuragenix_io,
-            "heuragenix_output_problem_dir": str((output_root / problem).resolve()),
-            "heuristic_dir": str(heuristic_dir),
-            "llm_config_file": str(llm_config_effective),
-            "requested": {
-                "method": "layout_heuragenix",
-                "llm_config_file": str(llm_config_effective),
-            },
-            "effective": {
-                "method": "layout_heuragenix",
-                "heuragenix_internal_data_root": str(internal_data_root),
-                "heuragenix_internal_out_root": str(internal_out),
-                "heuragenix_output_root": str(output_root),
-                "heuragenix_problem": str(problem),
-                "llm_config_file": str(llm_config_effective),
-            },
-        },
-        required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
-    )
-    trace_events_path = trace_dir / "trace_events.jsonl"
-    with (trace_dir / "trace_header.json").open("r", encoding="utf-8") as f:
-        header_payload = json.load(f)
-    append_trace_event_v54(
-        trace_events_path=trace_events_path,
-        run_id=run_id,
-        step=0,
-        event_type="trace_header",
-        payload=header_payload,
-        strict=True,
-    )
-    finalize_state = {
-        "finalized": False,
-        "reason": "error",
-        "steps_done": 0,
-        "best_solution_valid": False,
-        "best_total": None,
-    }
-    stable_hw_state: Dict[str, Any] = {}
-
-    def _finalize_trace(**overrides):
-        if finalize_state["finalized"]:
-            return
-        finalize_state.update({k: v for k, v in overrides.items() if v is not None})
-        summary_payload = {
-            "ok": bool(finalize_state.get("ok", True)),
-            "reason": str(finalize_state.get("reason", "error")),
-            "steps_done": int(finalize_state.get("steps_done", 0) or 0),
-            "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
-        }
-        summary_payload.update(build_baseline_trace_summary(cfg, stable_hw_state))
-        update_trace_summary(trace_dir, summary_payload)
-        try:
-            if llm_usage_path.exists():
-                llm_usage_path_compat.write_text(
-                    llm_usage_path.read_text(encoding="utf-8"),
-                    encoding="utf-8",
-                )
-        except Exception:
-            pass
-        finalize_trace_dir(
-            trace_events_path,
-            reason=str(finalize_state.get("reason", "error")),
-            steps_done=int(finalize_state.get("steps_done", 0) or 0),
-            best_solution_valid=bool(finalize_state.get("best_solution_valid", False)),
+        problem = str(baseline_cfg.get("problem", "wafer_layout"))
+        internal_out = out_dir / "heuragenix_internal"
+        internal_out.mkdir(parents=True, exist_ok=True)
+        heuragenix_cfg = getattr(cfg, "heuragenix", None)
+        data_root_cfg = getattr(heuragenix_cfg, "data_root", None) if heuragenix_cfg else None
+        output_root_cfg = getattr(heuragenix_cfg, "output_root", None) if heuragenix_cfg else None
+        internal_data_root = (
+            Path(data_root_cfg).expanduser().resolve() if data_root_cfg else (internal_out / "data").resolve()
         )
-        finalize_state["finalized"] = True
-
-    def _trace_excepthook(exc_type, exc, tb):
-        finalize_state["reason"] = "error"
-        _finalize_trace()
-        sys.__excepthook__(exc_type, exc, tb)
-
-    sys.excepthook = _trace_excepthook
-    meta["cfg_hash"] = str(cfg_hash)
-    (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    from utils.run_manifest import write_run_manifest
-
-    write_run_manifest(
-        out_dir=str(out_dir),
-        cfg_path=str(args.cfg),
-        cfg_hash=str(cfg_hash),
-        seed=int(args.seed),
-        stable_hw_state={
-            "guard_mode": "acc_first_hard_gating",
-            "lambda_hw_base": 0.0,
-            "lambda_hw_effective": 0.0,
-            "discrete_cache": {
-                "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
-                "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
+        internal_data_root.mkdir(parents=True, exist_ok=True)
+        (internal_data_root / problem / "test_data").mkdir(parents=True, exist_ok=True)
+        (internal_out / problem).mkdir(parents=True, exist_ok=True)
+        internal_data_base = internal_data_root
+        output_root = (
+            Path(output_root_cfg).expanduser().resolve() if output_root_cfg else (internal_out / "output").resolve()
+        )
+        output_root.mkdir(parents=True, exist_ok=True)
+        data_root_requested = os.path.abspath(str(data_root_cfg)) if data_root_cfg else ""
+        output_root_requested = os.path.abspath(str(output_root_cfg)) if output_root_cfg else ""
+        heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
+        selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
+        num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
+        rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
+        iters_sf = float(baseline_cfg.get("iterations_scale_factor", 2.0))
+        max_steps = baseline_cfg.get("max_steps", None)
+        S = int(infer_problem_size(layout_input))
+        if max_steps is not None and int(max_steps) >= 0:
+            max_steps = int(max_steps)
+            iters_sf = max(1.0, math.ceil(float(max_steps) / max(1, S)))
+        else:
+            max_steps = None
+        effective_max_steps = (
+            int(max_steps)
+            if max_steps is not None and int(max_steps) >= 0
+            else int(max(1, round(float(iters_sf) * max(1, S))))
+        )
+        budget_cfg = getattr(cfg, "budget", None) or {}
+        total_eval_budget = int(getattr(budget_cfg, "total_eval_budget", 0) or 0)
+        max_wallclock_sec = float(getattr(budget_cfg, "max_wallclock_sec", 0.0) or 0.0)
+    
+        if total_eval_budget and effective_max_steps:
+            effective_max_steps = int(min(effective_max_steps, total_eval_budget))
+        if effective_max_steps:
+            max_steps = int(effective_max_steps)
+    
+        layout_input["max_eval_calls"] = int(total_eval_budget)
+        layout_input["max_steps"] = int(effective_max_steps)
+        seed_payload = layout_input.get("seed", {})
+        if isinstance(seed_payload, dict):
+            seed_payload["seed_id"] = int(args.seed)
+            seed_payload["rng_seed"] = int(args.seed)
+            layout_input["seed"] = seed_payload
+        else:
+            layout_input["seed"] = int(args.seed)
+    
+        work_dir, case_name, case_file = _prepare_work_dir(
+            out_dir,
+            heuragenix_root,
+            layout_input,
+            seed,
+            internal_data_base,
+            seed_assign,
+            baseline_cfg,
+        )
+    
+        layout_hash = None
+        try:
+            layout_hash = hashlib.sha256(layout_input_path.read_bytes()).hexdigest()
+        except Exception:
+            layout_hash = None
+        resolved_text = (out_dir / "config_resolved.yaml").read_text(encoding="utf-8")
+        objective_cfg = _build_objective_cfg(cfg)
+        baseline_payload = dict(baseline_cfg) if isinstance(baseline_cfg, dict) else baseline_cfg
+        extra = {
+            "repo_root": str(_PROJECT_ROOT),
+            "problem_name": str(baseline_cfg.get("problem", "wafer_layout")),
+            "layout_input_hash": layout_hash,
+            "steps": int(effective_max_steps),
+            "budget": int(rollout_budget),
+            "case_stem": str(case_name),
+            "seed": int(seed),
+            "seed_assign": [int(x) for x in seed_assign],
+            "objective_cfg": objective_cfg,
+            "baseline": baseline_payload,
+            "trace_events": str(out_dir / "trace" / "trace_events.jsonl"),
+        }
+        cfg_hash = stable_hash({"cfg": resolved_text})
+        # ---- v5.4: canonical trace events (JSONL) ----
+        trace_path = trace_dir / "trace.csv"
+        signature = _build_run_signature(cfg, method_name=method_label, seed_global=int(seed))
+        llm_config = None
+        llm_config_requested = str(baseline_cfg.get("llm_config_file", ""))
+        llm_config_effective = ""
+        if method == "llm_hh":
+            llm_config = _resolve_llm_config_path(baseline_cfg, heuragenix_root)
+            if str(method).lower() == "llm_hh" and not llm_config:
+                raise SystemExit("[v5.4] llm_hh requires an explicit --llm_config_file (no implicit fallback).")
+            if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
+                raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
+            if llm_config:
+                with open(llm_config, "r", encoding="utf-8") as f:
+                    js = json.load(f)
+                if "top-p" in js and "top_p" not in js:
+                    js["top_p"] = js.pop("top-p")
+                adapted = internal_out / "llm_config_adapted.json"
+                with open(adapted, "w", encoding="utf-8") as f:
+                    json.dump(js, f, indent=2, ensure_ascii=False)
+                llm_config = adapted
+            llm_config_effective = str(llm_config) if llm_config else ""
+        init_trace_dir_v54(
+            base_dir=out_dir,
+            run_id="trace",
+            cfg=cfg,
+            signature=signature,
+            signature_v54=signature,
+            run_meta={
+                "heuristic": method_label,
+                "method": method,
+                "run_id": run_id,
+                "seed_id": int(seed),
+                "mode": "layout_heuragenix",
+                "heuragenix_io": heuragenix_io,
+                "heuragenix_output_problem_dir": str((output_root / problem).resolve()),
+                "heuristic_dir": str(heuristic_dir),
+                "llm_config_file": str(llm_config_effective),
+                "requested": {
+                    "method": "layout_heuragenix",
+                    "llm_config_file": str(llm_config_effective),
+                },
+                "effective": {
+                    "method": "layout_heuragenix",
+                    "heuragenix_internal_data_root": str(internal_data_root),
+                    "heuragenix_internal_out_root": str(internal_out),
+                    "heuragenix_output_root": str(output_root),
+                    "heuragenix_problem": str(problem),
+                    "llm_config_file": str(llm_config_effective),
+                },
             },
-        },
-        cfg=cfg,
-        extra={
-            "budget_main_axis": "eval_calls",
-            "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
-        },
-        run_id=run_id,
-        spec_version="v5.4",
-        command=" ".join(sys.argv),
-        code_root=str(_PROJECT_ROOT),
-    )
-
-    fallback_used = False
-    log_text = ""
-    heuragenix_path_map = {
-        "heuragenix_root": str(heuragenix_root.resolve()),
-        "effective_data_root": str(internal_data_root.resolve()),
-        "effective_output_root": str(output_root.resolve()),
-        "llm_config_path": str(Path(llm_config).resolve()) if llm_config else "",
-        "problem": str(problem),
-        "heuristic_dir": str(heuristic_dir),
-        "result_dir": "result",
-    }
-    (trace_dir / "heuragenix_path_map.json").write_text(
-        json.dumps(heuragenix_path_map, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    output_dir = output_root / problem / case_name / "result" / method
-    case_stem = case_name
-
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
-    ).strip(os.pathsep)
-    # HeurAgenix entrypoints are gated by v5.4 contract; wrapper is the auditable entrypoint.
-    env["V54_ALLOW_RAW_HEURAGENIX"] = "1"
-    # ---- v5.4 bridge: do not forcibly override user-provided AMLT_*; make roots explicit ----
-    if not str(env.get("AMLT_OUTPUT_DIR", "")).strip():
-        env["AMLT_OUTPUT_DIR"] = str(output_root)
-    if not str(env.get("AMLT_DATA_DIR", "")).strip():
-        env["AMLT_DATA_DIR"] = str(internal_data_root)
-
-    print(f"[bridge] AMLT_DATA_DIR={env['AMLT_DATA_DIR']}")
-    print(f"[bridge] AMLT_OUTPUT_DIR={env['AMLT_OUTPUT_DIR']}")
-    timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
-    result = None
-    if run_mode == "inprocess":
-        try:
-            output_dir = _run_heuragenix_inprocess(
-                heuragenix_root=heuragenix_root,
-                project_root=project_root,
-                problem=problem,
-                method=method,
-                heuristic_dir=heuristic_dir,
-                case_name=case_name,
-                case_file=case_file,
-                internal_data_base=internal_data_base,
-                output_root=output_root,
-                seed=seed,
-                iters_sf=iters_sf,
-                selection_frequency=selection_frequency,
-                num_candidate_heuristics=num_candidate_heuristics,
-                rollout_budget=rollout_budget,
-                llm_config=llm_config,
-                max_steps=max_steps,
-                baseline_cfg=baseline_cfg,
+            required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
+        )
+        trace_events_path = trace_dir / "trace_events.jsonl"
+        with (trace_dir / "trace_header.json").open("r", encoding="utf-8") as f:
+            header_payload = json.load(f)
+        append_trace_event_v54(
+            trace_events_path=trace_events_path,
+            run_id=run_id,
+            step=0,
+            event_type="trace_header",
+            payload=header_payload,
+            strict=True,
+        )
+        finalize_state = {
+            "finalized": False,
+            "reason": "error",
+            "steps_done": 0,
+            "best_solution_valid": False,
+            "best_total": None,
+        }
+        stable_hw_state: Dict[str, Any] = {}
+    
+        def _finalize_trace(**overrides):
+            if finalize_state["finalized"]:
+                return
+            finalize_state.update({k: v for k, v in overrides.items() if v is not None})
+            summary_payload = {
+                "ok": bool(finalize_state.get("ok", True)),
+                "reason": str(finalize_state.get("reason", "error")),
+                "steps_done": int(finalize_state.get("steps_done", 0) or 0),
+                "best_solution_valid": bool(finalize_state.get("best_solution_valid", False)),
+            }
+            summary_payload.update(build_baseline_trace_summary(cfg, stable_hw_state))
+            update_trace_summary(trace_dir, summary_payload)
+            try:
+                if llm_usage_path.exists():
+                    llm_usage_path_compat.write_text(
+                        llm_usage_path.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+            except Exception:
+                pass
+            finalize_trace_dir(
+                trace_events_path,
+                reason=str(finalize_state.get("reason", "error")),
+                steps_done=int(finalize_state.get("steps_done", 0) or 0),
+                best_solution_valid=bool(finalize_state.get("best_solution_valid", False)),
             )
-        except Exception as exc:
-            log_text = f"inprocess_failed: {exc!r}"
-            _append_llm_usage(
-                llm_usage_path,
-                {"ok": False, "reason": "inprocess_failed", "engine": method, "error": log_text},
-            )
-            run_mode = "subprocess"
-
-    if run_mode != "inprocess":
-        # llm_config has already been resolved by _resolve_llm_config_path(...)
-        if method == "llm_hh" and (llm_config is None or (not Path(llm_config).exists())):
-            raise FileNotFoundError(
-                str(llm_config) if llm_config is not None else "llm_config is None"
-            )
-        launch_cmd = [
-            sys.executable,
-            str(heuragenix_root / "launch_hyper_heuristic.py"),
-            "-p",
-            problem,
-            "-e",
-            method,
-            "-d",
-            heuristic_dir,
-            "-t",
-            case_file,
-            "-n",
-            f"{iters_sf}",
-            "-m",
-            str(selection_frequency),
-            "-c",
-            str(num_candidate_heuristics),
-            "-b",
-            str(rollout_budget),
-            "-r",
-            "result",
-            "--seed",
-            str(seed),
-        ]
-        if max_steps is not None:
-            launch_cmd.extend(["--max_steps", str(max_steps)])
-        if method == "llm_hh" and llm_config is not None:
-            launch_cmd.extend(["-l", str(llm_config)])
-        # keep subprocess behavior consistent with inprocess
-        llm_timeout_s = int(baseline_cfg.get("llm_timeout_s", 30))
-        max_llm_failures = int(baseline_cfg.get("max_llm_failures", 2))
-        fallback_on_llm_failure = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
-        launch_cmd.extend(["--llm_timeout_s", str(llm_timeout_s)])
-        launch_cmd.extend(["--max_llm_failures", str(max_llm_failures)])
-        launch_cmd.extend(["--fallback_on_llm_failure", fallback_on_llm_failure])
-        try:
-            result = subprocess.run(
-                launch_cmd,
-                cwd=str(heuragenix_root),
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired as exc:
-            log_text = f"timeout after {timeout_s}s"
-            _append_llm_usage(
-                llm_usage_path,
-                {
-                    "ok": False,
-                    "reason": "subprocess_timeout",
-                    "engine": method,
-                    "error": log_text,
-                    "stdout": (exc.stdout or "").strip(),
-                    "stderr": (exc.stderr or "").strip(),
+            finalize_state["finalized"] = True
+    
+        def _trace_excepthook(exc_type, exc, tb):
+            finalize_state["reason"] = "error"
+            _finalize_trace()
+            sys.__excepthook__(exc_type, exc, tb)
+    
+        sys.excepthook = _trace_excepthook
+        meta["cfg_hash"] = str(cfg_hash)
+        (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        from utils.run_manifest import write_run_manifest
+    
+        write_run_manifest(
+            out_dir=str(out_dir),
+            cfg_path=str(args.cfg),
+            cfg_hash=str(cfg_hash),
+            seed=int(args.seed),
+            stable_hw_state={
+                "guard_mode": "acc_first_hard_gating",
+                "lambda_hw_base": 0.0,
+                "lambda_hw_effective": 0.0,
+                "discrete_cache": {
+                    "mapping_signature": str(meta.get("mapping_signature", "")) if "meta" in locals() else "",
+                    "layout_signature": str(meta.get("layout_signature", "")) if "meta" in locals() else "",
                 },
-            )
-            result = None
-        # Always persist subprocess logs for debugging.
-        log_paths = _write_subprocess_logs(trace_dir, f"{method}_primary", result)
-
-        if result is None or result.returncode != 0:
-            if result is not None:
-                log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
-            else:
-                log_text = "subprocess returned None"
-            _append_llm_usage(
-                llm_usage_path,
-                {
-                    "ok": False,
-                    "reason": "launch_failed",
-                    "engine": method,
-                    "error": log_text,
-                    "stdout_log": log_paths["stdout"],
-                    "stderr_log": log_paths["stderr"],
-                },
-            )
-
-            # Try wrapper-level fallback method if configured
-            if method != fallback_method:
-                fallback_used = True
-                method = fallback_method
-                output_dir = output_root / problem / case_name / "result" / method
-                launch_cmd = [
-                    sys.executable,
-                    str(heuragenix_root / "launch_hyper_heuristic.py"),
-                    "-p",
-                    problem,
-                    "-e",
-                    method,
-                    "-d",
-                    heuristic_dir,
-                    "-t",
-                    case_file,
-                    "-n",
-                    f"{iters_sf}",
-                    "-m",
-                    str(selection_frequency),
-                    "-c",
-                    str(num_candidate_heuristics),
-                    "-b",
-                    str(rollout_budget),
-                    "-r",
-                    "result",
-                    "--seed",
-                    str(seed),
-                ]
-                if max_steps is not None:
-                    launch_cmd.extend(["--max_steps", str(max_steps)])
-
-                try:
-                    result = subprocess.run(
-                        launch_cmd,
-                        cwd=str(heuragenix_root),
-                        capture_output=True,
-                        text=True,
-                        env=env,
-                        timeout=timeout_s,
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    log_text = f"timeout after {timeout_s}s"
-                    _append_llm_usage(
-                        llm_usage_path,
-                        {
-                            "ok": False,
-                            "reason": "subprocess_timeout",
-                            "engine": method,
-                            "error": log_text,
-                            "stdout": (exc.stdout or "").strip(),
-                            "stderr": (exc.stderr or "").strip(),
-                        },
-                    )
-                    result = None
-
-                fb_log_paths = _write_subprocess_logs(trace_dir, f"{method}_fallback", result)
-
-                if result is None or result.returncode != 0:
-                    if result is not None:
-                        log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
-                    else:
-                        log_text = "subprocess returned None"
-                    _append_llm_usage(
-                        llm_usage_path,
-                        {
-                            "ok": False,
-                            "reason": "fallback_launch_failed",
-                            "engine": method,
-                            "error": log_text,
-                            "stdout_log": fb_log_paths["stdout"],
-                            "stderr_log": fb_log_paths["stderr"],
-                        },
-                    )
-                    # Do NOT continue to collect outputs if both primary and fallback failed.
-                    stderr_path = Path(fb_log_paths["stderr"])
-                    stdout_path = Path(fb_log_paths["stdout"])
+            },
+            cfg=cfg,
+            extra={
+                "budget_main_axis": "eval_calls",
+                "dataset_id": f"wafer_layout:{layout_input.get('meta', {}).get('layout_id', 'unknown')}",
+            },
+            run_id=run_id,
+            spec_version="v5.4",
+            command=" ".join(sys.argv),
+            code_root=str(_PROJECT_ROOT),
+        )
+    
+        fallback_used = False
+        log_text = ""
+        heuragenix_path_map = {
+            "heuragenix_root": str(heuragenix_root.resolve()),
+            "effective_data_root": str(internal_data_root.resolve()),
+            "effective_output_root": str(output_root.resolve()),
+            "llm_config_path": str(Path(llm_config).resolve()) if llm_config else "",
+            "problem": str(problem),
+            "heuristic_dir": str(heuristic_dir),
+            "result_dir": "result",
+        }
+        (trace_dir / "heuragenix_path_map.json").write_text(
+            json.dumps(heuragenix_path_map, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        output_dir = output_root / problem / case_name / "result" / method
+        case_stem = case_name
+    
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
+        ).strip(os.pathsep)
+        # HeurAgenix entrypoints are gated by v5.4 contract; wrapper is the auditable entrypoint.
+        env["V54_ALLOW_RAW_HEURAGENIX"] = "1"
+        # ---- v5.4 bridge: do not forcibly override user-provided AMLT_*; make roots explicit ----
+        if not str(env.get("AMLT_OUTPUT_DIR", "")).strip():
+            env["AMLT_OUTPUT_DIR"] = str(output_root)
+        if not str(env.get("AMLT_DATA_DIR", "")).strip():
+            env["AMLT_DATA_DIR"] = str(internal_data_root)
+    
+        print(f"[bridge] AMLT_DATA_DIR={env['AMLT_DATA_DIR']}")
+        print(f"[bridge] AMLT_OUTPUT_DIR={env['AMLT_OUTPUT_DIR']}")
+        timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
+        result = None
+        if run_mode == "inprocess":
+            try:
+                output_dir = _run_heuragenix_inprocess(
+                    heuragenix_root=heuragenix_root,
+                    project_root=project_root,
+                    problem=problem,
+                    method=method,
+                    heuristic_dir=heuristic_dir,
+                    case_name=case_name,
+                    case_file=case_file,
+                    internal_data_base=internal_data_base,
+                    output_root=output_root,
+                    seed=seed,
+                    iters_sf=iters_sf,
+                    selection_frequency=selection_frequency,
+                    num_candidate_heuristics=num_candidate_heuristics,
+                    rollout_budget=rollout_budget,
+                    llm_config=llm_config,
+                    max_steps=max_steps,
+                    baseline_cfg=baseline_cfg,
+                )
+            except Exception as exc:
+                log_text = f"inprocess_failed: {exc!r}"
+                _append_llm_usage(
+                    llm_usage_path,
+                    {"ok": False, "reason": "inprocess_failed", "engine": method, "error": log_text},
+                )
+                run_mode = "subprocess"
+    
+        if run_mode != "inprocess":
+            # llm_config has already been resolved by _resolve_llm_config_path(...)
+            if method == "llm_hh" and (llm_config is None or (not Path(llm_config).exists())):
+                raise FileNotFoundError(
+                    str(llm_config) if llm_config is not None else "llm_config is None"
+                )
+            launch_cmd = [
+                sys.executable,
+                str(heuragenix_root / "launch_hyper_heuristic.py"),
+                "-p",
+                problem,
+                "-e",
+                method,
+                "-d",
+                heuristic_dir,
+                "-t",
+                case_file,
+                "-n",
+                f"{iters_sf}",
+                "-m",
+                str(selection_frequency),
+                "-c",
+                str(num_candidate_heuristics),
+                "-b",
+                str(rollout_budget),
+                "-r",
+                "result",
+                "--seed",
+                str(seed),
+            ]
+            if max_steps is not None:
+                launch_cmd.extend(["--max_steps", str(max_steps)])
+            if method == "llm_hh" and llm_config is not None:
+                launch_cmd.extend(["-l", str(llm_config)])
+            # keep subprocess behavior consistent with inprocess
+            llm_timeout_s = int(baseline_cfg.get("llm_timeout_s", 30))
+            max_llm_failures = int(baseline_cfg.get("max_llm_failures", 2))
+            fallback_on_llm_failure = str(baseline_cfg.get("fallback_on_llm_failure", "random_hh"))
+            launch_cmd.extend(["--llm_timeout_s", str(llm_timeout_s)])
+            launch_cmd.extend(["--max_llm_failures", str(max_llm_failures)])
+            launch_cmd.extend(["--fallback_on_llm_failure", fallback_on_llm_failure])
+            try:
+                result = subprocess.run(
+                    launch_cmd,
+                    cwd=str(heuragenix_root),
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=timeout_s,
+                )
+            except subprocess.TimeoutExpired as exc:
+                log_text = f"timeout after {timeout_s}s"
+                _append_llm_usage(
+                    llm_usage_path,
+                    {
+                        "ok": False,
+                        "reason": "subprocess_timeout",
+                        "engine": method,
+                        "error": log_text,
+                        "stdout": (exc.stdout or "").strip(),
+                        "stderr": (exc.stderr or "").strip(),
+                    },
+                )
+                result = None
+            # Always persist subprocess logs for debugging.
+            log_paths = _write_subprocess_logs(trace_dir, f"{method}_primary", result)
+    
+            if result is None or result.returncode != 0:
+                if result is not None:
+                    log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+                else:
+                    log_text = "subprocess returned None"
+                _append_llm_usage(
+                    llm_usage_path,
+                    {
+                        "ok": False,
+                        "reason": "launch_failed",
+                        "engine": method,
+                        "error": log_text,
+                        "stdout_log": log_paths["stdout"],
+                        "stderr_log": log_paths["stderr"],
+                    },
+                )
+    
+                # Try wrapper-level fallback method if configured
+                if method != fallback_method:
+                    fallback_used = True
+                    method = fallback_method
+                    output_dir = output_root / problem / case_name / "result" / method
+                    launch_cmd = [
+                        sys.executable,
+                        str(heuragenix_root / "launch_hyper_heuristic.py"),
+                        "-p",
+                        problem,
+                        "-e",
+                        method,
+                        "-d",
+                        heuristic_dir,
+                        "-t",
+                        case_file,
+                        "-n",
+                        f"{iters_sf}",
+                        "-m",
+                        str(selection_frequency),
+                        "-c",
+                        str(num_candidate_heuristics),
+                        "-b",
+                        str(rollout_budget),
+                        "-r",
+                        "result",
+                        "--seed",
+                        str(seed),
+                    ]
+                    if max_steps is not None:
+                        launch_cmd.extend(["--max_steps", str(max_steps)])
+    
+                    try:
+                        result = subprocess.run(
+                            launch_cmd,
+                            cwd=str(heuragenix_root),
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                            timeout=timeout_s,
+                        )
+                    except subprocess.TimeoutExpired as exc:
+                        log_text = f"timeout after {timeout_s}s"
+                        _append_llm_usage(
+                            llm_usage_path,
+                            {
+                                "ok": False,
+                                "reason": "subprocess_timeout",
+                                "engine": method,
+                                "error": log_text,
+                                "stdout": (exc.stdout or "").strip(),
+                                "stderr": (exc.stderr or "").strip(),
+                            },
+                        )
+                        result = None
+    
+                    fb_log_paths = _write_subprocess_logs(trace_dir, f"{method}_fallback", result)
+    
+                    if result is None or result.returncode != 0:
+                        if result is not None:
+                            log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+                        else:
+                            log_text = "subprocess returned None"
+                        _append_llm_usage(
+                            llm_usage_path,
+                            {
+                                "ok": False,
+                                "reason": "fallback_launch_failed",
+                                "engine": method,
+                                "error": log_text,
+                                "stdout_log": fb_log_paths["stdout"],
+                                "stderr_log": fb_log_paths["stderr"],
+                            },
+                        )
+                        # Do NOT continue to collect outputs if both primary and fallback failed.
+                        stderr_path = Path(fb_log_paths["stderr"])
+                        stdout_path = Path(fb_log_paths["stdout"])
+                        stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
+                        stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
+    
+                        raise RuntimeError(
+                            "[HeurAgenix] subprocess failed (primary and fallback).\n"
+                            f"stderr_log: {stderr_path}\n"
+                            f"stdout_log: {stdout_path}\n"
+                            "----- stderr tail (last ~160 lines) -----\n"
+                            f"{stderr_tail}\n"
+                            "----- stdout tail (last ~80 lines) -----\n"
+                            f"{stdout_tail}\n"
+                        )
+                else:
+                    # No fallback configured; stop here and point to logs
+                    stderr_path = Path(log_paths["stderr"])
+                    stdout_path = Path(log_paths["stdout"])
                     stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
                     stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
-
+    
                     raise RuntimeError(
-                        "[HeurAgenix] subprocess failed (primary and fallback).\n"
+                        "[HeurAgenix] subprocess failed and no fallback configured.\n"
                         f"stderr_log: {stderr_path}\n"
                         f"stdout_log: {stdout_path}\n"
                         "----- stderr tail (last ~160 lines) -----\n"
@@ -1799,361 +1817,348 @@ def main() -> None:
                         "----- stdout tail (last ~80 lines) -----\n"
                         f"{stdout_tail}\n"
                     )
+    
+        recordings_found = True
+        recordings_missing = False
+        if run_mode == "inprocess":
+            cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
+            if not cands:
+                cands = list((output_root / problem / case_name / "result").glob("*/recordings.jsonl"))
+            if cands:
+                recordings_path = cands[0]
+                output_dir = recordings_path.parent
+                method = output_dir.name
+                fallback_used = method != baseline_method
             else:
-                # No fallback configured; stop here and point to logs
-                stderr_path = Path(log_paths["stderr"])
-                stdout_path = Path(log_paths["stdout"])
-                stderr_tail = _read_tail_text(stderr_path, max_lines=160, max_chars=8000)
-                stdout_tail = _read_tail_text(stdout_path, max_lines=80, max_chars=4000)
-
-                raise RuntimeError(
-                    "[HeurAgenix] subprocess failed and no fallback configured.\n"
-                    f"stderr_log: {stderr_path}\n"
-                    f"stdout_log: {stdout_path}\n"
-                    "----- stderr tail (last ~160 lines) -----\n"
-                    f"{stderr_tail}\n"
-                    "----- stdout tail (last ~80 lines) -----\n"
-                    f"{stdout_tail}\n"
+                output_dir = out_dir
+                recordings_path = out_dir / "recordings.jsonl"
+                recordings_found = False
+                recordings_missing = True
+                _append_llm_usage(
+                    llm_usage_path,
+                    {"ok": False, "reason": "missing_recordings", "engine": method},
                 )
-
-    recordings_found = True
-    recordings_missing = False
-    if run_mode == "inprocess":
-        cands = list((output_root / problem / case_name / "result" / method).glob("recordings.jsonl"))
-        if not cands:
-            cands = list((output_root / problem / case_name / "result").glob("*/recordings.jsonl"))
-        if cands:
-            recordings_path = cands[0]
-            output_dir = recordings_path.parent
-            method = output_dir.name
-            fallback_used = method != baseline_method
+                recordings_path.parent.mkdir(parents=True, exist_ok=True)
+                recordings_path.write_text("", encoding="utf-8")
         else:
-            output_dir = out_dir
-            recordings_path = out_dir / "recordings.jsonl"
-            recordings_found = False
-            recordings_missing = True
+            output_dir = _collect_subprocess_outputs(
+                out_dir=out_dir,
+                problem=problem,
+                case_stem=case_stem,
+                engine=method,
+                result_dir="result",
+            )
+            recordings_path = output_dir / "recordings.jsonl"
+            if not recordings_path.exists():
+                recordings_found = False
+                recordings_missing = True
+                _append_llm_usage(
+                    llm_usage_path,
+                    {"ok": False, "reason": "missing_recordings", "engine": method},
+                )
+                recordings_path.write_text("", encoding="utf-8")
+        eval_counter_src = output_dir / "eval_counter.json"
+        if eval_counter_src.exists():
+            shutil.copy2(eval_counter_src, out_dir / "eval_counter.json")
+        extra["recordings_found"] = bool(recordings_found)
+        extra["recordings_path"] = str(recordings_path)
+        # merge heuragenix internal llm_usage into wrapper llm_usage.jsonl
+        heuragenix_usage_path = output_dir / "llm_usage.jsonl"
+        if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:
+            with heuragenix_usage_path.open("r", encoding="utf-8") as rf:
+                for line in rf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        obj = {"raw": line}
+                    if isinstance(obj, dict):
+                        obj.setdefault("source", "heuragenix")
+                        obj.setdefault("wrapper_case_name", case_name)
+                        obj.setdefault("wrapper_seed_id", int(seed))
+                        obj.setdefault("wrapper_method", method)
+                        obj.setdefault("wrapper_run_mode", run_mode)
+                        merged = obj
+                    else:
+                        merged = {
+                            "source": "heuragenix",
+                            "wrapper_case_name": case_name,
+                            "wrapper_seed_id": int(seed),
+                            "wrapper_method": method,
+                            "wrapper_run_mode": run_mode,
+                            "obj": obj,
+                        }
+                    _append_llm_usage(llm_usage_path, merged)
+        else:
             _append_llm_usage(
                 llm_usage_path,
-                {"ok": False, "reason": "missing_recordings", "engine": method},
+                {"ok": False, "reason": "missing_llm_usage", "engine": method},
             )
-            recordings_path.parent.mkdir(parents=True, exist_ok=True)
-            recordings_path.write_text("", encoding="utf-8")
-    else:
-        output_dir = _collect_subprocess_outputs(
-            out_dir=out_dir,
-            problem=problem,
-            case_stem=case_stem,
-            engine=method,
-            result_dir="result",
-        )
-        recordings_path = output_dir / "recordings.jsonl"
         if not recordings_path.exists():
-            recordings_found = False
             recordings_missing = True
             _append_llm_usage(
                 llm_usage_path,
-                {"ok": False, "reason": "missing_recordings", "engine": method},
+                {"ok": False, "event": "recordings_missing", "path": str(recordings_path), "engine": method},
             )
-            recordings_path.write_text("", encoding="utf-8")
-    eval_counter_src = output_dir / "eval_counter.json"
-    if eval_counter_src.exists():
-        shutil.copy2(eval_counter_src, out_dir / "eval_counter.json")
-    extra["recordings_found"] = bool(recordings_found)
-    extra["recordings_path"] = str(recordings_path)
-    # merge heuragenix internal llm_usage into wrapper llm_usage.jsonl
-    heuragenix_usage_path = output_dir / "llm_usage.jsonl"
-    if heuragenix_usage_path.exists() and heuragenix_usage_path.stat().st_size > 0:
-        with heuragenix_usage_path.open("r", encoding="utf-8") as rf:
-            for line in rf:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    obj = {"raw": line}
-                if isinstance(obj, dict):
-                    obj.setdefault("source", "heuragenix")
-                    obj.setdefault("wrapper_case_name", case_name)
-                    obj.setdefault("wrapper_seed_id", int(seed))
-                    obj.setdefault("wrapper_method", method)
-                    obj.setdefault("wrapper_run_mode", run_mode)
-                    merged = obj
-                else:
-                    merged = {
-                        "source": "heuragenix",
-                        "wrapper_case_name": case_name,
-                        "wrapper_seed_id": int(seed),
-                        "wrapper_method": method,
-                        "wrapper_run_mode": run_mode,
-                        "obj": obj,
-                    }
-                _append_llm_usage(llm_usage_path, merged)
-    else:
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "reason": "missing_llm_usage", "engine": method},
+        method_label = f"heuragenix:{method}"
+        pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
+        objective_cfg = _build_objective_cfg(cfg)
+        objective_cfg.update(
+            {
+                "eps_comm": float(pareto_cfg.get("eps_comm", 0.0)),
+                "eps_therm": float(pareto_cfg.get("eps_therm", 0.0)),
+            }
         )
-    if not recordings_path.exists():
-        recordings_missing = True
-        _append_llm_usage(
-            llm_usage_path,
-            {"ok": False, "event": "recordings_missing", "path": str(recordings_path), "engine": method},
+        evaluator = _build_evaluator(layout_input=layout_input, objective_cfg=objective_cfg)
+        objective_hash = evaluator.objective_hash()
+        hx_rows = list(_iter_recordings(recordings_path))
+        budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
+        trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
+        # ---- v5.4 contract: auditable method fallback (requested vs effective) ----
+        pareto, trace_info = _write_trace_and_pareto(
+            trace_dir=out_dir / "trace",
+            hx_rows=hx_rows,
+            objective_hash=objective_hash,
+            cache_key=trace_cache_key,
+            requested_method=str(baseline_method),
+            effective_method=str(method),
+            trace_events_path=trace_events_path,
+            run_id=str(run_id),
+            cfg=cfg,
         )
-    method_label = f"heuragenix:{method}"
-    pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
-    objective_cfg = _build_objective_cfg(cfg)
-    objective_cfg.update(
-        {
-            "eps_comm": float(pareto_cfg.get("eps_comm", 0.0)),
-            "eps_therm": float(pareto_cfg.get("eps_therm", 0.0)),
+    
+        pareto.eps_comm = float(pareto_cfg.get("eps_comm", 0.0))
+        pareto.eps_therm = float(pareto_cfg.get("eps_therm", 0.0))
+        best_total = None
+        best_comm = None
+        best_therm = None
+        best_assign = None
+        base_eval = {}
+        for rec in hx_rows:
+            total_scalar = float(rec.get("total_scalar", 0.0))
+            comm_norm = float(rec.get("comm_norm", 0.0))
+            therm_norm = float(rec.get("therm_norm", 0.0))
+            if not base_eval:
+                base_eval = {"total_scalar": total_scalar, "comm_norm": comm_norm, "therm_norm": therm_norm}
+            if best_total is None or total_scalar < best_total:
+                best_total = total_scalar
+                best_comm = comm_norm
+                best_therm = therm_norm
+                best_assign = rec.get("assign")
+    
+        trace_info.update(
+            {
+                "objective_hash": objective_hash,
+                "best_total_scalar": float(best_total if best_total is not None else 0.0),
+                "best_comm_norm": float(best_comm if best_comm is not None else 0.0),
+                "best_therm_norm": float(best_therm if best_therm is not None else 0.0),
+                "best_assign": best_assign,
+                "base_eval": base_eval,
+                "evaluator_calls": int(len(hx_rows)),
+            }
+        )
+    
+        best_solution_path = output_dir / "best_solution.json"
+        best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
+        best_solution_payload = _read_best_solution_meta(best_solution_path)
+        _write_layout_best(out_dir, trace_path, layout_input, cfg, pareto, best_assign, run_id)
+    
+        detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
+        metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
+        eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
+        trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
+    
+        best_eval = {
+            "total_scalar": float(trace_info.get("best_total_scalar", 0.0)),
+            "comm_norm": float(trace_info.get("best_comm_norm", 0.0)),
+            "therm_norm": float(trace_info.get("best_therm_norm", 0.0)),
         }
-    )
-    evaluator = _build_evaluator(layout_input=layout_input, objective_cfg=objective_cfg)
-    objective_hash = evaluator.objective_hash()
-    hx_rows = list(_iter_recordings(recordings_path))
-    budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
-    trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
-    # ---- v5.4 contract: auditable method fallback (requested vs effective) ----
-    pareto, trace_info = _write_trace_and_pareto(
-        trace_dir=out_dir / "trace",
-        hx_rows=hx_rows,
-        objective_hash=objective_hash,
-        cache_key=trace_cache_key,
-        requested_method=str(baseline_method),
-        effective_method=str(method),
-        trace_events_path=trace_events_path,
-        run_id=str(run_id),
-        cfg=cfg,
-    )
-
-    pareto.eps_comm = float(pareto_cfg.get("eps_comm", 0.0))
-    pareto.eps_therm = float(pareto_cfg.get("eps_therm", 0.0))
-    best_total = None
-    best_comm = None
-    best_therm = None
-    best_assign = None
-    base_eval = {}
-    for rec in hx_rows:
-        total_scalar = float(rec.get("total_scalar", 0.0))
-        comm_norm = float(rec.get("comm_norm", 0.0))
-        therm_norm = float(rec.get("therm_norm", 0.0))
-        if not base_eval:
-            base_eval = {"total_scalar": total_scalar, "comm_norm": comm_norm, "therm_norm": therm_norm}
-        if best_total is None or total_scalar < best_total:
-            best_total = total_scalar
-            best_comm = comm_norm
-            best_therm = therm_norm
-            best_assign = rec.get("assign")
-
-    trace_info.update(
-        {
-            "objective_hash": objective_hash,
-            "best_total_scalar": float(best_total if best_total is not None else 0.0),
-            "best_comm_norm": float(best_comm if best_comm is not None else 0.0),
-            "best_therm_norm": float(best_therm if best_therm is not None else 0.0),
-            "best_assign": best_assign,
-            "base_eval": base_eval,
-            "evaluator_calls": int(len(hx_rows)),
-        }
-    )
-
-    best_solution_path = output_dir / "best_solution.json"
-    best_assign = _read_best_assign(best_solution_path, trace_info.get("best_assign") or _derive_initial_assign(layout_input).tolist())
-    best_solution_payload = _read_best_solution_meta(best_solution_path)
-    _write_layout_best(out_dir, trace_path, layout_input, cfg, pareto, best_assign, run_id)
-
-    detailed_cfg = cfg.get("detailed_place", {}) if isinstance(cfg, dict) else cfg.detailed_place
-    metrics_window = int(detailed_cfg.get("metrics_window_lastN", 200))
-    eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
-    trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
-
-    best_eval = {
-        "total_scalar": float(trace_info.get("best_total_scalar", 0.0)),
-        "comm_norm": float(trace_info.get("best_comm_norm", 0.0)),
-        "therm_norm": float(trace_info.get("best_therm_norm", 0.0)),
-    }
-    best_meta = best_solution_payload.get("meta", {}) if isinstance(best_solution_payload, dict) else {}
-    evaluator_source = str(best_meta.get("evaluator_source", ""))
-    evaluator_import_error = str(best_meta.get("evaluator_import_error", ""))
-    base_eval = trace_info.get("base_eval", {}) or {}
-    knee_comm, knee_therm, _ = pareto.knee_point()
-    trace_summary = _summarize_trace_hits(trace_path)
-    accept_rate = float(trace_metrics.get("accept_rate_overall", 0.0))
-    llm_summary = _summarize_llm_usage(llm_usage_path)
-    if llm_summary.get("fallback_used"):
-        fallback_used = True
-        if method == baseline_method:
-            fallback_method = "random_hh"
-    problem_size_eff = int(infer_problem_size(layout_input))
-    effective_max_steps = (
-        int(max_steps)
-        if (max_steps is not None and int(max_steps) >= 0)
-        else int(max(1, round(float(iters_sf) * max(1, problem_size_eff))))
-    )
-    eval_counter_path = out_dir / "eval_counter.json"
-    if not eval_counter_path.exists():
-        raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
-    ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
-    eval_calls_total_initial = int(ec.get("eval_calls_total", 0))
-    report = {
-        "run_id": run_id,
-        "success": (not recordings_missing),
-        "error": ("missing recordings.jsonl" if recordings_missing else ""),
-        "seed_id": int(seed),
-        "method": str(method),
-        "run_mode": str(run_mode),
-        "cfg_path": str(args.cfg),
-        "budget": {
-            "problem_size": problem_size_eff,
-            "iterations_scale_factor": float(iters_sf),
-            # ★按“实际预算”写入，而不是 None->0
-            "max_steps": effective_max_steps,
-            # ★可选：把用户是否显式指定也写清楚，方便复盘
-            "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else None,
-            # v5.4 fairness: count actual evaluator calls
-            "eval_calls": eval_calls_total_initial,
-        },
-        "evaluator": {
-            "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),
-            "allow_fallback_evaluator": bool(layout_input.get("allow_fallback_evaluator", False)),
-            "evaluator_source": str(evaluator_source),
-            "evaluator_import_error": str(evaluator_import_error),
-        },
-        "baseline": {
-            "name": baseline_name,
-            "method": baseline_method,
-            "heuristic_dir": heuristic_dir,
-            "selection_frequency": int(selection_frequency),
-            "num_candidate_heuristics": int(num_candidate_heuristics),
-            "rollout_budget": int(rollout_budget),
-            "iterations_scale_factor": float(iters_sf),
-            "metrics": {
-                "total_scalar": float(base_eval.get("total_scalar", 0.0)),
-                "comm_norm": float(base_eval.get("comm_norm", 0.0)),
-                "therm_norm": float(base_eval.get("therm_norm", 0.0)),
+        best_meta = best_solution_payload.get("meta", {}) if isinstance(best_solution_payload, dict) else {}
+        evaluator_source = str(best_meta.get("evaluator_source", ""))
+        evaluator_import_error = str(best_meta.get("evaluator_import_error", ""))
+        base_eval = trace_info.get("base_eval", {}) or {}
+        knee_comm, knee_therm, _ = pareto.knee_point()
+        trace_summary = _summarize_trace_hits(trace_path)
+        accept_rate = float(trace_metrics.get("accept_rate_overall", 0.0))
+        llm_summary = _summarize_llm_usage(llm_usage_path)
+        if llm_summary.get("fallback_used"):
+            fallback_used = True
+            if method == baseline_method:
+                fallback_method = "random_hh"
+        problem_size_eff = int(infer_problem_size(layout_input))
+        effective_max_steps = (
+            int(max_steps)
+            if (max_steps is not None and int(max_steps) >= 0)
+            else int(max(1, round(float(iters_sf) * max(1, problem_size_eff))))
+        )
+        eval_counter_path = out_dir / "eval_counter.json"
+        if not eval_counter_path.exists():
+            raise RuntimeError("missing eval_counter.json from HeurAgenix env; budget would be invalid")
+        ec = json.loads(eval_counter_path.read_text(encoding="utf-8"))
+        eval_calls_total_initial = int(ec.get("eval_calls_total", 0))
+        report = {
+            "run_id": run_id,
+            "success": (not recordings_missing),
+            "error": ("missing recordings.jsonl" if recordings_missing else ""),
+            "seed_id": int(seed),
+            "method": str(method),
+            "run_mode": str(run_mode),
+            "cfg_path": str(args.cfg),
+            "budget": {
+                "problem_size": problem_size_eff,
+                "iterations_scale_factor": float(iters_sf),
+                # ★按“实际预算”写入，而不是 None->0
+                "max_steps": effective_max_steps,
+                # ★可选：把用户是否显式指定也写清楚，方便复盘
+                "max_steps_requested": int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else None,
+                # v5.4 fairness: count actual evaluator calls
+                "eval_calls": eval_calls_total_initial,
             },
-        },
-        "llm_config": {
-            "requested": llm_config_requested,
-            "effective": llm_config_effective,
-        },
-        "best_objective": {
-            "total_scalar": float(best_eval.get("total_scalar", 0.0)),
-            "comm_norm": float(best_eval.get("comm_norm", 0.0)),
-            "therm_norm": float(best_eval.get("therm_norm", 0.0)),
-        },
-        "knee_point": {"comm_norm": float(knee_comm), "therm_norm": float(knee_therm)},
-        "pareto_size": int(len(pareto.points)),
-        "trace_extra": trace_info,
-        "n_steps": int(trace_summary.get("n_rows", 0)),
-        "accept_rate": accept_rate,
-        "tabu_hits": int(trace_summary.get("tabu_hits", 0)),
-        "inverse_hits": int(trace_summary.get("inverse_hits", 0)),
-        "cooldown_hits": int(trace_summary.get("cooldown_hits", 0)),
-        "oscillation_rate": float(trace_metrics.get("oscillation_rate", 0.0)),
-        "repeat_signature_rate": float(trace_metrics.get("repeat_signature_rate", 0.0)),
-        "objective_variance": float(trace_metrics.get("objective_variance", 0.0)),
-        "trace_metrics": trace_metrics,
-        "fallback_used": fallback_used,
-        "fallback_method": fallback_method if fallback_used else None,
-        "runtime_s": float(time.time() - start_time),
-        "metrics_window_lastN": metrics_window,
-        "eps_flat": eps_flat,
-        "raw_dir": str(output_dir),
-        "llm_usage": llm_summary,
-        "llm_fallback_used": bool(llm_summary.get("fallback_used", False)),
-        "llm_fallback_count": int(llm_summary.get("fallback_count", 0)),
-        "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
-        "evaluator_calls": int(ec.get("eval_calls_total", trace_summary.get("n_rows", 0))),
-        "evaluate_calls": int(ec.get("eval_calls_total", trace_summary.get("n_rows", 0))),
-        "fairness_overrides_applied": True,
-        "fairness_overrides": FAIRNESS_OVERRIDES,
-    }
-    require_main = bool(layout_input.get("require_main_evaluator", True))
-    if require_main and evaluator_source != "main_project":
-        report["success"] = False
-        report["error"] = (
-            f"HeurAgenix evaluator fallback detected: evaluator_source={evaluator_source}. "
-            f"evaluator_import_error={evaluator_import_error}"
-        )
-    total_wall_s = float(time.time() - start_time)
-    max_steps_done = int(trace_summary.get("n_rows", 0))
-    eval_calls_total = int(ec.get("eval_calls_total", 0))
-    effective_eval_calls_total = int(ec.get("effective_eval_calls_total", eval_calls_total))
-    cache_hits_total = int(ec.get("cache_hits_total", 0))
-
-    selection_freq = int(baseline_cfg.get("selection_frequency", 1))
-    num_candidates = int(baseline_cfg.get("num_candidate_heuristics", 1))
-    rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
-    max_steps = int(baseline_cfg.get("budget_total", effective_max_steps))
-
-    num_selections = (max_steps + max(1, selection_freq) - 1) // max(1, selection_freq)
-    eval_limit_est = int(max_steps + num_selections * num_candidates * max(0, rollout_budget))
-
-    wall_limit = int(_cfg_get(cfg, "layout_agent.max_runtime_sec", 0) or 0)
-
-    primary_limit = {
-        "type": "wall_time_s" if wall_limit > 0 else "eval_calls",
-        "limit": int(wall_limit) if wall_limit > 0 else int(eval_limit_est),
-    }
-    secondary_limit = {
-        "type": "eval_calls" if wall_limit > 0 else "steps",
-        "limit": int(eval_limit_est) if wall_limit > 0 else int(max_steps),
-    }
-
-    budget_out = {
-        "primary_limit": primary_limit,
-        "secondary_limit": secondary_limit,
-        "actual_eval_calls": int(eval_calls_total),
-        "effective_eval_calls": int(effective_eval_calls_total),
-        "cache_hits_total": int(cache_hits_total),
-        "wall_time_s": float(total_wall_s),
-    }
-    (out_dir / "budget.json").write_text(
-        json.dumps(budget_out, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    # ---- mirror outputs to HeurAgenix-guide-style tree under out_dir/output/... ----
-    guide_root = Path(out_dir) / "output"
-    src_root = Path(out_dir) / "heuragenix_internal" / "output"
-    if src_root.exists():
-        for p in src_root.rglob("*"):
-            rel = p.relative_to(src_root)
-            tgt = guide_root / rel
-            if p.is_dir():
-                tgt.mkdir(parents=True, exist_ok=True)
-            else:
-                tgt.parent.mkdir(parents=True, exist_ok=True)
-                tgt.write_bytes(p.read_bytes())
-        readme_path = guide_root / "wafer_layout" / "README_WRAPPER_PATHS.md"
-        readme_path.parent.mkdir(parents=True, exist_ok=True)
-        readme_path.write_text(
-            "\n".join(
-                [
-                    "# HeurAgenix wrapper output paths",
-                    "",
-                    "This wrapper runs HeurAgenix with a private working root, then mirrors the",
-                    "result tree into this `out_dir/output/...` folder for convenience.",
-                    "",
-                    "## Key paths",
-                    f"- HeurAgenix cwd/root: `{(internal_out / 'output').resolve()}`",
-                    f"- Internal data root: `{internal_out / 'data'}`",
-                    f"- Mirror root (this tree): `{guide_root}`",
-                    "",
-                    "## Why the split?",
-                    "- `heuragenix_internal/` keeps raw runs isolated from wrapper metadata.",
-                    "- `output/` mirrors the guide-style tree expected by HeurAgenix docs.",
-                    "- This avoids mixing test_data/previous_operations with wrapper outputs.",
-                ]
-            ),
+            "evaluator": {
+                "require_main_evaluator": bool(layout_input.get("require_main_evaluator", True)),
+                "allow_fallback_evaluator": bool(layout_input.get("allow_fallback_evaluator", False)),
+                "evaluator_source": str(evaluator_source),
+                "evaluator_import_error": str(evaluator_import_error),
+            },
+            "baseline": {
+                "name": baseline_name,
+                "method": baseline_method,
+                "heuristic_dir": heuristic_dir,
+                "selection_frequency": int(selection_frequency),
+                "num_candidate_heuristics": int(num_candidate_heuristics),
+                "rollout_budget": int(rollout_budget),
+                "iterations_scale_factor": float(iters_sf),
+                "metrics": {
+                    "total_scalar": float(base_eval.get("total_scalar", 0.0)),
+                    "comm_norm": float(base_eval.get("comm_norm", 0.0)),
+                    "therm_norm": float(base_eval.get("therm_norm", 0.0)),
+                },
+            },
+            "llm_config": {
+                "requested": llm_config_requested,
+                "effective": llm_config_effective,
+            },
+            "best_objective": {
+                "total_scalar": float(best_eval.get("total_scalar", 0.0)),
+                "comm_norm": float(best_eval.get("comm_norm", 0.0)),
+                "therm_norm": float(best_eval.get("therm_norm", 0.0)),
+            },
+            "knee_point": {"comm_norm": float(knee_comm), "therm_norm": float(knee_therm)},
+            "pareto_size": int(len(pareto.points)),
+            "trace_extra": trace_info,
+            "n_steps": int(trace_summary.get("n_rows", 0)),
+            "accept_rate": accept_rate,
+            "tabu_hits": int(trace_summary.get("tabu_hits", 0)),
+            "inverse_hits": int(trace_summary.get("inverse_hits", 0)),
+            "cooldown_hits": int(trace_summary.get("cooldown_hits", 0)),
+            "oscillation_rate": float(trace_metrics.get("oscillation_rate", 0.0)),
+            "repeat_signature_rate": float(trace_metrics.get("repeat_signature_rate", 0.0)),
+            "objective_variance": float(trace_metrics.get("objective_variance", 0.0)),
+            "trace_metrics": trace_metrics,
+            "fallback_used": fallback_used,
+            "fallback_method": fallback_method if fallback_used else None,
+            "runtime_s": float(time.time() - start_time),
+            "metrics_window_lastN": metrics_window,
+            "eps_flat": eps_flat,
+            "raw_dir": str(output_dir),
+            "llm_usage": llm_summary,
+            "llm_fallback_used": bool(llm_summary.get("fallback_used", False)),
+            "llm_fallback_count": int(llm_summary.get("fallback_count", 0)),
+            "llm_fallback_last_engine": llm_summary.get("fallback_last_engine"),
+            "evaluator_calls": int(ec.get("eval_calls_total", trace_summary.get("n_rows", 0))),
+            "evaluate_calls": int(ec.get("eval_calls_total", trace_summary.get("n_rows", 0))),
+            "fairness_overrides_applied": True,
+            "fairness_overrides": FAIRNESS_OVERRIDES,
+        }
+        require_main = bool(layout_input.get("require_main_evaluator", True))
+        if require_main and evaluator_source != "main_project":
+            report["success"] = False
+            report["error"] = (
+                f"HeurAgenix evaluator fallback detected: evaluator_source={evaluator_source}. "
+                f"evaluator_import_error={evaluator_import_error}"
+            )
+        total_wall_s = float(time.time() - start_time)
+        max_steps_done = int(trace_summary.get("n_rows", 0))
+        eval_calls_total = int(ec.get("eval_calls_total", 0))
+        effective_eval_calls_total = int(ec.get("effective_eval_calls_total", eval_calls_total))
+        cache_hits_total = int(ec.get("cache_hits_total", 0))
+    
+        selection_freq = int(baseline_cfg.get("selection_frequency", 1))
+        num_candidates = int(baseline_cfg.get("num_candidate_heuristics", 1))
+        rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
+        max_steps = int(baseline_cfg.get("budget_total", effective_max_steps))
+    
+        num_selections = (max_steps + max(1, selection_freq) - 1) // max(1, selection_freq)
+        eval_limit_est = int(max_steps + num_selections * num_candidates * max(0, rollout_budget))
+    
+        wall_limit = int(_cfg_get(cfg, "layout_agent.max_runtime_sec", 0) or 0)
+    
+        primary_limit = {
+            "type": "wall_time_s" if wall_limit > 0 else "eval_calls",
+            "limit": int(wall_limit) if wall_limit > 0 else int(eval_limit_est),
+        }
+        secondary_limit = {
+            "type": "eval_calls" if wall_limit > 0 else "steps",
+            "limit": int(eval_limit_est) if wall_limit > 0 else int(max_steps),
+        }
+    
+        budget_out = {
+            "primary_limit": primary_limit,
+            "secondary_limit": secondary_limit,
+            "actual_eval_calls": int(eval_calls_total),
+            "effective_eval_calls": int(effective_eval_calls_total),
+            "cache_hits_total": int(cache_hits_total),
+            "wall_time_s": float(total_wall_s),
+        }
+        (out_dir / "budget.json").write_text(
+            json.dumps(budget_out, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-
-    (out_dir / "HEURAGENIX_OUTPUT_LOCATION.txt").write_text(
-        f"Internal: {src_root}\nGuide-mirror: {guide_root}\n",
-        encoding="utf-8",
-    )
+        # ---- mirror outputs to HeurAgenix-guide-style tree under out_dir/output/... ----
+        guide_root = Path(out_dir) / "output"
+        src_root = Path(out_dir) / "heuragenix_internal" / "output"
+        if src_root.exists():
+            for p in src_root.rglob("*"):
+                rel = p.relative_to(src_root)
+                tgt = guide_root / rel
+                if p.is_dir():
+                    tgt.mkdir(parents=True, exist_ok=True)
+                else:
+                    tgt.parent.mkdir(parents=True, exist_ok=True)
+                    tgt.write_bytes(p.read_bytes())
+            readme_path = guide_root / "wafer_layout" / "README_WRAPPER_PATHS.md"
+            readme_path.parent.mkdir(parents=True, exist_ok=True)
+            readme_path.write_text(
+                "\n".join(
+                    [
+                        "# HeurAgenix wrapper output paths",
+                        "",
+                        "This wrapper runs HeurAgenix with a private working root, then mirrors the",
+                        "result tree into this `out_dir/output/...` folder for convenience.",
+                        "",
+                        "## Key paths",
+                        f"- HeurAgenix cwd/root: `{(internal_out / 'output').resolve()}`",
+                        f"- Internal data root: `{internal_out / 'data'}`",
+                        f"- Mirror root (this tree): `{guide_root}`",
+                        "",
+                        "## Why the split?",
+                        "- `heuragenix_internal/` keeps raw runs isolated from wrapper metadata.",
+                        "- `output/` mirrors the guide-style tree expected by HeurAgenix docs.",
+                        "- This avoids mixing test_data/previous_operations with wrapper outputs.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+    
+        (out_dir / "HEURAGENIX_OUTPUT_LOCATION.txt").write_text(
+            f"Internal: {src_root}\nGuide-mirror: {guide_root}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        run_ok = False
+        raise
     fallback_reasons = []
     if fallback_used:
         fallback_reasons.append(f"method_fallback:{baseline_method}->{fallback_method}")
@@ -2214,7 +2219,7 @@ def main() -> None:
                 "eval_calls_total": int(eval_calls_total),
                 "effective_eval_calls_total": int(effective_eval_calls_total),
             },
-            "ok": bool(ok),
+            "ok": bool(run_ok),
             "reason": str(reason),
         }
     )
