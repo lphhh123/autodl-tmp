@@ -10,6 +10,25 @@ import numpy as np
 
 
 # ----------------------------
+# RNG compatibility helper
+# ----------------------------
+def _rng_randint(rng, low: int, high: int) -> int:
+    """
+    Return an int in [low, high) for both:
+      - numpy.random.Generator (preferred)
+      - random.Random / python random module
+    """
+    # numpy Generator: integers(low, high)
+    if hasattr(rng, "integers"):
+        return int(rng.integers(low, high))
+    # python random: randrange(low, high)
+    if hasattr(rng, "randrange"):
+        return int(rng.randrange(low, high))
+    # fallback (should not happen)
+    raise TypeError(f"Unsupported RNG type: {type(rng)}")
+
+
+# ----------------------------
 # Assign signature (trace uses assign-signature, not op-signature)
 # ----------------------------
 def signature_from_assign(assign: Any) -> str:
@@ -273,8 +292,8 @@ def build_candidate_pool(
         newa = _apply_swap(assign, int(i), int(j))
         _push("swap", act, newa, bucket="swap:hot")
     while len([c for c in cands if c.type == "swap"]) < raw_n_swap and len(cands) < raw_target_max:
-        i = int(rng.randrange(0, S))
-        j = int(rng.randrange(0, S))
+        i = _rng_randint(rng, 0, S)
+        j = _rng_randint(rng, 0, S)
         if i == j:
             continue
         act = {"op": "swap", "i": int(i), "j": int(j), "type": "swap"}
@@ -294,7 +313,7 @@ def build_candidate_pool(
         else:
             # random region
             all_regions = list(region_sites.keys())
-            rr = int(all_regions[int(rng.randrange(0, len(all_regions)))])
+            rr = int(all_regions[_rng_randint(rng, 0, len(all_regions))])
             cand_sites = region_sites.get(rr, np.array([], dtype=int))
         neigh = _nearest_sites(sites_xy, cur_xy, cand_sites, neighbor_k)
         for to_site in neigh:
@@ -311,7 +330,7 @@ def build_candidate_pool(
         for _ in range(raw_n_cmov):
             if len(cands) >= raw_target_max:
                 break
-            cl = clusters[int(rng.randrange(0, len(clusters)))]
+            cl = clusters[_rng_randint(rng, 0, len(clusters))]
             slots = [int(s) for s in getattr(cl, "slots", [])]
             if not slots:
                 continue
@@ -321,7 +340,7 @@ def build_candidate_pool(
             all_regions = list(region_sites.keys())
             if not all_regions:
                 continue
-            tgt_region = int(all_regions[int(rng.randrange(0, len(all_regions)))])
+            tgt_region = int(all_regions[_rng_randint(rng, 0, len(all_regions))])
             if len(all_regions) > 1 and tgt_region == from_region:
                 tgt_region = int(all_regions[(all_regions.index(tgt_region) + 1) % len(all_regions)])
             cand_sites = region_sites.get(tgt_region, np.array([], dtype=int))
