@@ -135,13 +135,10 @@ def _count_jsonl_lines(path: Path) -> int:
 
 def _trace_csv_candidates(trace_dir: Path) -> list[Path]:
     """
-    v5.4 contract: trace.csv must live under trace_dir,
-    while trace_events.jsonl/summary.json live under out_dir/trace/.
+    v5.4 contract: trace.csv MUST live under trace_dir.
+    Compatibility copies (e.g., out_dir/trace.csv) are handled by callers.
     """
-    return [
-        trace_dir / "trace.csv",
-        trace_dir.parent / "trace.csv",
-    ]
+    return [trace_dir / "trace.csv"]
 
 
 def _pick_trace_csv_path(trace_dir: Path) -> Path:

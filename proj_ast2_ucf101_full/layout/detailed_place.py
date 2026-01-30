@@ -259,6 +259,10 @@ def run_detailed_place(
             fatal=True,
             trace_contract=trace_contract,
         )
+    # Use detailed_place sub-config for algorithm knobs, while keeping v5.4 seal checks on full cfg.
+    dp_cfg = getattr(cfg, "detailed_place", None)
+    if dp_cfg is None:
+        dp_cfg = cfg
     # ---- deterministic seeds ----
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
     rng = np.random.default_rng(base_seed)
@@ -293,14 +297,14 @@ def run_detailed_place(
         )
 
     # ---- anti-oscillation params ----
-    anti_cfg = _cfg_get(cfg, "anti_oscillation", {}) or {}
+    anti_cfg = _cfg_get(dp_cfg, "anti_oscillation", {}) or {}
     tabu_tenure = int(_cfg_get(anti_cfg, "tabu_tenure", 8))
     inverse_tenure = int(_cfg_get(anti_cfg, "inverse_tenure", 6))
     per_slot_cooldown = int(_cfg_get(anti_cfg, "per_slot_cooldown", 6))
     aspiration_delta = float(_cfg_get(anti_cfg, "aspiration_delta", 1e-4))
 
     # ---- planner config ----
-    planner_cfg = _cfg_get(cfg, "planner", {"type": "heuristic"}) or {"type": "heuristic"}
+    planner_cfg = _cfg_get(dp_cfg, "planner", {"type": "heuristic"}) or {"type": "heuristic"}
     planner_type = str(_cfg_get(planner_cfg, "type", "heuristic"))
     mixed_cfg = _cfg_get(planner_cfg, "mixed", {}) or {}
     mixed_every = int(_cfg_get(mixed_cfg, "every_n_steps", 200)) if planner_type == "mixed" else 0
@@ -310,15 +314,15 @@ def run_detailed_place(
 
     timeout_sec = int(_cfg_get(planner_cfg, "timeout_sec", 90))
     max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
-    stage_label = str(_cfg_get(cfg, "stage_label", f"detailed_{planner_type}"))
+    stage_label = str(_cfg_get(dp_cfg, "stage_label", f"detailed_{planner_type}"))
 
-    lookahead_cfg = _cfg_get(cfg, "lookahead", {}) or {}
+    lookahead_cfg = _cfg_get(dp_cfg, "lookahead", {}) or {}
     lookahead_enabled = bool(_cfg_get(lookahead_cfg, "enabled", False))
     lookahead_topk = int(_cfg_get(lookahead_cfg, "topk", 8))
     lookahead_beta = float(_cfg_get(lookahead_cfg, "beta", 0.5))
 
     # ===== v5.4 Ours-B2+ controller (optional) =====
-    ps_cfg = _cfg_get(cfg, "policy_switch", None)
+    ps_cfg = _cfg_get(dp_cfg, "policy_switch", None)
     use_ps = bool(ps_cfg and _cfg_get(ps_cfg, "enabled", False))
     eval_cache = None
     controller = None
@@ -356,9 +360,9 @@ def run_detailed_place(
         )
 
     # ---- SA params ----
-    steps = int(_cfg_get(cfg, "steps", 0))
-    T = float(_cfg_get(cfg, "sa_T0", 1.0))
-    alpha = float(_cfg_get(cfg, "sa_alpha", 0.999))
+    steps = int(_cfg_get(dp_cfg, "steps", 0))
+    T = float(_cfg_get(dp_cfg, "sa_T0", 1.0))
+    alpha = float(_cfg_get(dp_cfg, "sa_alpha", 0.999))
 
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     out_dir = trace_path.parent
@@ -524,8 +528,8 @@ def run_detailed_place(
                 consecutive_queue_rejects = 0
                 queue_window_steps = int(_cfg_get(planner_cfg, "queue_window_steps", 30))
                 refresh_due_to_rejects = False
-                progress_every = int(_cfg_get(cfg, "progress_every", 10))
-                save_every = int(_cfg_get(cfg, "save_every", 50))
+                progress_every = int(_cfg_get(dp_cfg, "progress_every", 10))
+                save_every = int(_cfg_get(dp_cfg, "save_every", 50))
 
                 for step in range(steps):
                     if trace_events_path is not None:
@@ -560,7 +564,7 @@ def run_detailed_place(
                         clusters,
                         cluster_to_region,
                         chip_tdp,
-                        cfg,
+                        dp_cfg,
                         rng,
                         debug_out_path=(out_dir / "candidate_pool_debug.json") if step == 0 else None,
                     )
@@ -776,7 +780,7 @@ def run_detailed_place(
                             action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
                         else:
                             action_payload = _sample_action(
-                                cfg,
+                                dp_cfg,
                                 traffic_sym,
                                 site_to_region,
                                 regions,
@@ -979,9 +983,9 @@ def run_detailed_place(
                             "signature": str(assign_signature),
                         }
                         recordings_fp.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
+                        if step % int(_cfg_get(dp_cfg, "trace_flush_every", 20)) == 0:
                             recordings_fp.flush()
-                    if step % int(_cfg_get(cfg, "trace_flush_every", 20)) == 0:
+                    if step % int(_cfg_get(dp_cfg, "trace_flush_every", 20)) == 0:
                         f_trace.flush()
                     if progress_every > 0 and step % progress_every == 0:
                         heartbeat = {
@@ -1111,7 +1115,7 @@ def run_detailed_place(
             "cache_size": int(cache_size),
         },
         "cache": {"hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None},
-        "run_signature": _build_run_signature(cfg),
+        "run_signature": _build_run_signature(dp_cfg),
     }
     (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
 
