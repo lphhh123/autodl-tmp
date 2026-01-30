@@ -15,5 +15,4 @@ baseline:
   require_main_evaluator: true
   allow_fallback_evaluator: false
   run_mode: inprocess
-
-llm_config_file: configs/llm/api_model_ark.json
+  llm_config_file: configs/llm/api_model_ark.json
