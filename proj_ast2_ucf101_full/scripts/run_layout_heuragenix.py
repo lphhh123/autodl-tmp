@@ -7,7 +7,6 @@ from __future__ import annotations
 
 # --- bootstrap sys.path for both invocation styles ---
 import sys
-import copy
 from pathlib import Path
 
 _THIS = Path(__file__).resolve()
@@ -97,28 +96,28 @@ def _pick_first_env(env: Dict[str, str], keys: Iterable[str]) -> str:
     return ""
 
 
-def _is_placeholder(v: object) -> bool:
+def _is_placeholder_str(v: str | None) -> bool:
     if v is None:
         return True
-    if not isinstance(v, str):
-        return False
-    s = v.strip()
-    if s == "":
+    v = str(v).strip()
+    if not v:
         return True
-    upper = s.upper()
-    if "YOUR_" in upper:
+    lower = v.lower()
+    placeholders = [
+        "your_ark_api_key",
+        "your_api_key",
+        "ep-xxx",
+        "replace_me",
+        "xxx",
+        "placeholder",
+    ]
+    if lower in placeholders:
         return True
-    if s in {"ep-xxx", "EP-XXX", "MODEL", "YOUR_MODEL"}:
+    if "your_" in lower or "placeholder" in lower:
+        return True
+    if "xxx" in lower:
         return True
     return False
-
-
-def _abspath(p: str) -> str:
-    return str(Path(p).expanduser().resolve())
-
-
-def _is_placeholder_str(v: str | None) -> bool:
-    return _is_placeholder(v)
 
 
 def _normalize_openai_compat_url(url: str) -> str:
@@ -185,52 +184,65 @@ def _ensure_heuragenix_llm_env(
 
 
 def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> tuple[str, str]:
-    cfg_llm = json.loads(cfg_llm_path.read_text(encoding="utf-8"))
-    effective_llm = copy.deepcopy(cfg_llm)
-    was_placeholder_before = {
-        "api_key": _is_placeholder(cfg_llm.get("api_key")),
-        "model": _is_placeholder(cfg_llm.get("model")),
-    }
+    js = json.loads(cfg_llm_path.read_text(encoding="utf-8"))
+    was_placeholder_before = {"api_key": False, "model": False}
     filled_from_env_keys: List[str] = []
-    env_key = os.environ.get("VOLC_ARK_API_KEY", "").strip()
-    env_model = os.environ.get("VOLC_ARK_MODEL", "").strip()
-    key_len = len(env_key)
-    if effective_llm.get("type") == "api_model":
-        if effective_llm.get("url"):
-            effective_llm["url"] = _normalize_openai_compat_url(str(effective_llm["url"]))
+    key_len = 0
+    if js.get("type") == "api_model":
+        if js.get("url"):
+            js["url"] = _normalize_openai_compat_url(str(js["url"]))
 
-        if _is_placeholder(effective_llm.get("model")):
+        api_key = js.get("api_key")
+        model = js.get("model")
+        was_placeholder_before["api_key"] = _is_placeholder_str(api_key)
+        was_placeholder_before["model"] = _is_placeholder_str(model)
+
+        env = os.environ
+        api_key_env = "VOLC_ARK_API_KEY" if env.get("VOLC_ARK_API_KEY", "").strip() else ""
+        api_key_env = api_key_env or ("ARK_API_KEY" if env.get("ARK_API_KEY", "").strip() else "")
+        model_env = "VOLC_ARK_MODEL" if env.get("VOLC_ARK_MODEL", "").strip() else ""
+        model_env = model_env or ("ARK_MODEL" if env.get("ARK_MODEL", "").strip() else "")
+
+        env_key, env_model = _resolve_ark_from_env()
+        if was_placeholder_before["model"]:
             if not env_model:
-                raise RuntimeError(
-                    "[v5.4] llm_config model is missing or placeholder; set VOLC_ARK_MODEL."
+                raise ValueError(
+                    "[v5.4] llm_config model is missing or placeholder; set VOLC_ARK_MODEL/ARK_MODEL."
                 )
-            effective_llm["model"] = env_model
-            filled_from_env_keys.append("VOLC_ARK_MODEL")
+            js["model"] = env_model
+            if model_env:
+                filled_from_env_keys.append(model_env)
+        if was_placeholder_before["api_key"]:
+            if not env_key:
+                raise ValueError(
+                    "[v5.4] llm_config api_key is missing or placeholder; set VOLC_ARK_API_KEY/ARK_API_KEY."
+                )
+            js["api_key"] = ""
+            if api_key_env:
+                filled_from_env_keys.append(api_key_env)
 
-        if _is_placeholder(effective_llm.get("api_key")):
-            effective_llm["api_key"] = ""
-            if env_key:
-                filled_from_env_keys.append("VOLC_ARK_API_KEY")
+        if was_placeholder_before["api_key"] and env_key:
+            key_len = len(env_key)
         else:
-            effective_llm["api_key"] = ""
+            key_len = len(str(js.get("api_key", "")).strip())
 
         top_value = None
-        if "top_p" in effective_llm or "top-p" in effective_llm:
-            top_value = effective_llm.get("top_p", effective_llm.get("top-p"))
-            effective_llm["top_p"] = top_value
-            effective_llm["top-p"] = top_value
+        if "top_p" in js or "top-p" in js:
+            top_value = js.get("top_p", js.get("top-p"))
+            js["top_p"] = top_value
+            js["top-p"] = top_value
 
     internal_out = out_dir / "heuragenix_internal"
     internal_out.mkdir(parents=True, exist_ok=True)
     adapted = internal_out / "llm_config_adapted.json"
-    adapted.write_text(json.dumps(effective_llm, indent=2, ensure_ascii=False), encoding="utf-8")
+    adapted.write_text(json.dumps(js, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    meta_base = _redact_llm_config_for_meta(effective_llm, key_len=key_len)
+    meta_base = _redact_llm_config_for_meta(js, key_len=key_len)
     meta = {
-        "type": effective_llm.get("type", ""),
-        "name": effective_llm.get("name", ""),
+        "type": js.get("type", ""),
+        "name": js.get("name", ""),
         "url": meta_base.get("normalized_url", ""),
-        "model": effective_llm.get("model", ""),
+        "model": js.get("model", ""),
         "key_len": int(meta_base.get("key_len", 0)),
         "filled_from_env": "+".join(filled_from_env_keys),
         "was_placeholder_before": was_placeholder_before,
@@ -1782,9 +1794,6 @@ def main() -> None:
         case_path = (internal_data_base / problem / "test_data" / case_file).resolve()
 
         env = dict(os.environ)
-        volc_key = os.environ.get("VOLC_ARK_API_KEY", "").strip()
-        if volc_key:
-            env.setdefault("OPENAI_API_KEY", volc_key)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(project_root), str(heuragenix_root), env.get("PYTHONPATH", "")]
         ).strip(os.pathsep)
@@ -1806,14 +1815,6 @@ def main() -> None:
         if run_mode == "inprocess":
             os.environ.update(env)
 
-        llm_cfg_path = _abspath(str(llm_config)) if llm_config else ""
-        llm_model = ""
-        if isinstance(llm_cfg_dict, dict):
-            llm_model = str(llm_cfg_dict.get("model", ""))
-        openai_key_len = len(env.get("OPENAI_API_KEY", "").strip())
-        print(
-            f"[LLM BRIDGE] llm_config_file={llm_cfg_path} model={llm_model} openai_key_len={openai_key_len}"
-        )
         print(f"[bridge] AMLT_DATA_DIR={env['AMLT_DATA_DIR']}")
         print(f"[bridge] AMLT_OUTPUT_DIR={env['AMLT_OUTPUT_DIR']}")
         timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
@@ -1880,7 +1881,7 @@ def main() -> None:
             if max_steps is not None:
                 launch_cmd.extend(["--max_steps", str(max_steps)])
             if method == "llm_hh" and llm_config is not None:
-                launch_cmd.extend(["-l", _abspath(str(llm_config))])
+                launch_cmd.extend(["-l", str(Path(llm_config).resolve())])
             # keep subprocess behavior consistent with inprocess
             llm_timeout_s = int(baseline_cfg.get("llm_timeout_s", 30))
             max_llm_failures = int(baseline_cfg.get("max_llm_failures", 2))
@@ -2483,9 +2484,7 @@ def main() -> None:
                     if cfg_key:
                         key_state = "placeholder" if _is_placeholder_str(cfg_key) else "set_in_config"
                     else:
-                        env_openai = os.environ.get("OPENAI_API_KEY", "").strip()
-                        env_volc = os.environ.get("VOLC_ARK_API_KEY", "").strip()
-                        key_state = "filled_from_env" if (env_openai or env_volc) else "empty_in_config"
+                        key_state = "empty_in_config"
                 except Exception:
                     key_state = "unreadable_config"
             stderr_path = Path(primary_log_paths["stderr"]) if primary_log_paths.get("stderr") else None
