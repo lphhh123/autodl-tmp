@@ -96,6 +96,79 @@ def _pick_first_env(env: Dict[str, str], keys: Iterable[str]) -> str:
     return ""
 
 
+def _is_placeholder_str(v: str | None) -> bool:
+    if v is None:
+        return True
+    v = str(v).strip()
+    if not v:
+        return True
+    lower = v.lower()
+    placeholders = [
+        "your_ark_api_key",
+        "ep-xxx",
+        "replace_me",
+        "xxx",
+    ]
+    if lower in placeholders:
+        return True
+    if "your_" in lower:
+        return True
+    if "xxx" in lower:
+        return True
+    return False
+
+
+def _normalize_openai_compat_url(url: str) -> str:
+    if not url:
+        return url
+    url = str(url).strip()
+    for suffix in ("/chat/completions", "/completions"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+            break
+    return url.rstrip("/")
+
+
+def _resolve_ark_credentials_from_env() -> tuple[str | None, str | None, str | None]:
+    env = os.environ
+    api_key_keys = ["VOLC_ARK_API_KEY", "ARK_API_KEY", "VOLC_API_KEY", "OPENAI_API_KEY"]
+    model_keys = ["VOLC_ARK_MODEL", "ARK_MODEL", "VOLC_ARK_ENDPOINT_ID", "ARK_ENDPOINT_ID"]
+    api_key = None
+    api_key_env = ""
+    for key in api_key_keys:
+        val = env.get(key, "").strip()
+        if val:
+            api_key = val
+            api_key_env = key
+            break
+    model = None
+    model_env = ""
+    for key in model_keys:
+        val = env.get(key, "").strip()
+        if val:
+            model = val
+            model_env = key
+            break
+    if api_key_env and model_env:
+        source = f"{api_key_env}+{model_env}"
+    elif api_key_env:
+        source = api_key_env
+    elif model_env:
+        source = model_env
+    else:
+        source = ""
+    return api_key, model, source or None
+
+
+def _redact_llm_config_for_meta(js: dict) -> dict:
+    payload = dict(js)
+    api_key = payload.get("api_key", "")
+    payload["key_len"] = len(str(api_key)) if api_key else 0
+    payload.pop("api_key", None)
+    payload["normalized_url"] = _normalize_openai_compat_url(str(payload.get("url", "")))
+    return payload
+
+
 def _ensure_heuragenix_llm_env(
     env: Dict[str, str],
     llm_cfg: Optional[Dict[str, Any]],
@@ -116,6 +189,9 @@ def _ensure_heuragenix_llm_env(
     llm_type = str(llm_cfg.get("type", "")).strip()
     if llm_type in ("api_model", "openai", "explicit_url", "vllm"):
         if not env.get("OPENAI_API_KEY", "").strip():
+            api_key = str(llm_cfg.get("api_key", "")).strip()
+            if api_key and not _is_placeholder_str(api_key):
+                env["OPENAI_API_KEY"] = api_key
             mapped = _pick_first_env(
                 env,
                 keys=[
@@ -133,6 +209,80 @@ def _ensure_heuragenix_llm_env(
         raise RuntimeError(
             "[v5.4] llm_hh requires OPENAI_API_KEY for HeurAgenix api_model client. "
             "Set one of: OPENAI_API_KEY / VOLC_ARK_API_KEY / ARK_API_KEY / DOUBAO_API_KEY."
+        )
+
+
+def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> str:
+    js = json.loads(cfg_llm_path.read_text(encoding="utf-8"))
+    was_placeholder_before = {"api_key": False, "model": False}
+    filled_from_env = ""
+    if js.get("type") == "api_model":
+        if js.get("url"):
+            js["url"] = _normalize_openai_compat_url(str(js["url"]))
+
+        api_key = js.get("api_key")
+        model = js.get("model")
+        was_placeholder_before["api_key"] = _is_placeholder_str(api_key)
+        was_placeholder_before["model"] = _is_placeholder_str(model)
+
+        if was_placeholder_before["api_key"] or was_placeholder_before["model"]:
+            env_key, env_model, source = _resolve_ark_credentials_from_env()
+            if was_placeholder_before["api_key"] and env_key:
+                js["api_key"] = env_key
+            if was_placeholder_before["model"] and env_model:
+                js["model"] = env_model
+            filled_from_env = source or ""
+
+        top_value = None
+        if "top_p" in js or "top-p" in js:
+            top_value = js.get("top_p", js.get("top-p"))
+            js["top_p"] = top_value
+            js["top-p"] = top_value
+
+    internal_out = out_dir / "heuragenix_internal"
+    internal_out.mkdir(parents=True, exist_ok=True)
+    adapted = internal_out / "llm_config_adapted.json"
+    adapted.write_text(json.dumps(js, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    meta_base = _redact_llm_config_for_meta(js)
+    meta = {
+        "type": js.get("type", ""),
+        "name": js.get("name", ""),
+        "url": meta_base.get("normalized_url", ""),
+        "model": js.get("model", ""),
+        "key_len": int(meta_base.get("key_len", 0)),
+        "filled_from_env": filled_from_env or "",
+        "was_placeholder_before": was_placeholder_before,
+    }
+    meta_path = internal_out / "llm_config_resolved_meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(adapted.resolve())
+
+
+def _preflight_llm_config_or_die(llm_cfg_path: str, method: str) -> None:
+    if method != "llm_hh":
+        return
+    cfg_path = Path(llm_cfg_path)
+    js = json.loads(cfg_path.read_text(encoding="utf-8"))
+    if js.get("type") != "api_model":
+        return
+    api_key = str(js.get("api_key", "")).strip()
+    model = str(js.get("model", "")).strip()
+    key_len = len(api_key)
+    url = str(js.get("url", "")).strip()
+    issues = []
+    if _is_placeholder_str(api_key) or key_len < 8:
+        issues.append("api_key")
+    if _is_placeholder_str(model):
+        issues.append("model")
+    if "/chat/completions" in url:
+        issues.append("url")
+    if issues:
+        raise RuntimeError(
+            "[v5.4] invalid llm_config for llm_hh. "
+            f"path={cfg_path} url='{url}' model='{model}' key_len={key_len}. "
+            "Set env: VOLC_ARK_API_KEY / ARK_API_KEY and "
+            "VOLC_ARK_MODEL / VOLC_ARK_ENDPOINT_ID / ARK_MODEL."
         )
 
 
@@ -1510,14 +1660,8 @@ def main() -> None:
             if not llm_config and (not bool(baseline_cfg.get("allow_llm_missing", False))):
                 raise RuntimeError("method=llm_hh requires baseline.llm_config_file, but it is missing.")
             if llm_config:
-                with open(llm_config, "r", encoding="utf-8") as f:
-                    js = json.load(f)
-                if "top-p" in js and "top_p" not in js:
-                    js["top_p"] = js.pop("top-p")
-                adapted = internal_out / "llm_config_adapted.json"
-                with open(adapted, "w", encoding="utf-8") as f:
-                    json.dump(js, f, indent=2, ensure_ascii=False)
-                llm_config = adapted.resolve()
+                llm_config = Path(_adapt_llm_config(llm_config, out_dir)).resolve()
+                _preflight_llm_config_or_die(str(llm_config), method=method)
             llm_config_effective = str(llm_config) if llm_config else ""
         init_trace_dir_v54(
             base_dir=out_dir,
