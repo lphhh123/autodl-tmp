@@ -438,18 +438,122 @@ def build_candidate_pool(
     return cands
 
 
-def build_state_summary(
-    assign: np.ndarray,
-    eval_out: Dict[str, Any],
-    candidates: List[Candidate],
-    pick_ids: Optional[List[int]] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+def build_state_summary(*args, **kwargs) -> Dict[str, Any]:
     """
-    LLM prompt/state summary: keep it stable and json-serializable.
+    Build json-serializable state summary for LLM / heuristic pickers.
+
+    Compatibility:
+      - OLD (positional, 13 args):
+          build_state_summary(step, T, eval_out, traffic_sym, assign, site_to_region,
+                             chip_tdp, clusters, regions, candidate_pool,
+                             candidate_ids, forbidden_ids, k_actions)
+      - NEW (current, 3~5 args):
+          build_state_summary(assign, eval_out, candidates, pick_ids=None, extra=None)
+
+    Contract:
+      - Must include keys used by layout/llm_provider.py:
+          candidate_ids, forbidden_ids, candidates
     """
-    topk = candidates[: min(20, len(candidates))]
-    summary = {
+    # -------------------------
+    # Parse inputs (old vs new)
+    # -------------------------
+    step = None
+    T = None
+    traffic_sym = None
+    site_to_region = None
+    chip_tdp = None
+    clusters = None
+    regions = None
+    k_actions = None
+
+    pick_ids = None
+    extra = None
+
+    # If called with keywords (future-proof)
+    if kwargs:
+        # New-style keywords
+        assign = kwargs.get("assign", None)
+        eval_out = kwargs.get("eval_out", None)
+        candidates = kwargs.get("candidates", None)
+        pick_ids = kwargs.get("pick_ids", None)
+        extra = kwargs.get("extra", None)
+
+        # Optional LLM fields (may be supplied by caller)
+        candidate_ids = kwargs.get("candidate_ids", None)
+        forbidden_ids = kwargs.get("forbidden_ids", None)
+        step = kwargs.get("step", None)
+        T = kwargs.get("T", None) or kwargs.get("temperature", None)
+        traffic_sym = kwargs.get("traffic_sym", None)
+        site_to_region = kwargs.get("site_to_region", None)
+        chip_tdp = kwargs.get("chip_tdp", None)
+        clusters = kwargs.get("clusters", None)
+        regions = kwargs.get("regions", None)
+        k_actions = kwargs.get("k_actions", None)
+
+    else:
+        # Old-style positional call: first arg is int step
+        if len(args) >= 5 and isinstance(args[0], (int, np.integer)):
+            # OLD signature
+            # (step, T, eval_out, traffic_sym, assign, site_to_region, chip_tdp, clusters, regions,
+            #  candidate_pool, candidate_ids, forbidden_ids, k_actions)
+            step = int(args[0])
+            T = float(args[1])
+            eval_out = args[2]
+            traffic_sym = args[3]
+            assign = args[4]
+            site_to_region = args[5] if len(args) > 5 else None
+            chip_tdp = args[6] if len(args) > 6 else None
+            clusters = args[7] if len(args) > 7 else None
+            regions = args[8] if len(args) > 8 else None
+            candidates = args[9] if len(args) > 9 else []
+            candidate_ids = args[10] if len(args) > 10 else None
+            forbidden_ids = args[11] if len(args) > 11 else None
+            k_actions = int(args[12]) if len(args) > 12 else None
+        else:
+            # NEW signature
+            # (assign, eval_out, candidates, pick_ids=None, extra=None)
+            assign = args[0]
+            eval_out = args[1]
+            candidates = args[2]
+            pick_ids = args[3] if len(args) > 3 else None
+            extra = args[4] if len(args) > 4 else None
+            candidate_ids = None
+            forbidden_ids = None
+
+    if candidates is None:
+        candidates = []
+    if eval_out is None:
+        eval_out = {}
+
+    # -------------------------
+    # Build candidate list (LLM expects this schema)
+    # -------------------------
+    cand_rows: List[Dict[str, Any]] = []
+    for c in candidates:
+        try:
+            cand_rows.append(
+                {
+                    "id": int(getattr(c, "id", -1)),
+                    "type": str(getattr(c, "type", "")),
+                    "signature": str(getattr(c, "signature", "")),
+                    "d_total": float(getattr(c, "est", {}).get("d_total", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
+                    "d_comm": float(getattr(c, "est", {}).get("d_comm", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
+                    "d_therm": float(getattr(c, "est", {}).get("d_therm", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
+                }
+            )
+        except Exception:
+            continue
+
+    # candidate_ids / forbidden_ids defaults
+    if candidate_ids is None:
+        candidate_ids = [int(r["id"]) for r in cand_rows if int(r.get("id", -1)) >= 0]
+    if forbidden_ids is None:
+        forbidden_ids = []
+
+    # -------------------------
+    # Stable summary (json-serializable)
+    # -------------------------
+    summary: Dict[str, Any] = {
         "assign_signature": signature_from_assign(assign),
         "metrics": {
             "total_scalar": float(eval_out.get("total_scalar", 0.0)),
@@ -457,21 +561,55 @@ def build_state_summary(
             "therm_norm": float(eval_out.get("therm_norm", 0.0)),
             "penalty": eval_out.get("penalty", {}),
         },
-        "candidate_pool_size": int(len(candidates)),
-        "top_candidates": [
-            {
-                "id": int(c.id),
-                "type": str(c.type),
-                "signature": str(c.signature),
-                "d_total": float(c.est.get("d_total", 0.0)),
-                "action": c.action,
-            }
-            for c in topk
-        ],
-        "pick_ids": [int(x) for x in (pick_ids or [])],
+        # LLM/heuristic provider contract fields
+        "candidate_ids": [int(x) for x in candidate_ids],
+        "forbidden_ids": [int(x) for x in forbidden_ids],
+        "candidates": cand_rows,
     }
-    if extra:
-        summary["extra"] = extra
+
+    # keep pick_ids (optional)
+    if pick_ids is not None:
+        summary["pick_ids"] = [int(x) for x in pick_ids]
+
+    # Add lightweight extra context (avoid dumping big numpy arrays)
+    extra_ctx: Dict[str, Any] = {}
+    if step is not None:
+        extra_ctx["step"] = int(step)
+    if T is not None:
+        extra_ctx["T"] = float(T)
+    if k_actions is not None:
+        extra_ctx["k_actions"] = int(k_actions)
+    if chip_tdp is not None:
+        try:
+            extra_ctx["chip_tdp"] = float(chip_tdp)
+        except Exception:
+            pass
+    if regions is not None:
+        try:
+            extra_ctx["n_regions"] = int(len(regions))
+        except Exception:
+            pass
+    if clusters is not None:
+        try:
+            extra_ctx["n_clusters"] = int(len(clusters))
+        except Exception:
+            pass
+    if traffic_sym is not None:
+        # do NOT dump full object; only include a short tag
+        extra_ctx["traffic_sym"] = str(type(traffic_sym).__name__)
+    if site_to_region is not None:
+        try:
+            extra_ctx["site_to_region_len"] = int(len(site_to_region))
+        except Exception:
+            pass
+
+    # merge caller-provided extra (must be json-serializable)
+    if isinstance(extra, dict):
+        extra_ctx.update(extra)
+
+    if extra_ctx:
+        summary["extra"] = extra_ctx
+
     return summary
 
 
