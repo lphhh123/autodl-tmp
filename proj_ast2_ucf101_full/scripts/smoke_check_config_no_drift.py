@@ -9,6 +9,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import argparse
 
+from omegaconf import OmegaConf
+
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 
@@ -20,6 +22,13 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.cfg)
+
+    # This smoke performs config validation only; it does not accept --out_dir.
+    # Some configs (e.g., stable_hw.no_drift.stats_path) use ${out_dir} interpolation.
+    # Provide a deterministic fallback so OmegaConf resolve does not fail.
+    if OmegaConf.select(cfg, "out_dir") is None:
+        OmegaConf.update(cfg, "out_dir", "outputs/SMOKE/_tmp_no_drift_cfgcheck", merge=False)
+
     cfg = validate_and_fill_defaults(cfg, mode=args.mode)
 
     # ---- SPEC_E: NoDoubleScale must be true and legacy lambdas must be 0 when stable_hw enabled
