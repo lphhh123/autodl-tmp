@@ -6,6 +6,7 @@ training:
 # twostage=True would nullify HW loss semantics; StableHW must be OFF to avoid silent degradation.
 stable_hw:
   enabled: false
+  force_disable_ok: true
   normalize:
     enabled: false
   lambda_hw_schedule:
@@ -25,3 +26,4 @@ loss:
   lambda_hw: 0.0
 hw:
   lambda_hw: 0.0
+  use_hw_loss: false
