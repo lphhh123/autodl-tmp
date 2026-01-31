@@ -511,6 +511,25 @@ class LayerHwProxy:
         lat = torch.clamp(lat, min=0.0)
         mem = torch.clamp(mem, min=0.0)
         power = torch.clamp(power, min=0.0)
+
+        # NOTE:
+        # MappingSolver uses this batch path to build the cost matrix.
+        # Without max-clamp / nan/inf sanitization, proxy can emit extreme
+        # values that explode raw_latency_ms/raw_mem_mb (even if the per-layer
+        # single path has clamps). Keep the ranges consistent with
+        # predict_layer_on_device().
+        MAX_LAT_MS = 100.0
+        MAX_MEM_MB = 8192.0
+        MAX_POWER_W = 2000.0
+        lat = torch.nan_to_num(lat, nan=MAX_LAT_MS, posinf=MAX_LAT_MS, neginf=0.0).clamp(
+            0.0, MAX_LAT_MS
+        )
+        mem = torch.nan_to_num(mem, nan=MAX_MEM_MB, posinf=MAX_MEM_MB, neginf=0.0).clamp(
+            0.0, MAX_MEM_MB
+        )
+        power = torch.nan_to_num(
+            power, nan=MAX_POWER_W, posinf=MAX_POWER_W, neginf=0.0
+        ).clamp(0.0, MAX_POWER_W)
         return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
 
     def predict_from_model_info(
