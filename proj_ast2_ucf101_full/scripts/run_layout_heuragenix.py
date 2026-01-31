@@ -1156,7 +1156,7 @@ def _read_best_solution_meta(best_solution_path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
+def _summarize_llm_usage(path: Path, *, wrapper_run_id: str | None = None) -> Dict[str, Any]:
     if not path.exists():
         return {
             "total": 0,
@@ -1178,22 +1178,25 @@ def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
             line = line.strip()
             if not line:
                 continue
-            total += 1
             try:
                 payload = json.loads(line)
             except Exception:
                 continue
-            if isinstance(payload, dict):
-                if payload.get("ok") is True:
-                    ok += 1
-                if payload.get("reason") == "llm_disabled_after_failures":
-                    disabled_after_failures = True
-                method = payload.get("method")
-                engine = payload.get("engine_used") or payload.get("selection")
-                if method and engine and engine != method:
-                    fallback_used = True
-                    fallback_count += 1
-                    fallback_last_engine = engine
+            if not isinstance(payload, dict):
+                continue
+            if wrapper_run_id is not None and payload.get("wrapper_run_id") != wrapper_run_id:
+                continue
+            total += 1
+            if payload.get("ok") is True:
+                ok += 1
+            if payload.get("reason") == "llm_disabled_after_failures":
+                disabled_after_failures = True
+            method = payload.get("method")
+            engine = payload.get("engine_used") or payload.get("selection")
+            if method and engine and engine != method:
+                fallback_used = True
+                fallback_count += 1
+                fallback_last_engine = engine
     ok_rate = ok / max(1, total)
     return {
         "total": total,
@@ -1206,10 +1209,34 @@ def _summarize_llm_usage(path: Path) -> Dict[str, Any]:
     }
 
 
-def _append_llm_usage(path: Path, payload: Dict[str, Any]) -> None:
+def _append_llm_usage(
+    path: Path,
+    payload: Dict[str, Any],
+    *,
+    wrapper_run_id: str | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if wrapper_run_id and "wrapper_run_id" not in payload:
+        payload["wrapper_run_id"] = wrapper_run_id
+    if "wrapper_ts_ms" not in payload:
+        payload["wrapper_ts_ms"] = int(time.time() * 1000)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _rotate_file_if_exists(path: Path, *, suffix: str = "") -> None:
+    if not path.exists():
+        return
+    ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    extra = f".{suffix}" if suffix else ""
+    backup = path.with_name(path.name + f".bak_{ts}{extra}")
+    try:
+        path.rename(backup)
+    except Exception:
+        try:
+            path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
 
 
 def _run_heuragenix_inprocess(
@@ -1446,6 +1473,7 @@ def main() -> None:
     out_dir = _resolve_cli_path(raw_out_dir, base)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
+    wrapper_run_id = uuid.uuid4().hex
     trace_dir = out_dir / "trace"
     trace_dir.mkdir(parents=True, exist_ok=True)
     trace_events_path = trace_dir / "trace_events.jsonl"
@@ -1554,6 +1582,12 @@ def main() -> None:
     start_time = time.time()
     llm_usage_path = trace_dir / "llm_usage.jsonl"
     llm_usage_path_compat = out_dir / "llm_usage.jsonl"
+    _rotate_file_if_exists(llm_usage_path, suffix=wrapper_run_id)
+    _rotate_file_if_exists(llm_usage_path_compat, suffix=wrapper_run_id)
+
+    def _append_llm_usage_for_run(payload: Dict[str, Any]) -> None:
+        _append_llm_usage(llm_usage_path, payload, wrapper_run_id=wrapper_run_id)
+
     run_ok: bool = True
     reason: str = ""
     error_msg: str = ""
@@ -1845,9 +1879,8 @@ def main() -> None:
                 )
             except Exception as exc:
                 log_text = f"inprocess_failed: {exc!r}"
-                _append_llm_usage(
-                    llm_usage_path,
-                    {"ok": False, "reason": "inprocess_failed", "engine": method, "error": log_text},
+                _append_llm_usage_for_run(
+                    {"ok": False, "reason": "inprocess_failed", "engine": method, "error": log_text}
                 )
                 run_mode = "subprocess"
     
@@ -1903,8 +1936,7 @@ def main() -> None:
                 )
             except subprocess.TimeoutExpired as exc:
                 log_text = f"timeout after {timeout_s}s"
-                _append_llm_usage(
-                    llm_usage_path,
+                _append_llm_usage_for_run(
                     {
                         "ok": False,
                         "reason": "subprocess_timeout",
@@ -1912,7 +1944,7 @@ def main() -> None:
                         "error": log_text,
                         "stdout": (exc.stdout or "").strip(),
                         "stderr": (exc.stderr or "").strip(),
-                    },
+                    }
                 )
                 result = None
             # Always persist subprocess logs for debugging.
@@ -1923,8 +1955,7 @@ def main() -> None:
                     log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
                 else:
                     log_text = "subprocess returned None"
-                _append_llm_usage(
-                    llm_usage_path,
+                _append_llm_usage_for_run(
                     {
                         "ok": False,
                         "reason": "launch_failed",
@@ -1932,7 +1963,7 @@ def main() -> None:
                         "error": log_text,
                         "stdout_log": log_paths["stdout"],
                         "stderr_log": log_paths["stderr"],
-                    },
+                    }
                 )
     
                 # Try wrapper-level fallback method if configured
@@ -1978,8 +2009,7 @@ def main() -> None:
                         )
                     except subprocess.TimeoutExpired as exc:
                         log_text = f"timeout after {timeout_s}s"
-                        _append_llm_usage(
-                            llm_usage_path,
+                        _append_llm_usage_for_run(
                             {
                                 "ok": False,
                                 "reason": "subprocess_timeout",
@@ -1987,7 +2017,7 @@ def main() -> None:
                                 "error": log_text,
                                 "stdout": (exc.stdout or "").strip(),
                                 "stderr": (exc.stderr or "").strip(),
-                            },
+                            }
                         )
                         result = None
     
@@ -1998,8 +2028,7 @@ def main() -> None:
                             log_text = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
                         else:
                             log_text = "subprocess returned None"
-                        _append_llm_usage(
-                            llm_usage_path,
+                        _append_llm_usage_for_run(
                             {
                                 "ok": False,
                                 "reason": "fallback_launch_failed",
@@ -2007,7 +2036,7 @@ def main() -> None:
                                 "error": log_text,
                                 "stdout_log": fb_log_paths["stdout"],
                                 "stderr_log": fb_log_paths["stderr"],
-                            },
+                            }
                         )
                         # Do NOT continue to collect outputs if both primary and fallback failed.
                         stderr_path = Path(fb_log_paths["stderr"])
@@ -2065,9 +2094,8 @@ def main() -> None:
                 recordings_path = out_dir / "recordings.jsonl"
                 recordings_found = False
                 recordings_missing = True
-                _append_llm_usage(
-                    llm_usage_path,
-                    {"ok": False, "reason": "missing_recordings", "engine": method},
+                _append_llm_usage_for_run(
+                    {"ok": False, "reason": "missing_recordings", "engine": method}
                 )
                 recordings_path.parent.mkdir(parents=True, exist_ok=True)
                 recordings_path.write_text("", encoding="utf-8")
@@ -2083,9 +2111,8 @@ def main() -> None:
             if not recordings_path.exists():
                 recordings_found = False
                 recordings_missing = True
-                _append_llm_usage(
-                    llm_usage_path,
-                    {"ok": False, "reason": "missing_recordings", "engine": method},
+                _append_llm_usage_for_run(
+                    {"ok": False, "reason": "missing_recordings", "engine": method}
                 )
                 recordings_path.write_text("", encoding="utf-8")
         eval_counter_src = output_dir / "eval_counter.json"
@@ -2121,17 +2148,15 @@ def main() -> None:
                             "wrapper_run_mode": run_mode,
                             "obj": obj,
                         }
-                    _append_llm_usage(llm_usage_path, merged)
+                    _append_llm_usage_for_run(merged)
         else:
-            _append_llm_usage(
-                llm_usage_path,
-                {"ok": False, "reason": "missing_llm_usage", "engine": method},
+            _append_llm_usage_for_run(
+                {"ok": False, "reason": "missing_llm_usage", "engine": method}
             )
         if not recordings_path.exists():
             recordings_missing = True
-            _append_llm_usage(
-                llm_usage_path,
-                {"ok": False, "event": "recordings_missing", "path": str(recordings_path), "engine": method},
+            _append_llm_usage_for_run(
+                {"ok": False, "event": "recordings_missing", "path": str(recordings_path), "engine": method}
             )
         method_label = f"heuragenix:{method}"
         pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
@@ -2213,7 +2238,7 @@ def main() -> None:
         knee_comm, knee_therm, _ = pareto.knee_point()
         trace_summary = _summarize_trace_hits(trace_path)
         accept_rate = float(trace_metrics.get("accept_rate_overall", 0.0))
-        llm_summary = _summarize_llm_usage(llm_usage_path)
+        llm_summary = _summarize_llm_usage(llm_usage_path, wrapper_run_id=wrapper_run_id)
         if llm_summary.get("fallback_used"):
             fallback_used = True
             if method == baseline_method:
