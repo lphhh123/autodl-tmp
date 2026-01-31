@@ -4,6 +4,7 @@ import json
 import os
 import random
 import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.problems.base.env import BaseEnv
@@ -11,6 +12,32 @@ from src.util.llm_client.get_llm_client import get_llm_client
 from src.util.util import get_heuristic_names, load_function
 
 from ._compat import env_continue_run, env_is_complete, env_is_valid
+
+
+def _resolve_llm_config_path(path_value: Optional[str]) -> Optional[str]:
+    if not path_value:
+        return None
+    candidate = Path(path_value).expanduser()
+    if candidate.is_absolute() and candidate.exists():
+        return str(candidate)
+
+    cwd_candidate = (Path.cwd() / candidate).resolve()
+    if cwd_candidate.exists():
+        return str(cwd_candidate)
+
+    out_dir = os.environ.get("AMLT_OUTPUT_DIR", "")
+    if out_dir:
+        try:
+            out_path = Path(out_dir).expanduser().resolve()
+            heuragenix_internal = out_path.parent
+            inferred = (heuragenix_internal / candidate.name).resolve()
+            if inferred.exists():
+                return str(inferred)
+        except Exception:
+            pass
+
+    return str(candidate)
+
 
 class LLMSelectionHyperHeuristic:
     """
@@ -36,7 +63,7 @@ class LLMSelectionHyperHeuristic:
     ):
         self.problem = problem
         self.heuristic_dir = heuristic_dir
-        self.llm_config_file = llm_config_file
+        self.llm_config_file = _resolve_llm_config_path(llm_config_file)
 
         self.iterations_scale_factor = float(iterations_scale_factor)
         self.selection_frequency = max(1, int(selection_frequency))

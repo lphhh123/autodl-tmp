@@ -238,6 +238,11 @@ def _adapt_llm_config(cfg_llm_path: Path, out_dir: Path) -> str:
             top_value = js.get("top_p", js.get("top-p"))
             js["top_p"] = top_value
             js["top-p"] = top_value
+        try:
+            js["temperature"] = float(os.environ.get("V54_LLM_PICK_TEMPERATURE", "0.0"))
+            js["top_p"] = float(os.environ.get("V54_LLM_PICK_TOP_P", js.get("top_p", "1.0")))
+        except Exception:
+            pass
 
     internal_out = out_dir / "heuragenix_internal"
     internal_out.mkdir(parents=True, exist_ok=True)
@@ -1582,6 +1587,7 @@ def main() -> None:
     start_time = time.time()
     llm_usage_path = trace_dir / "llm_usage.jsonl"
     llm_usage_path_compat = out_dir / "llm_usage.jsonl"
+    # Ensure per-run stats (avoid history accumulating in llm_usage.jsonl).
     _rotate_file_if_exists(llm_usage_path, suffix=wrapper_run_id)
     _rotate_file_if_exists(llm_usage_path_compat, suffix=wrapper_run_id)
 

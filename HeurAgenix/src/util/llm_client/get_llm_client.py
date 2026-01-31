@@ -172,7 +172,17 @@ class OpenAICompatibleClient:
                     return [], parse_error or "missing_wrapper"
             else:
                 return [], parse_error or "missing_wrapper"
-        picks_raw = parsed.get("pick") if isinstance(parsed, dict) else []
+        picks_raw: List[int] | List[str] | int | str | None = None
+        if isinstance(parsed, dict):
+            for key in ("pick", "picks", "chosen", "choice"):
+                if key in parsed:
+                    picks_raw = parsed.get(key)
+                    break
+        if isinstance(picks_raw, (int, str)):
+            try:
+                picks_raw = [int(picks_raw)]
+            except Exception:
+                picks_raw = []
         valid_picks = self._validate_picks(picks_raw, candidate_ids, forbidden_ids, k)
         if valid_picks:
             return valid_picks, None
@@ -190,10 +200,17 @@ class OpenAICompatibleClient:
                         return [pid], None
         return [], "empty_or_invalid_picks"
 
-    def propose_pick(self, state_summary: Dict, k: int, timeout_s: int | None = None) -> List[int]:
+    def propose_pick(
+        self,
+        state_summary: Dict,
+        k: int,
+        timeout_s: int | None = None,
+        *,
+        return_raw: bool = False,
+    ) -> List[int] | Tuple[List[int], str]:
         if not self.is_ready():
             self.last_usage = {"ok": False, "reason": "client_not_ready", "provider": self.provider}
-            return []
+            return ([], "") if return_raw else []
         url = self.base_url
         headers = self._headers()
         payload = self._build_payload(state_summary, k)
@@ -237,7 +254,7 @@ class OpenAICompatibleClient:
                 }
                 self.calls.append(dict(self.last_usage))
                 if ok:
-                    return picks
+                    return (picks, raw) if return_raw else picks
                 last_error = Exception(parse_error or "empty_or_invalid_picks")
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
@@ -251,7 +268,7 @@ class OpenAICompatibleClient:
                 time.sleep(self.sleep_time)
         if last_error and self.last_usage is not None:
             self.last_usage.setdefault("error", repr(last_error))
-        return []
+        return ([], "") if return_raw else []
 
     def choose_heuristic(self, prompt: Dict, candidates: List[str], timeout_s: int | None = None) -> str:
         candidate_ids = list(range(len(candidates)))
@@ -261,10 +278,26 @@ class OpenAICompatibleClient:
             "forbidden_ids": [],
             "candidates": [{"id": idx, "name": name} for idx, name in enumerate(candidates)],
         }
-        picks = self.propose_pick(state_summary, 1, timeout_s=timeout_s)
-        if not picks:
+        picks, raw_text = self.propose_pick(state_summary, 1, timeout_s=timeout_s, return_raw=True)
+        if picks:
+            idx = int(picks[0])
+        else:
+            raw_lower = (raw_text or "").lower()
+            idx = -1
+            for i, cand in enumerate(candidates):
+                if cand.lower() in raw_lower:
+                    idx = i
+                    break
+            if idx < 0:
+                m = re.search(r'("pick"|"chosen"|"choice")\s*:\s*\[\s*(\d+)\s*\]', raw_text or "")
+                if not m:
+                    m = re.search(r"\b(\d+)\b", raw_text or "")
+                if m:
+                    num = int(m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1))
+                    if 1 <= num <= len(candidate_ids):
+                        idx = num - 1
+        if idx < 0:
             raise ValueError("llm_empty_pick")
-        idx = int(picks[0])
         if idx < 0 or idx >= len(candidates):
             raise ValueError("llm_pick_out_of_range")
         if self.last_usage is None:
