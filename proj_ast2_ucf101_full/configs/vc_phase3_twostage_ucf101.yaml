@@ -1,29 +1,18 @@
 _base_: ./vc_phase3_full_ucf101.yaml
 training:
   twostage: true
+  stage1_epochs: 1
+  stage2_freeze_epoch: 1
 
-# v5.4 CONTRACT:
-# twostage=True would nullify HW loss semantics; StableHW must be OFF to avoid silent degradation.
+# Two-stage baseline is incompatible with StableHW (it would nullify HW loss semantics).
 stable_hw:
   enabled: false
   force_disable_ok: true
-  normalize:
-    enabled: false
-  lambda_hw_schedule:
-    enabled: false
-  accuracy_guard:
-    enabled: false
-  locked_acc_ref:
-    enabled: false
-  no_drift:
-    enabled: false
-  no_double_scale:
-    enabled: false
 
-# Be explicit: this baseline should NOT apply HW loss during stage-1 optimization under StableHW.
-# (Even if twostage code already bypasses it, keep config semantics clean.)
-loss:
-  lambda_hw: 0.0
+# When StableHW is disabled, HW loss must be weighted explicitly (otherwise it is a no-op).
 hw:
-  lambda_hw: 0.0
-  use_hw_loss: false
+  use_hw_loss: true
+  lambda_hw: 0.1
+
+loss:
+  lambda_hw: 0.1
