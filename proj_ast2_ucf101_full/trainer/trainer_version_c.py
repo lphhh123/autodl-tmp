@@ -738,14 +738,11 @@ def train_version_c(
         max_eval_batches = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
         data_iter = iter(loader)
 
+        # NOTE(v5.4 contract): cfg is sealed after validate_and_fill_defaults().
+        # Do NOT mutate cfg here (or anywhere after seal), otherwise seal_digest check will fail.
         mapping_only = bool(getattr(cfg.training, "mapping_only", False))
         layout_only = bool(getattr(cfg.training, "layout_only", False))
         twostage = bool(getattr(cfg.training, "twostage", False))
-        if mapping_only:
-            setattr(cfg.hw, "optimize_layout", False)
-            setattr(cfg.hw, "mapping_only", True)
-        if layout_only:
-            setattr(cfg.hw, "layout_only", True)
 
         base_update_alpha = not layout_only
         # v5.4: layout updates must be discrete and auditable; continuous pos optimization in trainer is forbidden
