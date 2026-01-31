@@ -242,14 +242,27 @@ def compute_hw_loss(
     raw_mem_t = mem_mb
     raw_comm_t = comm_ms
 
-    def _assert_nonneg_finite(name: str, value: torch.Tensor) -> None:
-        if torch.any(~torch.isfinite(value)) or torch.any(value < 0):
-            raise RuntimeError(f"proxy produced NaN or negative {name}")
+    # v5.4: do NOT hard-crash on proxy invalid outputs here.
+    # Smoke uses NegativeProxy to ensure we clamp+log instead of rewarding invalid values.
+    invalid_fields = []
 
-    _assert_nonneg_finite("latency", raw_latency_t)
-    _assert_nonneg_finite("energy", raw_energy_t)
-    _assert_nonneg_finite("memory", raw_mem_t)
-    _assert_nonneg_finite("comm", raw_comm_t)
+    def _sanitize_raw(name: str, value: torch.Tensor, *, posinf: float = 1e12) -> torch.Tensor:
+        nonlocal invalid_fields
+        if not torch.is_tensor(value):
+            value = torch.as_tensor(value, device=device, dtype=torch.float32)
+        # detect invalid BEFORE replacing
+        bad = (~torch.isfinite(value)) | (value < 0)
+        if bool(bad.any().item()):
+            invalid_fields.append(name)
+        # replace NaN/inf -> finite, then clamp negatives to 0
+        value = torch.nan_to_num(value, nan=0.0, posinf=posinf, neginf=0.0)
+        value = torch.clamp(value, min=0.0)
+        return value
+
+    raw_latency_t = _sanitize_raw("latency", raw_latency_t)
+    raw_energy_t = _sanitize_raw("energy", raw_energy_t)
+    raw_mem_t = _sanitize_raw("mem", raw_mem_t)
+    raw_comm_t = _sanitize_raw("comm_norm", raw_comm_t)
 
     # keep raw for logging
     raw_latency_ms = float(raw_latency_t.detach().cpu().item())
@@ -603,8 +616,11 @@ def compute_hw_loss(
             "ref_comm_ms": float(ref_C),
             "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
             "proxy_clamp_min_values": clamp_mins,
+            "proxy_invalid_fields": list(invalid_fields),
+            "proxy_invalid_count": int(len(invalid_fields)),
             "proxy_had_invalid": bool(
-                (clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]) > 0
+                (len(invalid_fields) > 0)
+                or ((clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]) > 0)
             ),
         }
     )
