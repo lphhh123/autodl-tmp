@@ -1110,7 +1110,12 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         if shw is None:
             raise ValueError("v5.4 contract: missing stable_hw section (would silently degrade)")
         if get_nested(cfg, "stable_hw.enabled", True) is False:
-            raise ValueError("v5.4 contract: stable_hw.enabled must not be False in version_c mode")
+            force_disable_ok = bool(get_nested(cfg, "stable_hw.force_disable_ok", False))
+            if not force_disable_ok:
+                raise ValueError(
+                    "v5.4 contract: stable_hw.enabled must not be False in version_c mode. "
+                    "If intentionally running an ablation/baseline, set stable_hw.force_disable_ok=true explicitly."
+                )
 
         if get_nested(cfg, "stable_hw.locked_acc_ref", None) is None:
             raise ValueError("v5.4 contract: missing stable_hw.locked_acc_ref")
