@@ -1165,7 +1165,13 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
 
     def _auto_record_contract_diffs(cfg_to_record, paths):
         req = get_nested(cfg_to_record, "_contract.requested_config_snapshot", {}) or {}
-        eff = OmegaConf.to_container(cfg_to_record, resolve=True)
+        # Contract diff recording should not hard-crash on missing interpolations.
+        # Some entry scripts inject aliases like cfg.out_dir at runtime, but config-only
+        # smoke checks may not. Fall back to a non-resolved snapshot if resolve fails.
+        try:
+            eff = OmegaConf.to_container(cfg_to_record, resolve=True)
+        except Exception:
+            eff = OmegaConf.to_container(cfg_to_record, resolve=False)
         existing = set()
         for it in (get_nested(cfg_to_record, "_contract.overrides", []) or []):
             if isinstance(it, dict) and "path" in it:

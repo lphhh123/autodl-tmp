@@ -23,10 +23,12 @@ stable_hw:
     acc_ref1: 0.0
     acc_ref5: 0.0
     strict: true
+    manual:
+      acc_ref1: 0.0
   no_drift:
     enabled: true
     allow_update: false
-    stats_path: "${out_dir}/baseline_stats.json"
+    stats_path: "${train.out_dir}/no_drift/stats.json"
   no_double_scale:
     enabled: true
 

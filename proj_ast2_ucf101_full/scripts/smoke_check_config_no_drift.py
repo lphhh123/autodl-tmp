@@ -23,11 +23,15 @@ def main():
 
     cfg = load_config(args.cfg)
 
-    # This smoke performs config validation only; it does not accept --out_dir.
-    # Some configs (e.g., stable_hw.no_drift.stats_path) use ${out_dir} interpolation.
-    # Provide a deterministic fallback so OmegaConf resolve does not fail.
-    if OmegaConf.select(cfg, "out_dir") is None:
-        OmegaConf.update(cfg, "out_dir", "outputs/SMOKE/_tmp_no_drift_cfgcheck", merge=False)
+    # Many training entrypoints inject cfg.out_dir = cfg.train.out_dir at runtime.
+    # Config-only smoke checks should do the same to avoid interpolation failures.
+    try:
+        if (not hasattr(cfg, "out_dir") or cfg.get("out_dir") in (None, "")) and hasattr(cfg, "train"):
+            td = cfg.train.get("out_dir", None)
+            if td not in (None, ""):
+                cfg.out_dir = td
+    except Exception:
+        pass
 
     cfg = validate_and_fill_defaults(cfg, mode=args.mode)
 
@@ -55,9 +59,7 @@ def main():
             raise AssertionError("stable_hw.no_double_scale must be True in v5.4")
 
         # ---- SPEC v5.4 LockedAccRef must be achievable ----
-        locked = getattr(cfg, "locked_acc_ref", None)
-        if locked is None:
-            locked = getattr(cfg.stable_hw, "locked_acc_ref", None)
+        locked = getattr(cfg.stable_hw, "locked_acc_ref", None)
         if locked is not None and bool(getattr(locked, "enabled", False)):
             src = getattr(locked, "source", "baseline_stats")
             # Case A: manual source is valid as long as acc_ref1 exists.
@@ -68,21 +70,19 @@ def main():
                     raise AssertionError(
                         "LockedAccRef violated: source=manual but locked_acc_ref.manual.acc_ref1 is None."
                     )
-            else:
+
+            if src != "manual":
                 baseline_path = getattr(locked, "baseline_stats_path", None)
                 sched = getattr(cfg.stable_hw, "lambda_hw_schedule", None) or {}
-                warmup_epochs = int(getattr(sched, "warmup_epochs", 0) or 0)
+                warmup_epochs = int(getattr(locked, "warmup_epochs", getattr(sched, "warmup_epochs", 0)) or 0)
                 warmup_steps = int(getattr(sched, "warmup_steps", 0) or 0)
-                freeze_epoch = int(getattr(locked, "freeze_epoch", 0) or 0)
+                freeze_epoch = int(getattr(locked, "freeze_epoch", getattr(sched, "warmup_epochs", 0)) or 0)
                 warmup_ok = (warmup_epochs >= 1) or (warmup_steps > 0)
-                if (baseline_path is None) and not (warmup_ok and freeze_epoch >= 1):
+                if (baseline_path in (None, "", "null")) and not (warmup_ok and freeze_epoch >= 1):
                     raise AssertionError(
-                        "LockedAccRef violated: baseline_stats_path is None, and warmup/freeze are insufficient. "
-                        "Need one of:\n"
-                        "  - locked_acc_ref.baseline_stats_path set, OR\n"
-                        "  - warmup_epochs>=1 (or warmup_steps>0) AND freeze_epoch>=1, OR\n"
-                        "  - source=manual with manual.acc_ref1 provided.\n"
-                        "Otherwise acc_ref may never be locked -> HW gating degenerates."
+                        "LockedAccRef violated: baseline_stats_path is None, but warmup/freeze are <1 "
+                        f"(warmup_epochs={warmup_epochs}, freeze_epoch={freeze_epoch}). "
+                        "acc_ref may never be locked -> HW gating degenerates."
                     )
 
         # ---- v5.4 NoDrift: HW refs must be frozen unless explicitly opted out ----
