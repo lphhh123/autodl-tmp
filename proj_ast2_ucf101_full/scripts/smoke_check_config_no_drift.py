@@ -58,16 +58,32 @@ def main():
         locked = getattr(cfg, "locked_acc_ref", None)
         if locked is None:
             locked = getattr(cfg.stable_hw, "locked_acc_ref", None)
-        sched = getattr(cfg.stable_hw, "lambda_hw_schedule", None)
         if locked is not None and bool(getattr(locked, "enabled", False)):
-            baseline_path = getattr(locked, "baseline_stats_path", None)
-            warmup_epochs = int(getattr(sched, "warmup_epochs", 0) or 0) if sched is not None else 0
-            freeze_epoch = int(getattr(locked, "freeze_epoch", warmup_epochs) or 0)
-            if (baseline_path is None) and (warmup_epochs <= 0 or freeze_epoch <= 0):
-                raise AssertionError(
-                    "LockedAccRef violated: baseline_stats_path is None, but warmup_epochs/freeze_epoch are not >=1. "
-                    "acc_ref will never be locked -> HW gating degenerates."
-                )
+            src = getattr(locked, "source", "baseline_stats")
+            # Case A: manual source is valid as long as acc_ref1 exists.
+            if src == "manual":
+                manual = getattr(locked, "manual", {}) or {}
+                acc_ref1 = manual.get("acc_ref1", None) if isinstance(manual, dict) else getattr(manual, "acc_ref1", None)
+                if acc_ref1 is None:
+                    raise AssertionError(
+                        "LockedAccRef violated: source=manual but locked_acc_ref.manual.acc_ref1 is None."
+                    )
+            else:
+                baseline_path = getattr(locked, "baseline_stats_path", None)
+                sched = getattr(cfg.stable_hw, "lambda_hw_schedule", None) or {}
+                warmup_epochs = int(getattr(sched, "warmup_epochs", 0) or 0)
+                warmup_steps = int(getattr(sched, "warmup_steps", 0) or 0)
+                freeze_epoch = int(getattr(locked, "freeze_epoch", 0) or 0)
+                warmup_ok = (warmup_epochs >= 1) or (warmup_steps > 0)
+                if (baseline_path is None) and not (warmup_ok and freeze_epoch >= 1):
+                    raise AssertionError(
+                        "LockedAccRef violated: baseline_stats_path is None, and warmup/freeze are insufficient. "
+                        "Need one of:\n"
+                        "  - locked_acc_ref.baseline_stats_path set, OR\n"
+                        "  - warmup_epochs>=1 (or warmup_steps>0) AND freeze_epoch>=1, OR\n"
+                        "  - source=manual with manual.acc_ref1 provided.\n"
+                        "Otherwise acc_ref may never be locked -> HW gating degenerates."
+                    )
 
         # ---- v5.4 NoDrift: HW refs must be frozen unless explicitly opted out ----
         no_drift_cfg = getattr(cfg, "no_drift", None)

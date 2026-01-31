@@ -356,6 +356,26 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         )
 
     STRICT = bool(get_nested(cfg, "_contract.strict", False))
+    # -------------------------------------------------------------------------
+    # v5.4 convenience: many configs reference ${out_dir}. If the config only
+    # defines train.out_dir, provide a root-level alias to avoid interpolation
+    # failures during OmegaConf resolve (e.g., smoke_check_config_no_drift).
+    # -------------------------------------------------------------------------
+    if get_nested(cfg, "out_dir", None) is None:
+        _train_out = get_nested(cfg, "train.out_dir", None)
+        if isinstance(_train_out, str) and _train_out.strip():
+            set_nested(cfg, "out_dir", _train_out)
+            try:
+                cfg._contract.overrides.append(
+                    {
+                        "path": "out_dir",
+                        "requested": None,
+                        "effective": _train_out,
+                        "reason": "alias_train_out_dir_for_interpolation",
+                    }
+                )
+            except Exception:
+                pass
     # ---- v5.4 helper: ensure NEW tabular proxy ckpts dir exists (no command change required) ----
     try:
         hw_proxy_dir = get_nested(cfg, "hw.proxy_weight_dir", None)
