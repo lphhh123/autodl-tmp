@@ -17,6 +17,7 @@ from mapping.mapping_solver import MappingSolver
 from mapping.segments import Segment
 from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
+from utils.stable_hw import init_hw_refs_for_no_drift
 
 
 class AnalyticProxy:
@@ -91,6 +92,18 @@ def main() -> None:
     cfg = load_config(args.cfg)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
 
+    # v5.4 NoDrift contract:
+    # If stable_hw.no_drift.enabled=True, compute_hw_loss() refuses to silently
+    # fabricate ref_T/ref_E/ref_M/ref_C. The real training loop seeds these refs
+    # via StableHW, but this standalone smoke must seed them explicitly.
+    def _seed_no_drift_refs(stable_hw_state: dict) -> None:
+        try:
+            init_hw_refs_for_no_drift(cfg, stable_hw_state)
+        except Exception:
+            # If helper is missing or cfg is incomplete, keep behavior unchanged;
+            # compute_hw_loss will raise a clear v5.4 error.
+            pass
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     cfg.hw.lambda_area = 1.0
@@ -141,12 +154,14 @@ def main() -> None:
 
     hw_proxy = AnalyticProxy()
 
+    stable_hw_state0 = {"epoch": 0}
+    _seed_no_drift_refs(stable_hw_state0)
     L_hw, _ = compute_hw_loss(
         cfg,
         hw_proxy,
         model_info={},
         stable_hw_cfg=getattr(cfg, "stable_hw", None),
-        stable_hw_state={},
+        stable_hw_state=stable_hw_state0,
         segments=segments,
         mapping=mapping,
         mapping_sig=None,
@@ -166,7 +181,8 @@ def main() -> None:
     ), "area grad missing/zero"
 
     # ===== S3: negative proxy guard must NOT reduce loss =====
-    stable_state = {}
+    stable_state = {"epoch": 0}
+    _seed_no_drift_refs(stable_state)
 
     # 1) run once to get reasonable refs from the positive proxy
     _, s0 = compute_hw_loss(

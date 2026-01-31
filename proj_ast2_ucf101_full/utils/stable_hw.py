@@ -1091,6 +1091,25 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
     stable_hw_state["ref_C"] = stable_hw_state["hw_refs"].get("comm_ref")
 
 
+def init_hw_refs_for_no_drift(cfg: Any, stable_hw_state: Dict[str, Any], stable_hw_cfg: Any = None) -> None:
+    """
+    v5.4 helper:
+      - If NoDrift is enabled, ensure ref_T/ref_E/ref_M/ref_C (and ref_A/ref_B/ref_P)
+        exist before compute_hw_loss().
+      - Prefer baseline stats when provided; otherwise seed from cfg.hw defaults.
+    """
+    stable_hw_cfg = stable_hw_cfg if stable_hw_cfg is not None else getattr(cfg, "stable_hw", None)
+    nd_cfg = _get_no_drift_cfg(cfg, stable_hw_cfg=stable_hw_cfg)
+    if not _as_enabled(nd_cfg, default=False):
+        return
+
+    required = ("ref_T", "ref_E", "ref_M", "ref_C", "ref_A", "ref_B", "ref_P")
+    if all(stable_hw_state.get(k) is not None for k in required):
+        return
+
+    init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
+
+
 def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
     # ====== Original update_hw_refs_from_stats logic moved here ======
     # Only update hardware refs; do NOT update locked_acc_ref / acc_ref here.
