@@ -573,7 +573,9 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
         return bool(v)
 
     # forbid ambiguous configs: parent off but child explicitly on
+    stable_hw_force_disable_ok = bool(get_nested(cfg, "stable_hw.force_disable_ok", False))
     if not stable_hw_enabled:
+        bad = []
         for p in (
             "stable_hw.normalize.enabled",
             "stable_hw.lambda_hw_schedule.enabled",
@@ -583,9 +585,23 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
             "stable_hw.no_double_scale.enabled",
         ):
             if get_nested(cfg, p, False) is True:
+                bad.append(p)
+        if bad:
+            if stable_hw_force_disable_ok:
+                for p in bad:
+                    try:
+                        OmegaConf.update(cfg, p, False, merge=False)
+                    except Exception:
+                        pass
+                print(
+                    "[v5.4 contract][WARN] stable_hw.enabled=False with force_disable_ok=True, "
+                    f"auto-disabled residual submodules: {bad}"
+                )
+            else:
                 raise ValueError(
-                    f"[SPEC v5.4] Ambiguous StableHW config: {p}=True while stable_hw.enabled=False. "
-                    f"Fix: set stable_hw.enabled=True or disable the submodule explicitly."
+                    f"[SPEC v5.4] Ambiguous StableHW config: {bad} are enabled while stable_hw.enabled=False. "
+                    "Fix: set stable_hw.enabled=True or disable the submodule explicitly. "
+                    "If this is an ablation/baseline, set stable_hw.force_disable_ok=true explicitly."
                 )
 
     # --- [v5.4 CONTRACT] twostage must not silently disable StableHW in version_c ---

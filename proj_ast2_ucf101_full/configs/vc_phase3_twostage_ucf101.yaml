@@ -8,11 +8,22 @@ training:
 stable_hw:
   enabled: false
   force_disable_ok: true
+  # Disable all submodules explicitly (they are enabled in vc_phase3_full via inheritance).
+  normalize:
+    enabled: false
+  accuracy_guard:
+    enabled: false
+  locked_acc_ref:
+    enabled: false
+  no_drift:
+    enabled: false
+  no_double_scale:
+    enabled: false
 
-# When StableHW is disabled, HW loss must be weighted explicitly (otherwise it is a no-op).
+# Make HW loss explicitly inactive for this baseline (avoid warnings / accidental nonzero weights).
 hw:
-  use_hw_loss: true
-  lambda_hw: 0.1
+  use_hw_loss: false
+  lambda_hw: 0.0
 
 loss:
-  lambda_hw: 0.1
+  lambda_hw: 0.0
