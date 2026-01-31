@@ -1244,6 +1244,45 @@ def _rotate_file_if_exists(path: Path, *, suffix: str = "") -> None:
             pass
 
 
+def _archive_and_reset_dir(dir_path: Path, archive_root: Path, tag: str) -> None:
+    """
+    Move an existing directory into archive_root/tag, then recreate an empty dir_path.
+    This ensures each wrapper run starts from a clean HeurAgenix result dir, so
+    llm_usage.jsonl / recordings.jsonl won't accumulate across runs.
+    """
+    try:
+        if dir_path.exists():
+            archive_root.mkdir(parents=True, exist_ok=True)
+            dst = archive_root / tag
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.move(str(dir_path), str(dst))
+        dir_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Best-effort: never crash the main run due to archiving.
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+
+def _freshen_internal_result_dirs(
+    output_root: Path,
+    problem: str,
+    case_stem: str,
+    result_dir: str,
+    engines: List[str],
+    run_id: str,
+) -> None:
+    """Ensure output_root/<problem>/<case_stem>/<result_dir>/<engine> is fresh for this run."""
+    archive_root = output_root / problem / case_stem / result_dir / "__archive"
+    for eng in engines:
+        if not eng:
+            continue
+        target_dir = output_root / problem / case_stem / result_dir / eng
+        _archive_and_reset_dir(target_dir, archive_root, f"{eng}.{run_id}")
+
+
 def _run_heuragenix_inprocess(
     *,
     heuragenix_root: Path,
@@ -1664,7 +1703,29 @@ def main() -> None:
             seed_assign,
             baseline_cfg,
         )
-    
+
+        # --- IMPORTANT ---
+        # HeurAgenix writes llm_usage.jsonl into:
+        #   AMLT_OUTPUT_DIR/<problem>/<case_stem>/<result_dir>/<engine>/llm_usage.jsonl
+        # If we don't clean it, it accumulates across runs and our wrapper will
+        # repeatedly merge historical lines into trace/llm_usage.jsonl.
+        # So we archive/reset the per-engine result dirs before launching subprocess.
+        try:
+            result_dir = getattr(cfg.baseline, "result_dir", "result") or "result"
+        except Exception:
+            result_dir = "result"
+        engines_to_freshen = [baseline_method]
+        if fallback_method and fallback_method not in engines_to_freshen:
+            engines_to_freshen.append(fallback_method)
+        _freshen_internal_result_dirs(
+            output_root=output_root,
+            problem=problem,
+            case_stem=str(case_name),
+            result_dir=result_dir,
+            engines=engines_to_freshen,
+            run_id=run_id,
+        )
+
         layout_hash = None
         try:
             layout_hash = hashlib.sha256(layout_input_path.read_bytes()).hexdigest()
