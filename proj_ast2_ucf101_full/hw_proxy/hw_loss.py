@@ -257,6 +257,19 @@ def compute_hw_loss(
         # replace NaN/inf -> finite, then clamp negatives to 0
         value = torch.nan_to_num(value, nan=0.0, posinf=posinf, neginf=0.0)
         value = torch.clamp(value, min=0.0)
+        # Optional hard caps (defensive): treat absurdly large values as invalid-ish.
+        caps = {
+            "latency": float(getattr(getattr(cfg, "hw", None), "proxy_cap_latency_ms", 1e5)),
+            "energy": float(getattr(getattr(cfg, "hw", None), "proxy_cap_energy_mj", 1e9)),
+            "mem": float(getattr(getattr(cfg, "hw", None), "proxy_cap_mem_mb", 1e6)),
+            "comm_norm": float(getattr(getattr(cfg, "hw", None), "proxy_cap_comm_ms", 1e5)),
+        }
+        if name in caps:
+            cap = torch.tensor(caps[name], device=device, dtype=torch.float32)
+            too_big = value > cap
+            if bool(too_big.any().item()):
+                invalid_fields.append(f"{name}_cap")
+            value = torch.minimum(value, cap)
         return value
 
     raw_latency_t = _sanitize_raw("latency", raw_latency_t)

@@ -56,7 +56,13 @@ class MappingSolver:
                     f"[ProxyMissing] alpha has shape {tuple(alpha_cpu.shape)} but needs >= {T} chip types."
                 )
 
-            big_cost = 1e6
+            # NOTE:
+            # alpha can have an extra "empty/none" column (alpha[-1]).
+            # Previously we added 1e6 directly into latency/mem/power which polluted
+            # physical metrics (raw_latency_ms/raw_mem_mb explode).
+            # We keep a *latency-only* penalty to prevent mapping onto empty slots,
+            # but do not inflate mem/power with impossible values.
+            EMPTY_SLOT_LAT_MS = 500.0
             lat_rows = []
             mem_rows = []
             power_rows = []
@@ -96,9 +102,7 @@ class MappingSolver:
                     expected_mem = torch.sum(slot_alpha[:T] * per_dev_mem_t)
                     expected_power = torch.sum(slot_alpha[:T] * per_dev_power_t)
                     if int(slot_alpha.shape[0]) > T:
-                        expected_lat = expected_lat + slot_alpha[-1] * big_cost
-                        expected_mem = expected_mem + slot_alpha[-1] * big_cost
-                        expected_power = expected_power + slot_alpha[-1] * big_cost
+                        expected_lat = expected_lat + slot_alpha[-1] * EMPTY_SLOT_LAT_MS
                     slot_lat.append(expected_lat)
                     slot_mem.append(expected_mem)
                     slot_power.append(expected_power)
@@ -175,7 +179,8 @@ class MappingSolver:
                 print(f"[MappingSolver] slot device_name distribution: {counts}")
                 self._logged_slot_devices = True
 
-            big_cost = torch.tensor(1e6, device=device, dtype=torch.float32)
+            # See note above: avoid injecting huge sentinel into physical metrics.
+            EMPTY_SLOT_LAT_MS = torch.tensor(500.0, device=device, dtype=torch.float32)
             lat_rows = []
             mem_rows = []
             power_rows = []
@@ -215,9 +220,7 @@ class MappingSolver:
                     expected_mem = torch.sum(slot_alpha[:T] * per_dev_mem_t)
                     expected_power = torch.sum(slot_alpha[:T] * per_dev_power_t)
                     if int(slot_alpha.shape[0]) > T:
-                        expected_lat = expected_lat + slot_alpha[-1] * big_cost
-                        expected_mem = expected_mem + slot_alpha[-1] * big_cost
-                        expected_power = expected_power + slot_alpha[-1] * big_cost
+                        expected_lat = expected_lat + slot_alpha[-1] * EMPTY_SLOT_LAT_MS
                     slot_lat.append(expected_lat)
                     slot_mem.append(expected_mem)
                     slot_power.append(expected_power)
