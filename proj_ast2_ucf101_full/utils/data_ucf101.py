@@ -185,6 +185,42 @@ def _retain_starts_entropy_density_train(
     return sorted(selected)
 
 
+def _retain_starts_uniform_eval(
+    starts: List[int],
+    cfg,
+) -> List[int]:
+    """Deterministic eval-time retention.
+
+    For val/test we want stable and lightweight window sampling to keep evaluation fast.
+    Keep at most K windows per video per cover_len, selected uniformly over the candidate starts.
+    """
+    if not starts:
+        return starts
+    ret = getattr(cfg.data, "window_retention", None)
+    if ret is None or not bool(getattr(ret, "enabled", False)):
+        return starts
+
+    max_windows = int(getattr(ret, "max_windows_per_video_per_len", 4))
+    if max_windows <= 0:
+        return []
+    if len(starts) <= max_windows:
+        return starts
+
+    idxs = np.linspace(0, len(starts) - 1, max_windows)
+    idxs = np.floor(idxs).astype(int).tolist()
+    kept = [starts[i] for i in idxs]
+
+    # de-dup while preserving order
+    seen = set()
+    out: List[int] = []
+    for s in kept:
+        s = int(s)
+        if s not in seen:
+            out.append(s)
+            seen.add(s)
+    return out
+
+
 def _try_load_classind(root: Path) -> Optional[Dict[str, int]]:
     """
     Try to load UCF101 classInd.txt (1-based indices).
@@ -414,6 +450,7 @@ class UCF101Dataset(Dataset):
                 "temporal_delta": int(getattr(ret_cfg, "temporal_delta", 1)),
                 "downsample": int(getattr(ret_cfg, "downsample", 32)),
                 "entropy_bins": int(getattr(ret_cfg, "entropy_bins", 32)),
+                "eval_mode": str(getattr(ret_cfg, "eval_mode", "uniform")),
             }
         cache_key = {
             "split": split_label,
@@ -500,6 +537,7 @@ class UCF101Dataset(Dataset):
                         max_start = max(total_frames - cover_len + 1, 1)
                         starts = list(range(offset, max_start, stride))
                     if self.is_train:
+                        # Train-time: entropy-density retention (may use cached global entropy).
                         starts = _retain_starts_entropy_density_train(
                             starts=starts,
                             cover_len=int(cover_len),
@@ -509,6 +547,23 @@ class UCF101Dataset(Dataset):
                             cfg=cfg,
                             hglobal_cache=self._hglobal_cache,
                         )
+                    else:
+                        # Eval-time: deterministic retention to keep val/test fast and stable.
+                        eval_mode = str(
+                            getattr(getattr(cfg.data, "window_retention", None), "eval_mode", "uniform")
+                        ).lower()
+                        if eval_mode == "entropy_density":
+                            starts = _retain_starts_entropy_density_train(
+                                starts=starts,
+                                cover_len=int(cover_len),
+                                frame_files=frame_files,
+                                total_frames=int(total_frames),
+                                video_id=video_id,
+                                cfg=cfg,
+                                hglobal_cache=self._hglobal_cache,
+                            )
+                        else:
+                            starts = _retain_starts_uniform_eval(starts=starts, cfg=cfg)
                     for start in starts:
                         t_start = start
                         clips.append(

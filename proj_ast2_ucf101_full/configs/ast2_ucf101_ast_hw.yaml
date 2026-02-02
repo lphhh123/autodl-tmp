@@ -12,6 +12,8 @@ hw:
 
 stable_hw:
   enabled: true
+  hw_ref_source: "baseline_stats"
+  baseline_stats_path: "outputs/dense_baseline/metrics.json"
   # AST2 侧做 HW-aware baseline：建议不强制 locked_acc_ref（Version-C 才要求严格锁定）
   locked_acc_ref:
     enabled: false

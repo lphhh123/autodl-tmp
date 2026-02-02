@@ -49,6 +49,7 @@ data:
     temporal_delta: 1
     downsample: 32
     entropy_bins: 32
+    eval_mode: "uniform"
 
 audio:
   feat_dim: 128
@@ -150,6 +151,8 @@ partition:
 
 stable_hw:
   enabled: true
+  hw_ref_source: "baseline_stats"
+  baseline_stats_path: "outputs/dense_baseline/metrics.json"
   no_double_scale:
     enabled: true
   discrete_ops:
@@ -163,7 +166,7 @@ stable_hw:
   normalize:
     enabled: true
     use_baseline_stats: false
-    baseline_stats_path: ""
+    baseline_stats_path: "outputs/dense_baseline/metrics.json"
     scheme: "none"
     ref_update: "frozen"
   lambda_hw_schedule:
