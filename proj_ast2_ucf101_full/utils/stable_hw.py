@@ -907,10 +907,10 @@ def extract_hw_refs_from_baseline(baseline_stats: dict) -> dict:
                 return v
         return None
 
-    lat = _pick("latency_ref_ms", "latency_ms", "lat_ms", "ref_latency_ms")
+    lat = _pick("latency_ref_ms", "latency_ms", "total_latency_ms", "lat_ms", "ref_latency_ms")
     ene = _pick("energy_ref_mj", "energy_mj", "ene_mj", "ref_energy_mj")
-    mem = _pick("mem_ref_mb", "mem_peak_mb", "mem_mb", "ref_mem_mb")
-    com = _pick("comm_ref", "comm_ref_ms", "comm_ms", "ref_comm_ms")
+    mem = _pick("mem_ref_mb", "mem_peak_mb", "peak_mem_mb", "mem_mb", "ref_mem_mb")
+    com = _pick("comm_ref", "comm_ref_ms", "comm_ms", "comm_norm", "ref_comm_ms")
 
     missing = [
         name
