@@ -24,6 +24,12 @@ from types import SimpleNamespace
 import numpy as np
 from omegaconf import OmegaConf
 
+# Optional progress bar (tqdm). If not installed, fall back to periodic prints.
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    tqdm = None  # type: ignore
+
 from layout.alt_opt import run_alt_opt
 from layout.candidate_pool import signature_from_assign
 from layout.coarsen import coarsen_traffic
@@ -268,6 +274,8 @@ def run_layout_agent(
     total_eval_budget = int(getattr(budget_cfg, "total_eval_budget", 0) or 0)
     max_wallclock_sec = float(getattr(budget_cfg, "max_wallclock_sec", 0.0) or 0.0)
     search_eval_budget = total_eval_budget - 1 if total_eval_budget and total_eval_budget > 1 else total_eval_budget
+    progress_enabled = bool(get_nested(cfg, "progress.enabled", True))
+    progress_poll_s = float(get_nested(cfg, "progress.poll_sec", 0.5))
 
     start_time = time.time()
     seed_everything(int(seed))
@@ -277,6 +285,7 @@ def run_layout_agent(
     S = 0
     Ns = 0
     ok = False
+    pbar = None  # progress bar (tqdm), if enabled
     try:
         wafer_radius = float(layout_input["wafer"]["radius_mm"])
         sites_xy = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
@@ -306,10 +315,34 @@ def run_layout_agent(
 
         _orig_eval = evaluator.evaluate
 
+        # tqdm progress bar (eval-calls). Show whenever a hard eval budget is configured.
+        last_print_t = 0.0
+        if progress_enabled and search_eval_budget and tqdm is not None:
+            try:
+                # tqdm writes to stderr by default; keep it separate from JSON stdout.
+                pbar = tqdm(total=int(search_eval_budget), desc="layout eval_calls", dynamic_ncols=True)
+            except Exception:
+                pbar = None
+
         def _budgeted_evaluate(state):
+            nonlocal last_print_t
             if search_eval_budget and evaluator.evaluator_calls >= search_eval_budget:
                 raise _BudgetExceeded("eval budget exhausted")
-            return _orig_eval(state)
+            out = _orig_eval(state)
+            # Update progress
+            if pbar is not None:
+                try:
+                    pbar.update(1)
+                except Exception:
+                    pass
+            else:
+                # Fallback: periodic plain-text heartbeat (every ~progress_poll_s seconds)
+                now = time.time()
+                if progress_enabled and search_eval_budget and (now - last_print_t) >= max(0.2, progress_poll_s):
+                    last_print_t = now
+                    cur = int(evaluator.evaluator_calls)
+                    print(f"[progress] eval_calls={cur}/{int(search_eval_budget)}")
+            return out
 
         evaluator.evaluate = _budgeted_evaluate
         layout_state = LayoutState(
@@ -562,10 +595,16 @@ def run_layout_agent(
             raise RuntimeError(f"failed to write budget.json: {exc}") from exc
         ok = True
     except Exception as exc:
-        steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
+        steps_done = int(getattr(evaluator, "evaluator_calls", 0)) if evaluator is not None else 0
         raise
     finally:
-        steps_done = int(getattr(evaluator, "evaluate_calls", 0)) if evaluator is not None else 0
+        # Close progress bar before writing final logs.
+        if pbar is not None:
+            try:
+                pbar.close()
+            except Exception:
+                pass
+        steps_done = int(getattr(evaluator, "evaluator_calls", 0)) if evaluator is not None else 0
         best_solution_valid = _is_valid_assign(best_assign, S, Ns)
         trace_append_err = None
         try:
