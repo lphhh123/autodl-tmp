@@ -3,3 +3,6 @@ training:
   mode: single_device_ast
 hw:
   mode: none
+stable_hw:
+  enabled: false
+  force_disable_ok: true
