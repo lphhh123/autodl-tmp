@@ -1,8 +1,6 @@
 _base_: ./ast2_ucf101.yaml
 training:
   mode: dense_baseline
-  epochs: 1
-  batch_size: 2
 ast:
   use_ast_prune: false
 hw:
