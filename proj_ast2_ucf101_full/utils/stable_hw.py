@@ -986,6 +986,19 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
     stable_hw_state["no_drift_enabled"] = bool(requested_no_drift)
 
     if baseline_stats is None:
+        if (
+            stable_hw_cfg is not None
+            and bool(getattr(stable_hw_cfg, "enabled", False))
+            and hw_ref_source == "baseline_stats"
+            and not stable_hw_state.get("_warned_missing_baseline_stats", False)
+        ):
+            stable_hw_state["_warned_missing_baseline_stats"] = True
+            warn_path = baseline_path or "<empty>"
+            print(
+                "[WARN] stable_hw: baseline_stats missing; using default HW refs (likely 1.0). "
+                f"baseline_stats_path={warn_path}. "
+                "Please run EXP-A1 (short run OK) to generate baseline stats for stable normalization."
+            )
         # baseline missing: do NOT EMA when NoDrift requested
         if requested_no_drift:
             stable_hw_state["_force_ref_update_mode"] = "frozen"

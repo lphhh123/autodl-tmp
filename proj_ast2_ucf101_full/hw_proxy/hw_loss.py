@@ -245,6 +245,7 @@ def compute_hw_loss(
     # v5.4: do NOT hard-crash on proxy invalid outputs here.
     # Smoke uses NegativeProxy to ensure we clamp+log instead of rewarding invalid values.
     invalid_fields = []
+    sanitize_fields = []
 
     def _sanitize_raw(name: str, value: torch.Tensor, *, posinf: float = 1e12) -> torch.Tensor:
         nonlocal invalid_fields
@@ -369,6 +370,9 @@ def compute_hw_loss(
     }
 
     raw_comm_norm = raw_comm_ms
+    comm_valid = math.isfinite(raw_comm_norm) and raw_comm_norm > 0.0
+    if not comm_valid:
+        sanitize_fields.append("comm_norm_fallback")
 
     def _penalty_from_raw(x: float) -> float:
         # 合同审计：sanitize 发生时必须能追溯 penalty_added（即便 used 被 ref 替代）
@@ -385,12 +389,29 @@ def compute_hw_loss(
     extra_penalty = float(penalty_T + penalty_E + penalty_M + penalty_C)
 
     # sanitize (no reward for invalid; used becomes ref when invalid)
+    if clamp_counts["T"] > 0:
+        sanitize_fields.append("latency_nonpositive")
+    if clamp_counts["E"] > 0:
+        sanitize_fields.append("energy_nonpositive")
+    if clamp_counts["M"] > 0:
+        sanitize_fields.append("mem_nonpositive")
+    if clamp_counts["C"] > 0 and "comm_norm_fallback" not in sanitize_fields:
+        sanitize_fields.append("comm_norm_nonpositive")
+
     latency_ms_pos = _sanitize_no_reward(latency_ms, ref_T_t)
     energy_mj_pos = _sanitize_no_reward(energy_mj, ref_E_t)
     mem_mb_pos = _sanitize_no_reward(mem_mb, ref_M_t)
     comm_ms_pos = _sanitize_no_reward(comm_ms, ref_C_t)
 
     eps_floor = max(float(eps_ratio), float(eps_floor))
+    if bool((latency_ms_pos < eps_floor).any().detach().cpu().item()):
+        sanitize_fields.append("latency_eps_floor")
+    if bool((energy_mj_pos < eps_floor).any().detach().cpu().item()):
+        sanitize_fields.append("energy_eps_floor")
+    if bool((mem_mb_pos < eps_floor).any().detach().cpu().item()):
+        sanitize_fields.append("mem_eps_floor")
+    if bool((comm_ms_pos < eps_floor).any().detach().cpu().item()):
+        sanitize_fields.append("comm_eps_floor")
     latency_ms_pos = torch.clamp(latency_ms_pos, min=eps_floor)
     energy_mj_pos = torch.clamp(energy_mj_pos, min=eps_floor)
     mem_mb_pos = torch.clamp(mem_mb_pos, min=eps_floor)
@@ -611,6 +632,7 @@ def compute_hw_loss(
     extra_penalty_t = torch.as_tensor(float(extra_penalty), device=device, dtype=latency_ms_pos.dtype)
     L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout) + extra_penalty_t
 
+    sanitize_fields = list(dict.fromkeys(sanitize_fields))
     hw_stats.update(
         {
             "comm_ms": float(comm_ms_pos.detach().cpu().item()),
@@ -627,14 +649,15 @@ def compute_hw_loss(
             "ref_energy_mj": float(ref_E),
             "ref_mem_mb": float(ref_M),
             "ref_comm_ms": float(ref_C),
+            "comm_valid": bool(comm_valid),
             "proxy_clamp_count": int(clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]),
             "proxy_clamp_min_values": clamp_mins,
             "proxy_invalid_fields": list(invalid_fields),
             "proxy_invalid_count": int(len(invalid_fields)),
-            "proxy_had_invalid": bool(
-                (len(invalid_fields) > 0)
-                or ((clamp_counts["T"] + clamp_counts["E"] + clamp_counts["M"] + clamp_counts["C"]) > 0)
-            ),
+            "proxy_had_invalid": bool(len(invalid_fields) > 0),
+            "proxy_sanitize_fields": list(sanitize_fields),
+            "proxy_sanitize_count": int(len(sanitize_fields)),
+            "proxy_had_sanitize": bool(len(sanitize_fields) > 0),
         }
     )
     if chip_used_expected is not None:
