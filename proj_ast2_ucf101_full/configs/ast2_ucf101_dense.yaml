@@ -4,4 +4,10 @@ training:
 ast:
   use_ast_prune: false
 hw:
-  mode: none
+  # Enable proxy stats for baseline refs (lat/energy/mem/comm), without changing training loss.
+  mode: single_device
+
+stable_hw:
+  # Baseline should be "pure dense" (no HW optimization); we only want hw_stats to be recorded.
+  enabled: false
+  force_disable_ok: true
