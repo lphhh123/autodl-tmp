@@ -1,0 +1,10 @@
+_base_: base_layout_exp.yaml
+
+detailed_place:
+  planner:
+    type: llm_mixed_pick
+    llm_config_file: configs/llm/api_model_ark.json
+    every_n_steps: 50
+    heuristics_dir: basic_heuristics
+    num_candidates: 8
+    max_candidates_per_bucket: 4

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import math
+import warnings
 import os
 import time
 import random as _random
@@ -646,8 +647,16 @@ class Env(BaseEnv):
 
     @property
     def continue_run(self) -> bool:
-        if getattr(self, "_max_eval_calls", 0) and self._evaluator is not None:
-            if int(getattr(self._evaluator, "evaluator_calls", 0)) >= int(self._max_eval_calls):
+        if int(getattr(self, "_max_eval_calls", 0) or 0) > 0 and self._evaluator is not None:
+            eval_calls = int(getattr(self._evaluator, "evaluate_calls", 0) or 0)
+            if eval_calls <= 0:
+                eval_calls = int(getattr(self._evaluator, "evaluator_calls", 0) or 0)
+                if eval_calls > 0:
+                    warnings.warn(
+                        "Using legacy counter evaluator_calls; please expose evaluate_calls in evaluator.",
+                        RuntimeWarning,
+                    )
+            if eval_calls >= int(self._max_eval_calls):
                 return False
         if self.max_steps is not None:
             return int(self.current_steps) < int(self.max_steps)
