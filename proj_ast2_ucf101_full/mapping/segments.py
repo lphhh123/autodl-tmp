@@ -73,6 +73,36 @@ def _extract_keep_factors(model_info: Optional[Dict[str, torch.Tensor]], depth: 
             "block_keep": [1.0] * depth,
         }
 
+    # v5.4+: allow passing precomputed keep_factors (fast path, avoids storing big masks)
+    # model_info["keep_factors"] may contain scalars or lists.
+    if "keep_factors" in model_info and model_info["keep_factors"] is not None:
+        kf = model_info["keep_factors"]
+
+        def _as_list(x, n: int, default: float = 1.0) -> List[float]:
+            if x is None:
+                return [default] * n
+            if isinstance(x, (int, float)):
+                return [float(x)] * n
+            if isinstance(x, (list, tuple)):
+                if len(x) == 0:
+                    return [default] * n
+                if len(x) == n:
+                    return [float(v) for v in x]
+                # tolerate mismatched length: broadcast first element
+                return [float(x[0])] * n
+            return [default] * n
+
+        token_keep = float(kf.get("token_keep", 1.0))
+        head_keep = _as_list(kf.get("head_keep", 1.0), depth, 1.0)
+        ch_keep = _as_list(kf.get("ch_keep", 1.0), depth, 1.0)
+        block_keep = _as_list(kf.get("block_keep", 1.0), depth, 1.0)
+        return {
+            "token_keep": [token_keep] * depth,
+            "head_keep": head_keep,
+            "ch_keep": ch_keep,
+            "block_keep": block_keep,
+        }
+
     token_mask = model_info.get("token_mask")
     token_keep = float(token_mask.float().mean().item()) if token_mask is not None else 1.0
 

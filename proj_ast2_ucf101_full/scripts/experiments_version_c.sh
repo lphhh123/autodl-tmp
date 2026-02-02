@@ -73,7 +73,10 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation A (Main/Core)
   # -------------------------
-  EXP-A1) run_ast configs/ast2_ucf101_dense.yaml                 "outputs/EXP-A1/seed${SEED}" ;;
+  EXP-A1)
+    export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
+    run_ast configs/ast2_ucf101_dense.yaml "outputs/EXP-A1/seed${SEED}"
+    ;;
   EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "outputs/EXP-A2/seed${SEED}" ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml                "outputs/EXP-A3/seed${SEED}" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101.yaml             "outputs/EXP-A4/seed${SEED}" ;;

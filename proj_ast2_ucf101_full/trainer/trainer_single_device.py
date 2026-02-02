@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 from hw_proxy.layer_hw_proxy import LayerHwProxy
 from hw_proxy.hw_loss import compute_hw_loss
+from mapping.segments import build_segments_from_model
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
@@ -256,6 +257,7 @@ def train_single_device(
         metrics_path = out_dir / "metrics.json"
         cfg_hash = str(seal_digest)
         cfg_path = str(getattr(cfg, "cfg_path", "") or getattr(getattr(cfg, "train", None), "cfg_path", "") or "")
+    baseline_export_path = os.environ.get("BASELINE_STATS_EXPORT", "").strip()
 
     if run_id is None:
         run_id = str(getattr(getattr(cfg, "train", None), "run_id", "") or "")
@@ -644,6 +646,38 @@ def train_single_device(
                     L_task = F.cross_entropy(logits, y)
 
                     model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                    if hw_proxy is not None and "layers_cfg" not in model_info:
+                        try:
+                            segments = build_segments_from_model(model, cfg, model_info=model_info, precision=1)
+                            bs = int(getattr(cfg.data, "batch_size", 1))
+                            nf = int(getattr(cfg.data, "num_frames", 1))
+                            bs_eff = max(1, bs * nf)
+                            layers_cfg = []
+                            for seg in segments:
+                                keep = seg.keep_factors or {}
+                                layers_cfg.append(
+                                    {
+                                        "layer_kind": seg.kind,
+                                        "flops": float(seg.flops) * bs_eff,
+                                        "bytes": float(seg.bytes) * bs_eff,
+                                        "embed_dim": int(seg.embed_dim),
+                                        "num_heads": int(seg.num_heads),
+                                        "mlp_ratio": float(seg.mlp_ratio),
+                                        "seq_len": int(seg.seq_len),
+                                        "precision": float(seg.precision),
+                                        "keep_ratio": float(keep.get("token_keep", 1.0)),
+                                    }
+                                )
+                            model_info = dict(model_info)
+                            model_info["layers_cfg"] = layers_cfg
+                            info["model_info"] = model_info
+                        except Exception as exc:
+                            if step == 0 and epoch == 0:
+                                logger.warning(
+                                    "[WARN] failed to build layers_cfg for proxy: %s: %s",
+                                    type(exc).__name__,
+                                    exc,
+                                )
                     L_hw, hw_stats = compute_hw_loss(
                         cfg,
                         hw_proxy,
@@ -830,6 +864,8 @@ def train_single_device(
                 metrics["last_hw_stats"] = {
                     "latency_ms": float((last_hw_stats or {}).get("latency_ms", 0.0)),
                     "energy_mj": float((last_hw_stats or {}).get("energy_mj", 0.0)),
+                    "mem_mb": float((last_hw_stats or {}).get("mem_mb", 0.0)),
+                    "comm_ms": float((last_hw_stats or {}).get("comm_ms", 0.0)),
                     "mem_peak_mb": float((last_hw_stats or {}).get("mem_mb", 0.0)),
                 }
                 metrics["stable_hw"] = stable_fields
@@ -844,6 +880,13 @@ def train_single_device(
 
                 with metrics_path.open("w", encoding="utf-8") as f:
                     json.dump(metrics, f, indent=2)
+                if baseline_export_path:
+                    export_path = Path(baseline_export_path)
+                    export_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_path = export_path.with_suffix(export_path.suffix + ".tmp")
+                    with tmp_path.open("w", encoding="utf-8") as tmp_f:
+                        json.dump(metrics, tmp_f, indent=2)
+                    os.replace(tmp_path, export_path)
 
                 # ---- v5.4: persist FULL hw_stats for audit (not only last_hw_stats) ----
                 hw_stats_out = dict(hw_stats or {})
