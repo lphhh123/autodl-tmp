@@ -98,15 +98,15 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation B (Layout)
   # -------------------------
-  EXP-B0)        run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh.yaml      "outputs/EXP-B0/seed${SEED}" ;;
-  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh.yaml   "outputs/EXP-B0-random/seed${SEED}" ;;
+  EXP-B0)        run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp2.yaml      "outputs/EXP-B0/seed${SEED}" ;;
+  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp2.yaml   "outputs/EXP-B0-random/seed${SEED}" ;;
 
-  EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic.yaml "outputs/EXP-B1/seed${SEED}" ;;
-  EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick.yaml "outputs/EXP-B2/seed${SEED}" ;;
+  EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "outputs/EXP-B1/seed${SEED}" ;;
+  EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "outputs/EXP-B2/seed${SEED}" ;;
   EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa.yaml "outputs/EXP-B3/seed${SEED}" ;;
-  EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;
-  EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas.yaml    "outputs/EXP-B2-ab-nofeas/seed${SEED}" ;;
-  EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse.yaml "outputs/EXP-B2-ab-nodiverse/seed${SEED}" ;;
+  EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;
+  EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "outputs/EXP-B2-ab-nofeas/seed${SEED}" ;;
+  EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "outputs/EXP-B2-ab-nodiverse/seed${SEED}" ;;
 
   # -------------------------
   # Appendix / Optional (kept but not required for main table)
