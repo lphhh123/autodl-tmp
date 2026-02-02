@@ -35,9 +35,10 @@ REQ_VERSION_C_HW_DEFAULTS = {
     "hw.lambda_hw": 0.0,
 
     # device/proxy
-    "hw.device_name": "RTX4090_FP16",
+    # Align repository default (configs/*.yaml) to avoid pointing to missing ckpts.
+    "hw.device_name": "RTX3090_FP16",
     "hw.gpu_yaml": "configs/gpu_data.yaml",
-    "hw.proxy_weight_dir": "proxy_weights",
+    "hw.proxy_weight_dir": "./proxy_ckpts",
 
     # memory constraints
     "mapping.mem_limit_factor": 1.0,

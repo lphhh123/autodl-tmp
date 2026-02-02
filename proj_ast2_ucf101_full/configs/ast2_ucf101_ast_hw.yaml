@@ -2,8 +2,6 @@ _base_: ./ast2_ucf101.yaml
 
 training:
   mode: single_device_ast
-  epochs: 2
-  batch_size: 2
 
 # legacy hw.lambda_hw will be ignored when stable_hw.enabled=true (NoDoubleScale)
 hw:
