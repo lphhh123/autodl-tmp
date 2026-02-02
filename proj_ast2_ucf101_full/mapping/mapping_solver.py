@@ -56,13 +56,16 @@ class MappingSolver:
                     f"[ProxyMissing] alpha has shape {tuple(alpha_cpu.shape)} but needs >= {T} chip types."
                 )
 
-            # NOTE:
-            # alpha can have an extra "empty/none" column (alpha[-1]).
-            # Previously we added 1e6 directly into latency/mem/power which polluted
-            # physical metrics (raw_latency_ms/raw_mem_mb explode).
-            # We keep a *latency-only* penalty to prevent mapping onto empty slots,
-            # but do not inflate mem/power with impossible values.
-            EMPTY_SLOT_LAT_MS = 500.0
+            alpha_chip = alpha_cpu[:, :T]
+            denom = alpha_chip.sum(dim=1, keepdim=True).clamp_min(1e-9)
+            alpha_chip_norm = alpha_chip / denom
+            if int(alpha_cpu.shape[1]) > T:
+                alpha_empty = alpha_cpu[:, -1]
+            else:
+                alpha_empty = torch.zeros(alpha_cpu.shape[0], dtype=alpha_cpu.dtype)
+            slot_enabled = alpha_empty < 0.5
+            if not bool(slot_enabled.any()):
+                slot_enabled[torch.argmin(alpha_empty)] = True
             lat_rows = []
             mem_rows = []
             power_rows = []
@@ -97,12 +100,10 @@ class MappingSolver:
                 slot_mem = []
                 slot_power = []
                 for s in range(S):
-                    slot_alpha = alpha_cpu[s]
-                    expected_lat = torch.sum(slot_alpha[:T] * per_dev_lat_t)
-                    expected_mem = torch.sum(slot_alpha[:T] * per_dev_mem_t)
-                    expected_power = torch.sum(slot_alpha[:T] * per_dev_power_t)
-                    if int(slot_alpha.shape[0]) > T:
-                        expected_lat = expected_lat + slot_alpha[-1] * EMPTY_SLOT_LAT_MS
+                    slot_alpha = alpha_chip_norm[s]
+                    expected_lat = torch.sum(slot_alpha * per_dev_lat_t)
+                    expected_mem = torch.sum(slot_alpha * per_dev_mem_t)
+                    expected_power = torch.sum(slot_alpha * per_dev_power_t)
                     slot_lat.append(expected_lat)
                     slot_mem.append(expected_mem)
                     slot_power.append(expected_power)
@@ -113,7 +114,7 @@ class MappingSolver:
             lat = torch.stack(lat_rows)
             mem = torch.stack(mem_rows)
             power = torch.stack(power_rows)
-            return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+            return {"lat_ms": lat, "mem_mb": mem, "power_w": power, "slot_enabled": slot_enabled}
 
         for seg in segments:
             layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
@@ -170,6 +171,17 @@ class MappingSolver:
                     f"[ProxyMissing] alpha has shape {tuple(alpha.shape)} but needs >= {T} chip types."
                 )
 
+            alpha_chip = alpha[:, :T]
+            denom = alpha_chip.sum(dim=1, keepdim=True).clamp_min(1e-9)
+            alpha_chip_norm = alpha_chip / denom
+            if int(alpha.shape[1]) > T:
+                alpha_empty = alpha[:, -1]
+            else:
+                alpha_empty = torch.zeros(alpha.shape[0], device=device, dtype=alpha.dtype)
+            slot_enabled = alpha_empty < 0.5
+            if not bool(slot_enabled.any()):
+                slot_enabled[torch.argmin(alpha_empty)] = True
+
             if not self._logged_slot_devices:
                 slot_choice = torch.argmax(alpha[:, :T], dim=1).detach().cpu().tolist()
                 slot_names = [chip_types[idx] for idx in slot_choice]
@@ -177,10 +189,15 @@ class MappingSolver:
                 for name in slot_names:
                     counts[name] = counts.get(name, 0) + 1
                 print(f"[MappingSolver] slot device_name distribution: {counts}")
+                print(
+                    "[MappingSolver] empty_prob: "
+                    f"mean={alpha_empty.mean().item():.3f} "
+                    f"max={alpha_empty.max().item():.3f} "
+                    f"min={alpha_empty.min().item():.3f} "
+                    f"enabled={int(slot_enabled.sum().item())}/{S}"
+                )
                 self._logged_slot_devices = True
 
-            # See note above: avoid injecting huge sentinel into physical metrics.
-            EMPTY_SLOT_LAT_MS = torch.tensor(500.0, device=device, dtype=torch.float32)
             lat_rows = []
             mem_rows = []
             power_rows = []
@@ -215,12 +232,10 @@ class MappingSolver:
                 slot_mem = []
                 slot_power = []
                 for s in range(S):
-                    slot_alpha = alpha[s]
-                    expected_lat = torch.sum(slot_alpha[:T] * per_dev_lat_t)
-                    expected_mem = torch.sum(slot_alpha[:T] * per_dev_mem_t)
-                    expected_power = torch.sum(slot_alpha[:T] * per_dev_power_t)
-                    if int(slot_alpha.shape[0]) > T:
-                        expected_lat = expected_lat + slot_alpha[-1] * EMPTY_SLOT_LAT_MS
+                    slot_alpha = alpha_chip_norm[s]
+                    expected_lat = torch.sum(slot_alpha * per_dev_lat_t)
+                    expected_mem = torch.sum(slot_alpha * per_dev_mem_t)
+                    expected_power = torch.sum(slot_alpha * per_dev_power_t)
                     slot_lat.append(expected_lat)
                     slot_mem.append(expected_mem)
                     slot_power.append(expected_power)
@@ -231,7 +246,7 @@ class MappingSolver:
             lat = torch.stack(lat_rows)
             mem = torch.stack(mem_rows)
             power = torch.stack(power_rows)
-            return {"lat_ms": lat, "mem_mb": mem, "power_w": power}
+            return {"lat_ms": lat, "mem_mb": mem, "power_w": power, "slot_enabled": slot_enabled}
 
         for seg in segments:
             layer_type = kind_to_type.get(getattr(seg, "kind", "other"), 3)
@@ -287,7 +302,15 @@ class MappingSolver:
         lat_ms = cost["lat_ms"]
         mem_mb = cost["mem_mb"]
         K, S = lat_ms.shape
-        mapping = [k % S for k in range(K)]
+        slot_enabled = cost.get("slot_enabled", None)
+        if torch.is_tensor(slot_enabled):
+            slot_enabled_list = [bool(x) for x in slot_enabled.detach().cpu().tolist()]
+        else:
+            slot_enabled_list = [True] * S
+        enabled_slots = [i for i, ok in enumerate(slot_enabled_list) if ok]
+        if not enabled_slots:
+            enabled_slots = list(range(S))
+        mapping = [enabled_slots[k % len(enabled_slots)] for k in range(K)]
         current_latency = self.estimate_pipeline_latency(mapping, lat_ms)
         improved = True
         limit_factor = float(mem_limit_factor) if mem_limit_factor is not None else float(self.mem_limit_factor)
@@ -302,6 +325,8 @@ class MappingSolver:
                     best_latency = current_latency
                     for d in range(S):
                         if d == curr_d:
+                            continue
+                        if not slot_enabled_list[d]:
                             continue
                         if self._violates_mem(mapping, k, d, mem_mb, eff_specs):
                             continue
