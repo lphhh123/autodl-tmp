@@ -31,6 +31,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import numpy as np
 from omegaconf import OmegaConf
 
+# Optional progress bar (tqdm). If missing, we fall back to periodic prints.
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    tqdm = None  # type: ignore
+
 project_root = Path(__file__).resolve().parents[1]
 
 from layout.candidate_pool import signature_from_assign, signature_for_assign
@@ -1432,6 +1438,149 @@ def _read_tail_text(path: Path, max_lines: int = 120, max_chars: int = 6000) -> 
         return f"<failed to read log {path}: {e!r}>"
 
 
+def _read_last_jsonl_record(path: Path) -> Optional[Dict[str, Any]]:
+    """Read the last JSON line from a jsonl file efficiently. Returns None if missing/invalid."""
+    try:
+        if path is None or (not path.exists()):
+            return None
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            if end <= 0:
+                return None
+            # Read up to last 64KB to find the last full line.
+            read_size = min(65536, end)
+            f.seek(-read_size, os.SEEK_END)
+            chunk = f.read(read_size)
+        # Find the last newline; if none, use whole chunk.
+        nl = chunk.rfind(b"\n")
+        line = chunk[nl + 1 :] if nl >= 0 else chunk
+        line = line.strip()
+        if not line:
+            # If file ends with newline, last record might be before it.
+            nl2 = chunk[:nl].rfind(b"\n") if nl > 0 else -1
+            if nl2 >= 0:
+                line = chunk[nl2 + 1 : nl].strip()
+        if not line:
+            return None
+        return json.loads(line.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _run_subprocess_with_progress(
+    *,
+    launch_cmd: List[str],
+    cwd: Path,
+    env: Dict[str, str],
+    trace_dir: Path,
+    tag: str,
+    internal_output_dir: Path,
+    total_eval_budget: int,
+    max_steps: Optional[int],
+    timeout_s: Optional[int],
+    poll_s: float = 0.5,
+) -> subprocess.CompletedProcess:
+    """Run HeurAgenix as a subprocess while showing a live progress bar.
+
+    Progress is estimated by tailing <internal_output_dir>/recordings.jsonl (written incrementally).
+    We do *not* rely on eval_counter.json because it is typically written at the end in upstream HeurAgenix.
+    """
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = trace_dir / f"heuragenix_subprocess_{tag}.stdout.log"
+    stderr_path = trace_dir / f"heuragenix_subprocess_{tag}.stderr.log"
+    rec_path = internal_output_dir / "recordings.jsonl"
+
+    t0 = time.time()
+    last_print_t = 0.0
+    last_eval = 0
+    last_step = 0
+    pbar = None
+    pbar_mode = "eval_calls" if total_eval_budget else ("steps" if (max_steps is not None and max_steps > 0) else "")
+    if tqdm is not None and (pbar_mode != ""):
+        try:
+            if pbar_mode == "eval_calls":
+                pbar = tqdm(total=int(total_eval_budget), desc=f"{tag} eval_calls", dynamic_ncols=True)
+            else:
+                pbar = tqdm(total=int(max_steps), desc=f"{tag} steps", dynamic_ncols=True)
+        except Exception:
+            pbar = None
+
+    with stdout_path.open("w", encoding="utf-8") as f_out, stderr_path.open("w", encoding="utf-8") as f_err:
+        proc = subprocess.Popen(
+            launch_cmd,
+            cwd=str(cwd),
+            stdout=f_out,
+            stderr=f_err,
+            text=True,
+            env=env,
+        )
+        try:
+            while True:
+                rc = proc.poll()
+                # Update progress from recordings.jsonl (if available)
+                rec = _read_last_jsonl_record(rec_path)
+                if isinstance(rec, dict):
+                    cur_eval = int(rec.get("eval_calls_cum", last_eval) or last_eval)
+                    cur_step = int(rec.get("iter", last_step) or last_step)
+                    if cur_eval < last_eval:
+                        cur_eval = last_eval
+                    if cur_step < last_step:
+                        cur_step = last_step
+                    last_eval, last_step = cur_eval, cur_step
+
+                    if pbar is not None:
+                        if pbar_mode == "eval_calls":
+                            if last_eval > pbar.n:
+                                pbar.update(last_eval - pbar.n)
+                        else:
+                            if last_step > pbar.n:
+                                pbar.update(last_step - pbar.n)
+                        try:
+                            pbar.set_postfix_str(f"eval_calls={last_eval}")
+                        except Exception:
+                            pass
+                    else:
+                        now = time.time()
+                        if (now - last_print_t) >= max(0.5, float(poll_s)):
+                            last_print_t = now
+                            if total_eval_budget:
+                                print(f"[progress:{tag}] eval_calls={last_eval}/{int(total_eval_budget)} step={last_step}")
+                            else:
+                                print(f"[progress:{tag}] eval_calls={last_eval} step={last_step}")
+
+                if rc is not None:
+                    break
+                if timeout_s is not None and (time.time() - t0) > float(timeout_s):
+                    proc.kill()
+                    raise subprocess.TimeoutExpired(cmd=launch_cmd, timeout=timeout_s)
+                time.sleep(max(0.1, float(poll_s)))
+        finally:
+            if pbar is not None:
+                try:
+                    if pbar_mode == "eval_calls":
+                        if last_eval > pbar.n:
+                            pbar.update(last_eval - pbar.n)
+                    elif pbar_mode == "steps":
+                        if last_step > pbar.n:
+                            pbar.update(last_step - pbar.n)
+                    pbar.close()
+                except Exception:
+                    pass
+
+    # Re-read logs for downstream error reporting.
+    stdout_txt = ""
+    stderr_txt = ""
+    try:
+        stdout_txt = stdout_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        stdout_txt = ""
+    try:
+        stderr_txt = stderr_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        stderr_txt = ""
+    return subprocess.CompletedProcess(args=launch_cmd, returncode=int(proc.returncode or 0), stdout=stdout_txt, stderr=stderr_txt)
+
 def _collect_subprocess_outputs(
     out_dir: Path,
     problem: str,
@@ -1993,13 +2142,17 @@ def main() -> None:
             launch_cmd.extend(["--max_llm_failures", str(max_llm_failures)])
             launch_cmd.extend(["--fallback_on_llm_failure", fallback_on_llm_failure])
             try:
-                result = subprocess.run(
-                    launch_cmd,
-                    cwd=str(heuragenix_root),
-                    capture_output=True,
-                    text=True,
+                result = _run_subprocess_with_progress(
+                    launch_cmd=launch_cmd,
+                    cwd=heuragenix_root,
                     env=env,
-                    timeout=timeout_s,
+                    trace_dir=trace_dir,
+                    tag=f"{method}_primary",
+                    internal_output_dir=output_dir,
+                    total_eval_budget=int(total_eval_budget),
+                    max_steps=max_steps,
+                    timeout_s=timeout_s,
+                    poll_s=float(get_nested(cfg, "progress.poll_sec", 0.5)),
                 )
             except subprocess.TimeoutExpired as exc:
                 log_text = f"timeout after {timeout_s}s"
@@ -2015,6 +2168,8 @@ def main() -> None:
                 )
                 result = None
             # Always persist subprocess logs for debugging.
+            # NOTE: _run_subprocess_with_progress already wrote logs under trace_dir; we keep
+            # this call to preserve legacy paths/behavior.
             log_paths = _write_subprocess_logs(trace_dir, f"{method}_primary", result)
     
             if result is None or result.returncode != 0:
@@ -2066,13 +2221,17 @@ def main() -> None:
                         launch_cmd.extend(["--max_steps", str(max_steps)])
     
                     try:
-                        result = subprocess.run(
-                            launch_cmd,
-                            cwd=str(heuragenix_root),
-                            capture_output=True,
-                            text=True,
+                        result = _run_subprocess_with_progress(
+                            launch_cmd=launch_cmd,
+                            cwd=heuragenix_root,
                             env=env,
-                            timeout=timeout_s,
+                            trace_dir=trace_dir,
+                            tag=f"{method}_fallback",
+                            internal_output_dir=output_dir,
+                            total_eval_budget=int(total_eval_budget),
+                            max_steps=max_steps,
+                            timeout_s=timeout_s,
+                            poll_s=float(get_nested(cfg, "progress.poll_sec", 0.5)),
                         )
                     except subprocess.TimeoutExpired as exc:
                         log_text = f"timeout after {timeout_s}s"
