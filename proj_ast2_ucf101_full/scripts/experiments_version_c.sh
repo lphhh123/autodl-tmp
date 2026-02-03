@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+SMOKE="${SMOKE:-0}"
 EXP_ID="${1:-}"
 SEED="${2:-0}"
 
 if [[ -z "$EXP_ID" ]]; then
   echo "Usage: $0 <EXP_ID> [SEED]"
   exit 1
+fi
+
+# ---- OUTPUT PREFIX --------------------------------------------------------
+# SMOKE=1 -> outputs/SMOKE/... (so it won't overwrite formal runs)
+OUT_PREFIX="outputs"
+if [[ "${SMOKE}" == "1" ]]; then
+  OUT_PREFIX="outputs/SMOKE"
+  mkdir -p "${OUT_PREFIX}"
+  echo "[SMOKE] enabled: output prefix -> ${OUT_PREFIX}"
 fi
 
 # ---- AUTO RESUME ----------------------------------------------------------
@@ -19,6 +29,11 @@ fi
 if [[ "${EXP_ID}" == EXP-A* ]]; then
   export AUTO_RESUME="${AUTO_RESUME:-1}"
 else
+  export AUTO_RESUME="${AUTO_RESUME:-0}"
+fi
+
+# For SMOKE runs, default-disable auto-resume to avoid looping on deterministic errors.
+if [[ "${SMOKE}" == "1" ]]; then
   export AUTO_RESUME="${AUTO_RESUME:-0}"
 fi
 
@@ -62,14 +77,14 @@ run_ast () {
   local cfg="$1"
   local out="$2"
   mkdir -p "$out"
-  python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
+  SMOKE="${SMOKE}" python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
 }
 
 run_vc () {
   local cfg="$1"
   local out="$2"
   mkdir -p "$out"
-  python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
+  SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
 }
 
 run_layout () {
@@ -90,34 +105,39 @@ run_layout_heuragenix () {
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
+odir () {
+  # usage: odir EXP-A1
+  echo "${OUT_PREFIX}/${1}/seed${SEED}"
+}
+
 case "$EXP_ID" in
   # -------------------------
   # Innovation A (Main/Core)
   # -------------------------
   EXP-A1)
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
-    run_ast configs/ast2_ucf101_dense_A1.yaml "outputs/EXP-A1/seed${SEED}"
+    run_ast configs/ast2_ucf101_dense_A1.yaml "$(odir EXP-A1)"
     ;;
-  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "outputs/EXP-A2/seed${SEED}" ;;
-  EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml          "outputs/EXP-A3/seed${SEED}" ;;
-  EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml       "outputs/EXP-A4/seed${SEED}" ;;
-  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101_A_main.yaml   "outputs/EXP-A5_twostage/seed${SEED}" ;;
-  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml     "outputs/EXP-A6_mappingonly/seed${SEED}" ;;
-  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml      "outputs/EXP-A7_layoutonly/seed${SEED}" ;;
+  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "$(odir EXP-A2)" ;;
+  EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
+  EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
+  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101_A_main.yaml  "$(odir EXP-A5_twostage)" ;;
+  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml     "$(odir EXP-A6_mappingonly)" ;;
+  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml      "$(odir EXP-A7_layoutonly)" ;;
 
   # A-G2 fairness (same rho_target)
-  EXP-A-G2-uniform) run_ast configs/ablations/ast_uniform_keep.yaml "outputs/EXP-A-G2-uniform/seed${SEED}" ;;
-  EXP-A-G2-random)  run_ast configs/ablations/ast_random_keep.yaml  "outputs/EXP-A-G2-random/seed${SEED}" ;;
-  EXP-A-G2-ours)    run_vc  configs/vc_phase3_full_ucf101.yaml      "outputs/EXP-A-G2-ours/seed${SEED}" ;;
+  EXP-A-G2-uniform) run_ast configs/ablations/ast_uniform_keep.yaml "$(odir EXP-A-G2-uniform)" ;;
+  EXP-A-G2-random)  run_ast configs/ablations/ast_random_keep.yaml  "$(odir EXP-A-G2-random)" ;;
+  EXP-A-G2-ours)    run_vc  configs/vc_phase3_full_ucf101.yaml      "$(odir EXP-A-G2-ours)" ;;
 
   # A-G3 ablations
-  EXP-Abl-time)     run_ast configs/ablations/ast_no_time.yaml      "outputs/EXP-Abl-time/seed${SEED}" ;;
-  EXP-Abl-space)    run_ast configs/ablations/ast_no_space.yaml     "outputs/EXP-Abl-space/seed${SEED}" ;;
-  EXP-Abl-vor)      run_ast configs/ablations/ast_no_voronoi.yaml   "outputs/EXP-Abl-vor/seed${SEED}" ;;
-  EXP-Abl-1lvl)     run_ast configs/ablations/ast_level1.yaml       "outputs/EXP-Abl-1lvl/seed${SEED}" ;;
-  EXP-Abl-nomodal)  run_ast configs/ablations/ast_no_modal.yaml     "outputs/EXP-Abl-nomodal/seed${SEED}" ;;
-  EXP-Abl-uniform)  run_ast configs/ablations/ast_uniform_keep.yaml "outputs/EXP-Abl-uniform/seed${SEED}" ;;
-  EXP-Abl-random)   run_ast configs/ablations/ast_random_keep.yaml  "outputs/EXP-Abl-random/seed${SEED}" ;;
+  EXP-Abl-time)     run_ast configs/ablations/ast_no_time.yaml      "$(odir EXP-Abl-time)" ;;
+  EXP-Abl-space)    run_ast configs/ablations/ast_no_space.yaml     "$(odir EXP-Abl-space)" ;;
+  EXP-Abl-vor)      run_ast configs/ablations/ast_no_voronoi.yaml   "$(odir EXP-Abl-vor)" ;;
+  EXP-Abl-1lvl)     run_ast configs/ablations/ast_level1.yaml       "$(odir EXP-Abl-1lvl)" ;;
+  EXP-Abl-nomodal)  run_ast configs/ablations/ast_no_modal.yaml     "$(odir EXP-Abl-nomodal)" ;;
+  EXP-Abl-uniform)  run_ast configs/ablations/ast_uniform_keep.yaml "$(odir EXP-Abl-uniform)" ;;
+  EXP-Abl-random)   run_ast configs/ablations/ast_random_keep.yaml  "$(odir EXP-Abl-random)" ;;
 
   # -------------------------
   # Innovation B (Layout)
