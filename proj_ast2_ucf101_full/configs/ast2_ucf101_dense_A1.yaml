@@ -21,7 +21,7 @@ data:
   clip_lens_eval: [16]
 
   # Control overall clip count via stride (unified across A-main)
-  train_stride_ratio: 0.75
+  train_stride_ratio: 1.0
   eval_stride_ratio: 1.0
 
   # Dense baseline MUST NOT use window retention
