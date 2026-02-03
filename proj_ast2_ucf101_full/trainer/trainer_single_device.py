@@ -449,7 +449,7 @@ def train_single_device(
 
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
     proxy_weight_dir = str(getattr(cfg.hw, "weight_dir", "") or getattr(cfg.hw, "proxy_weight_dir", ""))
     if not proxy_weight_dir:
@@ -619,7 +619,7 @@ def train_single_device(
                 if isinstance(model_state, dict):
                     model.load_state_dict(model_state, strict=True)
                 if isinstance(ckpt, dict) and "optimizer" in ckpt and ckpt["optimizer"] is not None:
-                    opt.load_state_dict(ckpt["optimizer"])
+                    optimizer.load_state_dict(ckpt["optimizer"])
                 if scaler is not None and isinstance(ckpt, dict) and ckpt.get("scaler", None) is not None:
                     try:
                         scaler.load_state_dict(ckpt["scaler"])
@@ -714,7 +714,7 @@ def train_single_device(
                         if _ctrl is None:
                             _ctrl = getattr(stable_hw_cfg, "controller", {})  # legacy fallback
                         mul = float(getattr(_ctrl, "lr_restart_mul", 2.0) or 2.0)
-                        for pg in opt.param_groups:
+                        for pg in optimizer.param_groups:
                             pg["lr"] = float(pg.get("lr", lr)) * mul
                         stable_state["_lr_restart_applied_epoch"] = int(epoch)
                     stable_state["request_lr_restart"] = False
@@ -739,7 +739,7 @@ def train_single_device(
                 y = batch["label"].to(device)
                 if epoch == 0 and step == 0:
                     logger.info("[DEBUG] train batch video.shape=%s", tuple(x.shape))
-                opt.zero_grad()
+                optimizer.zero_grad()
                 with autocast(device_type, enabled=cfg.train.amp):
                     if model_type == "video_audio":
                         logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
@@ -800,7 +800,7 @@ def train_single_device(
                 assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
                 assert float(lambda_hw_eff) >= 0.0
                 scaler.scale(loss).backward()
-                scaler.step(opt)
+                scaler.step(optimizer)
                 scaler.update()
                 if step % 10 == 0:
                     acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
