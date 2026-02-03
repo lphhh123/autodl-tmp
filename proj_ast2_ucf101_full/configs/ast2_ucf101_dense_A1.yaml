@@ -8,7 +8,7 @@
 #
 # NOTE: requires utils/data_ucf101.py support for *_train / *_eval keys.
 
-includes: [configs/ast2_ucf101_dense.yaml]
+_base_: configs/ast2_ucf101_dense.yaml
 
 model:
   # Dense baseline should not enable AST pruning in any form.
