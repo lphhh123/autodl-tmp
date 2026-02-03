@@ -10,16 +10,15 @@ data:
   clip_lens_eval: [16]
 
   # Keep stride the same as A1 so window is the main difference.
-  train_stride_ratio: 0.6
-  eval_stride_ratio: 0.6
+  train_stride_ratio: 0.75
+  eval_stride_ratio: 0.75
 
-  # Moderate window budget (NOT aggressive) to avoid obvious accuracy collapse.
+  # Align window budget with A4 (Version-C full) to avoid confounding variables
   window_retention:
     enabled: true
-    max_windows_per_video_per_len_train: 12
-    max_windows_per_video_per_len_eval: 24
-    eval_candidates: 256
+    max_windows_per_video_per_len_train: 8
+    max_windows_per_video_per_len_eval: 16
+    eval_candidates: 192
 
 test:
   run_final_test: true
-
