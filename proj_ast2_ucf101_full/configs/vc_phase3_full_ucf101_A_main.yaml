@@ -1,0 +1,20 @@
+# A4 main-table protocol (Version-C full):
+# - eval uses clip_len=16 only (stable comparison)
+# - retention moderate + stride_ratio to control clip count without large accuracy loss
+
+includes: [configs/vc_phase3_full_ucf101.yaml]
+
+data:
+  clip_lens_train: [16]
+  clip_lens_eval: [16]
+  train_stride_ratio: 0.75
+  eval_stride_ratio: 0.75
+
+  window_retention:
+    enabled: true
+    max_windows_per_video_per_len_train: 8
+    max_windows_per_video_per_len_eval: 16
+    eval_candidates: 192
+
+test:
+  run_final_test: false

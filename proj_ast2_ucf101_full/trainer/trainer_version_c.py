@@ -78,6 +78,36 @@ def save_checkpoint_version_c(
     }
     _atomic_torch_save(payload, ckpt_path)
     return ckpt_path
+
+
+def maybe_auto_resume_version_c(out_dir: Path, model, optimizer, scaler, logger):
+    auto_resume = str(os.environ.get("AUTO_RESUME", "0")).strip().lower() in ("1", "true", "yes", "y", "on")
+    if not auto_resume:
+        return 0, None
+    ckpt_path = Path(out_dir) / "checkpoints" / "last.pth"
+    if not ckpt_path.exists():
+        return 0, None
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        model_state = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
+        if isinstance(model_state, dict):
+            model.load_state_dict(model_state, strict=True)
+        if isinstance(ckpt, dict) and ckpt.get("optimizer", None) is not None:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        if scaler is not None and isinstance(ckpt, dict) and ckpt.get("scaler", None) is not None:
+            try:
+                scaler.load_state_dict(ckpt["scaler"])
+            except Exception:
+                pass
+        last_epoch = int(ckpt.get("epoch", -1)) if isinstance(ckpt, dict) else -1
+        start_outer = max(0, last_epoch + 1)
+        best_acc1 = float(ckpt.get("best_acc1", 0.0)) if isinstance(ckpt, dict) else None
+        logger.info(f"[AUTO_RESUME] loaded {ckpt_path} (start_outer={start_outer}, best_acc1={best_acc1})")
+        return start_outer, best_acc1
+    except Exception as e:
+        logger.warning(f"[AUTO_RESUME] failed to load {ckpt_path}: {e}. Start from scratch.")
+        return 0, None
+
 from utils.trace_contract_v54 import (
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
@@ -1099,7 +1129,10 @@ def train_version_c(
         freeze_epochs = 0
         total_epochs = 0
         try:
-            for outer in range(cfg.training.outer_epochs):
+            start_outer, best_from_ckpt = maybe_auto_resume_version_c(out_dir, model, optimizer, scaler, logger)
+            if best_from_ckpt is not None:
+                best_acc1 = float(best_from_ckpt)
+            for outer in range(start_outer, cfg.training.outer_epochs):
                 assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=outer)
                 ran_epochs += 1
                 total_epochs += 1

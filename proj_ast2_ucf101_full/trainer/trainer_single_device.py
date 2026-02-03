@@ -5,6 +5,7 @@ import json
 import math
 import os
 import numbers
+import random
 from pathlib import Path
 from functools import partial
 from typing import Dict, Any, Optional
@@ -576,6 +577,38 @@ def train_single_device(
 
     best_acc = 0.0
     best_ckpt_path: Optional[Path] = None
+    start_epoch = 0
+
+    # ---- AUTO RESUME (crash recovery) ------------------------------------
+    # Opt-in via env AUTO_RESUME=1.
+    # Restores: model/optimizer/scaler + epoch + best_acc1.
+    auto_resume = str(os.environ.get("AUTO_RESUME", "0")).strip().lower() in ("1", "true", "yes", "y", "on")
+    if auto_resume:
+        ckpt_path = Path(out_dir) / "checkpoints" / "last.pth"
+        if ckpt_path.exists():
+            try:
+                ckpt = torch.load(ckpt_path, map_location="cpu")
+                # Accept either full payload or bare state_dict
+                model_state = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
+                if isinstance(model_state, dict):
+                    model.load_state_dict(model_state, strict=True)
+                if isinstance(ckpt, dict) and "optimizer" in ckpt and ckpt["optimizer"] is not None:
+                    opt.load_state_dict(ckpt["optimizer"])
+                if scaler is not None and isinstance(ckpt, dict) and ckpt.get("scaler", None) is not None:
+                    try:
+                        scaler.load_state_dict(ckpt["scaler"])
+                    except Exception:
+                        pass
+
+                last_epoch = int(ckpt.get("epoch", -1)) if isinstance(ckpt, dict) else -1
+                start_epoch = max(0, last_epoch + 1)
+                if isinstance(ckpt, dict) and "best_acc1" in ckpt and ckpt["best_acc1"] is not None:
+                    best_acc = float(ckpt["best_acc1"])
+
+                logger.info(f"[AUTO_RESUME] loaded {ckpt_path} (start_epoch={start_epoch}, best_acc1={best_acc:.6f})")
+            except Exception as e:
+                logger.warning(f"[AUTO_RESUME] failed to load {ckpt_path}: {e}. Start from scratch.")
+                start_epoch = 0
     last_acc = 0.0
     ran_epochs = 0
     early_stop_triggered = False
@@ -586,7 +619,7 @@ def train_single_device(
     total_epochs = 0
     try:
         assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=0)
-        for epoch in range(cfg.train.epochs):
+        for epoch in range(start_epoch, cfg.train.epochs):
             assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=epoch)
             ran_epochs += 1
             steps_done = ran_epochs
