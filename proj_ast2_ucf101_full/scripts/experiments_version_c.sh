@@ -114,21 +114,28 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation A (Main/Core)
   # -------------------------
+  # A0: Window-only (HW off, Token off, Window on)
+  EXP-A0)
+    run_ast configs/ast2_ucf101_window_only_A0.yaml "$(odir EXP-A0)"
+    ;;
   EXP-A1)
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
     run_ast configs/ast2_ucf101_dense_A1.yaml "$(odir EXP-A1)"
     ;;
-  EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "$(odir EXP-A2)" ;;
+  # A2: Token-only (HW off, Window off, Token on)
+  EXP-A2) run_ast configs/ast2_ucf101_ast_only_A2.yaml           "$(odir EXP-A2)" ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
   EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101_A_main.yaml  "$(odir EXP-A5_twostage)" ;;
-  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml     "$(odir EXP-A6_mappingonly)" ;;
-  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml      "$(odir EXP-A7_layoutonly)" ;;
+  EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101_A_main.yaml "$(odir EXP-A6_mappingonly)" ;;
+  EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101_A_main.yaml  "$(odir EXP-A7_layoutonly)" ;;
 
   # A-G2 fairness (same rho_target)
+  # G2 fairness: keep policies run under Token-only protocol (HW off, Window off)
   EXP-A-G2-uniform) run_ast configs/ablations/ast_uniform_keep.yaml "$(odir EXP-A-G2-uniform)" ;;
   EXP-A-G2-random)  run_ast configs/ablations/ast_random_keep.yaml  "$(odir EXP-A-G2-random)" ;;
-  EXP-A-G2-ours)    run_vc  configs/vc_phase3_full_ucf101.yaml      "$(odir EXP-A-G2-ours)" ;;
+  # ours should match A-main protocol (clip_len=16, window moderate)
+  EXP-A-G2-ours)    run_vc  configs/vc_phase3_full_ucf101_A_main.yaml "$(odir EXP-A-G2-ours)" ;;
 
   # A-G3 ablations
   EXP-Abl-time)     run_ast configs/ablations/ast_no_time.yaml      "$(odir EXP-Abl-time)" ;;
