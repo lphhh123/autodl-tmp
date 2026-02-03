@@ -84,6 +84,13 @@ def apply_smoke_overrides_vc(cfg):
     if OmegaConf.select(cfg, "training.inner_steps_layout") is not None:
         cfg.training.inner_steps_layout = min(int(cfg.training.inner_steps_layout), 5)
 
+    # --- Aggressively reduce clip count for SMOKE (do NOT affect formal runs) ---
+    # code semantics: stride = int(clip_len * stride_ratio), bigger => fewer clips
+    if OmegaConf.select(cfg, "data.train_stride_ratio") is not None:
+        cfg.data.train_stride_ratio = 6.0
+    if OmegaConf.select(cfg, "data.eval_stride_ratio") is not None:
+        cfg.data.eval_stride_ratio = 6.0
+
     if OmegaConf.select(cfg, "val.fast_max_batches") is not None:
         cfg.val.fast_max_batches = min(int(cfg.val.fast_max_batches), 20)
     if OmegaConf.select(cfg, "val.full_every_epochs") is not None:
@@ -103,6 +110,7 @@ def apply_smoke_overrides_vc(cfg):
 
     print(
         "[SMOKE] version_c overrides applied: outer_epochs=1, inner_steps(ast/alpha/layout) small, "
+        "train_stride_ratio=6.0, eval_stride_ratio=6.0, "
         "fast_val<=20, full_every=1, final_test=ON (test.fast_max_batches<=50 if supported)"
     )
     return cfg
