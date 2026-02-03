@@ -8,7 +8,7 @@ _base_: configs/ast2_ucf101_ast_hw.yaml
 data:
   clip_lens_train: [16]
   clip_lens_eval: [16]
-  train_stride_ratio: 0.75
+  train_stride_ratio: 1.0
   eval_stride_ratio: 1.0
 
   window_retention:
