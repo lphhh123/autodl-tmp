@@ -89,12 +89,21 @@ def apply_smoke_overrides_vc(cfg):
     if OmegaConf.select(cfg, "val.full_every_epochs") is not None:
         cfg.val.full_every_epochs = 1
 
+    # --- FORCE final test in smoke (to reproduce late-stage crashes) ---
     if OmegaConf.select(cfg, "test.run_final_test") is not None:
-        cfg.test.run_final_test = False
+        cfg.test.run_final_test = True
+    # Bound final-test cost if your code supports it (harmless otherwise)
+    if OmegaConf.select(cfg, "test.fast_max_batches") is None:
+        try:
+            cfg.test.fast_max_batches = 50
+        except Exception:
+            pass
+    else:
+        cfg.test.fast_max_batches = min(int(cfg.test.fast_max_batches), 50)
 
     print(
         "[SMOKE] version_c overrides applied: outer_epochs=1, inner_steps(ast/alpha/layout) small, "
-        "fast_val<=20, full_every=1, final_test=off"
+        "fast_val<=20, full_every=1, final_test=ON (test.fast_max_batches<=50 if supported)"
     )
     return cfg
 

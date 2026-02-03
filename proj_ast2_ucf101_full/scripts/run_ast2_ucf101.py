@@ -63,11 +63,21 @@ def apply_smoke_overrides_single(cfg):
     if OmegaConf.select(cfg, "val.full_every_epochs") is not None:
         cfg.val.full_every_epochs = 1
 
+    # --- FORCE final test in smoke (to reproduce late-stage crashes) ---
     if OmegaConf.select(cfg, "test.run_final_test") is not None:
-        cfg.test.run_final_test = False
+        cfg.test.run_final_test = True
+    # Try to bound final-test cost if supported by your code.
+    # (If unused, harmless.)
+    if OmegaConf.select(cfg, "test.fast_max_batches") is None:
+        try:
+            cfg.test.fast_max_batches = 50
+        except Exception:
+            pass
+    else:
+        cfg.test.fast_max_batches = min(int(cfg.test.fast_max_batches), 50)
 
     print(
-        "[SMOKE] single-device overrides applied: epochs=1, warmup=0, fast_val<=20, full_every=1, final_test=off"
+        "[SMOKE] single-device overrides applied: epochs=1, warmup=0, fast_val<=20, full_every=1, final_test=ON (test.fast_max_batches<=50 if supported)"
     )
     return cfg
 
