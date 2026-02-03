@@ -1,5 +1,6 @@
 """Entry for Version-C full training."""
 # --- bootstrap sys.path for both invocation styles ---
+import os
 import sys
 from pathlib import Path
 
@@ -57,6 +58,45 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
         if cur is default:
             return default
     return cur
+
+
+def _is_smoke() -> bool:
+    v = str(os.environ.get("SMOKE", "0")).strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def apply_smoke_overrides_vc(cfg):
+    """Short preflight run to validate pipeline end-to-end."""
+    if not _is_smoke():
+        return cfg
+    try:
+        OmegaConf.set_struct(cfg, False)
+    except Exception:
+        pass
+
+    if OmegaConf.select(cfg, "training.outer_epochs") is not None:
+        cfg.training.outer_epochs = 1
+
+    if OmegaConf.select(cfg, "training.inner_steps_ast") is not None:
+        cfg.training.inner_steps_ast = min(int(cfg.training.inner_steps_ast), 10)
+    if OmegaConf.select(cfg, "training.inner_steps_alpha") is not None:
+        cfg.training.inner_steps_alpha = min(int(cfg.training.inner_steps_alpha), 5)
+    if OmegaConf.select(cfg, "training.inner_steps_layout") is not None:
+        cfg.training.inner_steps_layout = min(int(cfg.training.inner_steps_layout), 5)
+
+    if OmegaConf.select(cfg, "val.fast_max_batches") is not None:
+        cfg.val.fast_max_batches = min(int(cfg.val.fast_max_batches), 20)
+    if OmegaConf.select(cfg, "val.full_every_epochs") is not None:
+        cfg.val.full_every_epochs = 1
+
+    if OmegaConf.select(cfg, "test.run_final_test") is not None:
+        cfg.test.run_final_test = False
+
+    print(
+        "[SMOKE] version_c overrides applied: outer_epochs=1, inner_steps(ast/alpha/layout) small, "
+        "fast_val<=20, full_every=1, final_test=off"
+    )
+    return cfg
 
 
 def _record_override(cfg: dict, key_path: str, old, new, reason: str = "cli_override"):
@@ -161,6 +201,7 @@ def main():
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
     cfg = validate_and_fill_defaults(cfg, mode="version_c")
+    cfg = apply_smoke_overrides_vc(cfg)
     # ---- v5.4 quick contract self-check (fail-fast before training) ----
     try:
         requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}

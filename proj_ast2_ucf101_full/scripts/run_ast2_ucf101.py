@@ -1,8 +1,9 @@
 """Entry for AST2.0-lite single device training (SPEC)."""
 import argparse
 import json
-import uuid
+import os
 import sys
+import uuid
 from pathlib import Path
 
 _THIS = Path(__file__).resolve()
@@ -37,6 +38,40 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
     return cur
 
 
+def _is_smoke() -> bool:
+    v = str(os.environ.get("SMOKE", "0")).strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def apply_smoke_overrides_single(cfg):
+    """Short preflight run to validate the full pipeline can finish."""
+    if not _is_smoke():
+        return cfg
+
+    try:
+        OmegaConf.set_struct(cfg, False)
+    except Exception:
+        pass
+
+    if OmegaConf.select(cfg, "train.epochs") is not None:
+        cfg.train.epochs = 1
+    if OmegaConf.select(cfg, "train.warmup_epochs") is not None:
+        cfg.train.warmup_epochs = 0
+
+    if OmegaConf.select(cfg, "val.fast_max_batches") is not None:
+        cfg.val.fast_max_batches = min(int(cfg.val.fast_max_batches), 20)
+    if OmegaConf.select(cfg, "val.full_every_epochs") is not None:
+        cfg.val.full_every_epochs = 1
+
+    if OmegaConf.select(cfg, "test.run_final_test") is not None:
+        cfg.test.run_final_test = False
+
+    print(
+        "[SMOKE] single-device overrides applied: epochs=1, warmup=0, fast_val<=20, full_every=1, final_test=off"
+    )
+    return cfg
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", type=str, default="./configs/ast2_ucf101.yaml")
@@ -64,6 +99,7 @@ def main():
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
     cfg = validate_and_fill_defaults(cfg, mode="single")
+    cfg = apply_smoke_overrides_single(cfg)
     signature = None
     # ---- v5.4 quick contract self-check (fail-fast before training) ----
     try:
