@@ -22,7 +22,7 @@ data:
 
   # Control overall clip count via stride (unified across A-main)
   train_stride_ratio: 0.75
-  eval_stride_ratio: 0.75
+  eval_stride_ratio: 1.0
 
   # Dense baseline MUST NOT use window retention
   window_retention:
