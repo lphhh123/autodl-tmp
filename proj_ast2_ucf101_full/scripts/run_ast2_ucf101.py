@@ -17,6 +17,7 @@ from utils.config import load_config
 from utils.config_validate import validate_and_fill_defaults
 from utils.check_cfg_integrity import check_cfg_integrity
 from utils.seed import seed_everything
+from utils.torch_backend import maybe_enable_tf32
 from utils.trace_guard import init_trace_dir_v54
 from utils.trace_signature_v54 import build_signature_v54, REQUIRED_SIGNATURE_FIELDS
 from trainer.trainer_single_device import train_single_device
@@ -111,6 +112,8 @@ def main():
     trace_events_path = Path(trace_meta["trace_events"])
     run_id = trace_dir.name
     seed_everything(seed)
+    # Optional speed-up for Ampere/Ada (A-experiments set ENABLE_TF32=1).
+    maybe_enable_tf32()
     with (out_dir / "config_used.yaml").open("w", encoding="utf-8") as f:
         f.write(Path(args.cfg).read_text(encoding="utf-8"))
     try:

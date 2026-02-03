@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
+
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import load_config
 from utils.data_ucf101 import UCF101Dataset

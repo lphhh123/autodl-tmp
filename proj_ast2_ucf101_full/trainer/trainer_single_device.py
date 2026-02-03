@@ -7,7 +7,7 @@ import os
 import numbers
 from pathlib import Path
 from functools import partial
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -132,6 +132,49 @@ def _split_stats_for_metrics(d: Dict[str, Any]) -> tuple[Dict[str, float], Dict[
         extra = _to_jsonable(extra)
 
     return scalars, extra
+
+
+def _atomic_torch_save(obj, dst: Path) -> None:
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+    try:
+        torch.save(obj, tmp_path)
+        os.replace(tmp_path, dst)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def save_checkpoint_single_device(
+    out_dir: Path,
+    tag: str,
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[GradScaler],
+    epoch: int,
+    best_acc1: float,
+    seal_digest: str,
+    run_id: str,
+) -> Path:
+    ckpt_dir = Path(out_dir) / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / f"{tag}.pth"
+    payload = {
+        "epoch": int(epoch),
+        "best_acc1": float(best_acc1),
+        "seal_digest": str(seal_digest),
+        "run_id": str(run_id),
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": (scaler.state_dict() if scaler is not None else None),
+    }
+    _atomic_torch_save(payload, ckpt_path)
+    return ckpt_path
 
 
 def _cfg_get(obj, key: str, default=None):
@@ -532,7 +575,7 @@ def train_single_device(
     run_final_test = bool(_cfg_get(test_cfg, "run_final_test", False))
 
     best_acc = 0.0
-    best_state_dict = None
+    best_ckpt_path: Optional[Path] = None
     last_acc = 0.0
     ran_epochs = 0
     early_stop_triggered = False
@@ -777,7 +820,17 @@ def train_single_device(
             if last_acc is not None and do_full:
                 if last_acc > best_acc:
                     best_acc = float(last_acc)
-                    best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    best_ckpt_path = save_checkpoint_single_device(
+                        out_dir,
+                        "best",
+                        model=model,
+                        optimizer=optimizer,
+                        scaler=scaler,
+                        epoch=epoch,
+                        best_acc1=best_acc,
+                        seal_digest=seal_digest,
+                        run_id=run_id,
+                    )
             if stable_hw_enabled:
                 stable_decision, _ = apply_accuracy_guard(
                     epoch=epoch,
@@ -961,12 +1014,30 @@ def train_single_device(
             },
         )
 
+    if out_dir is not None and ran_epochs > 0:
+        last_epoch_idx = max(0, int(ran_epochs) - 1)
+        save_checkpoint_single_device(
+            out_dir,
+            "last",
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            epoch=last_epoch_idx,
+            best_acc1=best_acc,
+            seal_digest=seal_digest,
+            run_id=run_id,
+        )
+
     if run_final_test:
         if test_loader is None:
             test_loader = build_test_loader(cfg)
-        if best_state_dict is not None:
-            model.load_state_dict(best_state_dict)
-            logger.info("[FINAL TEST] Loaded best checkpoint from full validation acc=%.6f", best_acc)
+        best_path = best_ckpt_path
+        if best_path is None and out_dir is not None:
+            best_path = Path(out_dir) / "checkpoints" / "best.pth"
+        if best_path is not None and best_path.exists():
+            ckpt = torch.load(best_path, map_location="cpu")
+            model.load_state_dict(ckpt.get("model", ckpt))
+            logger.info("[CKPT] Loaded best checkpoint from %s", best_path)
         else:
             logger.info("[FINAL TEST] No best checkpoint captured; using current model state.")
         test_epoch = int(cfg.train.epochs)

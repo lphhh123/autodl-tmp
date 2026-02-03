@@ -20,6 +20,7 @@ from utils.config import load_config
 from utils.config_utils import get_nested, set_nested
 from utils.config_validate import validate_and_fill_defaults
 from utils.seed import seed_everything
+from utils.torch_backend import maybe_enable_tf32
 from utils.trace_contract_v54 import TraceContractV54
 from utils.trace_guard import build_trace_header_payload_v54
 from utils.trace_signature_v54 import build_signature_v54
@@ -151,6 +152,8 @@ def main():
     cfg.train.out_dir = str(out_dir)
 
     seed_everything(int(args.seed))
+    # Optional speed-up for Ampere/Ada (A-experiments set ENABLE_TF32=1).
+    maybe_enable_tf32()
     if hasattr(cfg, "train"):
         cfg.train.seed = int(args.seed)
     if hasattr(cfg, "training"):
