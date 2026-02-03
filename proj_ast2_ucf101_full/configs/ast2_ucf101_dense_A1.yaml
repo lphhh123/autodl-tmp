@@ -2,8 +2,9 @@
 # training throughput manageable.
 #
 # Key idea:
-# - Keep window retention for TRAIN to bound clip count
-# - Use a larger window budget for EVAL to avoid missing the action segment
+# - Keep window retention for TRAIN to bound clip count (but not too aggressive)
+# - Use a slightly larger budget for EVAL to avoid missing the action segment
+# - For A main table: train/eval both use clip_len=16 (stable & easy to explain)
 #
 # NOTE: requires utils/data_ucf101.py support for *_train / *_eval keys.
 
@@ -14,14 +15,22 @@ model:
   use_ast_prune: false
 
 data:
+  # Main-table protocol: eval uses the same temporal length as training
+  clip_lens_train: [16]
+  clip_lens_eval: [16]
+
+  # Control overall clip count via stride instead of over-aggressive retention
+  train_stride_ratio: 0.75
+  eval_stride_ratio: 0.75
+
   window_retention:
     enabled: true
-    # Train-time budget (keep small for speed)
-    max_windows_per_video_per_len_train: 4
-    # Eval-time budget (larger to avoid under-evaluating each video)
-    max_windows_per_video_per_len_eval: 32
-    # A bit more candidates helps when eval budget increases
-    eval_candidates: 256
+    # Train-time budget (moderate; reduces precision drop vs very aggressive=4)
+    max_windows_per_video_per_len_train: 8
+    # Eval-time budget (slightly larger than train; still bounded)
+    max_windows_per_video_per_len_eval: 16
+    # Candidate pool for eval selection
+    eval_candidates: 192
 
 test:
   # Avoid late-run crashes from final test; run it manually from best.ckpt.

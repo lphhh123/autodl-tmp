@@ -12,6 +12,16 @@ if [[ -z "$EXP_ID" ]]; then
   exit 1
 fi
 
+# ---- AUTO RESUME ----------------------------------------------------------
+# For Innovation A we default-enable AUTO_RESUME so crashes can be resumed by
+# re-running the same command. You can override per run:
+#   AUTO_RESUME=0 bash scripts/experiments_version_c.sh EXP-A1 0
+if [[ "${EXP_ID}" == EXP-A* ]]; then
+  export AUTO_RESUME="${AUTO_RESUME:-1}"
+else
+  export AUTO_RESUME="${AUTO_RESUME:-0}"
+fi
+
 # ---- TF32 (speed) ---------------------------------------------------------
 # For Innovation A we default-enable TF32 to speed up training on Ampere/Ada.
 # You can override per run: ENABLE_TF32=0 bash scripts/experiments_version_c.sh ...
@@ -89,9 +99,9 @@ case "$EXP_ID" in
     run_ast configs/ast2_ucf101_dense_A1.yaml "outputs/EXP-A1/seed${SEED}"
     ;;
   EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "outputs/EXP-A2/seed${SEED}" ;;
-  EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml                "outputs/EXP-A3/seed${SEED}" ;;
-  EXP-A4) run_vc  configs/vc_phase3_full_ucf101.yaml             "outputs/EXP-A4/seed${SEED}" ;;
-  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101.yaml         "outputs/EXP-A5_twostage/seed${SEED}" ;;
+  EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml          "outputs/EXP-A3/seed${SEED}" ;;
+  EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml       "outputs/EXP-A4/seed${SEED}" ;;
+  EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101_A_main.yaml   "outputs/EXP-A5_twostage/seed${SEED}" ;;
   EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101.yaml     "outputs/EXP-A6_mappingonly/seed${SEED}" ;;
   EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101.yaml      "outputs/EXP-A7_layoutonly/seed${SEED}" ;;
 
