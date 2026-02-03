@@ -209,8 +209,10 @@ def main():
         cfg.training.seed = int(args.seed)
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
-    cfg = validate_and_fill_defaults(cfg, mode="version_c")
+    # IMPORTANT: apply SMOKE overrides BEFORE validation/contract stamping,
+    # otherwise cfg.contract.seal_digest will mismatch computed seal.
     cfg = apply_smoke_overrides_vc(cfg)
+    cfg = validate_and_fill_defaults(cfg, mode="version_c")
     # ---- v5.4 quick contract self-check (fail-fast before training) ----
     try:
         requested_config = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
