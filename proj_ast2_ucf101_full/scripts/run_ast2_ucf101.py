@@ -108,8 +108,10 @@ def main():
         cfg.train.seed = seed
     if hasattr(cfg, "training"):
         cfg.training.seed = seed
-    cfg = validate_and_fill_defaults(cfg, mode="single")
+    # IMPORTANT: apply SMOKE overrides BEFORE validation/contract stamping,
+    # otherwise cfg.contract.seal_digest will mismatch computed seal.
     cfg = apply_smoke_overrides_single(cfg)
+    cfg = validate_and_fill_defaults(cfg, mode="single")
     signature = None
     # ---- v5.4 quick contract self-check (fail-fast before training) ----
     try:
