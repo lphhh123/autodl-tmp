@@ -11,7 +11,7 @@ data:
 
   # Keep stride the same as A1 so window is the main difference.
   train_stride_ratio: 0.75
-  eval_stride_ratio: 0.75
+  eval_stride_ratio: 1.0
 
   # Align window budget with A4 (Version-C full) to avoid confounding variables
   window_retention:
