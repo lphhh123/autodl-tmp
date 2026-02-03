@@ -2,7 +2,7 @@
 # - eval uses clip_len=16 only (stable comparison)
 # - retention moderate + stride_ratio to control clip count without large accuracy loss
 
-includes: [configs/vc_phase3_twostage_ucf101.yaml]
+_base_: configs/vc_phase3_twostage_ucf101.yaml
 
 data:
   clip_lens_train: [16]

@@ -3,7 +3,7 @@
 # - window_retention is moderate to avoid obvious accuracy drop vs baseline
 # - stride_ratio controls clip count without being too aggressive
 
-includes: [configs/ast2_ucf101_ast_hw.yaml]
+_base_: configs/ast2_ucf101_ast_hw.yaml
 
 data:
   clip_lens_train: [16]
