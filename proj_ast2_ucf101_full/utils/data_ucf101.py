@@ -9,7 +9,6 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
-from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -426,9 +425,7 @@ class UCF101Dataset(Dataset):
         self.label_to_idx = _build_deterministic_label_map(self.root, split_file)
         self.idx_to_label = {v: k for k, v in self.label_to_idx.items()}
         clips: List[ClipItem] = []
-        # Cache frame file lists lazily to avoid OOM. Cap size via cfg.data.frame_cache_max_videos.
-        self._frame_cache = OrderedDict()  # video_id -> List[Path]
-        self._frame_cache_max_videos = int(getattr(cfg.data, "frame_cache_max_videos", 128))
+        self._frame_cache: Dict[str, List[Path]] = {}
         self._hglobal_cache: Dict[str, float] = {}
         with open(split_file, "r", encoding="utf-8") as f:
             lines = [ln.strip() for ln in f if ln.strip()]
@@ -533,8 +530,7 @@ class UCF101Dataset(Dataset):
                     continue
                 total_frames = len(frame_files)
                 video_id = video_stem
-                # DO NOT eagerly cache all videos' frame lists here; it can OOM on UCF101.
-                # Frames are cached lazily with an LRU cap in _load_frames().
+                self._frame_cache[video_id] = frame_files
                 stride_ratio = cfg.data.train_stride_ratio if self.is_train else cfg.data.eval_stride_ratio
                 for cover_len in self.clip_lens:
                     stride = max(1, int(cover_len * stride_ratio))
@@ -631,12 +627,6 @@ class UCF101Dataset(Dataset):
         frame_files = self._frame_cache.get(video_id)
         if frame_files is None:
             frame_files = sorted(p for p in source_path.glob("*.jpg") if p.is_file())
-            # LRU insert with cap
-            if self._frame_cache_max_videos > 0:
-                self._frame_cache[video_id] = frame_files
-                self._frame_cache.move_to_end(video_id)
-                while len(self._frame_cache) > self._frame_cache_max_videos:
-                    self._frame_cache.popitem(last=False)
         if not frame_files:
             img = Image.new("RGB", (self.img_size, self.img_size))
             return [img for _ in range(len(frame_indices))]
