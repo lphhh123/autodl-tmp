@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import os
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,6 +35,49 @@ from utils.logging_utils import setup_logger, log_stats
 from utils.seed import seed_everything
 from utils.stable_hash import stable_hash
 from utils.safe_json import safe_dump, safe_dumps
+
+
+def _atomic_torch_save(obj, dst: Path) -> None:
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+    try:
+        torch.save(obj, tmp_path)
+        os.replace(tmp_path, dst)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def save_checkpoint_version_c(
+    out_dir: Path,
+    tag: str,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: Optional[GradScaler],
+    epoch: int,
+    best_acc1: Optional[float],
+    seal_digest: str,
+    run_id: str,
+) -> Path:
+    ckpt_dir = Path(out_dir) / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / f"{tag}.pth"
+    payload = {
+        "epoch": int(epoch),
+        "best_acc1": (float(best_acc1) if best_acc1 is not None else None),
+        "seal_digest": str(seal_digest),
+        "run_id": str(run_id),
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": (scaler.state_dict() if scaler is not None else None),
+    }
+    _atomic_torch_save(payload, ckpt_path)
+    return ckpt_path
 from utils.trace_contract_v54 import (
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
@@ -1910,10 +1954,41 @@ def train_version_c(
 
                 last_acc1 = float(acc_used_value)
 
+                prev_best_acc1 = best_acc1
                 if best_acc1 is None:
                     best_acc1 = float(last_acc1)
                 else:
                     best_acc1 = max(float(best_acc1), float(last_acc1))
+
+                improved_best = (prev_best_acc1 is None) or (
+                    best_acc1 is not None and float(best_acc1) > float(prev_best_acc1)
+                )
+                try:
+                    save_checkpoint_version_c(
+                        out_dir,
+                        "last",
+                        model=model,
+                        optimizer=optimizer,
+                        scaler=scaler,
+                        epoch=outer,
+                        best_acc1=best_acc1,
+                        seal_digest=seal_digest,
+                        run_id=run_id,
+                    )
+                    if improved_best:
+                        save_checkpoint_version_c(
+                            out_dir,
+                            "best",
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler,
+                            epoch=outer,
+                            best_acc1=best_acc1,
+                            seal_digest=seal_digest,
+                            run_id=run_id,
+                        )
+                except Exception as _ckpt_e:
+                    logger.warning(f"[CKPT] save failed: {_ckpt_e}")
 
                 stable_hw_state["val_acc1_best_seen"] = float(best_acc1) if best_acc1 is not None else None
 

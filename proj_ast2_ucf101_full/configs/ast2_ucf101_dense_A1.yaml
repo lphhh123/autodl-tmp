@@ -1,0 +1,28 @@
+# A1 (dense baseline) - tuned to be a fair accuracy baseline while keeping
+# training throughput manageable.
+#
+# Key idea:
+# - Keep window retention for TRAIN to bound clip count
+# - Use a larger window budget for EVAL to avoid missing the action segment
+#
+# NOTE: requires utils/data_ucf101.py support for *_train / *_eval keys.
+
+includes: [configs/ast2_ucf101_dense.yaml]
+
+model:
+  # Dense baseline should not enable AST pruning in any form.
+  use_ast_prune: false
+
+data:
+  window_retention:
+    enabled: true
+    # Train-time budget (keep small for speed)
+    max_windows_per_video_per_len_train: 4
+    # Eval-time budget (larger to avoid under-evaluating each video)
+    max_windows_per_video_per_len_eval: 32
+    # A bit more candidates helps when eval budget increases
+    eval_candidates: 256
+
+test:
+  # Avoid late-run crashes from final test; run it manually from best.ckpt.
+  run_final_test: false

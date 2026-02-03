@@ -12,6 +12,15 @@ if [[ -z "$EXP_ID" ]]; then
   exit 1
 fi
 
+# ---- TF32 (speed) ---------------------------------------------------------
+# For Innovation A we default-enable TF32 to speed up training on Ampere/Ada.
+# You can override per run: ENABLE_TF32=0 bash scripts/experiments_version_c.sh ...
+if [[ "${EXP_ID}" == EXP-A* ]]; then
+  export ENABLE_TF32="${ENABLE_TF32:-1}"
+else
+  export ENABLE_TF32="${ENABLE_TF32:-0}"
+fi
+
 # ---- ensure A3 middleware exists: outputs/P3/A3/layout_input.json ----
 ensure_layout_input() {
   local LI="outputs/P3/A3/layout_input.json"
@@ -42,13 +51,15 @@ ensure_layout_input() {
 run_ast () {
   local cfg="$1"
   local out="$2"
-  python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED"
+  mkdir -p "$out"
+  python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
 }
 
 run_vc () {
   local cfg="$1"
   local out="$2"
-  python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED"
+  mkdir -p "$out"
+  python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
 }
 
 run_layout () {
@@ -75,7 +86,7 @@ case "$EXP_ID" in
   # -------------------------
   EXP-A1)
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
-    run_ast configs/ast2_ucf101_dense.yaml "outputs/EXP-A1/seed${SEED}"
+    run_ast configs/ast2_ucf101_dense_A1.yaml "outputs/EXP-A1/seed${SEED}"
     ;;
   EXP-A2) run_ast configs/ast2_ucf101_ast_only.yaml              "outputs/EXP-A2/seed${SEED}" ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw.yaml                "outputs/EXP-A3/seed${SEED}" ;;

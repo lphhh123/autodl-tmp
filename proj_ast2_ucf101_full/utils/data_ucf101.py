@@ -92,7 +92,7 @@ def _retain_starts_entropy_density_train(
     if ret is None or not bool(getattr(ret, "enabled", False)):
         return starts
 
-    max_windows = int(getattr(ret, "max_windows_per_video_per_len", 4))
+    max_windows = int(getattr(ret, "max_windows_per_video_per_len_train", getattr(ret, "max_windows_per_video_per_len", 4)))
     if max_windows <= 0:
         return []
 
@@ -200,7 +200,7 @@ def _retain_starts_uniform_eval(
     if ret is None or not bool(getattr(ret, "enabled", False)):
         return starts
 
-    max_windows = int(getattr(ret, "max_windows_per_video_per_len", 4))
+    max_windows = int(getattr(ret, "max_windows_per_video_per_len_eval", getattr(ret, "max_windows_per_video_per_len", 4)))
     if max_windows <= 0:
         return []
     if len(starts) <= max_windows:
@@ -439,6 +439,12 @@ class UCF101Dataset(Dataset):
                 "enabled": bool(getattr(ret_cfg, "enabled", False)),
                 "max_windows_per_video_per_len": int(
                     getattr(ret_cfg, "max_windows_per_video_per_len", 4)
+                ),
+                "max_windows_per_video_per_len_train": int(
+                    getattr(ret_cfg, "max_windows_per_video_per_len_train", getattr(ret_cfg, "max_windows_per_video_per_len", 4))
+                ),
+                "max_windows_per_video_per_len_eval": int(
+                    getattr(ret_cfg, "max_windows_per_video_per_len_eval", getattr(ret_cfg, "max_windows_per_video_per_len", 4))
                 ),
                 "eval_candidates": int(getattr(ret_cfg, "eval_candidates", 128)),
                 "global_frames": int(getattr(ret_cfg, "global_frames", 8)),
