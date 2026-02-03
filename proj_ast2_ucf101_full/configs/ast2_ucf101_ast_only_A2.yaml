@@ -1,0 +1,29 @@
+# A2: Token-only (HW off, Window off, Token on)
+# Purpose: isolate token sparsity contribution without mixing in window/hardware.
+_base_: configs/ast2_ucf101.yaml
+
+training:
+  mode: single_device_ast
+
+hw:
+  mode: none
+
+stable_hw:
+  enabled: false
+  force_disable_ok: true
+
+model:
+  # enable token pruning path (your code uses this flag for AST pruning hooks)
+  use_ast_prune: true
+
+data:
+  clip_lens_train: [16]
+  clip_lens_eval: [16]
+  train_stride_ratio: 0.6
+  eval_stride_ratio: 0.6
+  window_retention:
+    enabled: false
+
+test:
+  run_final_test: true
+

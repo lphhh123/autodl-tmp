@@ -1,0 +1,9 @@
+_base_: configs/vc_phase3_full_ucf101_A_main.yaml
+
+training:
+  mapping_only: true
+  inner_steps_layout: 0
+
+hw:
+  optimize_layout: false
+

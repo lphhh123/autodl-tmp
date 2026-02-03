@@ -17,4 +17,4 @@ data:
     eval_candidates: 192
 
 test:
-  run_final_test: false
+  run_final_test: true

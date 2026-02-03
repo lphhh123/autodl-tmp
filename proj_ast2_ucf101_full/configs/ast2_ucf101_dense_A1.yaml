@@ -2,11 +2,12 @@
 # training throughput manageable.
 #
 # Key idea:
-# - Keep window retention for TRAIN to bound clip count (but not too aggressive)
-# - Use a slightly larger budget for EVAL to avoid missing the action segment
-# - For A main table: train/eval both use clip_len=16 (stable & easy to explain)
-#
-# NOTE: requires utils/data_ucf101.py support for *_train / *_eval keys.
+# A1: Dense baseline protocol (for clean attribution)
+# - HW off
+# - Token pruning off
+# - Window off  (avoid mixing "data window" with "token sparsity")
+# - clip_len train/eval = 16
+# - use stride_ratio to control clip count (target: train steps < 4000)
 
 _base_: configs/ast2_ucf101_dense.yaml
 
@@ -19,19 +20,14 @@ data:
   clip_lens_train: [16]
   clip_lens_eval: [16]
 
-  # Control overall clip count via stride instead of over-aggressive retention
-  train_stride_ratio: 0.75
-  eval_stride_ratio: 0.75
+  # Control overall clip count via stride (4492@0.5 -> ~3743@0.6)
+  train_stride_ratio: 0.6
+  eval_stride_ratio: 0.6
 
+  # Dense baseline MUST NOT use window retention
   window_retention:
-    enabled: true
-    # Train-time budget (moderate; reduces precision drop vs very aggressive=4)
-    max_windows_per_video_per_len_train: 8
-    # Eval-time budget (slightly larger than train; still bounded)
-    max_windows_per_video_per_len_eval: 16
-    # Candidate pool for eval selection
-    eval_candidates: 192
+    enabled: false
 
 test:
-  # Avoid late-run crashes from final test; run it manually from best.ckpt.
-  run_final_test: false
+  # Keep ON in formal runs; SMOKE bounds it automatically.
+  run_final_test: true
