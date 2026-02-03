@@ -58,6 +58,13 @@ def apply_smoke_overrides_single(cfg):
     if OmegaConf.select(cfg, "train.warmup_epochs") is not None:
         cfg.train.warmup_epochs = 0
 
+    # --- Aggressively reduce clip count for SMOKE (do NOT affect formal runs) ---
+    # code semantics: stride = int(clip_len * stride_ratio), bigger => fewer clips
+    if OmegaConf.select(cfg, "data.train_stride_ratio") is not None:
+        cfg.data.train_stride_ratio = 6.0
+    if OmegaConf.select(cfg, "data.eval_stride_ratio") is not None:
+        cfg.data.eval_stride_ratio = 6.0
+
     if OmegaConf.select(cfg, "val.fast_max_batches") is not None:
         cfg.val.fast_max_batches = min(int(cfg.val.fast_max_batches), 20)
     if OmegaConf.select(cfg, "val.full_every_epochs") is not None:
@@ -77,7 +84,9 @@ def apply_smoke_overrides_single(cfg):
         cfg.test.fast_max_batches = min(int(cfg.test.fast_max_batches), 50)
 
     print(
-        "[SMOKE] single-device overrides applied: epochs=1, warmup=0, fast_val<=20, full_every=1, final_test=ON (test.fast_max_batches<=50 if supported)"
+        "[SMOKE] single-device overrides applied: epochs=1, warmup=0, "
+        "train_stride_ratio=6.0, eval_stride_ratio=6.0, "
+        "fast_val<=20, full_every=1, final_test=ON (test.fast_max_batches<=50 if supported)"
     )
     return cfg
 
