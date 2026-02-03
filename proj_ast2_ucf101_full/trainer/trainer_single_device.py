@@ -186,6 +186,26 @@ def _cfg_get(obj, key: str, default=None):
     return getattr(obj, key, default)
 
 
+def _cfg_select(cfg: Any, key: str, default: Any = None) -> Any:
+    """Safe OmegaConf path read.
+    Works for DictConfig and plain dicts.
+    Returns default when path is missing.
+    Compatible with older OmegaConf that may not support `default=` kwarg.
+    """
+    try:
+        # OmegaConf 2.2+ supports default=
+        v = OmegaConf.select(cfg, key, default=default)
+        return v
+    except TypeError:
+        # older OmegaConf: no default kwarg
+        try:
+            v = OmegaConf.select(cfg, key)
+        except Exception:
+            v = None
+        return default if v is None else v
+    except Exception:
+        return default
+
 def _build_run_signature(cfg) -> Dict[str, Any]:
     detailed_cfg = _cfg_get(cfg, "detailed_place", None)
     lookahead_cfg = _cfg_get(detailed_cfg, "lookahead", _cfg_get(cfg, "lookahead", {}))
@@ -218,7 +238,8 @@ def build_dataloaders(cfg):
     val_ds = UCF101Dataset(cfg, split="val")
     print(f"[DEBUG] len(train_ds)={len(train_ds)}, len(val_ds)={len(val_ds)}")
     batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
-    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    # Some single-device configs don't have `training:` (they use `train:`).
+    base_seed = int(_cfg_select(cfg, "training.seed", _cfg_select(cfg, "train.seed", 0)) or 0)
     generator = torch.Generator()
     generator.manual_seed(base_seed)
     worker_init = partial(_seed_worker, base_seed=base_seed)
@@ -244,7 +265,7 @@ def build_dataloaders(cfg):
 def build_test_loader(cfg):
     test_ds = UCF101Dataset(cfg, split="test")
     batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
-    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)))
+    base_seed = int(_cfg_select(cfg, "training.seed", _cfg_select(cfg, "train.seed", 0)) or 0)
     generator = torch.Generator()
     generator.manual_seed(base_seed)
     worker_init = partial(_seed_worker, base_seed=base_seed)
@@ -292,7 +313,12 @@ def train_single_device(
     logger = setup_logger()
     metrics_path = None
     trace_dir = None
-    seed = int(getattr(cfg.train, "seed", 0) or getattr(cfg.training, "seed", 0) or 0)
+    # Robust seed read (no `training:` in A1 dense baseline).
+    seed = int(
+        (_cfg_select(cfg, "train.seed", 0) or 0)
+        or (_cfg_select(cfg, "training.seed", 0) or 0)
+        or 0
+    )
     if out_dir is None and hasattr(cfg, "train") and getattr(cfg.train, "out_dir", None):
         out_dir = Path(cfg.train.out_dir)
     if out_dir is not None:
@@ -382,7 +408,7 @@ def train_single_device(
         )
     train_loader, val_loader = build_dataloaders(cfg)
     test_loader = None
-    model_type = getattr(cfg.training, "model_type", "video")
+    model_type = str(_cfg_select(cfg, "training.model_type", "video") or "video")
     num_frames = int(getattr(cfg.data, "num_frames", cfg.model.num_frames))
     audio_feat_dim = int(getattr(cfg.data, "audio_feat_dim", cfg.audio.feat_dim))
     if model_type == "video_audio":
@@ -1017,7 +1043,7 @@ def train_single_device(
     if out_dir is not None:
         from utils.run_manifest import write_run_manifest
         git_sha = None
-        seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)) or 0)
+        seed = int(_cfg_select(cfg, "training.seed", _cfg_select(cfg, "train.seed", 0)) or 0)
 
         _metrics_summary = {
             "best_acc1": float(best_acc) if ("best_acc" in locals() and best_acc is not None) else None,
@@ -1128,7 +1154,7 @@ def validate(
         for batch_idx, batch in iterable:
             x = batch["video"].to(device)
             y = batch["label"].to(device)
-            if cfg.training.model_type == "video_audio":
+            if str(_cfg_select(cfg, "training.model_type", "video") or "video") == "video_audio":
                 logits = model(x, batch["audio"].to(device))
             else:
                 logits = model(x)
