@@ -7,14 +7,14 @@ _base_: configs/vc_phase3_full_ucf101.yaml
 data:
   clip_lens_train: [16]
   clip_lens_eval: [16]
-  train_stride_ratio: 1.0
-  eval_stride_ratio: 1.0
+  train_stride_ratio: 0.5
+  eval_stride_ratio: 0.5
 
   window_retention:
     enabled: true
-    max_windows_per_video_per_len_train: 8
-    max_windows_per_video_per_len_eval: 16
-    eval_candidates: 192
+    max_windows_per_video_per_len_train: 12
+    max_windows_per_video_per_len_eval: 24
+    eval_candidates: 256
 
 test:
   run_final_test: true
