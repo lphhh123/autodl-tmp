@@ -20,9 +20,11 @@ data:
   clip_lens_train: [16]
   clip_lens_eval: [16]
 
-  # Control overall clip count via stride (unified across A-main)
-  train_stride_ratio: 1.0
-  eval_stride_ratio: 1.0
+  # Higher-accuracy formal protocol (still reasonable on 3x4090):
+  # stride = int(cover_len * stride_ratio). For cover_len=16:
+  # 1.0 -> stride 16 (non-overlap); 0.5 -> stride 8 (~2x clips).
+  train_stride_ratio: 0.5
+  eval_stride_ratio: 0.5
 
   # Dense baseline MUST NOT use window retention
   window_retention:
