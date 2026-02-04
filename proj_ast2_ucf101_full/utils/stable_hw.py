@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import yaml
 
 
 @dataclass
@@ -1102,6 +1103,104 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
     stable_hw_state["ref_E"] = stable_hw_state["hw_refs"].get("energy_ref_mj")
     stable_hw_state["ref_M"] = stable_hw_state["hw_refs"].get("mem_ref_mb")
     stable_hw_state["ref_C"] = stable_hw_state["hw_refs"].get("comm_ref")
+
+    # ------------------------------------------------------------
+    # v5.4 fix (paper-grade):
+    # NoDrift requires ref_A/ref_B/ref_P to be present.
+    # Baseline stats often provide only T/E/M/C. For A/B/P, use
+    # the project-declared device spec from hw.gpu_yaml + hw.device_name,
+    # falling back to explicit cfg.hw.area_ref_mm2/bw_ref_gbps/power_ref_w if set.
+    #
+    # This does NOT affect SMOKE/official output directory logic.
+    # It only completes the reference tuple for HW normalization.
+    # ------------------------------------------------------------
+    hw_cfg = getattr(cfg, "hw", None)
+
+    def _to_float(v: Any, default: float) -> float:
+        try:
+            return float(default if v is None else v)
+        except Exception:
+            return float(default)
+
+    def _load_device_spec_from_gpu_yaml() -> Dict[str, float]:
+        if hw_cfg is None:
+            return {}
+        device_name = getattr(hw_cfg, "device_name", None)
+        gpu_yaml = getattr(hw_cfg, "gpu_yaml", None)
+        if not device_name or not gpu_yaml:
+            return {}
+        p = Path(str(gpu_yaml))
+        # allow relative path like "./configs/gpu_data.yaml"
+        if not p.is_file():
+            p = (Path.cwd() / p).resolve()
+        if not p.is_file():
+            return {}
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            return {}
+        entries = data.get("chip_types", []) if isinstance(data, dict) else []
+        for e in entries:
+            if isinstance(e, dict) and e.get("name") == device_name:
+                area = _to_float(e.get("area_mm2", None), 0.0)
+                tdp = _to_float(e.get("tdp_w", None), 0.0)
+                bw = e.get("peak_bw_gbps", e.get("peak_bw", None))
+                bw_f = _to_float(bw, 0.0)
+                # match chiplet_lib behavior: if provided as e.g. 936e9, convert to 936.0
+                if bw_f > 1e6:
+                    bw_f = bw_f / 1e9
+                out = {}
+                if area > 0:
+                    out["area_ref_mm2"] = area
+                if bw_f > 0:
+                    out["bw_ref_gbps"] = bw_f
+                if tdp > 0:
+                    out["power_ref_w"] = tdp
+                return out
+        return {}
+
+    dev = _load_device_spec_from_gpu_yaml()
+    # If user explicitly sets these in cfg.hw, they override gpu_yaml-derived values.
+    area_ref = (
+        _to_float(getattr(hw_cfg, "area_ref_mm2", None), dev.get("area_ref_mm2", 0.0))
+        if hw_cfg is not None
+        else dev.get("area_ref_mm2", 0.0)
+    )
+    bw_ref = (
+        _to_float(getattr(hw_cfg, "bw_ref_gbps", None), dev.get("bw_ref_gbps", 0.0))
+        if hw_cfg is not None
+        else dev.get("bw_ref_gbps", 0.0)
+    )
+    pwr_ref = (
+        _to_float(getattr(hw_cfg, "power_ref_w", None), dev.get("power_ref_w", 0.0))
+        if hw_cfg is not None
+        else dev.get("power_ref_w", 0.0)
+    )
+
+    stable_hw_state.setdefault("hw_refs", {})
+    if area_ref > 0:
+        stable_hw_state["hw_refs"].setdefault("area_ref_mm2", area_ref)
+        stable_hw_state.setdefault("ref_A", area_ref)
+    if bw_ref > 0:
+        stable_hw_state["hw_refs"].setdefault("bw_ref_gbps", bw_ref)
+        stable_hw_state.setdefault("ref_B", bw_ref)
+    if pwr_ref > 0:
+        stable_hw_state["hw_refs"].setdefault("power_ref_w", pwr_ref)
+        stable_hw_state.setdefault("ref_P", pwr_ref)
+
+    # If NoDrift is enabled but we still don't have A/B/P, fail-fast with a clearer message.
+    if stable_hw_state.get("no_drift_effective", False):
+        if (
+            stable_hw_state.get("ref_A") is None
+            or stable_hw_state.get("ref_B") is None
+            or stable_hw_state.get("ref_P") is None
+        ):
+            raise RuntimeError(
+                "[v5.4 P0] NoDrift enabled but ref_A/ref_B/ref_P unresolved. "
+                "Please set hw.device_name + hw.gpu_yaml correctly, or explicitly set "
+                "hw.area_ref_mm2, hw.bw_ref_gbps, hw.power_ref_w."
+            )
 
 
 def init_hw_refs_for_no_drift(cfg: Any, stable_hw_state: Dict[str, Any], stable_hw_cfg: Any = None) -> None:
