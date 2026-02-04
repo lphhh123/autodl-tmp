@@ -871,6 +871,17 @@ def train_version_c(
         lr = _as_float(cfg.train.lr, "cfg.train.lr")
         weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
         optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        # ------------------------------------------------------------------
+        # v5.4 hotfix:
+        # Version-C trainer historically used a single variable name `optimizer`
+        # for checkpointing / auto-resume, but this implementation split into
+        # optimizer_model / optimizer_alpha and forgot to define `optimizer`.
+        #
+        # Keep checkpoint semantics unchanged: `optimizer` refers to the MODEL
+        # optimizer (optimizer_model). This avoids NameError and does NOT affect
+        # SMOKE vs official output directory routing.
+        # ------------------------------------------------------------------
+        optimizer = optimizer_model
         scaler = GradScaler(device_type, enabled=cfg.train.amp)
 
         library = ChipletLibrary(cfg.hw.gpu_yaml)
