@@ -11,8 +11,8 @@ data:
 
   # Keep stride aligned with A1 so window remains the main difference,
   # but use higher-accuracy stride (moderate extra cost on 3x4090).
-  train_stride_ratio: 0.5
-  eval_stride_ratio: 0.5
+  train_stride_ratio: 0.75
+  eval_stride_ratio: 0.75
 
   # Align window budget with A4 (Version-C full) to avoid confounding variables
   window_retention:

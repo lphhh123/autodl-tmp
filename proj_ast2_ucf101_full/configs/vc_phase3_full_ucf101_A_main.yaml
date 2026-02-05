@@ -7,8 +7,8 @@ _base_: configs/vc_phase3_full_ucf101.yaml
 data:
   clip_lens_train: [16]
   clip_lens_eval: [16]
-  train_stride_ratio: 0.5
-  eval_stride_ratio: 0.5
+  train_stride_ratio: 0.75
+  eval_stride_ratio: 0.75
 
   window_retention:
     enabled: true
