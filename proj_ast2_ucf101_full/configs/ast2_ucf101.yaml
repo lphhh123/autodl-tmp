@@ -27,8 +27,10 @@ data:
   clip_lens_eval: [8, 16]
   num_frames: 8
   use_audio: false
-  train_stride_ratio: 0.5
-  eval_stride_ratio: 0.5
+  # stride = int(cover_len * stride_ratio). For cover_len=16:
+  # 1.0->16 (non-overlap), 0.75->12 (moderate overlap), 0.5->8 (heavier overlap)
+  train_stride_ratio: 0.75
+  eval_stride_ratio: 0.75
   clip_jitter: true
   img_size: 224
   num_workers: 8
