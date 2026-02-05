@@ -190,6 +190,31 @@ class ASTPruner(nn.Module):
         self.g_ch = nn.Parameter(torch.zeros(depth, hidden_dim))
         self.g_block = nn.Parameter(torch.zeros(depth))
 
+        # Runtime overrides (set by trainer for warmup/ramp scheduling).
+        # These are optional and default to None/False to preserve original behavior.
+        self._runtime_force_dense: bool = False
+        self._runtime_rho_token: Optional[float] = None
+        self._runtime_token_temperature: Optional[float] = None
+
+    def set_runtime_overrides(
+        self,
+        *,
+        force_dense: Optional[bool] = None,
+        rho_token: Optional[float] = None,
+        token_temperature: Optional[float] = None,
+    ) -> None:
+        """Set per-epoch runtime overrides without mutating cfg."""
+        if force_dense is not None:
+            self._runtime_force_dense = bool(force_dense)
+        if rho_token is not None:
+            self._runtime_rho_token = float(rho_token)
+        else:
+            self._runtime_rho_token = None
+        if token_temperature is not None:
+            self._runtime_token_temperature = float(token_temperature)
+        else:
+            self._runtime_token_temperature = None
+
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         return minmax_norm_per_batch(H)
 
@@ -239,6 +264,10 @@ class ASTPruner(nn.Module):
     def token_gating_single_modal(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         B, T, N, _ = x.shape
+        if self._runtime_force_dense or bool(cfg.get("force_dense", False)):
+            mask_soft = torch.ones(B, T, N, device=x.device, dtype=x.dtype)
+            sparsity_token = mask_soft.new_tensor(0.0)
+            return mask_soft, sparsity_token
         Ht = compute_multi_level_time_entropy(
             x, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
         )
@@ -269,8 +298,8 @@ class ASTPruner(nn.Module):
             idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
             score = idx / (float(score.numel()) + 1e-12)
         mask_soft = []
-        rho = cfg.get("rho_token_target", 0.5)
-        temperature = cfg.get("token_temperature", 0.1)
+        rho = float(self._runtime_rho_token) if self._runtime_rho_token is not None else float(cfg.get("rho_token_target", 0.5))
+        temperature = float(self._runtime_token_temperature) if self._runtime_token_temperature is not None else float(cfg.get("token_temperature", 0.1))
         for b in range(B):
             flat = score[b].reshape(-1)
             k = max(1, int(rho * flat.numel()))
@@ -284,6 +313,14 @@ class ASTPruner(nn.Module):
         self, x: torch.Tensor, modality_slices: Dict[str, Tuple[int, int]]
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         modal_stats = {}
+        if self._runtime_force_dense or bool(self.cfg.get("force_dense", False)):
+            B, T, N, _ = x.shape
+            mask_soft = torch.ones(B, T, N, device=x.device, dtype=x.dtype)
+            sparsity_token = mask_soft.new_tensor(0.0)
+            # still provide per-modality sparsity=0.0
+            for name, (s, e) in modality_slices.items():
+                modal_stats[name] = {"sparsity": mask_soft.new_tensor(0.0)}
+            return mask_soft, sparsity_token, modal_stats
         H_time_token = torch.zeros(x.shape[:3], device=x.device, dtype=x.dtype)
         H_space_token = torch.zeros_like(H_time_token)
         region_ids = self.region_ids.to(x.device)
@@ -337,8 +374,8 @@ class ASTPruner(nn.Module):
             score = idx / (float(score.numel()) + 1e-12)
 
         mask_soft = []
-        rho = self.cfg.get("rho_token_target", 0.5)
-        temperature = self.cfg.get("token_temperature", 0.1)
+        rho = float(self._runtime_rho_token) if self._runtime_rho_token is not None else float(self.cfg.get("rho_token_target", 0.5))
+        temperature = float(self._runtime_token_temperature) if self._runtime_token_temperature is not None else float(self.cfg.get("token_temperature", 0.1))
         for b in range(x.shape[0]):
             flat = score[b].reshape(-1)
             k = max(1, int(rho * flat.numel()))
@@ -359,7 +396,15 @@ class ASTPruner(nn.Module):
             mask_soft, sparsity_token = self.token_gating_single_modal(x)
             modal_stats = {}
         x_gated = x * mask_soft.unsqueeze(-1)
-        return x_gated, {"sparsity_token": sparsity_token, "mask": mask_soft, "modal_stats": modal_stats}
+        token_prune = sparsity_token
+        token_keep = (1.0 - token_prune)
+        return x_gated, {
+            "sparsity_token": token_prune,
+            "token_prune": token_prune,
+            "token_keep": token_keep,
+            "mask": mask_soft,
+            "modal_stats": modal_stats,
+        }
 
     def compute_L_AST(self, sparsity_token: torch.Tensor, sparsity_head: torch.Tensor, sparsity_ch: torch.Tensor, sparsity_block: torch.Tensor) -> torch.Tensor:
         loss_cfg = self.cfg.get("loss", self.cfg)

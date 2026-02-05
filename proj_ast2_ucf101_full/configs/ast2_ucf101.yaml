@@ -51,7 +51,7 @@ data:
     temporal_delta: 1
     downsample: 32
     entropy_bins: 32
-    eval_mode: "uniform"
+    eval_mode: "entropy_density"
 
 audio:
   feat_dim: 128
@@ -73,6 +73,15 @@ ast:
   entropy_tau: 1.0
   rho_token_target: 0.5
   token_temperature: 0.1
+  # Dense warmup -> ramp -> stabilize for token gating (prevents early over-pruning).
+  schedule:
+    enabled: true
+    warmup_epochs: 5      # epochs with force_dense + lambda_AST=0
+    ramp_epochs: 10       # epochs to ramp to target rho/temperature/lambda_AST
+    curve: "cosine"       # "linear" or "cosine"
+    rho_start: 1.0
+    temp_start: 1.0
+    lambda_ast_start: 0.0
   num_regions: 8
   alpha_time: 1.0
   beta_space: 0.5

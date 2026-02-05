@@ -56,6 +56,80 @@ from utils.stable_hw import (
 )
 
 
+def _ast_interp(a: float, b: float, t: float, curve: str = "linear") -> float:
+    t = float(max(0.0, min(1.0, t)))
+    curve = str(curve or "linear").lower()
+    if curve == "cosine":
+        # cosine ease-in-out
+        tt = 0.5 - 0.5 * math.cos(math.pi * t)
+    else:
+        tt = t
+    return float(a + (b - a) * tt)
+
+
+def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
+    """Compute per-epoch AST (token gating) schedule without mutating cfg.
+
+    Returns dict with:
+      - force_dense (bool)
+      - rho_token (float)
+      - token_temperature (float)
+      - lambda_ast (float)  (multiplier for info['L_AST'])
+      - phase (str): warmup|ramp|stabilize|disabled
+      - t (float): ramp progress in [0,1]
+    """
+    ast = getattr(cfg, "ast", None)
+    sched = getattr(ast, "schedule", None) if ast is not None else None
+    if sched is None or (not bool(getattr(sched, "enabled", False))):
+        return {"phase": "disabled"}
+
+    warm = int(getattr(sched, "warmup_epochs", 0) or 0)
+    ramp = int(getattr(sched, "ramp_epochs", 0) or 0)
+    curve = str(getattr(sched, "curve", "cosine") or "cosine")
+
+    rho_end = float(getattr(sched, "rho_end", getattr(ast, "rho_token_target", 1.0)) or getattr(ast, "rho_token_target", 1.0))
+    rho_start = float(getattr(sched, "rho_start", 1.0) or 1.0)
+
+    temp_end = float(getattr(sched, "temp_end", getattr(ast, "token_temperature", 0.1)) or getattr(ast, "token_temperature", 0.1))
+    temp_start = float(getattr(sched, "temp_start", 1.0) or 1.0)
+
+    loss_cfg = getattr(cfg, "loss", None)
+    lam_end = float(getattr(sched, "lambda_ast_end", getattr(loss_cfg, "lambda_AST", 1.0) if loss_cfg is not None else 1.0) or (getattr(loss_cfg, "lambda_AST", 1.0) if loss_cfg is not None else 1.0))
+    lam_start = float(getattr(sched, "lambda_ast_start", 0.0) or 0.0)
+
+    if epoch < warm:
+        return {
+            "phase": "warmup",
+            "t": 0.0,
+            "force_dense": True,
+            "rho_token": 1.0,
+            "token_temperature": temp_start,
+            "lambda_ast": lam_start,
+        }
+
+    if ramp <= 0:
+        return {
+            "phase": "stabilize",
+            "t": 1.0,
+            "force_dense": False,
+            "rho_token": rho_end,
+            "token_temperature": temp_end,
+            "lambda_ast": lam_end,
+        }
+
+    # ramp progress for this epoch (first ramp epoch uses t=1/ramp)
+    t = float(epoch - warm + 1) / float(ramp)
+    t = float(max(0.0, min(1.0, t)))
+    phase = "ramp" if t < 1.0 else "stabilize"
+    return {
+        "phase": phase,
+        "t": t,
+        "force_dense": False,
+        "rho_token": _ast_interp(rho_start, rho_end, t, curve=curve),
+        "token_temperature": _ast_interp(temp_start, temp_end, t, curve=curve),
+        "lambda_ast": _ast_interp(lam_start, lam_end, t, curve=curve),
+    }
+
 def _as_float(val, name: str) -> float:
     """Convert config values that might be strings into floats with a clear error."""
     try:
@@ -725,6 +799,33 @@ def train_single_device(
 
             stable_state["lambda_hw_effective"] = float(lambda_hw_eff)
             stable_state.setdefault("lambda_hw_base", float(stable_state.get("lambda_hw_base", 0.0)))
+
+            # -------------------------
+            # AST schedule (dense warmup -> ramp -> stabilize)
+            # This affects token gating (rho/temperature) and lambda_AST multiplier only.
+            # -------------------------
+            ast_sched = compute_ast_schedule_effective(cfg, int(epoch))
+            lambda_ast_eff = float(getattr(getattr(cfg, "loss", None), "lambda_AST", 1.0) or 1.0)
+            if ast_sched.get("phase") != "disabled":
+                lambda_ast_eff = float(ast_sched.get("lambda_ast", lambda_ast_eff))
+                pruner = getattr(model, "ast_pruner", None)
+                if pruner is not None and hasattr(pruner, "set_runtime_overrides"):
+                    pruner.set_runtime_overrides(
+                        force_dense=bool(ast_sched.get("force_dense", False)),
+                        rho_token=float(ast_sched.get("rho_token", getattr(getattr(cfg, "ast", None), "rho_token_target", 1.0))),
+                        token_temperature=float(ast_sched.get("token_temperature", getattr(getattr(cfg, "ast", None), "token_temperature", 0.1))),
+                    )
+                if epoch == start_epoch:
+                    sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
+                    logger.info(
+                        "[ASTSchedule] enabled: warmup=%s, ramp=%s, curve=%s",
+                        getattr(sched0, "warmup_epochs", None),
+                        getattr(sched0, "ramp_epochs", None),
+                        getattr(sched0, "curve", None),
+                    )
+            else:
+                lambda_ast_eff = float(getattr(getattr(cfg, "loss", None), "lambda_AST", 1.0) or 1.0)
+
             model.train()
             last_hw_stats = None
             total_steps = len(train_loader) if hasattr(train_loader, "__len__") else None
@@ -792,7 +893,7 @@ def train_single_device(
 
                     L_ast = info["L_AST"] if isinstance(info, dict) and "L_AST" in info else logits.new_tensor(0.0)
 
-                    loss = L_task + float(getattr(cfg.loss, "lambda_AST", 1.0)) * L_ast + lambda_hw_eff * L_hw
+                    loss = L_task + float(lambda_ast_eff) * L_ast + lambda_hw_eff * L_hw
                     assert "hw_loss_weighted" not in (hw_stats or {}), (
                         "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
                     )
