@@ -218,6 +218,33 @@ class ASTPruner(nn.Module):
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         return minmax_norm_per_batch(H)
 
+    @staticmethod
+    def _calibrate_keep_mean(
+        mask_soft: torch.Tensor,
+        target_keep: float,
+        iters: int = 2,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        Calibrate a soft mask so its per-sample mean matches target_keep (keep ratio).
+        This keeps sparsity tracking rho even when sigmoid temperature is high or
+        gate-score scale is small.
+
+        mask_soft shape: [B, T, N], values in [0, 1].
+        """
+        target_keep = float(target_keep)
+        if target_keep >= 1.0 - 1e-6:
+            return torch.ones_like(mask_soft)
+        if target_keep <= 0.0 + 1e-6:
+            return torch.zeros_like(mask_soft)
+
+        out = mask_soft
+        for _ in range(max(1, int(iters))):
+            cur = out.mean(dim=(1, 2), keepdim=True)
+            scale = target_keep / (cur + eps)
+            out = (out * scale).clamp(0.0, 1.0)
+        return out
+
     def _fuse_levels(
         self,
         levels: Dict[int, torch.Tensor],
@@ -306,6 +333,8 @@ class ASTPruner(nn.Module):
             kth = torch.kthvalue(-flat, k).values * -1
             mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
         mask_soft = torch.stack(mask_soft, dim=0)
+        if bool(cfg.get("calibrate_keep_mean", True)):
+            mask_soft = self._calibrate_keep_mean(mask_soft, target_keep=rho)
         sparsity_token = 1.0 - mask_soft.mean()
         return mask_soft, sparsity_token
 
@@ -382,6 +411,8 @@ class ASTPruner(nn.Module):
             kth = torch.kthvalue(-flat, k).values * -1
             mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
         mask_soft = torch.stack(mask_soft, dim=0)
+        if bool(self.cfg.get("calibrate_keep_mean", True)):
+            mask_soft = self._calibrate_keep_mean(mask_soft, target_keep=rho)
         sparsity_token = 1.0 - mask_soft.mean()
         for name, (s, e) in modality_slices.items():
             modal_stats[name]["sparsity"] = 1.0 - mask_soft[:, :, s:e].mean()

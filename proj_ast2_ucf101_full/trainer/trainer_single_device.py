@@ -117,8 +117,10 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
             "lambda_ast": lam_end,
         }
 
-    # ramp progress for this epoch (first ramp epoch uses t=1/ramp)
-    t = float(epoch - warm + 1) / float(ramp)
+    # Ramp progress for this epoch.
+    # Use t=0 at the first ramp epoch (epoch == warmup_epochs) so
+    # rho/temp/lambda start from *_start without an immediate jump.
+    t = float(epoch - warm) / float(ramp)
     t = float(max(0.0, min(1.0, t)))
     phase = "ramp" if t < 1.0 else "stabilize"
     return {
@@ -1230,8 +1232,15 @@ def validate(
     tqdm_leave: bool = False,
 ) -> float:
     model.eval()
+    # Clip-level accuracy: each sampled clip/window counts as one sample.
     total = 0
     correct = 0
+
+    # Video-level accuracy: aggregate logits over clips sharing video_id.
+    video_logits_sum: dict[str, torch.Tensor] = {}
+    video_counts: dict[str, int] = {}
+    video_labels: dict[str, int] = {}
+    saw_video_id = False
     total_batches = len(loader) if hasattr(loader, "__len__") else None
     if max_batches is not None and max_batches > 0 and total_batches is not None:
         total_batches = min(total_batches, max_batches)
@@ -1255,6 +1264,9 @@ def validate(
         for batch_idx, batch in iterable:
             x = batch["video"].to(device)
             y = batch["label"].to(device)
+            vids = batch.get("video_id", None)
+            if vids is not None:
+                saw_video_id = True
             if str(_cfg_select(cfg, "training.model_type", "video") or "video") == "video_audio":
                 logits = model(x, batch["audio"].to(device))
             else:
@@ -1263,6 +1275,19 @@ def validate(
             pred = logits.argmax(dim=1)
             total += y.size(0)
             correct += (pred == y).sum().item()
+
+            if vids is not None:
+                logits_cpu = logits.detach().float().cpu()
+                y_cpu = y.detach().cpu()
+                for j, vid in enumerate(vids):
+                    k = str(vid)
+                    if k not in video_logits_sum:
+                        video_logits_sum[k] = logits_cpu[j].clone()
+                        video_counts[k] = 1
+                        video_labels[k] = int(y_cpu[j].item())
+                    else:
+                        video_logits_sum[k] += logits_cpu[j]
+                        video_counts[k] += 1
 
             if pbar is not None and (batch_idx == 1 or batch_idx % refresh_every == 0):
                 acc_now = correct / max(1, total)
@@ -1281,7 +1306,29 @@ def validate(
             if max_batches is not None and max_batches > 0 and batch_idx >= max_batches:
                 break
 
-    acc = correct / max(1, total)
-    logger.info("[val] epoch=%s mode=%s acc=%.4f", epoch, tag, acc)
+    acc_clip = correct / max(1, total)
+    acc_video = acc_clip
+    if saw_video_id and len(video_logits_sum) > 0:
+        vids_all = list(video_logits_sum.keys())
+        logits_video = torch.stack(
+            [video_logits_sum[k] / float(max(1, video_counts[k])) for k in vids_all],
+            dim=0,
+        )
+        labels_video = torch.tensor([video_labels[k] for k in vids_all], dtype=torch.long)
+        pred_video = logits_video.argmax(dim=1)
+        acc_video = float((pred_video == labels_video).float().mean().item())
+
+    pref = str(getattr(getattr(cfg, "data", object()), "eval_aggregate", "clip")).lower()
+    logger.info(
+        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f n_video=%s (pref=%s)",
+        epoch,
+        tag,
+        acc_clip,
+        acc_video,
+        len(video_logits_sum),
+        pref,
+    )
     logger.info("Finished validation epoch=%s mode=%s", epoch, tag)
-    return float(acc)
+    if pref in {"video", "video_avg", "video_mean"}:
+        return float(acc_video)
+    return float(acc_clip)
