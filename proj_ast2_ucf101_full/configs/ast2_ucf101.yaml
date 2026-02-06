@@ -25,6 +25,10 @@ data:
   clip_lens: [8, 16]
   clip_lens_train: [16]
   clip_lens_eval: [8, 16]
+  # How to compute accuracy on val/test.
+  # "clip"  : each window counts as a sample.
+  # "video" : average logits across windows sharing the same video_id.
+  eval_aggregate: "video"
   num_frames: 8
   use_audio: false
   # stride = int(cover_len * stride_ratio). For cover_len=16:

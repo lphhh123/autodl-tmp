@@ -98,8 +98,10 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
             "lambda_ast": lam_end,
         }
 
-    # ramp progress for this epoch (first ramp epoch uses t=1/ramp)
-    t = float(epoch - warm + 1) / float(ramp)
+    # Ramp progress for this epoch.
+    # Use t=0 at the first ramp epoch (epoch == warmup_epochs) so
+    # rho/temp/lambda start from *_start without an immediate jump.
+    t = float(epoch - warm) / float(ramp)
     t = float(max(0.0, min(1.0, t)))
     phase = "ramp" if t < 1.0 else "stabilize"
     return {
@@ -1835,12 +1837,14 @@ def train_version_c(
                         L_layout.backward()
                         optimizer_layout.step()
 
+                val_agg = str(getattr(getattr(cfg, "data", object()), "eval_aggregate", "clip"))
                 val_acc1 = eval_acc1(
                     model,
                     val_loader,
                     device,
                     model_type=str(getattr(cfg.training, "model_type", "video")),
                     max_batches=max_eval_batches,
+                    aggregate=val_agg,
                 )
                 if stable_hw_enabled:
                     stable_decision, _ = apply_accuracy_guard(
