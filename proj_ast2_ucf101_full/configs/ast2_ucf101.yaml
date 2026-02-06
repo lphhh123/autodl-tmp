@@ -80,8 +80,10 @@ ast:
   # Dense warmup -> ramp -> stabilize for token gating (prevents early over-pruning).
   schedule:
     enabled: true
-    warmup_epochs: 5      # epochs with force_dense + lambda_AST=0
-    ramp_epochs: 10       # epochs to ramp to target rho/temperature/lambda_AST
+    # For train.epochs=50:
+    # warmup=15 (epoch 0..14), ramp=25 (epoch 15..39), stabilize=10 (epoch 40..49)
+    warmup_epochs: 15     # epochs with force_dense + lambda_AST=0
+    ramp_epochs: 25       # epochs to ramp to target rho/temperature/lambda_AST
     curve: "cosine"       # "linear" or "cosine"
     rho_start: 1.0
     temp_start: 1.0
