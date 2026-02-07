@@ -56,14 +56,19 @@ def apply_smoke_overrides_single(cfg):
     if OmegaConf.select(cfg, "train.epochs") is not None:
         cfg.train.epochs = 1
     if OmegaConf.select(cfg, "train.warmup_epochs") is not None:
-        cfg.train.warmup_epochs = 0
+        cfg.train.warmup_epochs = 1
+
+    # SMOKE: shorten AST dense warmup stage (default in configs/ast2_ucf101.yaml is 15)
+    # This affects only SMOKE=1 runs and helps hit pruning code-path quickly.
+    if OmegaConf.select(cfg, "ast.schedule.warmup_epochs") is not None:
+        cfg.ast.schedule.warmup_epochs = 1
 
     # --- Aggressively reduce clip count for SMOKE (do NOT affect formal runs) ---
     # code semantics: stride = int(clip_len * stride_ratio), bigger => fewer clips
     if OmegaConf.select(cfg, "data.train_stride_ratio") is not None:
-        cfg.data.train_stride_ratio = 6.0
+        cfg.data.train_stride_ratio = 10.0
     if OmegaConf.select(cfg, "data.eval_stride_ratio") is not None:
-        cfg.data.eval_stride_ratio = 6.0
+        cfg.data.eval_stride_ratio = 10.0
 
     if OmegaConf.select(cfg, "val.fast_max_batches") is not None:
         cfg.val.fast_max_batches = min(int(cfg.val.fast_max_batches), 20)
@@ -84,8 +89,8 @@ def apply_smoke_overrides_single(cfg):
         cfg.test.fast_max_batches = min(int(cfg.test.fast_max_batches), 50)
 
     print(
-        "[SMOKE] single-device overrides applied: epochs=1, warmup=0, "
-        "train_stride_ratio=6.0, eval_stride_ratio=6.0, "
+        "[SMOKE] single-device overrides applied: epochs=1, warmup=1, ast_warmup=1, "
+        "train_stride_ratio=10.0, eval_stride_ratio=10.0, "
         "fast_val<=20, full_every=1, final_test=ON (test.fast_max_batches<=50 if supported)"
     )
     return cfg
