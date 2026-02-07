@@ -190,6 +190,12 @@ class ASTPruner(nn.Module):
         self.g_ch = nn.Parameter(torch.zeros(depth, hidden_dim))
         self.g_block = nn.Parameter(torch.zeros(depth))
 
+        self.gating_fp32 = bool(cfg.get("gating_fp32", True))
+        self.detach_mask = bool(cfg.get("detach_mask", True))
+        self.hard_topk = bool(cfg.get("hard_topk", True))
+        self.min_keep_ratio = float(cfg.get("min_keep_ratio", 0.25))
+        self.sanitize_nan = bool(cfg.get("sanitize_nan", True))
+
         # Runtime overrides (set by trainer for warmup/ramp scheduling).
         # These are optional and default to None/False to preserve original behavior.
         self._runtime_force_dense: bool = False
@@ -324,16 +330,27 @@ class ASTPruner(nn.Module):
         elif policy == "uniform":
             idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
             score = idx / (float(score.numel()) + 1e-12)
+        if self.sanitize_nan:
+            score = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
         mask_soft = []
         rho = float(self._runtime_rho_token) if self._runtime_rho_token is not None else float(cfg.get("rho_token_target", 0.5))
         temperature = float(self._runtime_token_temperature) if self._runtime_token_temperature is not None else float(cfg.get("token_temperature", 0.1))
         for b in range(B):
             flat = score[b].reshape(-1)
-            k = max(1, int(rho * flat.numel()))
-            kth = torch.kthvalue(-flat, k).values * -1
-            mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
+            min_keep = int(max(1, float(self.min_keep_ratio) * flat.numel()))
+            k = int(rho * flat.numel())
+            k = max(min_keep, k)
+            k = max(1, min(k, flat.numel()))
+            if self.hard_topk:
+                topk_idx = torch.topk(flat, k, largest=True).indices
+                mask = torch.zeros_like(flat)
+                mask[topk_idx] = 1.0
+                mask_soft.append(mask.view_as(score[b]))
+            else:
+                kth = torch.kthvalue(-flat, k).values * -1
+                mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
         mask_soft = torch.stack(mask_soft, dim=0)
-        if bool(cfg.get("calibrate_keep_mean", True)):
+        if (not self.hard_topk) and bool(cfg.get("calibrate_keep_mean", True)):
             mask_soft = self._calibrate_keep_mean(mask_soft, target_keep=rho)
         sparsity_token = 1.0 - mask_soft.mean()
         return mask_soft, sparsity_token
@@ -401,17 +418,28 @@ class ASTPruner(nn.Module):
         elif policy == "uniform":
             idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
             score = idx / (float(score.numel()) + 1e-12)
+        if self.sanitize_nan:
+            score = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
 
         mask_soft = []
         rho = float(self._runtime_rho_token) if self._runtime_rho_token is not None else float(self.cfg.get("rho_token_target", 0.5))
         temperature = float(self._runtime_token_temperature) if self._runtime_token_temperature is not None else float(self.cfg.get("token_temperature", 0.1))
         for b in range(x.shape[0]):
             flat = score[b].reshape(-1)
-            k = max(1, int(rho * flat.numel()))
-            kth = torch.kthvalue(-flat, k).values * -1
-            mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
+            min_keep = int(max(1, float(self.min_keep_ratio) * flat.numel()))
+            k = int(rho * flat.numel())
+            k = max(min_keep, k)
+            k = max(1, min(k, flat.numel()))
+            if self.hard_topk:
+                topk_idx = torch.topk(flat, k, largest=True).indices
+                mask = torch.zeros_like(flat)
+                mask[topk_idx] = 1.0
+                mask_soft.append(mask.view_as(score[b]))
+            else:
+                kth = torch.kthvalue(-flat, k).values * -1
+                mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
         mask_soft = torch.stack(mask_soft, dim=0)
-        if bool(self.cfg.get("calibrate_keep_mean", True)):
+        if (not self.hard_topk) and bool(self.cfg.get("calibrate_keep_mean", True)):
             mask_soft = self._calibrate_keep_mean(mask_soft, target_keep=rho)
         sparsity_token = 1.0 - mask_soft.mean()
         for name, (s, e) in modality_slices.items():
@@ -421,12 +449,19 @@ class ASTPruner(nn.Module):
     def forward_token_gating(
         self, x: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        x_gate = x
+        if self.detach_mask:
+            x_gate = x_gate.detach()
+        if self.gating_fp32:
+            x_gate = x_gate.float()
+        if self.sanitize_nan:
+            x_gate = torch.nan_to_num(x_gate, nan=0.0, posinf=0.0, neginf=0.0)
         if modality_slices:
-            mask_soft, sparsity_token, modal_stats = self.token_gating_multi_modal(x, modality_slices)
+            mask_soft, sparsity_token, modal_stats = self.token_gating_multi_modal(x_gate, modality_slices)
         else:
-            mask_soft, sparsity_token = self.token_gating_single_modal(x)
+            mask_soft, sparsity_token = self.token_gating_single_modal(x_gate)
             modal_stats = {}
-        x_gated = x * mask_soft.unsqueeze(-1)
+        x_gated = x * mask_soft.to(dtype=x.dtype).unsqueeze(-1)
         token_prune = sparsity_token
         token_keep = (1.0 - token_prune)
         return x_gated, {

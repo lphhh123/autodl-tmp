@@ -29,37 +29,64 @@ class VideoViTConfig:
     ast_cfg: Optional[Dict] = None
 
 
+class DropPath(nn.Module):
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = float(drop_prob)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.drop_prob == 0.0 or (not self.training):
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor = random_tensor.floor()
+        return x.div(keep_prob) * random_tensor
+
+
 class MLP(nn.Module):
-    def __init__(self, dim: int, mlp_ratio: float):
+    def __init__(self, dim: int, mlp_ratio: float, drop: float = 0.0):
         super().__init__()
         hidden = int(dim * mlp_ratio)
         self.fc1 = nn.Linear(dim, hidden)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden, dim)
+        self.drop = nn.Dropout(drop)
 
     def forward(self, x: torch.Tensor, ch_weight: torch.Tensor) -> torch.Tensor:
         h = self.fc1(x)
         h = h * ch_weight.unsqueeze(0).unsqueeze(0)
         h = self.act(h)
+        h = self.drop(h)
         h = self.fc2(h)
+        h = self.drop(h)
         return h
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, mlp_ratio: float, attn_drop: float = 0.0, drop: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        attn_drop: float = 0.0,
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+    ):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True, dropout=attn_drop)
         self.norm2 = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, mlp_ratio)
+        self.mlp = MLP(dim, mlp_ratio, drop=drop)
+        self.drop_path = DropPath(drop_path)
 
     def forward(self, x: torch.Tensor, head_weight: torch.Tensor, ch_weight: torch.Tensor, block_weight: torch.Tensor) -> torch.Tensor:
         h, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
         head_scale = head_weight.mean()
         h = h * head_scale
-        x = x + block_weight * h
+        x = x + self.drop_path(block_weight * h)
         mlp_out = self.mlp(self.norm2(x), ch_weight)
-        x = x + block_weight * mlp_out
+        x = x + self.drop_path(block_weight * mlp_out)
         return x
 
 
@@ -77,10 +104,20 @@ class VideoViT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, cfg.embed_dim))
         self.pos_drop = nn.Dropout(cfg.drop_rate)
 
-        self.blocks = nn.ModuleList([
-            Block(cfg.embed_dim, cfg.num_heads, cfg.mlp_ratio, attn_drop=cfg.attn_drop, drop=cfg.drop_rate)
-            for _ in range(cfg.depth)
-        ])
+        dpr = torch.linspace(0, cfg.drop_path_rate, cfg.depth).tolist()
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    cfg.embed_dim,
+                    cfg.num_heads,
+                    cfg.mlp_ratio,
+                    attn_drop=cfg.attn_drop,
+                    drop=cfg.drop_rate,
+                    drop_path=dpr[i],
+                )
+                for i in range(cfg.depth)
+            ]
+        )
         self.norm = nn.LayerNorm(cfg.embed_dim)
         self.head = nn.Linear(cfg.embed_dim, cfg.num_classes)
 
@@ -139,9 +176,11 @@ class VideoViT(nn.Module):
         ast_out: Optional[ASTOutputs] = None
         L_AST = torch.tensor(0.0, device=x.device)
         if self.use_ast and self.ast_pruner is not None:
-            ast_out = self.ast_pruner(tokens)
-            token_mask = ast_out.token_mask.unsqueeze(-1)  # [B, T, N, 1]
-            tokens = tokens * token_mask
+            with torch.autocast(device_type=tokens.device.type, enabled=False):
+                ast_out = self.ast_pruner(tokens.float())
+            token_mask = ast_out.token_mask
+            token_mask = torch.nan_to_num(token_mask, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+            tokens = tokens * token_mask.to(dtype=tokens.dtype).unsqueeze(-1)
         logits, head_w, ch_w, block_w, sparsity = self._forward_tokens(tokens, ast_out, b, t)
 
         if not return_intermediate:
@@ -237,10 +276,20 @@ class VideoAudioAST(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches_total + 1, embed_dim))
         self.pos_drop = nn.Dropout(drop_rate)
 
-        self.blocks = nn.ModuleList([
-            Block(embed_dim, num_heads, mlp_ratio, attn_drop=attn_drop, drop=drop_rate)
-            for _ in range(depth)
-        ])
+        dpr = torch.linspace(0, drop_path_rate, depth).tolist()
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    embed_dim,
+                    num_heads,
+                    mlp_ratio,
+                    attn_drop=attn_drop,
+                    drop=drop_rate,
+                    drop_path=dpr[i],
+                )
+                for i in range(depth)
+            ]
+        )
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, num_classes)
         self.audio_proj = nn.Linear(audio_feat_dim, embed_dim)
@@ -281,9 +330,11 @@ class VideoAudioAST(nn.Module):
         L_AST = torch.tensor(0.0, device=x_video.device)
         modality_slices = {"video": (0, self.num_tokens_video), "audio": (self.num_tokens_video, self.num_tokens_video + 1)}
         if self.use_ast and self.ast_pruner is not None:
-            ast_out = self.ast_pruner(tokens, modality_slices=modality_slices)
-            token_mask = ast_out.token_mask.unsqueeze(-1)  # [B, T, N, 1]
-            tokens = tokens * token_mask
+            with torch.autocast(device_type=tokens.device.type, enabled=False):
+                ast_out = self.ast_pruner(tokens.float(), modality_slices=modality_slices)
+            token_mask = ast_out.token_mask
+            token_mask = torch.nan_to_num(token_mask, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+            tokens = tokens * token_mask.to(dtype=tokens.dtype).unsqueeze(-1)
 
         tokens = tokens.view(b * t, self.num_tokens, -1)
         cls_tokens = self.cls_token.expand(b * t, -1, -1)
