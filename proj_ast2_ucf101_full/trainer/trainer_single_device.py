@@ -6,6 +6,7 @@ import math
 import os
 import numbers
 import random
+from copy import deepcopy
 from pathlib import Path
 from functools import partial
 from typing import Dict, Any, Optional
@@ -13,6 +14,7 @@ from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -226,11 +228,26 @@ def _atomic_torch_save(obj, dst: Path) -> None:
             pass
 
 
+class ModelEMA:
+    def __init__(self, model: nn.Module, decay: float = 0.9999):
+        self.decay = float(decay)
+        self.ema = deepcopy(model).eval()
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    def update(self, model: nn.Module) -> None:
+        with torch.no_grad():
+            msd = model.state_dict()
+            for k, v in self.ema.state_dict().items():
+                if k in msd:
+                    v.copy_(v * self.decay + msd[k] * (1.0 - self.decay))
+
 def save_checkpoint_single_device(
     out_dir: Path,
     tag: str,
     *,
     model: nn.Module,
+    ema_model: Optional[ModelEMA],
     optimizer: torch.optim.Optimizer,
     scaler: Optional[GradScaler],
     epoch: int,
@@ -247,6 +264,7 @@ def save_checkpoint_single_device(
         "seal_digest": str(seal_digest),
         "run_id": str(run_id),
         "model": model.state_dict(),
+        "ema": (ema_model.ema.state_dict() if ema_model is not None else None),
         "optimizer": optimizer.state_dict(),
         "scaler": (scaler.state_dict() if scaler is not None else None),
     }
@@ -527,6 +545,27 @@ def train_single_device(
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scaler = GradScaler(enabled=cfg.train.amp)
+    ema_cfg = getattr(cfg.train, "ema", None)
+    ema_enabled = bool(getattr(ema_cfg, "enabled", False))
+    ema_decay = float(getattr(ema_cfg, "decay", 0.9999) or 0.9999)
+    ema_eval = bool(getattr(ema_cfg, "eval", True))
+    ema_model = ModelEMA(model, decay=ema_decay) if ema_enabled else None
+
+    lr_schedule = str(getattr(cfg.train, "lr_schedule", "none") or "none").lower()
+    min_lr = float(getattr(cfg.train, "min_lr", 0.0) or 0.0)
+    warmup_epochs = int(getattr(cfg.train, "warmup_epochs", 0) or 0)
+    steps_per_epoch = len(train_loader) if hasattr(train_loader, "__len__") else 0
+    warmup_steps = warmup_epochs * steps_per_epoch
+    total_steps = int(cfg.train.epochs) * steps_per_epoch
+
+    label_smoothing = float(getattr(cfg.train, "label_smoothing", 0.0) or 0.0)
+    mixup_alpha = float(getattr(cfg.train, "mixup_alpha", 0.0) or 0.0)
+    mixup_prob = float(getattr(cfg.train, "mixup_prob", 1.0) or 1.0)
+    mixup_switch_off_epoch = int(getattr(cfg.train, "mixup_switch_off_epoch", -1) or -1)
+
+    grad_clip_norm = float(getattr(cfg.train, "grad_clip_norm", 0.0) or 0.0)
+    nan_guard = bool(getattr(cfg.train, "nan_guard", True))
+    skip_step_on_nonfinite = bool(getattr(cfg.train, "skip_step_on_nonfinite", True))
     proxy_weight_dir = str(getattr(cfg.hw, "weight_dir", "") or getattr(cfg.hw, "proxy_weight_dir", ""))
     if not proxy_weight_dir:
         raise RuntimeError("[ProxyMissing] cfg.hw.weight_dir or cfg.hw.proxy_weight_dir must be set.")
@@ -536,7 +575,7 @@ def train_single_device(
         proxy_weight_dir,
         run_ctx={
             "img": int(cfg.model.img_size),
-            "bs": int(getattr(cfg.data, "batch_size", 1) or 1),
+            "bs": int(getattr(cfg.train, "batch_size", getattr(cfg.data, "batch_size", 1)) or 1),
             "depth": int(cfg.model.depth),
             "embed_dim": int(cfg.model.embed_dim),
             "num_heads": int(cfg.model.num_heads),
@@ -562,6 +601,18 @@ def train_single_device(
                     json.dump(stable_state, f, indent=2)
             except Exception:
                 pass
+
+    def _compute_lr(global_step: int) -> float:
+        if lr_schedule != "cosine":
+            return float(lr)
+        if total_steps <= 0:
+            return float(lr)
+        if warmup_steps > 0 and global_step < warmup_steps:
+            return float(lr) * float(global_step + 1) / float(max(1, warmup_steps))
+        denom = max(1, total_steps - warmup_steps)
+        progress = float(global_step - warmup_steps) / float(denom)
+        progress = max(0.0, min(1.0, progress))
+        return float(min_lr) + 0.5 * (float(lr) - float(min_lr)) * (1.0 + math.cos(math.pi * progress))
 
     def _to_scalar(val, default: float = 0.0) -> float:
         if hasattr(val, "detach"):
@@ -701,6 +752,11 @@ def train_single_device(
                         scaler.load_state_dict(ckpt["scaler"])
                     except Exception:
                         pass
+                if ema_enabled and ema_model is not None and isinstance(ckpt, dict) and ckpt.get("ema", None) is not None:
+                    try:
+                        ema_model.ema.load_state_dict(ckpt["ema"], strict=True)
+                    except Exception:
+                        pass
 
                 last_epoch = int(ckpt.get("epoch", -1)) if isinstance(ckpt, dict) else -1
                 start_epoch = max(0, last_epoch + 1)
@@ -838,23 +894,54 @@ def train_single_device(
                 leave=True,
             )
             for step, batch in train_pbar:
+                global_step = int(epoch) * max(1, steps_per_epoch) + int(step)
+                if lr_schedule == "cosine":
+                    lr_cur = _compute_lr(global_step)
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = lr_cur
                 x = batch["video"].to(device)
                 y = batch["label"].to(device)
                 if epoch == 0 and step == 0:
                     logger.info("[DEBUG] train batch video.shape=%s", tuple(x.shape))
-                optimizer.zero_grad()
+                mixup_enabled = (
+                    mixup_alpha > 0.0
+                    and (random.random() < mixup_prob)
+                    and (mixup_switch_off_epoch < 0 or epoch < mixup_switch_off_epoch)
+                )
+                y_a = y
+                y_b = y
+                mixup_lam = 1.0
+                audio = batch.get("audio", None)
+                if mixup_enabled:
+                    mixup_lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                    perm = torch.randperm(x.size(0), device=x.device)
+                    x = x * mixup_lam + x[perm] * (1.0 - mixup_lam)
+                    if audio is not None:
+                        audio = audio.to(device)
+                        audio = audio * mixup_lam + audio[perm] * (1.0 - mixup_lam)
+                    y_a = y
+                    y_b = y[perm]
+                optimizer.zero_grad(set_to_none=True)
                 with autocast(device_type, enabled=cfg.train.amp):
                     if model_type == "video_audio":
-                        logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
+                        if audio is None:
+                            audio = batch["audio"].to(device)
+                        logits, info = model(x, audio, return_intermediate=True)
                     else:
                         logits, info = model(x, return_intermediate=True)
-                    L_task = F.cross_entropy(logits, y)
+                    if mixup_enabled:
+                        L_task = (
+                            mixup_lam * F.cross_entropy(logits, y_a, label_smoothing=label_smoothing)
+                            + (1.0 - mixup_lam) * F.cross_entropy(logits, y_b, label_smoothing=label_smoothing)
+                        )
+                    else:
+                        L_task = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
 
                     model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
                     if hw_proxy is not None and "layers_cfg" not in model_info:
                         try:
                             segments = build_segments_from_model(model, cfg, model_info=model_info, precision=1)
-                            bs = int(getattr(cfg.data, "batch_size", 1))
+                            bs = int(getattr(cfg.train, "batch_size", getattr(cfg.data, "batch_size", 1)) or 1)
                             nf = int(getattr(cfg.data, "num_frames", 1))
                             bs_eff = max(1, bs * nf)
                             layers_cfg = []
@@ -899,12 +986,29 @@ def train_single_device(
                     assert "hw_loss_weighted" not in (hw_stats or {}), (
                         "NoDoubleScale violated: hw_loss should not be weighted inside hw_loss module."
                     )
+                if nan_guard and (not torch.isfinite(loss.detach())):
+                    logger.error(
+                        "[NaNGuard] non-finite loss at epoch=%s step=%s: %s",
+                        epoch,
+                        step,
+                        float(loss.detach().cpu().item()) if torch.is_tensor(loss) else loss,
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    if skip_step_on_nonfinite:
+                        continue
+                    raise FloatingPointError("Non-finite loss encountered in training step.")
                 # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
                 assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
                 assert float(lambda_hw_eff) >= 0.0
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if grad_clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
+                if ema_model is not None:
+                    ema_model.update(model)
                 if step % 10 == 0:
                     acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
                     if stable_hw_enabled:
@@ -966,8 +1070,9 @@ def train_single_device(
                     tag,
                     "ALL" if max_batches == 0 else max_batches,
                 )
+                eval_model = ema_model.ema if (ema_model is not None and ema_eval) else model
                 last_acc = validate(
-                    model,
+                    eval_model,
                     val_loader,
                     device,
                     logger,
@@ -986,6 +1091,7 @@ def train_single_device(
                         out_dir,
                         "best",
                         model=model,
+                        ema_model=ema_model,
                         optimizer=optimizer,
                         scaler=scaler,
                         epoch=epoch,
@@ -1182,6 +1288,7 @@ def train_single_device(
             out_dir,
             "last",
             model=model,
+            ema_model=ema_model,
             optimizer=optimizer,
             scaler=scaler,
             epoch=last_epoch_idx,
@@ -1199,12 +1306,18 @@ def train_single_device(
         if best_path is not None and best_path.exists():
             ckpt = torch.load(best_path, map_location="cpu")
             model.load_state_dict(ckpt.get("model", ckpt))
+            if ema_enabled and ema_model is not None and ckpt.get("ema", None) is not None:
+                try:
+                    ema_model.ema.load_state_dict(ckpt.get("ema"), strict=True)
+                except Exception:
+                    pass
             logger.info("[CKPT] Loaded best checkpoint from %s", best_path)
         else:
             logger.info("[FINAL TEST] No best checkpoint captured; using current model state.")
         test_epoch = int(cfg.train.epochs)
+        eval_model = ema_model.ema if (ema_model is not None and ema_eval) else model
         validate(
-            model,
+            eval_model,
             test_loader,
             device,
             logger,

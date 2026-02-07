@@ -14,6 +14,9 @@ _base_: configs/ast2_ucf101_dense.yaml
 model:
   # Dense baseline should not enable AST pruning in any form.
   use_ast_prune: false
+  drop_rate: 0.1
+  attn_drop: 0.1
+  drop_path_rate: 0.15
 
 data:
   # Main-table protocol: eval uses the same temporal length as training
@@ -27,9 +30,27 @@ data:
   train_stride_ratio: 0.75
   eval_stride_ratio: 0.75
 
+  runtime_tstart_jitter: 8
+  frame_sampling_train: "segment_random"
+  frame_sampling_eval: "linspace"
+
   # Dense baseline MUST NOT use window retention
   window_retention:
     enabled: false
+
+train:
+  lr_schedule: "cosine"
+  min_lr: 1e-6
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  mixup_prob: 1.0
+  grad_clip_norm: 1.0
+  nan_guard: true
+  skip_step_on_nonfinite: true
+  ema:
+    enabled: true
+    decay: 0.9998
+    eval: true
 
 test:
   # Keep ON in formal runs; SMOKE bounds it automatically.

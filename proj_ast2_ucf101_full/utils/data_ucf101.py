@@ -620,8 +620,36 @@ class UCF101Dataset(Dataset):
                 ]
             )
 
+        self.runtime_tstart_jitter = int(getattr(data_cfg, "runtime_tstart_jitter", 0) or 0)
+        default_sampling = str(getattr(data_cfg, "frame_sampling", "linspace") or "linspace").lower()
+        self.frame_sampling_train = str(
+            getattr(data_cfg, "frame_sampling_train", default_sampling) or default_sampling
+        ).lower()
+        self.frame_sampling_eval = str(
+            getattr(data_cfg, "frame_sampling_eval", "linspace") or "linspace"
+        ).lower()
+
     def __len__(self) -> int:
         return len(self.clips)
+
+    def _choose_frame_indices(self, Lw: int, num_frames: int, policy: str) -> List[int]:
+        """Choose frame indices within a clip window."""
+        if num_frames <= 0:
+            return []
+        if Lw <= 0:
+            return [0 for _ in range(num_frames)]
+        policy = str(policy or "linspace").lower()
+        if policy == "segment_random":
+            indices: List[int] = []
+            for i in range(num_frames):
+                start = int(i * Lw / num_frames)
+                end = int((i + 1) * Lw / num_frames) - 1
+                if end < start:
+                    end = start
+                indices.append(random.randint(start, end))
+            return indices
+        idxs = np.linspace(0, Lw - 1, num_frames)
+        return np.floor(idxs).astype(int).tolist()
 
     def _load_frames(self, source_path: Path, frame_indices: List[int], video_id: str) -> List[Image.Image]:
         frame_files = self._frame_cache.get(video_id)
@@ -660,21 +688,18 @@ class UCF101Dataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.clips[idx]
         total_frames = item.total_frames
-        t_end = min(item.t_start + item.cover_len, total_frames)
-        t_end = max(t_end, item.t_start)
-        Lw = max(0, t_end - item.t_start)
-        if Lw >= self.num_frames:
-            idxs = np.linspace(0, Lw - 1, self.num_frames)
-            idxs = np.floor(idxs).astype(int)
-        else:
-            base = np.arange(Lw, dtype=int)
-            if base.size == 0:
-                idxs = np.zeros(self.num_frames, dtype=int)
-            else:
-                pad_needed = self.num_frames - Lw
-                pad = np.clip(base[-1:], 0, max(Lw - 1, 0)).repeat(pad_needed)
-                idxs = np.concatenate([base, pad], axis=0)
-        frame_ids = item.t_start + idxs
+        t_start = int(item.t_start)
+        if self.is_train and self.runtime_tstart_jitter > 0:
+            jitter = int(self.runtime_tstart_jitter)
+            delta = random.randint(-jitter, jitter)
+            max_start = max(total_frames - item.cover_len, 0)
+            t_start = max(0, min(t_start + delta, max_start))
+        t_end = min(t_start + item.cover_len, total_frames)
+        t_end = max(t_end, t_start)
+        Lw = max(0, t_end - t_start)
+        policy = self.frame_sampling_train if self.is_train else self.frame_sampling_eval
+        idxs = np.array(self._choose_frame_indices(Lw, self.num_frames, policy), dtype=int)
+        frame_ids = t_start + idxs
         frame_ids = np.clip(frame_ids, 0, max(total_frames - 1, 0)).astype(int).tolist()
         frames = self._load_frames(item.source_path, frame_ids, item.video_id)
         tensor_frames = [self.transform(frame) for frame in frames]

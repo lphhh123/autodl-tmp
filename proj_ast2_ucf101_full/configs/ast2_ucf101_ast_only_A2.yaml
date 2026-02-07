@@ -15,14 +15,53 @@ stable_hw:
 model:
   # enable token pruning path (your code uses this flag for AST pruning hooks)
   use_ast_prune: true
+  drop_rate: 0.1
+  attn_drop: 0.1
+  drop_path_rate: 0.15
 
 data:
   clip_lens_train: [16]
   clip_lens_eval: [16]
   train_stride_ratio: 0.75
   eval_stride_ratio: 0.75
+  runtime_tstart_jitter: 8
+  frame_sampling_train: "segment_random"
+  frame_sampling_eval: "linspace"
   window_retention:
     enabled: false
+
+ast:
+  gating_fp32: true
+  detach_mask: true
+  hard_topk: true
+  min_keep_ratio: 0.25
+  sanitize_nan: true
+  token_temperature: 0.5
+  schedule:
+    enabled: true
+    warmup_epochs: 20
+    ramp_epochs: 25
+    curve: "cosine"
+    rho_start: 1.0
+    temp_start: 1.0
+    lambda_ast_start: 0.0
+
+loss:
+  lambda_AST: 0.2
+
+train:
+  lr_schedule: "cosine"
+  min_lr: 1e-6
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  mixup_prob: 1.0
+  grad_clip_norm: 1.0
+  nan_guard: true
+  skip_step_on_nonfinite: true
+  ema:
+    enabled: true
+    decay: 0.9998
+    eval: true
 
 test:
   run_final_test: true
