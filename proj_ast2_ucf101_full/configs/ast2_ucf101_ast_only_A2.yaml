@@ -39,7 +39,7 @@ ast:
   token_temperature: 0.5
   schedule:
     enabled: true
-    warmup_epochs: 20
+    warmup_epochs: 15
     ramp_epochs: 25
     curve: "cosine"
     rho_start: 1.0

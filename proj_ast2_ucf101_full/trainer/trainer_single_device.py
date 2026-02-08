@@ -27,7 +27,6 @@ from mapping.segments import build_segments_from_model
 from models.video_vit import VideoViT, VideoAudioAST
 from utils.data_ucf101 import UCF101Dataset
 from utils.logging_utils import setup_logger, log_stats
-from utils.metrics import topk_accuracy
 from utils.distributed_utils import get_device
 from utils.eval_utils import eval_acc1
 from utils.seed import seed_everything
@@ -133,6 +132,116 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
         "token_temperature": _ast_interp(temp_start, temp_end, t, curve=curve),
         "lambda_ast": _ast_interp(lam_start, lam_end, t, curve=curve),
     }
+
+
+# -------------------------
+# AST schedule runtime helpers
+# -------------------------
+
+def _apply_ast_runtime_overrides_to_model(model: nn.Module, cfg, ast_sched: dict) -> Optional[dict]:
+    """Apply AST schedule to a model's pruner (if present) without mutating cfg."""
+    pruner = getattr(model, "ast_pruner", None)
+    if pruner is None or not hasattr(pruner, "set_runtime_overrides"):
+        return None
+
+    ast_cfg = getattr(cfg, "ast", None)
+    force_dense = bool(ast_sched.get("force_dense", False))
+    rho_token = float(
+        ast_sched.get("rho_token", getattr(ast_cfg, "rho_token_target", 1.0) if ast_cfg is not None else 1.0)
+    )
+    token_temperature = float(
+        ast_sched.get(
+            "token_temperature",
+            getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1,
+        )
+    )
+
+    pruner.set_runtime_overrides(
+        force_dense=force_dense,
+        rho_token=rho_token,
+        token_temperature=token_temperature,
+    )
+    return {
+        "force_dense": force_dense,
+        "rho_token": float(rho_token),
+        "token_temperature": float(token_temperature),
+    }
+
+
+def _maybe_freeze_ast_schedule(ast_sched: dict, stable_state: Dict[str, Any], epoch: int) -> dict:
+    """Freeze AST schedule when StableHW is in recovery (prevents over-pruning)."""
+    if not isinstance(stable_state, dict):
+        return ast_sched
+
+    freeze = bool(stable_state.get("freeze_schedule", False)) or bool(stable_state.get("freeze_ast_schedule", False))
+    if not freeze:
+        stable_state["ast_sched_last_applied"] = dict(ast_sched)
+        stable_state["ast_sched_last_epoch"] = int(epoch)
+        # clear frozen snapshot when leaving recovery
+        stable_state.pop("ast_sched_frozen", None)
+        stable_state.pop("ast_sched_frozen_epoch", None)
+        return ast_sched
+
+    frozen = stable_state.get("ast_sched_frozen") or stable_state.get("ast_sched_last_applied")
+    if isinstance(frozen, dict) and frozen:
+        stable_state["ast_sched_frozen"] = dict(frozen)
+        stable_state["ast_sched_frozen_epoch"] = int(epoch)
+        return dict(frozen)
+    return ast_sched
+
+
+def _extract_ast_pruner_runtime(model: nn.Module) -> Optional[dict]:
+    pruner = getattr(model, "ast_pruner", None)
+    if pruner is None:
+        return None
+    out: Dict[str, Any] = {}
+
+    # Some pruners expose a dict; others store private runtime fields.
+    ro = getattr(pruner, "runtime_overrides", None)
+    if isinstance(ro, dict):
+        out["runtime_overrides"] = dict(ro)
+
+    # v5.4 AST2 pruner uses private runtime fields.
+    if hasattr(pruner, "_runtime_force_dense"):
+        try:
+            out["force_dense"] = bool(getattr(pruner, "_runtime_force_dense"))
+        except Exception:
+            pass
+    if hasattr(pruner, "_runtime_rho_token"):
+        try:
+            v = getattr(pruner, "_runtime_rho_token")
+            out["rho_token"] = (None if v is None else float(v))
+        except Exception:
+            pass
+    if hasattr(pruner, "_runtime_token_temperature"):
+        try:
+            v = getattr(pruner, "_runtime_token_temperature")
+            out["token_temperature"] = (None if v is None else float(v))
+        except Exception:
+            pass
+
+    # Best-effort: some older pruners expose public fields.
+    for k in ("force_dense", "rho_token", "token_temperature"):
+        if k in out:
+            continue
+        if hasattr(pruner, k):
+            try:
+                v = getattr(pruner, k)
+                out[k] = bool(v) if k == "force_dense" else float(v)
+            except Exception:
+                pass
+
+    return out if out else None
+
+
+def _topk_correct_frac(logits: torch.Tensor, targets: torch.Tensor, k: int) -> torch.Tensor:
+    """Per-sample correctness for top-k. Returns float tensor in [0,1] of shape [B]."""
+    k = int(k)
+    if k <= 1:
+        return (logits.argmax(dim=1) == targets).float()
+    _, pred = logits.topk(k, dim=1)
+    return pred.eq(targets.view(-1, 1)).any(dim=1).float()
+
 
 def _as_float(val, name: str) -> float:
     """Convert config values that might be strings into floats with a clear error."""
@@ -254,6 +363,7 @@ def save_checkpoint_single_device(
     best_acc1: float,
     seal_digest: str,
     run_id: str,
+    ast_sched_applied: Optional[dict] = None,
 ) -> Path:
     ckpt_dir = Path(out_dir) / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -265,6 +375,10 @@ def save_checkpoint_single_device(
         "run_id": str(run_id),
         "model": model.state_dict(),
         "ema": (ema_model.ema.state_dict() if ema_model is not None else None),
+        # v5.4+: persist AST schedule + runtime overrides for reproducible eval/test
+        "ast_sched_applied": (dict(ast_sched_applied) if isinstance(ast_sched_applied, dict) else None),
+        "ast_pruner_runtime_model": _extract_ast_pruner_runtime(model),
+        "ast_pruner_runtime_ema": (_extract_ast_pruner_runtime(ema_model.ema) if ema_model is not None else None),
         "optimizer": optimizer.state_dict(),
         "scaler": (scaler.state_dict() if scaler is not None else None),
     }
@@ -861,28 +975,46 @@ def train_single_device(
             # -------------------------
             # AST schedule (dense warmup -> ramp -> stabilize)
             # This affects token gating (rho/temperature) and lambda_AST multiplier only.
+            # IMPORTANT: runtime overrides MUST be applied to BOTH model and EMA model,
+            # otherwise eval/test silently uses default rho_target and drifts from training.
             # -------------------------
             ast_sched = compute_ast_schedule_effective(cfg, int(epoch))
+            ast_sched = _maybe_freeze_ast_schedule(ast_sched, stable_state, epoch=int(epoch))
+            stable_state["ast_sched_last_applied"] = (
+                dict(ast_sched) if isinstance(ast_sched, dict) else {"phase": "disabled"}
+            )
+            stable_state["ast_sched_last_epoch"] = int(epoch)
             lambda_ast_eff = float(getattr(getattr(cfg, "loss", None), "lambda_AST", 1.0) or 1.0)
-            if ast_sched.get("phase") != "disabled":
+            if isinstance(ast_sched, dict) and ast_sched.get("phase") != "disabled":
                 lambda_ast_eff = float(ast_sched.get("lambda_ast", lambda_ast_eff))
-                pruner = getattr(model, "ast_pruner", None)
-                if pruner is not None and hasattr(pruner, "set_runtime_overrides"):
-                    pruner.set_runtime_overrides(
-                        force_dense=bool(ast_sched.get("force_dense", False)),
-                        rho_token=float(ast_sched.get("rho_token", getattr(getattr(cfg, "ast", None), "rho_token_target", 1.0))),
-                        token_temperature=float(ast_sched.get("token_temperature", getattr(getattr(cfg, "ast", None), "token_temperature", 0.1))),
+                _apply_ast_runtime_overrides_to_model(model, cfg, ast_sched)
+                if ema_model is not None:
+                    _apply_ast_runtime_overrides_to_model(ema_model.ema, cfg, ast_sched)
+                sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
+                warm_e = int(getattr(sched0, "warmup_epochs", 0) or 0) if sched0 is not None else 0
+                freeze_now = bool(stable_state.get("freeze_schedule", False)) or bool(
+                    stable_state.get("freeze_ast_schedule", False)
+                )
+
+                # Log at key transition points to confirm pruning actually starts.
+                if epoch == start_epoch or epoch == warm_e or epoch == (warm_e + 1) or freeze_now or (epoch % 5 == 0):
+                    logger.info(
+                        "[ASTSchedule] epoch=%s phase=%s force_dense=%s rho_token=%.4f temp=%.4f lambda_ast=%.4f freeze=%s",
+                        int(epoch),
+                        str(ast_sched.get("phase")),
+                        bool(ast_sched.get("force_dense", False)),
+                        float(ast_sched.get("rho_token", 1.0)),
+                        float(ast_sched.get("token_temperature", 0.1)),
+                        float(ast_sched.get("lambda_ast", lambda_ast_eff)),
+                        bool(freeze_now),
                     )
                 if epoch == start_epoch:
-                    sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
                     logger.info(
                         "[ASTSchedule] enabled: warmup=%s, ramp=%s, curve=%s",
                         getattr(sched0, "warmup_epochs", None),
                         getattr(sched0, "ramp_epochs", None),
                         getattr(sched0, "curve", None),
                     )
-            else:
-                lambda_ast_eff = float(getattr(getattr(cfg, "loss", None), "lambda_AST", 1.0) or 1.0)
 
             model.train()
             last_hw_stats = None
@@ -1010,26 +1142,51 @@ def train_single_device(
                 if ema_model is not None:
                     ema_model.update(model)
                 if step % 10 == 0:
-                    acc1, acc5 = topk_accuracy(logits.detach(), y, topk=(1, 5))
+                    # NOTE: Under Mixup, raw argmax-vs-y accuracy is NOT meaningful.
+                    # We compute a mixup-weighted correctness so train acc can be compared to val/test.
+                    with torch.no_grad():
+                        if mixup_enabled:
+                            top1_a = _topk_correct_frac(logits.detach(), y_a, 1)
+                            top1_b = _topk_correct_frac(logits.detach(), y_b, 1)
+                            top5_a = _topk_correct_frac(logits.detach(), y_a, 5)
+                            top5_b = _topk_correct_frac(logits.detach(), y_b, 5)
+                            acc1 = (mixup_lam * top1_a + (1.0 - mixup_lam) * top1_b).mean()
+                            acc5 = (mixup_lam * top5_a + (1.0 - mixup_lam) * top5_b).mean()
+                        else:
+                            acc1 = _topk_correct_frac(logits.detach(), y, 1).mean()
+                            acc5 = _topk_correct_frac(logits.detach(), y, 5).mean()
+
+                    acc1_val = float(acc1.item())
+                    acc5_val = float(acc5.item())
+                    acc1_pct = acc1_val * 100.0
+                    acc5_pct = acc5_val * 100.0
+
                     if stable_hw_enabled:
                         metric = get_accuracy_metric_key(stable_hw_cfg)
                         if metric in ("train_acc1_ema", "train_ema"):
-                            update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1))
+                            # v5.4 contract: accuracy values are in [0,1]
+                            update_train_acc1_ema(stable_hw_cfg, stable_state, float(acc1_val))
                     train_pbar.set_postfix(
                         {
                             "loss": f"{loss.item():.4f}",
-                            "acc1": f"{acc1.item():.4f}",
+                            "acc1": f"{acc1_val:.4f}",
+                            "acc1%": f"{acc1_pct:.1f}",
                             "sparsity": f"{info['gates'].get('sparsity', {}).get('token', torch.tensor(0)).item():.4f}",
                         }
                     )
                     stats = {
                         "epoch": epoch,
                         "step": step,
-                        "loss": loss.item(),
-                        "acc1": acc1.item(),
-                        "acc5": acc5.item(),
+                        "loss": float(loss.item()),
+                        "acc1": float(acc1_val),
+                        "acc5": float(acc5_val),
+                        "acc1_pct": float(acc1_pct),
+                        "acc5_pct": float(acc5_pct),
+                        "mixup": int(bool(mixup_enabled)),
+                        "mixup_lam": float(mixup_lam) if mixup_enabled else 1.0,
                         "sparsity_token": info["gates"].get("sparsity", {}).get("token", torch.tensor(0)).item(),
                         "lambda_hw": float(lambda_hw_eff),
+                        "lambda_ast": float(lambda_ast_eff),
                         "hw_loss": float(L_hw.detach().cpu().item()),
                     }
                     stats.update(
@@ -1083,6 +1240,7 @@ def train_single_device(
                     tag=tag,
                     use_tqdm=val_use_tqdm,
                     tqdm_leave=(tag in ("full", "test")),
+                    ast_sched_override=stable_state.get("ast_sched_last_applied"),
                 )
             if last_acc is not None and do_full:
                 if last_acc > best_acc:
@@ -1098,6 +1256,7 @@ def train_single_device(
                         best_acc1=best_acc,
                         seal_digest=seal_digest,
                         run_id=run_id,
+                        ast_sched_applied=stable_state.get("ast_sched_last_applied"),
                     )
             if stable_hw_enabled:
                 stable_decision, _ = apply_accuracy_guard(
@@ -1295,6 +1454,9 @@ def train_single_device(
             best_acc1=best_acc,
             seal_digest=seal_digest,
             run_id=run_id,
+            ast_sched_applied=stable_state.get("ast_sched_last_applied")
+            if isinstance(locals().get("stable_state"), dict)
+            else None,
         )
 
     if run_final_test:
@@ -1303,6 +1465,8 @@ def train_single_device(
         best_path = best_ckpt_path
         if best_path is None and out_dir is not None:
             best_path = Path(out_dir) / "checkpoints" / "best.pth"
+        ckpt = None
+        test_ast_sched = None
         if best_path is not None and best_path.exists():
             ckpt = torch.load(best_path, map_location="cpu")
             model.load_state_dict(ckpt.get("model", ckpt))
@@ -1312,8 +1476,23 @@ def train_single_device(
                 except Exception:
                     pass
             logger.info("[CKPT] Loaded best checkpoint from %s", best_path)
+            # Restore the exact AST schedule used when this checkpoint was saved.
+            if isinstance(ckpt, dict) and isinstance(ckpt.get("ast_sched_applied"), dict):
+                test_ast_sched = dict(ckpt.get("ast_sched_applied"))
+            else:
+                ckpt_epoch = (
+                    int(ckpt.get("epoch", int(cfg.train.epochs))) if isinstance(ckpt, dict) else int(cfg.train.epochs)
+                )
+                test_ast_sched = compute_ast_schedule_effective(cfg, ckpt_epoch)
         else:
             logger.info("[FINAL TEST] No best checkpoint captured; using current model state.")
+            test_ast_sched = compute_ast_schedule_effective(cfg, int(cfg.train.epochs))
+
+        # Apply schedule to both model and EMA model to avoid silent drift.
+        if isinstance(test_ast_sched, dict) and test_ast_sched.get("phase") != "disabled":
+            _apply_ast_runtime_overrides_to_model(model, cfg, test_ast_sched)
+            if ema_model is not None:
+                _apply_ast_runtime_overrides_to_model(ema_model.ema, cfg, test_ast_sched)
         test_epoch = int(cfg.train.epochs)
         eval_model = ema_model.ema if (ema_model is not None and ema_eval) else model
         validate(
@@ -1328,6 +1507,7 @@ def train_single_device(
             tag="test",
             use_tqdm=val_use_tqdm,
             tqdm_leave=True,
+            ast_sched_override=test_ast_sched,
         )
 
 
@@ -1343,8 +1523,20 @@ def validate(
     tag: str = "full",
     use_tqdm: bool = True,
     tqdm_leave: bool = False,
+    ast_sched_override: Optional[dict] = None,
 ) -> float:
     model.eval()
+    # Ensure eval/test uses the SAME AST runtime overrides as training.
+    # (Critical for EMA eval and for final-test after loading best checkpoint.)
+    try:
+        ast_sched = (
+            ast_sched_override if isinstance(ast_sched_override, dict) else compute_ast_schedule_effective(cfg, int(epoch))
+        )
+        if isinstance(ast_sched, dict) and ast_sched.get("phase") != "disabled":
+            _apply_ast_runtime_overrides_to_model(model, cfg, ast_sched)
+    except Exception:
+        # Never let schedule plumbing crash eval.
+        pass
     # Clip-level accuracy: each sampled clip/window counts as one sample.
     total = 0
     correct = 0

@@ -24,3 +24,12 @@ data:
 
 test:
   run_final_test: true
+
+# Regularization to reduce train/test gap (no pretrain)
+train:
+  mixup_alpha: 0.2
+  mixup_prob: 1.0
+  mixup_switch_off_epoch: 18
+  label_smoothing: 0.1
+  ema: true
+  ema_decay: 0.9999
