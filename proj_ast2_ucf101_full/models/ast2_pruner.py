@@ -195,6 +195,7 @@ class ASTPruner(nn.Module):
         self.hard_topk = bool(cfg.get("hard_topk", True))
         self.min_keep_ratio = float(cfg.get("min_keep_ratio", 0.25))
         self.sanitize_nan = bool(cfg.get("sanitize_nan", True))
+        self._warned_missing_external_score = False
 
         # Runtime overrides (set by trainer for warmup/ramp scheduling).
         # These are optional and default to None/False to preserve original behavior.
@@ -294,42 +295,67 @@ class ASTPruner(nn.Module):
             raise ValueError(f"Unexpected space token shape {Hs.shape}, expected [B, {T}, {N}]")
         raise ValueError(f"Unexpected space token dims {Hs.dim()}, expected 2 or 3")
 
-    def token_gating_single_modal(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def token_gating_single_modal(
+        self,
+        x: torch.Tensor,
+        external_score: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
         B, T, N, _ = x.shape
         if self._runtime_force_dense or bool(cfg.get("force_dense", False)):
             mask_soft = torch.ones(B, T, N, device=x.device, dtype=x.dtype)
             sparsity_token = mask_soft.new_tensor(0.0)
             return mask_soft, sparsity_token
-        Ht = compute_multi_level_time_entropy(
-            x, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
-        )
-        Hs = compute_multi_level_space_entropy(
-            x, self.H_p, self.W_p, self.space_window_levels, self.entropy_tau, self.entropy_eps
-        )
-        Ht_fused = self._fuse_levels(
-            Ht["H_time_level"], expected_shape=(B, N), device=x.device, dtype=x.dtype
-        )
-        Hs_fused = self._fuse_levels(
-            Hs["H_space_level"], expected_shape=(B, T), device=x.device, dtype=x.dtype
-        )
-        Ht_norm = self._normalize(Ht_fused).to(x.dtype)
-        Hs_norm = self._normalize(Hs_fused).to(x.dtype)
-        H_time_token = self._expand_time_token(Ht_norm, T, N)
-        H_space_token = self._expand_space_token(Hs_norm, T, N)
-        region_score = H_space_token.mean(dim=1, keepdim=True).expand(-1, T, -1)
-        score = (
-            cfg.get("alpha_time", 1.0) * H_time_token
-            + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * H_space_token
-            + cfg.get("gamma_region", cfg.get("gamma_space_fine", 0.5)) * region_score
-        )
-        # ---- ablations: token_gating_policy (entropy|uniform|random) ----
+        # ---- token score source: pixel_entropy vs. embedding entropy ----
         policy = str(cfg.get("token_gating_policy", "entropy")).lower()
-        if policy == "random":
-            score = torch.rand_like(score)
-        elif policy == "uniform":
-            idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
-            score = idx / (float(score.numel()) + 1e-12)
+
+        if policy == "pixel_entropy" and external_score is not None:
+            assert tuple(external_score.shape) == (B, T, N), (
+                f"external_score shape mismatch: expected {(B, T, N)}, got {tuple(external_score.shape)}"
+            )
+            score = external_score.to(device=x.device, dtype=x.dtype)
+        else:
+            if policy == "pixel_entropy" and external_score is None and (not self._warned_missing_external_score):
+                print(
+                    "[ASTPruner][WARN] token_gating_policy=pixel_entropy but external_score is None; "
+                    "falling back to embedding-entropy score."
+                )
+                self._warned_missing_external_score = True
+
+            Ht = compute_multi_level_time_entropy(
+                x, self.time_window_levels, self.entropy_tau, self.entropy_eps, overlap=self.time_window_overlap
+            )
+            Hs = compute_multi_level_space_entropy(
+                x, self.H_p, self.W_p, self.space_window_levels, self.entropy_tau, self.entropy_eps
+            )
+            Ht_fused = self._fuse_levels(
+                Ht["H_time_level"], expected_shape=(B, N), device=x.device, dtype=x.dtype
+            )
+            Hs_fused = self._fuse_levels(
+                Hs["H_space_level"], expected_shape=(B, T), device=x.device, dtype=x.dtype
+            )
+            Ht_norm = self._normalize(Ht_fused).to(x.dtype)
+            Hs_norm = self._normalize(Hs_fused).to(x.dtype)
+            H_time_token = self._expand_time_token(Ht_norm, T, N)
+            H_space_token = self._expand_space_token(Hs_norm, T, N)
+            region_score = H_space_token.mean(dim=1, keepdim=True).expand(-1, T, -1)
+            score = (
+                cfg.get("alpha_time", 1.0) * H_time_token
+                + cfg.get("beta_space", cfg.get("beta_space_coarse", 0.5)) * H_space_token
+                + cfg.get("gamma_region", cfg.get("gamma_space_fine", 0.5)) * region_score
+            )
+
+            # ---- ablations ----
+            if policy == "random":
+                score = torch.rand_like(score)
+            elif policy == "uniform":
+                idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
+                score = idx / (float(score.numel()) + 1e-12)
+            else:
+                # Default entropy style; pixel_entropy(fallback) 不做 invert
+                entropy_keep = str(cfg.get("entropy_keep", "high")).strip().lower()
+                if policy != "pixel_entropy" and entropy_keep in ("low", "small", "min", "lowest"):
+                    score = -score
         if self.sanitize_nan:
             score = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
         mask_soft = []
@@ -447,7 +473,7 @@ class ASTPruner(nn.Module):
         return mask_soft, sparsity_token, modal_stats
 
     def forward_token_gating(
-        self, x: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None
+        self, x: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None, token_score: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         x_gate = x
         if self.detach_mask:
@@ -459,7 +485,7 @@ class ASTPruner(nn.Module):
         if modality_slices:
             mask_soft, sparsity_token, modal_stats = self.token_gating_multi_modal(x_gate, modality_slices)
         else:
-            mask_soft, sparsity_token = self.token_gating_single_modal(x_gate)
+            mask_soft, sparsity_token = self.token_gating_single_modal(x_gate, external_score=token_score)
             modal_stats = {}
         x_gated = x * mask_soft.to(dtype=x.dtype).unsqueeze(-1)
         token_prune = sparsity_token
@@ -480,11 +506,15 @@ class ASTPruner(nn.Module):
         lambda_block = loss_cfg.get("lambda_block", 0.1)
         return lambda_token * sparsity_token + lambda_head * sparsity_head + lambda_ch * sparsity_ch + lambda_block * sparsity_block
 
-    def forward(self, token_feat: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None) -> ASTOutputs:
-        x_gated, stats_token = self.forward_token_gating(token_feat, modality_slices=modality_slices)
+    def forward(self, token_feat: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None, token_score: Optional[torch.Tensor] = None) -> ASTOutputs:
+        x_gated, stats_token = self.forward_token_gating(token_feat, modality_slices=modality_slices, token_score=token_score)
         head_weights = torch.sigmoid(self.g_head)
         ch_weights = torch.sigmoid(self.g_ch)
         block_weights = torch.sigmoid(self.g_block)
+        if self.sanitize_nan:
+            head_weights = torch.nan_to_num(head_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            ch_weights = torch.nan_to_num(ch_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            block_weights = torch.nan_to_num(block_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         sparsity_head = 1.0 - head_weights.mean()
         sparsity_ch = 1.0 - ch_weights.mean()
         sparsity_block = 1.0 - block_weights.mean()

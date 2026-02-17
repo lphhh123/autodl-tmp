@@ -75,6 +75,21 @@ ast:
   space_window_levels: [1, 2, 4]
   time_window_overlap: 0.5
   entropy_tau: 1.0
+  # Paper-style signal: patch-wise pixel entropy density (rather than embedding entropy).
+  token_gating_policy: "pixel_entropy"  # pixel_entropy|entropy|uniform|random
+  pixel_entropy:
+    bins: 32
+    eps: 1.0e-6
+    patch_downsample: 2
+    use_temporal: true
+    temporal_delta: 1
+    lambda_dist: 0.5
+    center_mode: "max_entropy"   # max_entropy | image_center
+    alpha_space: 1.0
+    beta_time: 1.0
+    normalize_per_frame: true
+    mean: [0.485, 0.456, 0.406]
+    std:  [0.229, 0.224, 0.225]
   rho_token_target: 0.5
   token_temperature: 0.1
   # Dense warmup -> ramp -> stabilize for token gating (prevents early over-pruning).

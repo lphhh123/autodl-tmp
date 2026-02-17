@@ -8,6 +8,10 @@ SMOKE="${SMOKE:-0}"
 EXP_ID="${1:-}"
 SEED="${2:-0}"
 
+# Default slim logging (can be overridden per run)
+export LOG_SLIM="${LOG_SLIM:-1}"
+export TQDM_DISABLE="${TQDM_DISABLE:-1}"
+
 if [[ -z "$EXP_ID" ]]; then
   echo "Usage: $0 <EXP_ID> [SEED]"
   exit 1
