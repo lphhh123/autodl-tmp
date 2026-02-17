@@ -268,6 +268,19 @@ def _cfg_get(obj, key: str, default=None):
     return getattr(obj, key, default)
 
 
+@torch.no_grad()
+def _repair_nonfinite_params_(module: torch.nn.Module, *, max_abs: float = 1.0e4) -> bool:
+    repaired = False
+    for p in module.parameters(recurse=True):
+        if p is None:
+            continue
+        if not torch.isfinite(p).all():
+            p.data = torch.nan_to_num(p.data, nan=0.0, posinf=float(max_abs), neginf=-float(max_abs))
+            p.data.clamp_(-float(max_abs), float(max_abs))
+            repaired = True
+    return repaired
+
+
 def build_dataloader(cfg):
     ds = UCF101Dataset(cfg, split="train")
     batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
@@ -815,6 +828,9 @@ def train_version_c(
             layout_export_dir.mkdir(parents=True, exist_ok=True)
         log_path = out_dir / "logs" / "version_c_stats.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_slim = bool(int(os.environ.get("LOG_SLIM", "1")))
+        log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
+        log_interval_steps = max(1, int(log_interval_steps))
         # ---- v5.4 contract log (avoid missing-key crash) ----
         def _boolish(x):
             if x is None:
@@ -1460,6 +1476,13 @@ def train_version_c(
                         else:
                             logits, info = model(x, return_intermediate=True)
                         run_state["last_model_info"] = info
+                        # Hard guard: if model produced non-finite logits, skip the step.
+                        if not torch.isfinite(logits).all():
+                            run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
+                            logger.warning("[NaNGuard] non-finite logits detected (outer=%s step=%s); skipping step.", outer, step)
+                            optimizer_model.zero_grad(set_to_none=True)
+                            optimizer_alpha.zero_grad(set_to_none=True)
+                            continue
                         L_task = F.cross_entropy(logits, y)
                         model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
                         slot_out = chiplet_slots(hard=False)
@@ -1709,7 +1732,12 @@ def train_version_c(
                         scaler.step(optimizer_alpha)
                     # v5.4: forbidden (P0-3) — layout must be updated via discrete assign-only agent + cache
                     scaler.update()
-                    if step % 10 == 0:
+                    repaired = _repair_nonfinite_params_(model)
+                    if update_alpha:
+                        repaired = _repair_nonfinite_params_(chiplet_slots) or repaired
+                    if repaired:
+                        logger.warning("[NaNGuard] repaired non-finite parameters (outer=%s step=%s).", outer, step)
+                    if step % log_interval_steps == 0:
                         acc1 = (logits.argmax(dim=1) == y).float().mean()
                         last_acc1 = float(acc1.item())
                         best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))

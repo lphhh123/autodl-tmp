@@ -9,6 +9,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .ast2_pruner import ASTOutputs, ASTPruner
+from .pixel_entropy_score import compute_pixel_entropy_density_score_video
+
+
+def _cfg_get(cfg, key: str, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    if hasattr(cfg, "get"):
+        try:
+            return cfg.get(key, default)
+        except TypeError:
+            pass
+    return getattr(cfg, key, default)
 
 
 @dataclass
@@ -131,8 +145,10 @@ class VideoViT(nn.Module):
             ast_cfg = dict(ast_cfg_raw)
             ast_cfg.setdefault("patch_grid_h", grid[0])
             ast_cfg.setdefault("patch_grid_w", grid[1])
+            self.ast_cfg = ast_cfg
             self.ast_pruner = ASTPruner(ast_cfg, cfg.embed_dim, cfg.num_heads, cfg.depth, num_patches)
         else:
+            self.ast_cfg = None
             self.ast_pruner = None
 
     def _embed_video(self, x: torch.Tensor) -> torch.Tensor:
@@ -176,8 +192,29 @@ class VideoViT(nn.Module):
         ast_out: Optional[ASTOutputs] = None
         L_AST = torch.tensor(0.0, device=x.device)
         if self.use_ast and self.ast_pruner is not None:
+            token_score = None
+            policy = str(_cfg_get(self.ast_cfg, "token_gating_policy", "entropy")).lower()
+            if policy == "pixel_entropy":
+                pe = _cfg_get(self.ast_cfg, "pixel_entropy", None)
+                token_score = compute_pixel_entropy_density_score_video(
+                    x,
+                    int(self.cfg.patch_size),
+                    mean=_cfg_get(pe, "mean", None),
+                    std=_cfg_get(pe, "std", None),
+                    bins=int(_cfg_get(pe, "bins", 32)),
+                    eps=float(_cfg_get(pe, "eps", 1.0e-6)),
+                    patch_downsample=int(_cfg_get(pe, "patch_downsample", 2)),
+                    use_temporal=bool(_cfg_get(pe, "use_temporal", True)),
+                    temporal_delta=int(_cfg_get(pe, "temporal_delta", 1)),
+                    lambda_dist=float(_cfg_get(pe, "lambda_dist", 0.5)),
+                    center_mode=str(_cfg_get(pe, "center_mode", "max_entropy")),
+                    alpha_space=float(_cfg_get(pe, "alpha_space", 1.0)),
+                    beta_time=float(_cfg_get(pe, "beta_time", 1.0)),
+                    normalize_per_frame=bool(_cfg_get(pe, "normalize_per_frame", True)),
+                )
+
             with torch.autocast(device_type=tokens.device.type, enabled=False):
-                ast_out = self.ast_pruner(tokens.float())
+                ast_out = self.ast_pruner(tokens.float(), token_score=token_score)
             token_mask = ast_out.token_mask
             token_mask = torch.nan_to_num(token_mask, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
             tokens = tokens * token_mask.to(dtype=tokens.dtype).unsqueeze(-1)
@@ -306,6 +343,7 @@ class VideoAudioAST(nn.Module):
             ast_cfg.setdefault("patch_grid_w", img_size // patch_size)
             self.ast_pruner = ASTPruner(ast_cfg, embed_dim, num_heads, depth, num_patches_total)
         else:
+            self.ast_cfg = None
             self.ast_pruner = None
 
     def _embed_video(self, x: torch.Tensor) -> torch.Tensor:

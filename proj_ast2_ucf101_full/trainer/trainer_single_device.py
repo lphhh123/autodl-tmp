@@ -6,6 +6,7 @@ import math
 import os
 import numbers
 import random
+import sys
 from copy import deepcopy
 from pathlib import Path
 from functools import partial
@@ -839,6 +840,9 @@ def train_single_device(
 
     full_on_last_epoch = bool(_cfg_get(val_cfg, "full_on_last_epoch", True))
     val_log_interval = int(_cfg_get(val_cfg, "log_interval", 50) or 50)
+    log_slim = bool(int(os.environ.get("LOG_SLIM", "0")))
+    log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
+    log_interval_steps = max(1, int(log_interval_steps))
     val_use_tqdm = bool(_cfg_get(val_cfg, "use_tqdm", True))
     run_final_test = bool(_cfg_get(test_cfg, "run_final_test", False))
 
@@ -1019,11 +1023,13 @@ def train_single_device(
             model.train()
             last_hw_stats = None
             total_steps = len(train_loader) if hasattr(train_loader, "__len__") else None
+            disable_tqdm = log_slim or (not sys.stdout.isatty()) or bool(int(os.environ.get("TQDM_DISABLE", "0")))
             train_pbar = tqdm(
                 enumerate(train_loader),
                 total=total_steps,
                 desc=f"Train e{epoch}",
                 leave=True,
+                disable=disable_tqdm,
             )
             for step, batch in train_pbar:
                 global_step = int(epoch) * max(1, steps_per_epoch) + int(step)
@@ -1141,7 +1147,7 @@ def train_single_device(
                 scaler.update()
                 if ema_model is not None:
                     ema_model.update(model)
-                if step % 10 == 0:
+                if step % log_interval_steps == 0:
                     # NOTE: Under Mixup, raw argmax-vs-y accuracy is NOT meaningful.
                     # We compute a mixup-weighted correctness so train acc can be compared to val/test.
                     with torch.no_grad():
@@ -1554,12 +1560,14 @@ def validate(
     with torch.no_grad():
         iterable = enumerate(loader, start=1)
         pbar = None
+        disable_tqdm = bool(int(os.environ.get("LOG_SLIM", "0"))) or (not sys.stdout.isatty()) or bool(int(os.environ.get("TQDM_DISABLE", "0")))
         if use_tqdm:
             pbar = tqdm(
                 iterable,
                 total=total_batches,
                 desc=f"Val e{epoch} ({tag})",
                 leave=bool(tqdm_leave),
+                disable=disable_tqdm,
             )
             iterable = pbar
 
