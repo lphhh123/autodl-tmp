@@ -1696,7 +1696,19 @@ def train_version_c(
                                     run_id=run_id,
                                     step=int(step),
                                 )
-                        hw_term = float(lambda_hw_eff) * L_hw if not twostage else (L_hw * 0.0)
+                        # ---- NaN-safe HW term (avoid 0*NaN propagation) ----
+                        hw_nonfinite = not torch.isfinite(L_hw).all()
+                        if twostage or float(lambda_hw_eff) <= 0.0:
+                            hw_term = torch.zeros_like(L_hw)
+                        else:
+                            hw_term = float(lambda_hw_eff) * torch.nan_to_num(L_hw, nan=0.0, posinf=0.0, neginf=0.0)
+                        # If HW loss went non-finite, skip this step entirely (keeps model/alpha stable).
+                        if hw_nonfinite:
+                            run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
+                            logger.warning("[NaNGuard] non-finite L_hw detected (outer=%s step=%s); skipping step.", outer, step)
+                            optimizer_model.zero_grad(set_to_none=True)
+                            optimizer_alpha.zero_grad(set_to_none=True)
+                            continue
                         loss = L_task + float(lambda_ast_eff) * info["L_AST"] + hw_term
                         # ---- v5.4 audit: capture the exact loss components used ----
                         try:
@@ -1726,6 +1738,14 @@ def train_version_c(
                     # v5.4 contract: NoDoubleScale (lambda_hw only applied once via stable_hw lambda_hw_eff)
                     assert "lambda_hw" not in str(type(L_hw)).lower()  # cheap guard (won't catch all, but prevents accidental wrapping)
                     assert float(lambda_hw_eff) >= 0.0
+
+                    # Hard guard: skip if total loss becomes non-finite (e.g., rare NaN from HW/AST).
+                    if not torch.isfinite(loss).all():
+                        run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
+                        logger.warning("[NaNGuard] non-finite total loss (outer=%s step=%s); skipping step.", outer, step)
+                        optimizer_model.zero_grad(set_to_none=True)
+                        optimizer_alpha.zero_grad(set_to_none=True)
+                        continue
                     scaler.scale(loss).backward()
                     scaler.step(optimizer_model)
                     if not twostage and update_alpha:
@@ -1759,35 +1779,79 @@ def train_version_c(
                             "mapping_signature": cache["mapping_signature"],
                             "layout_signature": cache["layout_signature"],
                         }
-                        stats.update(hw_stats)
+                        if (not log_slim) and hw_stats:
+                            stats.update(hw_stats)
+                        elif hw_stats:
+                            # slim mode: keep only a tiny, stable subset
+                            for _k in (
+                                "L_hw_total",
+                                "L_hw_norm",
+                                "raw_latency_ms",
+                                "raw_energy_mj",
+                                "raw_mem_mb",
+                                "raw_comm_ms",
+                                "latency_ms",
+                                "energy_mj",
+                                "mem_mb",
+                                "comm_ms",
+                                "proxy_invalid_count",
+                                "proxy_sanitize_count",
+                                "hw_loss_nonfinite",
+                            ):
+                                if _k in hw_stats:
+                                    stats[_k] = hw_stats[_k]
                         log_stats(logger, stats)
                         with log_path.open("a", encoding="utf-8") as f:
-                            f.write(
-                                safe_dumps(
-                                    {
-                                        "step": int(global_step),
-                                        "outer": int(outer),
-                                        "loss": float(loss.item()),
-                                        "lat_ms": float(
-                                            hw_stats.get(
-                                                "raw_latency_ms",
-                                                hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
-                                            )
-                                        ),
-                                        "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
-                                        "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
-                                        "lambda_hw": float(lambda_hw_eff),
-                                        "stable_hw": stable_hw_log_fields(stable_hw_state, cfg),
-                                        "mapping_updated": step_mapping_updated,
-                                        "layout_updated": step_layout_updated,
-                                        "mapping_cache_hit": (not step_mapping_updated),
-                                        "layout_cache_hit": (not step_layout_updated),
-                                        "mapping_signature": cache["mapping_signature"],
-                                        "layout_signature": cache["layout_signature"],
-                                    }
+                            if log_slim:
+                                # Minimal per-step record (keeps files small & easy to grep).
+                                f.write(
+                                    safe_dumps(
+                                        {
+                                            "step": int(global_step),
+                                            "outer": int(outer),
+                                            "loss": float(loss.item()),
+                                            "acc1": float(acc1.item()),
+                                            "lambda_hw": float(lambda_hw_eff),
+                                            "lat_ms": float(
+                                                hw_stats.get("raw_latency_ms", hw_stats.get("latency_ms", 0.0)) if hw_stats else 0.0
+                                            ),
+                                            "energy_mj": float(hw_stats.get("energy_mj", 0.0) if hw_stats else 0.0),
+                                            "mem_mb": float(hw_stats.get("mem_mb", 0.0) if hw_stats else 0.0),
+                                            "comm_ms": float(hw_stats.get("comm_ms", 0.0) if hw_stats else 0.0),
+                                            "hw_loss": float(hw_stats.get("L_hw_total", 0.0) if hw_stats else 0.0),
+                                            "mapping_cache_hit": (not step_mapping_updated),
+                                            "layout_cache_hit": (not step_layout_updated),
+                                        }
+                                    )
+                                    + "\n"
                                 )
-                                + "\n"
-                            )
+                            else:
+                                f.write(
+                                    safe_dumps(
+                                        {
+                                            "step": int(global_step),
+                                            "outer": int(outer),
+                                            "loss": float(loss.item()),
+                                            "lat_ms": float(
+                                                hw_stats.get(
+                                                    "raw_latency_ms",
+                                                    hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
+                                                )
+                                            ),
+                                            "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
+                                            "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
+                                            "lambda_hw": float(lambda_hw_eff),
+                                            "stable_hw": stable_hw_log_fields(stable_hw_state, cfg),
+                                            "mapping_updated": step_mapping_updated,
+                                            "layout_updated": step_layout_updated,
+                                            "mapping_cache_hit": (not step_mapping_updated),
+                                            "layout_cache_hit": (not step_layout_updated),
+                                            "mapping_signature": cache["mapping_signature"],
+                                            "layout_signature": cache["layout_signature"],
+                                        }
+                                    )
+                                    + "\n"
+                                )
                     global_step += 1
 
                 # Step B: alpha refinement
@@ -1830,9 +1894,16 @@ def train_version_c(
                             alpha=alpha,
                         )
 
-                        optimizer_alpha.zero_grad()
-                        (loss_alpha := (float(lambda_hw_eff) * L_hw)).backward()
-                        optimizer_alpha.step()
+                        optimizer_alpha.zero_grad(set_to_none=True)
+                        loss_alpha = float(lambda_hw_eff) * L_hw
+                        if (not twostage) and (float(lambda_hw_eff) > 0.0) and torch.isfinite(loss_alpha).all():
+                            loss_alpha.backward()
+                            optimizer_alpha.step()
+                        else:
+                            # Skip alpha update if HW term is disabled or non-finite
+                            run_state["nan_guard_skipped_alpha"] = int(run_state.get("nan_guard_skipped_alpha", 0)) + 1
+                            if not torch.isfinite(loss_alpha).all():
+                                logger.warning("[NaNGuard] non-finite alpha loss; skipping alpha step.")
 
                 # Step D: layout refinement
                 if update_layout and allow_discrete:
@@ -1861,7 +1932,13 @@ def train_version_c(
                             lambda_thermal=cfg.hw.lambda_thermal,
                             distance_scale=float(getattr(cfg.hw, "distance_scale_ms", 1.0) or 1.0),
                         )
-                        optimizer_layout.zero_grad()
+                        if not torch.isfinite(L_layout).all():
+                            run_state["nan_guard_skipped_layout"] = int(run_state.get("nan_guard_skipped_layout", 0)) + 1
+                            logger.warning("[NaNGuard] non-finite layout loss; disabling layout refinement for this run.")
+                            _repair_nonfinite_params_(wafer_layout)
+                            update_layout = False
+                            break
+                        optimizer_layout.zero_grad(set_to_none=True)
                         L_layout.backward()
                         optimizer_layout.step()
 
