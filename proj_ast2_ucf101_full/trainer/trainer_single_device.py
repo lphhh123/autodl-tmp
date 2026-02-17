@@ -838,9 +838,13 @@ def train_single_device(
     full_val_every_epochs = int(_cfg_get(val_cfg, "full_every_epochs", 0) or 0)
     full_val_max_batches = int(_cfg_get(val_cfg, "full_max_batches", 0) or 0)
 
+    log_slim = bool(int(os.environ.get("LOG_SLIM", "0")))
+
     full_on_last_epoch = bool(_cfg_get(val_cfg, "full_on_last_epoch", True))
     val_log_interval = int(_cfg_get(val_cfg, "log_interval", 50) or 50)
-    log_slim = bool(int(os.environ.get("LOG_SLIM", "0")))
+    if log_slim:
+        val_log_interval = max(int(val_log_interval), 200)
+
     log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
     log_interval_steps = max(1, int(log_interval_steps))
     val_use_tqdm = bool(_cfg_get(val_cfg, "use_tqdm", True))

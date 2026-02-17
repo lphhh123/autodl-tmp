@@ -632,6 +632,12 @@ def compute_hw_loss(
     extra_penalty_t = torch.as_tensor(float(extra_penalty), device=device, dtype=latency_ms_pos.dtype)
     L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout) + extra_penalty_t
 
+    # ---- Non-finite guard (prevents NaN from propagating into training) ----
+    hw_loss_nonfinite = (not torch.isfinite(L_hw_total_t).all()) or (not torch.isfinite(L_hw_norm_t).all())
+    if hw_loss_nonfinite:
+        L_hw_norm_t = torch.nan_to_num(L_hw_norm_t, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
+        L_hw_total_t = torch.nan_to_num(L_hw_total_t, nan=1.0e6, posinf=1.0e6, neginf=1.0e6)
+
     sanitize_fields = list(dict.fromkeys(sanitize_fields))
     hw_stats.update(
         {
@@ -666,10 +672,22 @@ def compute_hw_loss(
         hw_stats["area_used_mm2"] = float(area_used_mm2.detach().cpu().item())
         hw_stats["area_budget_mm2"] = float(area_budget_mm2)
     if layout_stats:
-        hw_stats.update({f"layout_{k}": v for k, v in layout_stats.items()})
+        def _lf(v):
+            try:
+                if hasattr(v, "detach"):
+                    return float(v.detach().cpu().item())
+            except Exception:
+                pass
+            try:
+                return float(v)
+            except Exception:
+                return v
+
+        hw_stats.update({f"layout_{k}": _lf(v) for k, v in layout_stats.items()})
 
     hw_stats.update(
         {
+            "hw_loss_nonfinite": bool(hw_loss_nonfinite),
             "L_hw_norm": float(L_hw_norm_t.detach().cpu().item()),
             "L_hw_total": float(L_hw_total_t.detach().cpu().item()),
         }

@@ -81,14 +81,25 @@ run_ast () {
   local cfg="$1"
   local out="$2"
   mkdir -p "$out"
-  SMOKE="${SMOKE}" python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
+  if [[ -t 1 && "${TEE_STDOUT:-1}" == "1" ]]; then
+    SMOKE="${SMOKE}" python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
+  else
+    # Non-interactive (nohup/setsid): avoid duplicating logs into the parent nohup log.
+    SMOKE="${SMOKE}" python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" > "$out/stdout.log" 2>&1
+    echo "[INFO] logs -> $out/stdout.log"
+  fi
 }
 
 run_vc () {
   local cfg="$1"
   local out="$2"
   mkdir -p "$out"
-  SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
+  if [[ -t 1 && "${TEE_STDOUT:-1}" == "1" ]]; then
+    SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
+  else
+    SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" > "$out/stdout.log" 2>&1
+    echo "[INFO] logs -> $out/stdout.log"
+  fi
 }
 
 run_layout () {
