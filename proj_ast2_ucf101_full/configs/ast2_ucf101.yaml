@@ -14,6 +14,14 @@ model:
   drop_path_rate: 0.0
   use_ast_prune: true
 
+pretrain:
+  enabled: true
+  kind: "timm_vit"
+  # Accept either a directory (preferred) or a direct file path.
+  path: "/home/lyao/pretrained/vit_base_patch16_224.augreg_in21k_ft_in1k"
+  # Safety: if fewer than this number of keys are loaded, fail loudly.
+  min_loaded_keys: 50
+
 data:
   dataset: "ucf101"
   frames_root: "data/ucf101/frames"

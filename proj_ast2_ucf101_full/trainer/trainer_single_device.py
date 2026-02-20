@@ -46,6 +46,7 @@ from utils.config import AttrDict
 from utils.config_utils import get_nested
 from utils.contract_seal import assert_cfg_sealed_or_violate
 from utils.trace_contract_v54 import assert_trace_header_v54
+from utils.pretrain_loader import maybe_load_pretrained
 from utils.stable_hw import (
     apply_accuracy_guard,
     get_accuracy_metric_key,
@@ -655,6 +656,11 @@ def train_single_device(
             use_ast_prune=cfg.ast.use_ast_prune,
             ast_cfg=cfg.ast,
         ).to(device)
+
+    # Optional pretrained initialization (local weights).
+    # If pretrain.enabled=true and weights are missing/incompatible, we fail loudly
+    # to avoid accidental "training from scratch".
+    maybe_load_pretrained(cfg=cfg, model=model, logger=logger)
 
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
