@@ -26,20 +26,27 @@ if [[ "${SMOKE}" == "1" ]]; then
   echo "[SMOKE] enabled: output prefix -> ${OUT_PREFIX}"
 fi
 
-# ---- AUTO RESUME ----------------------------------------------------------
-# For Innovation A we default-enable AUTO_RESUME so crashes can be resumed by
-# re-running the same command. You can override per run:
-#   AUTO_RESUME=0 bash scripts/experiments_version_c.sh EXP-A1 0
-if [[ "${EXP_ID}" == EXP-A* ]]; then
-  export AUTO_RESUME="${AUTO_RESUME:-1}"
-else
-  export AUTO_RESUME="${AUTO_RESUME:-0}"
+# ---- AUTO RESUME / FRESH RUN ---------------------------------------------
+# By default we DO NOT auto-resume.
+# If you want crash recovery, opt-in per run:
+#   AUTO_RESUME=1 bash scripts/experiments_version_c.sh EXP-A1 0
+export AUTO_RESUME="${AUTO_RESUME:-0}"
+
+# When not auto-resuming, default to fresh run semantics:
+# move any existing output dir aside so the rerun never mixes with old ckpts.
+# Disable if you really want to overwrite in-place:
+#   FRESH_RUN=0 ...
+export FRESH_RUN="${FRESH_RUN:-1}"
+
+# For SMOKE runs, always disable auto-resume (avoid looping on deterministic errors).
+if [[ "${SMOKE}" == "1" ]]; then
+  export AUTO_RESUME="0"
 fi
 
-# For SMOKE runs, default-disable auto-resume to avoid looping on deterministic errors.
-if [[ "${SMOKE}" == "1" ]]; then
-  export AUTO_RESUME="${AUTO_RESUME:-0}"
-fi
+# Centralized stdout directory (symlinks) for easier monitoring.
+# Defaults to the same LOG_DIR used by launch_A_noabl_* scripts when present.
+STDOUT_AGG_DIR="${STDOUT_AGG_DIR:-${LOG_DIR:-$HOME/runlogs_A}/stdout}"
+mkdir -p "${STDOUT_AGG_DIR}"
 
 # ---- TF32 (speed) ---------------------------------------------------------
 # For Innovation A we default-enable TF32 to speed up training on Ampere/Ada.
@@ -81,6 +88,24 @@ run_ast () {
   local cfg="$1"
   local out="$2"
   mkdir -p "$out"
+
+  # Fresh-run guard: archive the whole output dir if it already has checkpoints
+  # and AUTO_RESUME is disabled.
+  if [[ "${FRESH_RUN}" == "1" && "${AUTO_RESUME}" == "0" ]]; then
+    if [[ -d "$out/checkpoints" || -f "$out/metrics.json" || -f "$out/stdout.log" ]]; then
+      local ts; ts="$(date '+%Y%m%d_%H%M%S')"
+      local bak="${out}__bak__${ts}"
+      echo "[FRESH_RUN] archiving existing out dir -> ${bak}"
+      mv "$out" "$bak"
+      mkdir -p "$out"
+    fi
+  fi
+
+  # Create a stable symlink for this experiment's stdout.
+  # You can tail: tail -f "$STDOUT_AGG_DIR/${EXP_ID}_seed${SEED}.log"
+  : > "$out/stdout.log"
+  ln -sf "$(realpath "$out/stdout.log")" "$STDOUT_AGG_DIR/${EXP_ID}_seed${SEED}.log"
+
   if [[ -t 1 && "${TEE_STDOUT:-1}" == "1" ]]; then
     SMOKE="${SMOKE}" python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
   else
@@ -94,6 +119,20 @@ run_vc () {
   local cfg="$1"
   local out="$2"
   mkdir -p "$out"
+
+  if [[ "${FRESH_RUN}" == "1" && "${AUTO_RESUME}" == "0" ]]; then
+    if [[ -d "$out/checkpoints" || -f "$out/metrics.json" || -f "$out/stdout.log" ]]; then
+      local ts; ts="$(date '+%Y%m%d_%H%M%S')"
+      local bak="${out}__bak__${ts}"
+      echo "[FRESH_RUN] archiving existing out dir -> ${bak}"
+      mv "$out" "$bak"
+      mkdir -p "$out"
+    fi
+  fi
+
+  : > "$out/stdout.log"
+  ln -sf "$(realpath "$out/stdout.log")" "$STDOUT_AGG_DIR/${EXP_ID}_seed${SEED}.log"
+
   if [[ -t 1 && "${TEE_STDOUT:-1}" == "1" ]]; then
     SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
   else
