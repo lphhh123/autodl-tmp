@@ -51,7 +51,7 @@ data:
   cache_enabled: true
   cache_dir: outputs/cache/ucf101
   window_retention:
-    enabled: true
+    enabled: false
     max_windows_per_video_per_len: 4
     eval_candidates: 128
     global_frames: 8
@@ -65,6 +65,10 @@ data:
     entropy_bins: 32
     # Eval should be deterministic/stable by default (entropy_density eval may introduce jitter).
     eval_mode: "uniform"
+
+  # NOTE (2026-02): clip-level window retention is disabled by default for Innovation A runs.
+  # Use ast token-level pruning (A2/A4) for paper-aligned sparsity; keep window_retention off unless explicitly studying sampling.
+
 
 audio:
   feat_dim: 128
