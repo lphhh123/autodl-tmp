@@ -17,10 +17,18 @@ data:
   # Align window budget with A4 (Version-C full) to avoid confounding variables
   window_retention:
     enabled: true
-    # slightly larger window budget for better accuracy (still bounded)
-    max_windows_per_video_per_len_train: 12
+    # Increase train coverage so A0 does not under-train vs A1, while still keeping a bounded window budget.
+    max_windows_per_video_per_len_train: 24
+    # Eval uses uniform sampling (deterministic) and can be slightly denser for accuracy stability.
     max_windows_per_video_per_len_eval: 24
+    # Candidate pool for entropy-density selection (train). Larger = better coverage but more preprocessing cost.
     eval_candidates: 256
+    # Ensure deterministic eval behavior (avoid inheriting base eval_mode=entropy_density).
+    eval_mode: "uniform"
+    # Encourage diversity among selected windows.
+    min_gap: 8
+    # Slightly weaker distance decay to avoid collapsing around the anchor window.
+    lambda_dist: 0.25
 
 test:
   run_final_test: true

@@ -507,7 +507,37 @@ class ASTPruner(nn.Module):
         return lambda_token * sparsity_token + lambda_head * sparsity_head + lambda_ch * sparsity_ch + lambda_block * sparsity_block
 
     def forward(self, token_feat: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None, token_score: Optional[torch.Tensor] = None) -> ASTOutputs:
-        x_gated, stats_token = self.forward_token_gating(token_feat, modality_slices=modality_slices, token_score=token_score)
+        force_dense = bool(self._runtime_force_dense or bool(self.cfg.get("force_dense", False)))
+
+        # v5.4 contract: during warmup (force_dense=True), AST must behave IDENTICALLY
+        # to the dense baseline: token mask = 1, all structural gates = 1, and L_AST = 0.
+        if force_dense:
+            b, t, n, _ = token_feat.shape
+            token_mask = token_feat.new_ones((b, t, n))
+            head_weights = torch.ones_like(self.g_head, device=token_feat.device, dtype=token_feat.dtype)
+            ch_weights = torch.ones_like(self.g_ch, device=token_feat.device, dtype=token_feat.dtype)
+            block_weights = torch.ones_like(self.g_block, device=token_feat.device, dtype=token_feat.dtype)
+            zero = token_feat.new_tensor(0.0)
+            return ASTOutputs(
+                token_mask=token_mask,
+                head_weights=head_weights,
+                ch_weights=ch_weights,
+                block_weights=block_weights,
+                sparsity={
+                    "token": zero,
+                    "head": zero,
+                    "ch": zero,
+                    "block": zero,
+                    "modal": {},
+                },
+                L_AST=zero,
+            )
+
+        _, stats_token = self.forward_token_gating(
+            token_feat,
+            modality_slices=modality_slices,
+            token_score=token_score,
+        )
         head_weights = torch.sigmoid(self.g_head)
         ch_weights = torch.sigmoid(self.g_ch)
         block_weights = torch.sigmoid(self.g_block)

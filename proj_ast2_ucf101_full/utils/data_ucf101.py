@@ -85,6 +85,7 @@ def _retain_starts_entropy_density_train(
     video_id: str,
     cfg,
     hglobal_cache: Optional[Dict[str, float]],
+    max_windows_override: Optional[int] = None,
 ) -> List[int]:
     if not starts:
         return starts
@@ -92,7 +93,10 @@ def _retain_starts_entropy_density_train(
     if ret is None or not bool(getattr(ret, "enabled", False)):
         return starts
 
-    max_windows = int(getattr(ret, "max_windows_per_video_per_len_train", getattr(ret, "max_windows_per_video_per_len", 4)))
+    if max_windows_override is None:
+        max_windows = int(getattr(ret, "max_windows_per_video_per_len_train", getattr(ret, "max_windows_per_video_per_len", 4)))
+    else:
+        max_windows = int(max_windows_override)
     if max_windows <= 0:
         return []
 
@@ -559,6 +563,16 @@ class UCF101Dataset(Dataset):
                             getattr(getattr(cfg.data, "window_retention", None), "eval_mode", "uniform")
                         ).lower()
                         if eval_mode == "entropy_density":
+                            ret_cfg = getattr(cfg.data, "window_retention", None)
+                            max_windows_eval = None
+                            if ret_cfg is not None:
+                                max_windows_eval = int(
+                                    getattr(
+                                        ret_cfg,
+                                        "max_windows_per_video_per_len_eval",
+                                        getattr(ret_cfg, "max_windows_per_video_per_len", 4),
+                                    )
+                                )
                             starts = _retain_starts_entropy_density_train(
                                 starts=starts,
                                 cover_len=int(cover_len),
@@ -567,6 +581,7 @@ class UCF101Dataset(Dataset):
                                 video_id=video_id,
                                 cfg=cfg,
                                 hglobal_cache=self._hglobal_cache,
+                                max_windows_override=max_windows_eval,
                             )
                         else:
                             starts = _retain_starts_uniform_eval(starts=starts, cfg=cfg)
