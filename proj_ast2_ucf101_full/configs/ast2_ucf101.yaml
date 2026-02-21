@@ -63,7 +63,8 @@ data:
     temporal_delta: 1
     downsample: 32
     entropy_bins: 32
-    eval_mode: "entropy_density"
+    # Eval should be deterministic/stable by default (entropy_density eval may introduce jitter).
+    eval_mode: "uniform"
 
 audio:
   feat_dim: 128
@@ -86,7 +87,8 @@ ast:
   # Paper-style signal: patch-wise pixel entropy density (rather than embedding entropy).
   token_gating_policy: "pixel_entropy"  # pixel_entropy|entropy|uniform|random
   pixel_entropy:
-    bins: 32
+    # Paper uses 8-bit histogram entropy (256 bins). 128 bins is a good accuracy/stability tradeoff.
+    bins: 128
     eps: 1.0e-6
     patch_downsample: 2
     use_temporal: true
@@ -95,7 +97,10 @@ ast:
     center_mode: "max_entropy"   # max_entropy | image_center
     alpha_space: 1.0
     beta_time: 1.0
-    normalize_per_frame: true
+    # Paper-style ratio already normalizes by global entropy; per-frame min-max can erase absolute difficulty.
+    normalize_per_frame: false
+    # Optional: region-consistency smoothing using pruner's Voronoi regions (0 disables).
+    region_smooth_alpha: 0.5
     mean: [0.485, 0.456, 0.406]
     std:  [0.229, 0.224, 0.225]
   rho_token_target: 0.5

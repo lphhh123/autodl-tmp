@@ -295,6 +295,36 @@ class ASTPruner(nn.Module):
             raise ValueError(f"Unexpected space token shape {Hs.shape}, expected [B, {T}, {N}]")
         raise ValueError(f"Unexpected space token dims {Hs.dim()}, expected 2 or 3")
 
+    def _smooth_score_by_region(self, score: torch.Tensor, alpha: float, eps: float = 1.0e-6) -> torch.Tensor:
+        """Region-consistency smoothing (paper-style Voronoi prior).
+
+        score: [B, T, N] where N == num_patches.
+        alpha: blend weight in [0, 1]. 0 -> no-op; 1 -> pure region mean.
+        """
+        if alpha <= 0.0:
+            return score
+        if int(getattr(self, "num_regions", 1)) <= 1:
+            return score
+        if score.dim() != 3:
+            return score
+        B, T, N = score.shape
+        region_ids = self.region_ids.to(device=score.device)
+        if region_ids.numel() != N:
+            # Safety: do not break if token layout changes.
+            return score
+        R = int(self.num_regions)
+        bt = int(B * T)
+        score_bt = score.reshape(bt, N)
+        rid_bt = region_ids.view(1, N).expand(bt, -1)
+        region_sum = score_bt.new_zeros((bt, R))
+        region_cnt = score_bt.new_zeros((bt, R))
+        region_sum.scatter_add_(1, rid_bt, score_bt)
+        region_cnt.scatter_add_(1, rid_bt, score_bt.new_ones((bt, N)))
+        region_mean = region_sum / (region_cnt + float(eps))
+        score_region = region_mean.gather(1, rid_bt)
+        out_bt = (1.0 - float(alpha)) * score_bt + float(alpha) * score_region
+        return out_bt.view(B, T, N)
+
     def token_gating_single_modal(
         self,
         x: torch.Tensor,
@@ -314,6 +344,12 @@ class ASTPruner(nn.Module):
                 f"external_score shape mismatch: expected {(B, T, N)}, got {tuple(external_score.shape)}"
             )
             score = external_score.to(device=x.device, dtype=x.dtype)
+
+            # Optional: enforce region consistency to mimic paper's Voronoi/Delaunay prior.
+            pe_cfg = cfg.get("pixel_entropy", {}) if hasattr(cfg, "get") else {}
+            region_alpha = float(pe_cfg.get("region_smooth_alpha", 0.0))
+            if region_alpha > 0.0:
+                score = self._smooth_score_by_region(score, alpha=region_alpha, eps=self.entropy_eps)
         else:
             if policy == "pixel_entropy" and external_score is None and (not self._warned_missing_external_score):
                 print(
