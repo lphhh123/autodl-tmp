@@ -15,6 +15,7 @@ data:
     max_windows_per_video_per_len_train: 12
     max_windows_per_video_per_len_eval: 24
     eval_candidates: 256
+    eval_mode: "uniform"
 
 test:
   run_final_test: true
