@@ -394,24 +394,81 @@ class ASTPruner(nn.Module):
                     score = -score
         if self.sanitize_nan:
             score = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
-        mask_soft = []
+        mask_soft_list = []
         rho = float(self._runtime_rho_token) if self._runtime_rho_token is not None else float(cfg.get("rho_token_target", 0.5))
         temperature = float(self._runtime_token_temperature) if self._runtime_token_temperature is not None else float(cfg.get("token_temperature", 0.1))
-        for b in range(B):
-            flat = score[b].reshape(-1)
-            min_keep = int(max(1, float(self.min_keep_ratio) * flat.numel()))
-            k = int(rho * flat.numel())
-            k = max(min_keep, k)
-            k = max(1, min(k, flat.numel()))
-            if self.hard_topk:
-                topk_idx = torch.topk(flat, k, largest=True).indices
-                mask = torch.zeros_like(flat)
-                mask[topk_idx] = 1.0
-                mask_soft.append(mask.view_as(score[b]))
-            else:
-                kth = torch.kthvalue(-flat, k).values * -1
-                mask_soft.append(torch.sigmoid((score[b] - kth) / temperature))
-        mask_soft = torch.stack(mask_soft, dim=0)
+        topk_mode = str(cfg.get("topk_mode", "global")).strip().lower()  # global | per_frame
+        uniform_mode = str(cfg.get("uniform_mode", "linspace")).strip().lower()  # linspace | stride
+
+        def _uniform_indices(n: int, k: int, device: torch.device) -> torch.Tensor:
+            # Deterministic, roughly uniform coverage over [0, n-1].
+            if k >= n:
+                return torch.arange(n, device=device)
+            if k <= 1:
+                return torch.tensor([0], device=device)
+            if uniform_mode == "stride":
+                step = max(1, n // k)
+                idx = torch.arange(0, n, step, device=device)[:k]
+                if idx.numel() < k:
+                    extra = torch.arange(n, device=device)
+                    idx = torch.cat([idx, extra[: (k - idx.numel())]], dim=0)
+                return idx[:k]
+            # default: linspace
+            idx = torch.linspace(0, n - 1, steps=k, device=device).round().long()
+            idx = torch.unique_consecutive(idx)
+            if idx.numel() < k:
+                all_idx = torch.arange(n, device=device)
+                used = torch.zeros(n, dtype=torch.bool, device=device)
+                used[idx] = True
+                extra = all_idx[~used][: (k - idx.numel())]
+                idx = torch.cat([idx, extra], dim=0)
+            return idx[:k]
+
+        if topk_mode == "per_frame":
+            # Enforce temporal coverage: select top-k independently per frame.
+            for b in range(B):
+                mask_bt = torch.zeros((T, N), device=score.device, dtype=score.dtype)
+                for tt in range(T):
+                    frame = score[b, tt]
+                    min_keep = int(max(1, float(self.min_keep_ratio) * frame.numel()))
+                    k = int(rho * frame.numel())
+                    k = max(min_keep, k)
+                    k = max(1, min(k, frame.numel()))
+                    if self.hard_topk:
+                        if policy == "uniform":
+                            idx = _uniform_indices(N, k, score.device)
+                            mask_bt[tt, idx] = 1.0
+                        else:
+                            topk_idx = torch.topk(frame.reshape(-1), k, largest=True).indices
+                            mask_bt[tt].view(-1)[topk_idx] = 1.0
+                    else:
+                        kth = torch.kthvalue(-frame.reshape(-1), k).values * -1
+                        mask_bt[tt] = torch.sigmoid((frame - kth) / temperature)
+                mask_soft_list.append(mask_bt)
+            mask_soft = torch.stack(mask_soft_list, dim=0)
+        else:
+            # Global top-k over (T * N) tokens (may concentrate on a subset of frames).
+            for b in range(B):
+                flat = score[b].reshape(-1)
+                min_keep = int(max(1, float(self.min_keep_ratio) * flat.numel()))
+                k = int(rho * flat.numel())
+                k = max(min_keep, k)
+                k = max(1, min(k, flat.numel()))
+                if self.hard_topk:
+                    if policy == "uniform":
+                        topk_idx = _uniform_indices(flat.numel(), k, score.device)
+                        mask = torch.zeros_like(flat)
+                        mask[topk_idx] = 1.0
+                        mask_soft_list.append(mask.view_as(score[b]))
+                    else:
+                        topk_idx = torch.topk(flat, k, largest=True).indices
+                        mask = torch.zeros_like(flat)
+                        mask[topk_idx] = 1.0
+                        mask_soft_list.append(mask.view_as(score[b]))
+                else:
+                    kth = torch.kthvalue(-flat, k).values * -1
+                    mask_soft_list.append(torch.sigmoid((score[b] - kth) / temperature))
+            mask_soft = torch.stack(mask_soft_list, dim=0)
         if (not self.hard_topk) and bool(cfg.get("calibrate_keep_mean", True)):
             mask_soft = self._calibrate_keep_mean(mask_soft, target_keep=rho)
         sparsity_token = 1.0 - mask_soft.mean()

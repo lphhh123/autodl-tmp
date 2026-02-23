@@ -90,6 +90,15 @@ ast:
   entropy_tau: 1.0
   # Paper-style signal: patch-wise pixel entropy density (rather than embedding entropy).
   token_gating_policy: "pixel_entropy"  # pixel_entropy|entropy|uniform|random
+  # Strict masking semantics for pruning experiments:
+  # - prevents pruned tokens from being revived by positional embeddings/residual updates
+  # - prevents pruned tokens from contributing as K/V in attention (key_padding_mask)
+  # This keeps the functional effect closer to true token dropping while still using masks.
+  strict_masking: true
+  # Token selection granularity: per_frame avoids temporal coverage collapse under global top-k.
+  topk_mode: "per_frame"  # global | per_frame
+  # Uniform baseline selection pattern (deterministic, evenly spaced indices).
+  uniform_mode: "linspace"  # linspace | stride
   pixel_entropy:
     # Paper uses 8-bit histogram entropy (256 bins). 128 bins is a good accuracy/stability tradeoff.
     bins: 128
