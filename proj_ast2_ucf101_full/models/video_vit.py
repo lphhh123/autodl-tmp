@@ -492,6 +492,12 @@ class VideoAudioAST(nn.Module):
                 "head_keep": head_keep,
                 "ch_keep": ch_keep,
                 "block_keep": block_keep,
+                # Estimated compute ratios if token pruning were implemented as true token dropping/packing.
+                # Attention scales ~O(L^2) and MLP scales ~O(L) in sequence length L.
+                "seq_len_total": float(self.num_tokens + 1),
+                "seq_len_effective": float(1.0 + token_keep * self.num_tokens),
+                "est_attn_flops_ratio": float(((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)) ** 2),
+                "est_token_linear_flops_ratio": float((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)),
             },
             "modality_slices": modality_slices,
             "modal_stats": sparsity.get("modal") if sparsity else None,

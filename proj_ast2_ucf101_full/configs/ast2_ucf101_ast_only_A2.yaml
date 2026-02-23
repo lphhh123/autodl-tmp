@@ -33,6 +33,12 @@ data:
 ast:
   # Paper-style token importance: pixel entropy density (patch-level, fused space+time).
   token_gating_policy: "pixel_entropy"
+  # v5.4 strict masking semantics: prevent pos_embed/residual revival and prevent pruned tokens as K/V.
+  strict_masking: true
+  # Avoid temporal coverage collapse under global top-k.
+  topk_mode: "per_frame"  # global | per_frame
+  # Deterministic, evenly spaced baseline pattern (used by uniform ablation).
+  uniform_mode: "linspace"  # linspace | stride
   gating_fp32: true
   detach_mask: true
   hard_topk: true

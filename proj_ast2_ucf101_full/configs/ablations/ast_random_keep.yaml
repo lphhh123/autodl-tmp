@@ -1,3 +1,5 @@
 _base_: ../ast2_ucf101_ast_only_A2.yaml
 ast:
   token_gating_policy: "random"
+  strict_masking: true
+  topk_mode: "per_frame"
