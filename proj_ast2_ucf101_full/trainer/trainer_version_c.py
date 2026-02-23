@@ -1771,11 +1771,18 @@ def train_version_c(
                             metric = get_accuracy_metric_key(stable_hw_cfg)
                             if metric in ("train_acc1_ema", "train_ema"):
                                 update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
+                        model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
                         stats = {
                             "outer": outer,
                             "step": step,
                             "loss": loss.item(),
                             "acc1": acc1.item(),
+                            # Masking-based pruning compute estimates (theoretical; does not claim real speedup).
+                            "token_keep": float(model_info.get("token_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "seq_len_total": float(model_info.get("seq_len_total", 0.0)) if isinstance(model_info, dict) else 0.0,
+                            "seq_len_effective": float(model_info.get("seq_len_effective", 0.0)) if isinstance(model_info, dict) else 0.0,
+                            "est_attn_flops_ratio": float(model_info.get("est_attn_flops_ratio", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "est_token_linear_flops_ratio": float(model_info.get("est_token_linear_flops_ratio", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "lambda_hw": float(lambda_hw_eff),
                             "allow_discrete_updates": bool(allow_discrete),
                             "mapping_updated": step_mapping_updated,

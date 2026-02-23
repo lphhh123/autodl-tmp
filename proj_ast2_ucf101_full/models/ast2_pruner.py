@@ -385,8 +385,9 @@ class ASTPruner(nn.Module):
             if policy == "random":
                 score = torch.rand_like(score)
             elif policy == "uniform":
-                idx = torch.arange(score.numel(), device=score.device, dtype=score.dtype).reshape_as(score)
-                score = idx / (float(score.numel()) + 1e-12)
+                # Deterministic uniform selection is handled in the top-k stage via _uniform_indices.
+                # Use a constant score here to avoid introducing an unintended positional bias.
+                score = torch.zeros_like(score)
             else:
                 # Default entropy style; pixel_entropy(fallback) 不做 invert
                 entropy_keep = str(cfg.get("entropy_keep", "high")).strip().lower()
@@ -397,7 +398,7 @@ class ASTPruner(nn.Module):
         mask_soft_list = []
         rho = float(self._runtime_rho_token) if self._runtime_rho_token is not None else float(cfg.get("rho_token_target", 0.5))
         temperature = float(self._runtime_token_temperature) if self._runtime_token_temperature is not None else float(cfg.get("token_temperature", 0.1))
-        topk_mode = str(cfg.get("topk_mode", "global")).strip().lower()  # global | per_frame
+        topk_mode = str(cfg.get("topk_mode", "per_frame")).strip().lower()  # global | per_frame
         uniform_mode = str(cfg.get("uniform_mode", "linspace")).strip().lower()  # linspace | stride
 
         def _uniform_indices(n: int, k: int, device: torch.device) -> torch.Tensor:
