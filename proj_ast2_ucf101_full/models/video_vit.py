@@ -94,13 +94,37 @@ class Block(nn.Module):
         self.mlp = MLP(dim, mlp_ratio, drop=drop)
         self.drop_path = DropPath(drop_path)
 
-    def forward(self, x: torch.Tensor, head_weight: torch.Tensor, ch_weight: torch.Tensor, block_weight: torch.Tensor) -> torch.Tensor:
-        h, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        head_weight: torch.Tensor,
+        ch_weight: torch.Tensor,
+        block_weight: torch.Tensor,
+        *,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        keep_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if keep_mask is not None:
+            # keep_mask: [B, L] with 1 for kept tokens (including CLS), 0 for pruned tokens.
+            x = x * keep_mask.unsqueeze(-1)
+
+        x_norm = self.norm1(x)
+        if key_padding_mask is not None:
+            h, _ = self.attn(x_norm, x_norm, x_norm, key_padding_mask=key_padding_mask)
+        else:
+            h, _ = self.attn(x_norm, x_norm, x_norm)
+
         head_scale = head_weight.mean()
         h = h * head_scale
         x = x + self.drop_path(block_weight * h)
         mlp_out = self.mlp(self.norm2(x), ch_weight)
         x = x + self.drop_path(block_weight * mlp_out)
+
+        if keep_mask is not None:
+            # Enforce strict pruning semantics: pruned tokens stay inert and cannot be "revived"
+            # by residual updates across blocks.
+            x = x * keep_mask.unsqueeze(-1)
+
         return x
 
 
@@ -166,6 +190,23 @@ class VideoViT(nn.Module):
         seq = seq + self.pos_embed[:, : seq.size(1), :]
         seq = self.pos_drop(seq)
 
+        strict_masking = False
+        keep_mask_seq: Optional[torch.Tensor] = None
+        key_padding_mask: Optional[torch.Tensor] = None
+        if ast_out is not None:
+            # Strict pruning semantics (masking-only): prevent pruned tokens from being "revived"
+            # by positional embeddings / residual updates, and prevent them from contributing as K/V.
+            strict_masking = bool(_cfg_get(self.ast_cfg, "strict_masking", True))
+            if strict_masking:
+                token_mask_bt = ast_out.token_mask.view(b * t, self.num_tokens).to(dtype=seq.dtype)
+                keep_mask_seq = torch.ones((b * t, self.num_tokens + 1), device=seq.device, dtype=seq.dtype)
+                keep_mask_seq[:, 1:] = token_mask_bt
+                # key_padding_mask: True indicates position is ignored as key/value in attention.
+                key_padding_mask = (keep_mask_seq <= 0.0)
+                key_padding_mask[:, 0] = False
+                # Cancel "pos_embed revival" for pruned tokens.
+                seq = seq * keep_mask_seq.unsqueeze(-1)
+
         if ast_out is None:
             head_w = [torch.ones(self.cfg.num_heads, device=tokens.device) for _ in range(len(self.blocks))]
             ch_w = [torch.ones(int(self.cfg.embed_dim * self.cfg.mlp_ratio), device=tokens.device) for _ in range(len(self.blocks))]
@@ -178,7 +219,10 @@ class VideoViT(nn.Module):
             sparsity = ast_out.sparsity
 
         for idx, blk in enumerate(self.blocks):
-            seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx])
+            if strict_masking and keep_mask_seq is not None:
+                seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx], key_padding_mask=key_padding_mask, keep_mask=keep_mask_seq)
+            else:
+                seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx])
         seq = self.norm(seq)
         cls_out = seq[:, 0]
         logits = self.head(cls_out)  # [B*T, num_classes]
@@ -247,6 +291,12 @@ class VideoViT(nn.Module):
                 "head_keep": head_keep,
                 "ch_keep": ch_keep,
                 "block_keep": block_keep,
+                # Estimated compute ratios if token pruning were implemented as true token dropping/packing.
+                # Attention scales ~O(L^2) and MLP scales ~O(L) in sequence length L.
+                "seq_len_total": float(self.num_tokens + 1),
+                "seq_len_effective": float(1.0 + token_keep * self.num_tokens),
+                "est_attn_flops_ratio": float(((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)) ** 2),
+                "est_token_linear_flops_ratio": float((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)),
             },
             "gates": {
                 "token_mask": ast_out.token_mask if ast_out is not None else torch.ones(b, t, self.num_tokens, device=x.device),
@@ -380,6 +430,20 @@ class VideoAudioAST(nn.Module):
         seq = seq + self.pos_embed[:, : seq.size(1), :]
         seq = self.pos_drop(seq)
 
+        ast_cfg = self.cfg.ast_cfg or {}
+        strict_masking = False
+        keep_mask_seq: Optional[torch.Tensor] = None
+        key_padding_mask: Optional[torch.Tensor] = None
+        if ast_out is not None:
+            strict_masking = bool(_cfg_get(ast_cfg, "strict_masking", True))
+            if strict_masking:
+                token_mask_bt = ast_out.token_mask.view(b * t, self.num_tokens).to(dtype=seq.dtype)
+                keep_mask_seq = torch.ones((b * t, self.num_tokens + 1), device=seq.device, dtype=seq.dtype)
+                keep_mask_seq[:, 1:] = token_mask_bt
+                key_padding_mask = (keep_mask_seq <= 0.0)
+                key_padding_mask[:, 0] = False
+                seq = seq * keep_mask_seq.unsqueeze(-1)
+
         if ast_out is None:
             head_w = [torch.ones(self.cfg.num_heads, device=x_video.device) for _ in range(len(self.blocks))]
             ch_w = [torch.ones(int(self.cfg.embed_dim * self.cfg.mlp_ratio), device=x_video.device) for _ in range(len(self.blocks))]
@@ -392,7 +456,10 @@ class VideoAudioAST(nn.Module):
             sparsity = ast_out.sparsity
 
         for idx, blk in enumerate(self.blocks):
-            seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx])
+            if strict_masking and keep_mask_seq is not None:
+                seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx], key_padding_mask=key_padding_mask, keep_mask=keep_mask_seq)
+            else:
+                seq = blk(seq, head_w[idx], ch_w[idx], block_w[idx])
         seq = self.norm(seq)
         cls_out = seq[:, 0]
         logits = self.head(cls_out)
