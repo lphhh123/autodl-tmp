@@ -60,7 +60,7 @@ data:
     space_weight: 0.5
     time_weight: 0.5
     min_gap: 8
-    temporal_delta: 1
+    temporal_delta: 2
     downsample: 32
     entropy_bins: 32
     # Eval should be deterministic/stable by default (entropy_density eval may introduce jitter).
@@ -105,11 +105,11 @@ ast:
     eps: 1.0e-6
     patch_downsample: 2
     use_temporal: true
-    temporal_delta: 1
+    temporal_delta: 2
     lambda_dist: 0.5
-    center_mode: "max_entropy"   # max_entropy | image_center
-    alpha_space: 1.0
-    beta_time: 1.0
+    center_mode: "image_center"   # max_entropy | image_center
+    alpha_space: 0.7
+    beta_time: 2.0
     # Paper-style ratio already normalizes by global entropy; per-frame min-max can erase absolute difficulty.
     normalize_per_frame: false
     # Optional: region-consistency smoothing using pruner's Voronoi regions (0 disables).
