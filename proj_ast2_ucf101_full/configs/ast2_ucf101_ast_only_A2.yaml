@@ -55,7 +55,7 @@ ast:
     lambda_ast_start: 0.0
 
 loss:
-  lambda_AST: 0.2
+  lambda_AST: 0.1
 
 train:
   lr_schedule: "cosine"
