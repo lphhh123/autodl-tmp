@@ -15,3 +15,10 @@ data:
 
 test:
   run_final_test: true
+
+training:
+  outer_epochs: 50
+  inner_steps_ast: -1
+
+train:
+  grad_clip_norm: 1.0

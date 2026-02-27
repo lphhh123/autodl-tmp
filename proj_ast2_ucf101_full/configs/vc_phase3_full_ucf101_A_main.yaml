@@ -15,3 +15,15 @@ data:
 
 test:
   run_final_test: true
+
+# --- Paper-grade A-main budget (Version-C) ---
+training:
+  # Version-C trainer uses training.outer_epochs (NOT train.epochs).
+  # Must be >= ast.schedule.warmup_epochs(15) to actually enter pruning.
+  outer_epochs: 50
+  # <=0 means: iterate the whole train dataloader per outer epoch (see trainer patch).
+  inner_steps_ast: -1
+
+train:
+  # Keep Version-C numerically stable (A1/A2 already use clipping).
+  grad_clip_norm: 1.0
