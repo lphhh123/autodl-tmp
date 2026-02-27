@@ -27,3 +27,5 @@ training:
 train:
   # Keep Version-C numerically stable (A1/A2 already use clipping).
   grad_clip_norm: 1.0
+  warn_every_steps: 200
+  nan_guard_warn_every_steps: 200

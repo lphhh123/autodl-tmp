@@ -22,3 +22,5 @@ training:
 
 train:
   grad_clip_norm: 1.0
+  warn_every_steps: 200
+  nan_guard_warn_every_steps: 200
