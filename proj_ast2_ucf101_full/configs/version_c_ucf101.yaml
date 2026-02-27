@@ -1,6 +1,10 @@
 _base_: ./ast2_ucf101.yaml
 train:
   mode: version_c
+  # Reduce log bloat from repeated per-step warnings in Version-C runs.
+  # 0 => auto (use LOG_INTERVAL_STEPS / default 200)
+  warn_every_steps: 200
+  nan_guard_warn_every_steps: 200
 stable_hw:
   enabled: true
   no_double_scale:

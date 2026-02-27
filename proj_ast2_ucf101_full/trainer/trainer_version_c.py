@@ -848,6 +848,40 @@ def train_version_c(
         log_slim = bool(int(os.environ.get("LOG_SLIM", "1")))
         log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
         log_interval_steps = max(1, int(log_interval_steps))
+        # Reduce log bloat from repeated per-step warnings in long Version-C runs.
+        # - train.warn_every_steps (or WARN_EVERY_STEPS env) controls how often repeated WARN lines are emitted.
+        # - We still count all events and print a per-outer summary (so issues remain auditable).
+        warn_every_steps = int(getattr(getattr(cfg, "train", object()), "warn_every_steps", 0) or 0)
+        if warn_every_steps <= 0:
+            warn_every_steps = int(os.environ.get("WARN_EVERY_STEPS", str(log_interval_steps)))
+        warn_every_steps = max(1, int(warn_every_steps))
+
+        nan_guard_warn_every_steps = int(getattr(getattr(cfg, "train", object()), "nan_guard_warn_every_steps", 0) or 0)
+        if nan_guard_warn_every_steps <= 0:
+            nan_guard_warn_every_steps = warn_every_steps
+        nan_guard_warn_every_steps = max(1, int(nan_guard_warn_every_steps))
+
+        def _warn_throttled(key: str, step_i: int, msg: str, *args, every_steps: int, first_n: int = 1) -> None:
+            total_key = f"warn_{key}_total"
+            logged_key = f"warn_{key}_logged"
+            last_key = f"warn_{key}_last_step"
+            total = int(run_state.get(total_key, 0)) + 1
+            run_state[total_key] = total
+            last = run_state.get(last_key, None)
+            should = False
+            if total <= int(first_n):
+                should = True
+            elif last is None:
+                should = True
+            else:
+                try:
+                    should = (int(step_i) - int(last)) >= int(every_steps)
+                except Exception:
+                    should = True
+            if should:
+                run_state[last_key] = int(step_i)
+                run_state[logged_key] = int(run_state.get(logged_key, 0)) + 1
+                logger.warning(msg, *args)
         # ---- v5.4 contract log (avoid missing-key crash) ----
         def _boolish(x):
             if x is None:
@@ -1261,6 +1295,13 @@ def train_version_c(
                 assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=outer)
                 ran_epochs += 1
                 total_epochs += 1
+                # Per-outer warning deltas (keeps stdout small but still auditable).
+                amp_no_grads_total_before = int(run_state.get("warn_amp_alpha_no_grads_total", 0))
+                amp_no_grads_logged_before = int(run_state.get("warn_amp_alpha_no_grads_logged", 0))
+                nan_repair_total_before = int(run_state.get("warn_nan_repair_total", 0))
+                nan_repair_logged_before = int(run_state.get("warn_nan_repair_logged", 0))
+                nan_loss_total_before = int(run_state.get("warn_nan_total_loss_total", 0))
+                nan_loss_logged_before = int(run_state.get("warn_nan_total_loss_logged", 0))
                 stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
                 if stable_hw_enabled:
                     legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
@@ -1775,7 +1816,15 @@ def train_version_c(
                     # Hard guard: skip if total loss becomes non-finite (e.g., rare NaN from HW/AST).
                     if not torch.isfinite(loss).all():
                         run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
-                        logger.warning("[NaNGuard] non-finite total loss (outer=%s step=%s); skipping step.", outer, step)
+                        _warn_throttled(
+                            "nan_total_loss",
+                            step,
+                            "[NaNGuard] non-finite total loss (outer=%s step=%s); skipping step.",
+                            outer,
+                            step,
+                            every_steps=nan_guard_warn_every_steps,
+                            first_n=3,
+                        )
                         optimizer_model.zero_grad(set_to_none=True)
                         optimizer_alpha.zero_grad(set_to_none=True)
                         continue
@@ -1792,10 +1841,14 @@ def train_version_c(
                                 torch.nn.utils.clip_grad_norm_(chiplet_slots.parameters(), grad_clip_norm)
                             scaler.step(optimizer_alpha)
                         else:
-                            logger.warning(
+                            _warn_throttled(
+                                "amp_alpha_no_grads",
+                                step,
                                 "[AMP] optimizer_alpha has no grads (outer=%s step=%s); skip scaler.step(optimizer_alpha).",
                                 outer,
                                 step,
+                                every_steps=warn_every_steps,
+                                first_n=1,
                             )
                     # v5.4: forbidden (P0-3) — layout must be updated via discrete assign-only agent + cache
                     scaler.update()
@@ -1803,7 +1856,15 @@ def train_version_c(
                     if update_alpha:
                         repaired = _repair_nonfinite_params_(chiplet_slots) or repaired
                     if repaired:
-                        logger.warning("[NaNGuard] repaired non-finite parameters (outer=%s step=%s).", outer, step)
+                        _warn_throttled(
+                            "nan_repair",
+                            step,
+                            "[NaNGuard] repaired non-finite parameters (outer=%s step=%s).",
+                            outer,
+                            step,
+                            every_steps=nan_guard_warn_every_steps,
+                            first_n=3,
+                        )
                     if step % log_interval_steps == 0:
                         acc1 = (logits.argmax(dim=1) == y).float().mean()
                         last_acc1 = float(acc1.item())
@@ -1957,7 +2018,13 @@ def train_version_c(
                             # Skip alpha update if HW term is disabled or non-finite
                             run_state["nan_guard_skipped_alpha"] = int(run_state.get("nan_guard_skipped_alpha", 0)) + 1
                             if not torch.isfinite(loss_alpha).all():
-                                logger.warning("[NaNGuard] non-finite alpha loss; skipping alpha step.")
+                                _warn_throttled(
+                                    "nan_alpha_loss",
+                                    int(global_step),
+                                    "[NaNGuard] non-finite alpha loss; skipping alpha step.",
+                                    every_steps=nan_guard_warn_every_steps,
+                                    first_n=3,
+                                )
 
                 # Step D: layout refinement
                 if update_layout and allow_discrete:
@@ -1988,13 +2055,68 @@ def train_version_c(
                         )
                         if not torch.isfinite(L_layout).all():
                             run_state["nan_guard_skipped_layout"] = int(run_state.get("nan_guard_skipped_layout", 0)) + 1
-                            logger.warning("[NaNGuard] non-finite layout loss; disabling layout refinement for this run.")
+                            _warn_throttled(
+                                "nan_layout_loss",
+                                int(global_step),
+                                "[NaNGuard] non-finite layout loss; disabling layout refinement for this run.",
+                                every_steps=nan_guard_warn_every_steps,
+                                first_n=1,
+                            )
                             _repair_nonfinite_params_(wafer_layout)
                             update_layout = False
                             break
                         optimizer_layout.zero_grad(set_to_none=True)
                         L_layout.backward()
                         optimizer_layout.step()
+
+                # ---- per-outer warning summary (keeps stdout small) ----
+                amp_no_grads_total_after = int(run_state.get("warn_amp_alpha_no_grads_total", 0))
+                amp_no_grads_logged_after = int(run_state.get("warn_amp_alpha_no_grads_logged", 0))
+                amp_d_total = amp_no_grads_total_after - amp_no_grads_total_before
+                amp_d_logged = amp_no_grads_logged_after - amp_no_grads_logged_before
+                if amp_d_total > 0:
+                    amp_d_supp = max(0, amp_d_total - amp_d_logged)
+                    if amp_d_supp > 0:
+                        logger.info(
+                            "[LOG] AMP alpha-no-grads warnings throttled: outer=%s total=%s logged=%s suppressed=%s (warn_every_steps=%s)",
+                            outer,
+                            amp_d_total,
+                            amp_d_logged,
+                            amp_d_supp,
+                            warn_every_steps,
+                        )
+
+                nan_repair_total_after = int(run_state.get("warn_nan_repair_total", 0))
+                nan_repair_logged_after = int(run_state.get("warn_nan_repair_logged", 0))
+                nan_d_total = nan_repair_total_after - nan_repair_total_before
+                nan_d_logged = nan_repair_logged_after - nan_repair_logged_before
+                if nan_d_total > 0:
+                    nan_d_supp = max(0, nan_d_total - nan_d_logged)
+                    if nan_d_supp > 0:
+                        logger.info(
+                            "[LOG] NaNGuard repair warnings throttled: outer=%s total=%s logged=%s suppressed=%s (nan_guard_warn_every_steps=%s)",
+                            outer,
+                            nan_d_total,
+                            nan_d_logged,
+                            nan_d_supp,
+                            nan_guard_warn_every_steps,
+                        )
+
+                nan_loss_total_after = int(run_state.get("warn_nan_total_loss_total", 0))
+                nan_loss_logged_after = int(run_state.get("warn_nan_total_loss_logged", 0))
+                nloss_d_total = nan_loss_total_after - nan_loss_total_before
+                nloss_d_logged = nan_loss_logged_after - nan_loss_logged_before
+                if nloss_d_total > 0:
+                    nloss_d_supp = max(0, nloss_d_total - nloss_d_logged)
+                    if nloss_d_supp > 0:
+                        logger.info(
+                            "[LOG] NaNGuard non-finite-loss warnings throttled: outer=%s total=%s logged=%s suppressed=%s (nan_guard_warn_every_steps=%s)",
+                            outer,
+                            nloss_d_total,
+                            nloss_d_logged,
+                            nloss_d_supp,
+                            nan_guard_warn_every_steps,
+                        )
 
                 val_agg = str(getattr(getattr(cfg, "data", object()), "eval_aggregate", "clip"))
                 val_acc1 = eval_acc1(
