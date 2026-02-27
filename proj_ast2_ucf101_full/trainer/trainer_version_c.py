@@ -1482,12 +1482,23 @@ def train_version_c(
                 sum_mem = 0.0
                 sum_comm = 0.0
                 hw_stats_count = 0
-                for step in range(cfg.training.inner_steps_ast):
+                grad_clip_norm = float(getattr(cfg.train, "grad_clip_norm", 0.0) or 0.0)
+                inner_steps_ast = int(getattr(cfg.training, "inner_steps_ast", 0) or 0)
+
+                def _next_batch():
+                    nonlocal data_iter
                     try:
-                        batch = next(data_iter)
+                        return next(data_iter)
                     except StopIteration:
                         data_iter = iter(loader)
-                        batch = next(data_iter)
+                        return next(data_iter)
+
+                if inner_steps_ast <= 0:
+                    step_iter = enumerate(loader)
+                else:
+                    step_iter = ((i, _next_batch()) for i in range(inner_steps_ast))
+
+                for step, batch in step_iter:
                     x = batch["video"].to(device)
                     y = batch["label"].to(device)
                     optimizer_model.zero_grad()
@@ -1769,10 +1780,16 @@ def train_version_c(
                         optimizer_alpha.zero_grad(set_to_none=True)
                         continue
                     scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer_model)
+                    if grad_clip_norm > 0.0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                     scaler.step(optimizer_model)
                     if not twostage and update_alpha:
                         # AMP safety: skip alpha step when no alpha grads are present.
                         if _optimizer_has_any_grad(optimizer_alpha):
+                            scaler.unscale_(optimizer_alpha)
+                            if grad_clip_norm > 0.0:
+                                torch.nn.utils.clip_grad_norm_(chiplet_slots.parameters(), grad_clip_norm)
                             scaler.step(optimizer_alpha)
                         else:
                             logger.warning(
