@@ -37,6 +37,22 @@ from utils.stable_hash import stable_hash
 from utils.safe_json import safe_dump, safe_dumps
 
 
+def _optimizer_has_any_grad(opt: torch.optim.Optimizer) -> bool:
+    """Return True if any parameter in optimizer has a non-None gradient.
+
+    This avoids calling GradScaler.step() on optimizers with no tracked grads,
+    which can raise: "No inf checks were recorded for this optimizer."
+    """
+    try:
+        for group in opt.param_groups:
+            for p in group.get("params", []):
+                if p is not None and getattr(p, "grad", None) is not None:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def _ast_interp(a: float, b: float, t: float, curve: str = "linear") -> float:
     t = float(max(0.0, min(1.0, t)))
     curve = str(curve or "linear").lower()
@@ -1755,7 +1771,15 @@ def train_version_c(
                     scaler.scale(loss).backward()
                     scaler.step(optimizer_model)
                     if not twostage and update_alpha:
-                        scaler.step(optimizer_alpha)
+                        # AMP safety: skip alpha step when no alpha grads are present.
+                        if _optimizer_has_any_grad(optimizer_alpha):
+                            scaler.step(optimizer_alpha)
+                        else:
+                            logger.warning(
+                                "[AMP] optimizer_alpha has no grads (outer=%s step=%s); skip scaler.step(optimizer_alpha).",
+                                outer,
+                                step,
+                            )
                     # v5.4: forbidden (P0-3) — layout must be updated via discrete assign-only agent + cache
                     scaler.update()
                     repaired = _repair_nonfinite_params_(model)
