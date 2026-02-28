@@ -443,6 +443,7 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
             if cand is not None:
                 st["acc_ref"] = _safe_float(cand, None)  # type: ignore[arg-type]
                 st["acc_ref_source"] = f"baseline_stats:{p}"
+                st["acc_ref_locked"] = True
                 return
         except Exception:
             if strict:
@@ -652,6 +653,9 @@ def apply_accuracy_guard(
         if st.get("warmup_acc_best") is not None:
             st["acc_ref"] = float(st["warmup_acc_best"])
             st["acc_ref_source"] = "warmup_best"
+            st["acc_ref_locked"] = True
+            st["acc_ref_freeze_epoch"] = int(freeze_epoch)
+            st["acc_ref_locked_epoch"] = int(epoch)
 
     acc_ref = st.get("acc_ref", None)
     if acc_ref is None:

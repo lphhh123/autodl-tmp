@@ -10,7 +10,9 @@ stable_hw:
     acc_ref1: 0.0
     acc_ref5: 0.0
     strict: true
-    freeze_epoch: 1
+    # IMPORTANT: do NOT lock acc_ref on epoch0/1; it is too noisy and causes permanent VIOLATE.
+    # Align with AST warmup (ast.schedule.warmup_epochs=15) so discrete updates are allowed early.
+    freeze_epoch: 15
   no_drift:
     enabled: true
     allow_update: false
@@ -23,9 +25,9 @@ stable_hw:
 
   lambda_hw_schedule:
     enabled: true
-    # ★ 必须 >=1：用于 warmup_best 产生 acc_ref（当 baseline_stats_path 为空时）
-    warmup_epochs: 1
-    ramp_epochs: 1
+    # Start HW schedule only after accuracy reference is frozen (freeze_epoch=15).
+    warmup_epochs: 15
+    ramp_epochs: 10
     lambda_hw_min: 0.0
     lambda_hw_max: 0.08
 
@@ -46,11 +48,13 @@ stable_hw:
     enabled: true
     controller:
       metric: val_acc1
-      epsilon_drop: 0.002
+      # Too strict + noisy fast-val (20 batches) => permanent VIOLATE. Relax and add hysteresis.
+      epsilon_drop: 0.01
+      hysteresis: 0.002
       cut_hw_loss_on_violate: true
       freeze_discrete_updates: true
       freeze_schedule_in_recovery: true
-      recovery_min_epochs: 1
+      recovery_min_epochs: 2
       k_exit: 2
       margin_exit: 0.0
 
