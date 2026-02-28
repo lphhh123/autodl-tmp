@@ -23,6 +23,8 @@ training:
   outer_epochs: 50
   # <=0 means: iterate the whole train dataloader per outer epoch (see trainer patch).
   inner_steps_ast: -1
+  # Make StableHW guard decision less noisy. Default was 20 (too jittery).
+  stable_hw_eval_max_batches: 200
   # Perf: when lambda_hw_eff==0, skip HW proxy forward (does not change gradients).
   # Keep evaluation (val_acc1) unchanged.
   compute_hw_when_lambda0: false
