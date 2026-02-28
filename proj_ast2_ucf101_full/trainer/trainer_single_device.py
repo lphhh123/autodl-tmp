@@ -453,21 +453,36 @@ def build_dataloaders(cfg):
     generator = torch.Generator()
     generator.manual_seed(base_seed)
     worker_init = partial(_seed_worker, base_seed=base_seed)
-    train_loader = DataLoader(
-        train_ds,
+    pin_memory = bool(getattr(cfg.data, "pin_memory", True))
+    persistent_workers = bool(getattr(cfg.data, "persistent_workers", True)) and int(cfg.data.num_workers) > 0
+    prefetch_factor = int(getattr(cfg.data, "prefetch_factor", 2))
+    train_kwargs = dict(
         batch_size=batch_size,
         shuffle=True,
         num_workers=cfg.data.num_workers,
         worker_init_fn=worker_init,
         generator=generator,
+        pin_memory=pin_memory,
     )
-    val_loader = DataLoader(
-        val_ds,
+    if int(cfg.data.num_workers) > 0:
+        train_kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
+    train_loader = DataLoader(
+        train_ds,
+        **train_kwargs,
+    )
+    val_kwargs = dict(
         batch_size=batch_size,
         shuffle=False,
         num_workers=cfg.data.num_workers,
         worker_init_fn=worker_init,
         generator=generator,
+        pin_memory=pin_memory,
+    )
+    if int(cfg.data.num_workers) > 0:
+        val_kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
+    val_loader = DataLoader(
+        val_ds,
+        **val_kwargs,
     )
     return train_loader, val_loader
 
@@ -479,13 +494,22 @@ def build_test_loader(cfg):
     generator = torch.Generator()
     generator.manual_seed(base_seed)
     worker_init = partial(_seed_worker, base_seed=base_seed)
-    test_loader = DataLoader(
-        test_ds,
+    pin_memory = bool(getattr(cfg.data, "pin_memory", True))
+    persistent_workers = bool(getattr(cfg.data, "persistent_workers", True)) and int(cfg.data.num_workers) > 0
+    prefetch_factor = int(getattr(cfg.data, "prefetch_factor", 2))
+    test_kwargs = dict(
         batch_size=batch_size,
         shuffle=False,
         num_workers=cfg.data.num_workers,
         worker_init_fn=worker_init,
         generator=generator,
+        pin_memory=pin_memory,
+    )
+    if int(cfg.data.num_workers) > 0:
+        test_kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
+    test_loader = DataLoader(
+        test_ds,
+        **test_kwargs,
     )
     return test_loader
 

@@ -305,14 +305,20 @@ def build_dataloader(cfg):
     generator = torch.Generator()
     generator.manual_seed(base_seed)
     worker_init = partial(_seed_worker, base_seed=base_seed)
-    return DataLoader(
-        ds,
+    pin_memory = bool(getattr(cfg.data, "pin_memory", True))
+    persistent_workers = bool(getattr(cfg.data, "persistent_workers", True)) and int(cfg.data.num_workers) > 0
+    prefetch_factor = int(getattr(cfg.data, "prefetch_factor", 2))
+    kwargs = dict(
         batch_size=batch_size,
         shuffle=True,
         num_workers=cfg.data.num_workers,
         worker_init_fn=worker_init,
         generator=generator,
+        pin_memory=pin_memory,
     )
+    if int(cfg.data.num_workers) > 0:
+        kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
+    return DataLoader(ds, **kwargs)
 
 
 def build_val_loader(cfg) -> DataLoader:
@@ -943,14 +949,21 @@ def train_version_c(
             s = base_seed + worker_id
             seed_everything(s)
 
-        val_loader = DataLoader(
-            val_ds,
+        pin_memory = bool(getattr(cfg.data, "pin_memory", True))
+        persistent_workers = bool(getattr(cfg.data, "persistent_workers", True)) and int(getattr(cfg.data, "num_workers", 4)) > 0
+        prefetch_factor = int(getattr(cfg.data, "prefetch_factor", 2))
+        val_kwargs = dict(
+            dataset=val_ds,
             batch_size=int(getattr(cfg.data, "batch_size", cfg.train.batch_size)),
             shuffle=False,
             num_workers=int(getattr(cfg.data, "num_workers", 4)),
             worker_init_fn=_seed_worker,
             generator=generator,
+            pin_memory=pin_memory,
         )
+        if int(getattr(cfg.data, "num_workers", 4)) > 0:
+            val_kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
+        val_loader = DataLoader(**val_kwargs)
 
         max_eval_batches = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
         data_iter = iter(loader)
@@ -1704,22 +1717,38 @@ def train_version_c(
                         else:
                             mapping_sig_for_hw = None
 
-                        L_hw, hw_stats = compute_hw_loss(
-                            cfg,
-                            hw_proxy,
-                            model_info=model_info,
-                            stable_hw_cfg=stable_hw_cfg,
-                            stable_hw_state=stable_hw_state,
-                            segments=segments_for_hw,
-                            mapping=mapping_for_hw,
-                            mapping_sig=mapping_sig_for_hw,
-                            segments_sig=segments_sig,
-                            eff_specs=eff_specs,
-                            layout_positions=layout_positions,
-                            mapping_solver=mapping_solver,
-                            wafer_layout=wafer_layout,
-                            alpha=alpha,
-                        )
+                        compute_hw_when_lambda0 = bool(getattr(cfg.training, "compute_hw_when_lambda0", True))
+                        if (float(lambda_hw_eff) <= 0.0) and (not compute_hw_when_lambda0):
+                            # HW term is disabled => skipping HW proxy has NO effect on gradients.
+                            L_hw = torch.zeros_like(L_task)
+                            hw_stats = {
+                                "proxy_raw_latency_ms": 0.0,
+                                "raw_latency_ms": 0.0,
+                                "energy_mj": 0.0,
+                                "mem_mb": 0.0,
+                                "comm_ms": 0.0,
+                                "L_hw_total": 0.0,
+                                "proxy_raw": {},
+                                "proxy_used": {},
+                                "proxy_had_invalid": False,
+                            }
+                        else:
+                            L_hw, hw_stats = compute_hw_loss(
+                                cfg,
+                                hw_proxy,
+                                model_info=model_info,
+                                stable_hw_cfg=stable_hw_cfg,
+                                stable_hw_state=stable_hw_state,
+                                segments=segments_for_hw,
+                                mapping=mapping_for_hw,
+                                mapping_sig=mapping_sig_for_hw,
+                                segments_sig=segments_sig,
+                                eff_specs=eff_specs,
+                                layout_positions=layout_positions,
+                                mapping_solver=mapping_solver,
+                                wafer_layout=wafer_layout,
+                                alpha=alpha,
+                            )
                         last_hw_stats = hw_stats
                         sum_latency += float(
                             hw_stats.get(
@@ -1833,23 +1862,14 @@ def train_version_c(
                     if grad_clip_norm > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                     scaler.step(optimizer_model)
-                    if not twostage and update_alpha:
-                        # AMP safety: skip alpha step when no alpha grads are present.
+                    if (not twostage) and update_alpha and (float(lambda_hw_eff) > 0.0):
+                        # Only attempt alpha step when HW term is actually enabled (lambda_hw_eff>0).
                         if _optimizer_has_any_grad(optimizer_alpha):
                             scaler.unscale_(optimizer_alpha)
                             if grad_clip_norm > 0.0:
                                 torch.nn.utils.clip_grad_norm_(chiplet_slots.parameters(), grad_clip_norm)
                             scaler.step(optimizer_alpha)
-                        else:
-                            _warn_throttled(
-                                "amp_alpha_no_grads",
-                                step,
-                                "[AMP] optimizer_alpha has no grads (outer=%s step=%s); skip scaler.step(optimizer_alpha).",
-                                outer,
-                                step,
-                                every_steps=warn_every_steps,
-                                first_n=1,
-                            )
+                        # If HW enabled but still no grads, keep silent (avoid log bloat); audit is via stats/trace.
                     # v5.4: forbidden (P0-3) — layout must be updated via discrete assign-only agent + cache
                     scaler.update()
                     repaired = _repair_nonfinite_params_(model)
@@ -1969,8 +1989,8 @@ def train_version_c(
                                 )
                     global_step += 1
 
-                # Step B: alpha refinement
-                if update_alpha:
+                # Step B: alpha refinement (only meaningful when HW term enabled)
+                if update_alpha and (float(lambda_hw_eff) > 0.0):
                     for _ in range(cfg.training.inner_steps_alpha):
                         model_info = {}
                         last_info = run_state.get("last_model_info")
@@ -2011,7 +2031,7 @@ def train_version_c(
 
                         optimizer_alpha.zero_grad(set_to_none=True)
                         loss_alpha = float(lambda_hw_eff) * L_hw
-                        if (not twostage) and (float(lambda_hw_eff) > 0.0) and torch.isfinite(loss_alpha).all():
+                        if (not twostage) and torch.isfinite(loss_alpha).all():
                             loss_alpha.backward()
                             optimizer_alpha.step()
                         else:

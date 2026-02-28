@@ -46,6 +46,10 @@ data:
   clip_jitter: true
   img_size: 224
   num_workers: 8
+  # --- perf knobs (do NOT change semantics) ---
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
   audio_feat_dim: 128
   progress_every: 200
   cache_enabled: true

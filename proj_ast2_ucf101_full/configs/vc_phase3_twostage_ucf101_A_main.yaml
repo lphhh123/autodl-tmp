@@ -19,6 +19,9 @@ test:
 training:
   outer_epochs: 50
   inner_steps_ast: -1
+  # Perf: when lambda_hw_eff==0, skip HW proxy forward (does not change gradients).
+  # Keep evaluation (val_acc1) unchanged.
+  compute_hw_when_lambda0: false
 
 train:
   grad_clip_norm: 1.0
