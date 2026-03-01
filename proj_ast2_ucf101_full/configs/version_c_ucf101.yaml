@@ -1,12 +1,18 @@
 _base_: ./ast2_ucf101.yaml
 train:
   mode: version_c
+  # v5.4 contract: keep aligned with stable_hw.accuracy_guard.controller.epsilon_drop
+  # to avoid "stable_hw.acc_drop_max missing/0; force to 0.002" fallback logs.
+  acc_drop_max: 0.01
   # Reduce log bloat from repeated per-step warnings in Version-C runs.
   # 0 => auto (use LOG_INTERVAL_STEPS / default 200)
   warn_every_steps: 200
   nan_guard_warn_every_steps: 200
 stable_hw:
   enabled: true
+  # Recovery-only sparsity relaxation. Used by trainer_version_c when StableHW freezes AST schedule.
+  # Default 0.02: slightly relax rho_token toward dense during RECOVERY to help exit faster.
+  recovery_rho_relax: 0.02
   no_double_scale:
     enabled: true
   warmup:
