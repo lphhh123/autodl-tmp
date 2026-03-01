@@ -129,6 +129,103 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
         "lambda_ast": _ast_interp(lam_start, lam_end, t, curve=curve),
     }
 
+
+# -------------------------
+# AST schedule freeze (StableHW recovery)
+# -------------------------
+def _stablehw_freeze_ast_now(stable_state: Dict[str, Any]) -> bool:
+    """Return True when StableHW requests freezing/pinning the AST pruning schedule."""
+    if not isinstance(stable_state, dict):
+        return False
+    # freeze_schedule is the canonical flag (set by accuracy_guard); keep legacy alias too.
+    return bool(stable_state.get("freeze_schedule", False)) or bool(stable_state.get("freeze_ast_schedule", False)) or bool(
+        stable_state.get("in_recovery", False)
+    )
+
+
+def _apply_ast_runtime_overrides_to_model(model: torch.nn.Module, cfg, ast_sched: dict) -> Optional[dict]:
+    """Apply AST schedule to a model's pruner (if present) without mutating cfg."""
+    pruner = getattr(model, "ast_pruner", None)
+    if pruner is None or not hasattr(pruner, "set_runtime_overrides"):
+        return None
+
+    ast_cfg = getattr(cfg, "ast", None)
+    force_dense = bool(ast_sched.get("force_dense", False))
+    rho_token = float(ast_sched.get("rho_token", getattr(ast_cfg, "rho_token_target", 1.0) if ast_cfg is not None else 1.0))
+    token_temperature = float(
+        ast_sched.get("token_temperature", getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
+    )
+
+    pruner.set_runtime_overrides(force_dense=force_dense, rho_token=rho_token, token_temperature=token_temperature)
+    return {"force_dense": force_dense, "rho_token": float(rho_token), "token_temperature": float(token_temperature)}
+
+
+def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict[str, Any], outer: int) -> Tuple[dict, int]:
+    """Compute AST schedule using a virtual epoch that pauses while StableHW is in recovery.
+
+    - When not frozen: advance stable_state['ast_sched_virtual_epoch'] by 1 per outer.
+    - When frozen: reuse the last applied schedule and DO NOT advance the virtual epoch
+      (prevents token_keep from continuing to drop while StableHW is trying to recover accuracy).
+    Returns: (ast_sched, ast_epoch_used)
+    """
+    if not isinstance(stable_state, dict):
+        stable_state = {}
+
+    # virtual epoch defaults to outer index (fresh run) or resume start_outer
+    v_epoch = stable_state.get("ast_sched_virtual_epoch", None)
+    try:
+        v_epoch = int(outer if v_epoch is None else v_epoch)
+    except Exception:
+        v_epoch = int(outer)
+
+    freeze_now = _stablehw_freeze_ast_now(stable_state)
+
+    if freeze_now:
+        # Prefer a pinned snapshot; fall back to last applied schedule.
+        frozen = stable_state.get("ast_sched_frozen") or stable_state.get("ast_sched_last_applied") or {}
+        if not isinstance(frozen, dict) or not frozen:
+            # fail-safe: dense behavior
+            ast_cfg = getattr(cfg, "ast", None)
+            token_temperature = float(getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
+            frozen = {
+                "phase": "warmup",
+                "t": 0.0,
+                "force_dense": True,
+                "rho_token": 1.0,
+                "token_temperature": token_temperature,
+                "lambda_ast": 0.0,
+            }
+        else:
+            frozen = dict(frozen)
+
+        # During recovery, enforce dense + disable AST loss weight to maximize accuracy recovery.
+        ast_cfg = getattr(cfg, "ast", None)
+        token_temperature = float(
+            frozen.get("token_temperature", getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
+        )
+        frozen["force_dense"] = True
+        frozen["rho_token"] = 1.0
+        frozen["token_temperature"] = token_temperature
+        frozen["lambda_ast"] = 0.0
+
+        stable_state["ast_sched_frozen"] = dict(frozen)
+        stable_state["ast_sched_frozen_outer"] = int(outer)
+        # Do NOT advance virtual epoch.
+        return dict(frozen), int(v_epoch)
+
+    # not frozen => advance virtual epoch
+    ast_epoch_used = int(v_epoch)
+    ast_sched = compute_ast_schedule_effective(cfg, ast_epoch_used)
+    if not isinstance(ast_sched, dict):
+        ast_sched = {"phase": "disabled"}
+    stable_state["ast_sched_last_applied"] = dict(ast_sched)
+    stable_state["ast_sched_last_epoch"] = int(ast_epoch_used)
+    stable_state["ast_sched_virtual_epoch"] = int(ast_epoch_used) + 1
+    # clear frozen snapshot when leaving recovery
+    stable_state.pop("ast_sched_frozen", None)
+    stable_state.pop("ast_sched_frozen_outer", None)
+    return dict(ast_sched), int(ast_epoch_used)
+
 def _atomic_torch_save(obj, dst: Path) -> None:
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1392,20 +1489,38 @@ def train_version_c(
                 # -------------------------
                 # AST schedule (dense warmup -> ramp -> stabilize)
                 # This affects token gating (rho/temperature) and lambda_AST multiplier only.
+                # v5.4 fix: when StableHW enters VIOLATE/RECOVERY (freeze_schedule=True),
+                # pause the AST schedule so token_keep does NOT keep dropping (otherwise recovery becomes impossible).
                 # -------------------------
-                ast_sched = compute_ast_schedule_effective(cfg, int(outer))
+                # Ensure the virtual epoch is aligned to resume start point.
+                stable_hw_state.setdefault("ast_sched_virtual_epoch", int(outer))
+                ast_sched, ast_epoch_used = compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_hw_state, int(outer))
+                freeze_now = bool(_stablehw_freeze_ast_now(stable_hw_state)) if stable_hw_enabled else False
+                stable_hw_state["freeze_ast_schedule"] = bool(freeze_now)
+                stable_hw_state["ast_sched_epoch_used"] = int(ast_epoch_used)
+
                 lambda_ast_eff = float(getattr(getattr(cfg, "loss", None), "lambda_AST", 1.0) or 1.0)
-                if ast_sched.get("phase") != "disabled":
+                if isinstance(ast_sched, dict) and ast_sched.get("phase") != "disabled":
                     lambda_ast_eff = float(ast_sched.get("lambda_ast", lambda_ast_eff))
-                    pruner = getattr(model, "ast_pruner", None)
-                    if pruner is not None and hasattr(pruner, "set_runtime_overrides"):
-                        pruner.set_runtime_overrides(
-                            force_dense=bool(ast_sched.get("force_dense", False)),
-                            rho_token=float(ast_sched.get("rho_token", getattr(getattr(cfg, "ast", None), "rho_token_target", 1.0))),
-                            token_temperature=float(ast_sched.get("token_temperature", getattr(getattr(cfg, "ast", None), "token_temperature", 0.1))),
+                    _apply_ast_runtime_overrides_to_model(model, cfg, ast_sched)
+
+                    # Log at key transition points and whenever we freeze/unfreeze (prevents blind 3-day runs).
+                    sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
+                    warm_e = int(getattr(sched0, "warmup_epochs", 0) or 0) if sched0 is not None else 0
+                    if outer == start_outer or outer == warm_e or outer == (warm_e + 1) or freeze_now or (outer % 5 == 0):
+                        logger.info(
+                            "[ASTSchedule] outer=%s ast_epoch=%s phase=%s force_dense=%s rho_token=%.4f temp=%.4f lambda_ast=%.4f freeze=%s guard_mode=%s",
+                            int(outer),
+                            int(ast_epoch_used),
+                            str(ast_sched.get("phase")),
+                            bool(ast_sched.get("force_dense", False)),
+                            float(ast_sched.get("rho_token", 1.0)),
+                            float(ast_sched.get("token_temperature", 0.1)),
+                            float(ast_sched.get("lambda_ast", lambda_ast_eff)),
+                            bool(freeze_now),
+                            str(stable_hw_state.get("guard_mode", "disabled")) if stable_hw_enabled else "disabled",
                         )
                     if outer == start_outer:
-                        sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
                         logger.info(
                             "[ASTSchedule] enabled: warmup=%s, ramp=%s, curve=%s",
                             getattr(sched0, "warmup_epochs", None),
@@ -2266,6 +2381,14 @@ def train_version_c(
                             "outer_iter": int(outer_iter),
                             "global_step": int(global_step),
                             "notes": "version_c",
+                            "ast_phase": str(ast_sched.get("phase", "disabled")) if isinstance(ast_sched, dict) else "disabled",
+                            "ast_force_dense": bool(ast_sched.get("force_dense", False)) if isinstance(ast_sched, dict) else False,
+                            "ast_rho_token": float(ast_sched.get("rho_token", 1.0)) if isinstance(ast_sched, dict) else 1.0,
+                            "ast_token_temperature": float(ast_sched.get("token_temperature", 0.1)) if isinstance(ast_sched, dict) else 0.1,
+                            "ast_lambda_ast": float(ast_sched.get("lambda_ast", 0.0)) if isinstance(ast_sched, dict) else 0.0,
+                            "ast_freeze_now": bool(_stablehw_freeze_ast_now(stable_hw_state)) if stable_hw_enabled else False,
+                            "ast_sched_virtual_epoch": int(stable_hw_state.get("ast_sched_virtual_epoch", int(outer) + 1)),
+                            "ast_sched_epoch_used": int(stable_hw_state.get("ast_sched_epoch_used", int(outer))),
                         },
                     )
                     missing_keys = [k for k in REQUIRED_GATING_KEYS if k not in payload]
