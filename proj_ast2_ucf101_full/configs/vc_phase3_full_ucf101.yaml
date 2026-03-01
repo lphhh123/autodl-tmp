@@ -56,7 +56,7 @@ stable_hw:
       freeze_schedule_in_recovery: true
       recovery_min_epochs: 2
       k_exit: 2
-      margin_exit: 0.0
+      margin_exit: 0.002
 
   discrete_isolation:
     mapping_update_every_epochs: 1

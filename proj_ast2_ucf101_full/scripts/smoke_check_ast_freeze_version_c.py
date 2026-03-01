@@ -33,12 +33,13 @@ def main():
     assert int(e0) == 0
     assert int(st["ast_sched_virtual_epoch"]) == 1
 
-    # Freeze: schedule must NOT advance and must be dense
+    # Freeze: schedule must NOT advance and should hold prior sparsity schedule.
     st["freeze_schedule"] = True
     sF, eF = compute_ast_schedule_effective_with_stable_hw_freeze(cfg, st, outer=1)
     assert int(st["ast_sched_virtual_epoch"]) == 1, "virtual epoch must pause while frozen"
-    assert bool(sF.get("force_dense", False)) is True
-    assert abs(float(sF.get("rho_token", 0.0)) - 1.0) < 1e-12
+    assert bool(sF.get("force_dense", True)) is False
+    assert abs(float(sF.get("rho_token", 0.0)) - float(s0.get("rho_token", 0.0))) < 1e-12
+    assert abs(float(sF.get("token_temperature", 0.0)) - float(s0.get("token_temperature", 0.0))) < 1e-12
     assert abs(float(sF.get("lambda_ast", 1.0)) - 0.0) < 1e-12
 
     # Unfreeze: should resume from virtual epoch 1, and then advance to 2

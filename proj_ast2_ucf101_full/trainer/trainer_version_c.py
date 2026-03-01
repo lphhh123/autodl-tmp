@@ -198,14 +198,29 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         else:
             frozen = dict(frozen)
 
-        # During recovery, enforce dense + disable AST loss weight to maximize accuracy recovery.
+        # During recovery: PAUSE schedule progression, but DO NOT revert to full dense.
+        # Hold the last applied rho_token/temperature so the model can actually adapt at this sparsity level.
         ast_cfg = getattr(cfg, "ast", None)
-        token_temperature = float(
-            frozen.get("token_temperature", getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
-        )
-        frozen["force_dense"] = True
-        frozen["rho_token"] = 1.0
-        frozen["token_temperature"] = token_temperature
+
+        # Keep previous settings if present; otherwise fall back to dense safely.
+        rho_prev = float(frozen.get("rho_token", 1.0))
+        temp_prev = float(frozen.get("token_temperature", getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1))
+
+        # Optional: tiny relaxation to help recovery, but keep it very small to avoid gaming.
+        # Set to 0.0 by default (no behavior change unless you later add cfg knob).
+        relax = 0.0
+        try:
+            relax = float(getattr(getattr(cfg, "stable_hw", None), "recovery_rho_relax", 0.0) or 0.0)
+        except Exception:
+            relax = 0.0
+
+        rho_hold = min(1.0, max(0.0, rho_prev + relax))
+
+        frozen["force_dense"] = bool(frozen.get("force_dense", False))  # keep prior; do not force True
+        frozen["rho_token"] = float(rho_hold)
+        frozen["token_temperature"] = float(temp_prev)
+
+        # Disable AST auxiliary loss during recovery to reduce extra instability.
         frozen["lambda_ast"] = 0.0
 
         stable_state["ast_sched_frozen"] = dict(frozen)
