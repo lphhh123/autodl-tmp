@@ -214,7 +214,7 @@ case "$EXP_ID" in
 
   EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "outputs/EXP-B1/seed${SEED}" ;;
   EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "outputs/EXP-B2/seed${SEED}" ;;
-  EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa_exp.yaml "outputs/EXP-B3/seed${SEED}" ;;
+  EXP-B3) run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml "outputs/EXP-B3/seed${SEED}" ;;
   EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;
   EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "outputs/EXP-B2-ab-nofeas/seed${SEED}" ;;
   EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "outputs/EXP-B2-ab-nodiverse/seed${SEED}" ;;

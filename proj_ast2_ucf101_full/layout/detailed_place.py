@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -389,9 +390,13 @@ def run_detailed_place(
         except Exception as e:
             llm_provider = None
             llm_init_error = repr(e)
-    fallback_reason = "llm_init_failed" if (planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error) else ""
-    llm_fail_count = 1 if fallback_reason else 0
-    if fallback_reason and trace_events_path is not None:
+    fallback_reason_init = "llm_init_failed" if (planner_type in ("llm", "mixed") and llm_provider is None and llm_init_error) else ""
+    llm_fail_count = 1 if fallback_reason_init else 0
+    llm_attempt_count = 0
+    llm_success_count = 0
+    llm_disabled = False
+    llm_disabled_reason = ""
+    if fallback_reason_init and trace_events_path is not None:
         append_trace_event_v54(
             trace_events_path,
             "contract_override",
@@ -400,7 +405,7 @@ def run_detailed_place(
                 "reason": "planner_fallback",
                 "requested": {"planner.type": planner_type},
                 "effective": {"planner.type": "heuristic"},
-                "details": {"fallback_reason": fallback_reason},
+                "details": {"fallback_reason": fallback_reason_init},
             },
             step=0,
         )
@@ -487,7 +492,7 @@ def run_detailed_place(
                         "cache_saved_eval_calls_cum": cache_saved_eval_calls_cum,
                         "llm_used": 0,
                         "llm_fail_count": llm_fail_count,
-                        "fallback_reason": fallback_reason,
+                        "fallback_reason": fallback_reason_init,
                         "wall_time_ms_cum": wall_time_ms,
                         "accepted_steps_cum": accepted_steps,
                         "sim_eval_calls_cum": eval_calls_cum,
@@ -576,6 +581,8 @@ def run_detailed_place(
                 refresh_due_to_rejects = False
                 progress_every = int(_cfg_get(dp_cfg, "progress_every", 10))
                 save_every = int(_cfg_get(dp_cfg, "save_every", 50))
+                require_llm = bool(_cfg_get(planner_cfg, "require_llm", False))
+                disable_on_fatal = bool(_cfg_get(planner_cfg, "disable_on_fatal", True))
 
                 for step in range(steps):
                     if trace_events_path is not None:
@@ -690,6 +697,11 @@ def run_detailed_place(
                     llm_prompt_tokens = 0
                     llm_completion_tokens = 0
                     llm_latency_ms = 0
+                    fallback_reason_step = ""
+                    llm_status_code_step = 0
+                    llm_error_code_step = ""
+                    llm_ok_step = 0
+                    llm_n_pick_step = 0
 
                     llm_policy = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
                     if forced_policy:
@@ -698,6 +710,10 @@ def run_detailed_place(
                         elif forced_policy.lower() == "llm":
                             llm_policy = (planner_type in ("llm", "mixed") and llm_provider is not None)
                     need_refresh = bool(llm_policy and llm_provider is not None and (not action_queue or refresh_due_to_rejects))
+                    if llm_disabled and llm_policy:
+                        need_refresh = False
+                        llm_called = 0
+                        fallback_reason_step = f"llm_disabled:{llm_disabled_reason}"
                     llm_called = 1 if need_refresh else 0
                     refresh_due_to_rejects = False
 
@@ -727,16 +743,43 @@ def run_detailed_place(
                             t0 = time.perf_counter()
                             pick_ids = llm_provider.propose_pick(ss, k_actions) or []
                             llm_latency_ms = int((time.perf_counter() - t0) * 1000)
+                            usage = getattr(llm_provider, "last_usage", {}) or {}
+                            llm_status_code_step = int(usage.get("status_code", 0) or 0)
+                            llm_error_code_step = str(usage.get("error_code", "") or "")
+                            if (not llm_error_code_step) and ("resp" in usage):
+                                m = re.search(r'"code":"([^"]+)"', str(usage.get("resp", "")))
+                                if m:
+                                    llm_error_code_step = m.group(1)
+                            llm_n_pick_step = int(len(pick_ids))
+                            llm_ok_step = 1 if (llm_status_code_step == 200 and llm_n_pick_step > 0) else 0
+                            llm_attempt_count += 1
+                            if llm_ok_step:
+                                llm_success_count += 1
+                            else:
+                                llm_fail_count += 1
+                                if llm_status_code_step == 429 and llm_error_code_step == "SetLimitExceeded":
+                                    fallback_reason_step = "llm_fatal:SetLimitExceeded"
+                                    if disable_on_fatal:
+                                        llm_disabled = True
+                                        llm_disabled_reason = "SetLimitExceeded"
+                                    if require_llm:
+                                        raise RuntimeError("LLM fatal: HTTP429 SetLimitExceeded (require_llm=True)")
+                                elif llm_status_code_step != 200:
+                                    fallback_reason_step = f"llm_http_{llm_status_code_step}:{llm_error_code_step}"
+                                else:
+                                    fallback_reason_step = "llm_empty_pick"
                             for pid in pick_ids:
                                 cand = cand_map.get(pid)
                                 if cand:
                                     pick_types_count[cand.type] = pick_types_count.get(cand.type, 0) + 1
                                     if best_d_total is None or cand.est.get("d_total", 0) < best_d_total:
                                         best_d_total = cand.est.get("d_total", 0)
-                            usage = getattr(llm_provider, "last_usage", {}) or {}
+                            usage = usage or getattr(llm_provider, "last_usage", {}) or {}
                             llm_prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                             llm_completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                         except Exception as e:
+                            llm_fail_count += 1
+                            fallback_reason_step = "llm_exception"
                             if usage_fp:
                                 json.dump(
                                     {
@@ -747,7 +790,7 @@ def run_detailed_place(
                                     },
                                     usage_fp,
                                 )
-                                usage_fp.write("\\n")
+                                usage_fp.write("\n")
                                 usage_fp.flush()
                         actions: List[Dict[str, Any]] = []
                         if pick_ids:
@@ -782,7 +825,7 @@ def run_detailed_place(
                             usage["n_queue_push"] = len(actions)
                             usage["step"] = int(step)
                             json.dump(usage, usage_fp)
-                            usage_fp.write("\\n")
+                            usage_fp.write("\n")
                             usage_fp.flush()
                             expire_step = step + queue_window_steps
                             if queue_enabled:
@@ -1003,14 +1046,19 @@ def run_detailed_place(
                         "cache_key": cache_key,
                         "eval_calls_cum": int(eval_calls_cum),
                         "llm_used": int(llm_called),
-                        "llm_fail_count": llm_fail_count,
-                        "fallback_reason": fallback_reason,
+                        "llm_fail_count": int(llm_fail_count),
+                        "fallback_reason": str(fallback_reason_step or fallback_reason_init),
                         "wall_time_ms_cum": int(wall_time_ms_cum),
                         "accepted_steps_cum": int(accepted_steps),
                         "sim_eval_calls_cum": int(eval_calls_cum),
                         "lookahead_enabled": int(lookahead_enabled),
                         "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
-                        "notes": "",
+                        "notes": (
+                            f"llm_call={int(llm_called)} status={llm_status_code_step} code={llm_error_code_step} ok={llm_ok_step} n_pick={llm_n_pick_step} "
+                            f"llm_ok/att={llm_success_count}/{llm_attempt_count}"
+                            if (int(llm_called) == 1 or (fallback_reason_step != ""))
+                            else ""
+                        ),
                     }
                     writer.writerow(row)
                     if recordings_fp is not None:
@@ -1117,7 +1165,7 @@ def run_detailed_place(
                         "cache_saved_eval_calls_cum": cache_hit_cum,
                         "llm_used": 0,
                         "llm_fail_count": llm_fail_count,
-                        "fallback_reason": fallback_reason,
+                        "fallback_reason": fallback_reason_init,
                         "wall_time_ms_cum": int((time.perf_counter() - wall_start) * 1000),
                         "accepted_steps_cum": int(accepted_steps),
                         "sim_eval_calls_cum": int(eval_calls_cum),

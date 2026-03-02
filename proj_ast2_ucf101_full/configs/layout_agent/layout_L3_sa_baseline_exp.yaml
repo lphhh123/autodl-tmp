@@ -1,0 +1,11 @@
+_base_: base_layout_exp.yaml
+
+detailed_place:
+  planner:
+    type: heuristic
+  candidate_pool:
+    raw_target_size: 0
+    raw_target_max: 0
+    final_size: 0
+    diversity_enabled: false
+    coverage_min_per_bucket: 0
