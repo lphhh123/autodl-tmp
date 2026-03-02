@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 import json
 import math
 import os
+import re
 from pathlib import Path
 import yaml
 
@@ -339,18 +340,12 @@ def stable_hw_schedule(
     )
     clamp_max = _safe_float(_cfg_get(sched, "clamp_max", 1.0), 1.0)
 
-    # freeze schedule during recovery if asked (spec)
+    # freeze flag during recovery (used by trainers to pause AST schedule),
+    # BUT DO NOT freeze lambda_hw_base progression (otherwise it can get stuck at 0 if recovery happens early).
     guard = _get_accuracy_guard_cfg(stable_hw_cfg)
     ctrl = _cfg_get(guard, "controller", {}) or {}
     freeze_in_recovery = bool(_cfg_get(ctrl, "freeze_schedule_in_recovery", True))
-    if freeze_in_recovery and bool(st.get("in_recovery", False)):
-        lam = float(st.get("lambda_hw_base", 0.0))
-        st["freeze_schedule"] = True
-        st["lambda_hw_base"] = float(lam)
-        st["schedule_epoch"] = int(epoch)
-        st["lambda_hw_effective"] = float(lam)  # pre-guard
-        return st
-    st["freeze_schedule"] = False
+    st["freeze_schedule"] = bool(freeze_in_recovery and bool(st.get("in_recovery", False)))
     if epoch < warmup_epochs:
         phase = "warmup"
         lam = 0.0
@@ -396,6 +391,62 @@ def stable_hw_schedule(
     if lock_enabled and (st.get("acc_ref", None) is None):
         st["lambda_hw_effective"] = 0.0
     return st
+
+
+
+def _format_seed_template(path_tmpl: str, seed: int) -> str:
+    s = str(path_tmpl)
+    s = s.replace("{seed}", str(seed)).replace("${seed}", str(seed))
+    return s
+
+
+def _parse_baseline_curve_from_stdout(stdout_path: Path) -> Dict[int, float]:
+    """
+    Parse baseline curve from EXP-A1 stdout.
+
+    We expect lines like:
+      [val] epoch=5 mode=full acc_clip=... acc_video=0.6008 ...
+      [val] epoch=16 mode=fast ... acc_video=0.5510 ...
+    Prefer mode=full if present for the same epoch; otherwise use mode=fast.
+    Ignore mode=test.
+    """
+    pat = re.compile(r"\[val\].*epoch=(\d+).*mode=([a-zA-Z_]+).*acc_video=([0-9]*\.?[0-9]+)")
+    best_by_epoch: Dict[int, Tuple[int, float]] = {}  # epoch -> (priority, acc); full>fast
+    # priority: full=2, fast=1
+    with stdout_path.open("r", errors="ignore") as f:
+        for line in f:
+            if "[val]" not in line:
+                continue
+            m = pat.search(line)
+            if not m:
+                continue
+            ep = int(m.group(1))
+            mode = str(m.group(2)).lower().strip()
+            acc = float(m.group(3))
+            if mode == "test":
+                continue
+            pr = 2 if mode == "full" else 1
+            old = best_by_epoch.get(ep)
+            if old is None or pr > old[0]:
+                best_by_epoch[ep] = (pr, acc)
+
+    out: Dict[int, float] = {}
+    for ep, (_, acc) in best_by_epoch.items():
+        out[int(ep)] = float(acc)
+    return out
+
+
+def _ema_smooth(values: list[float], alpha: float) -> list[float]:
+    if not values:
+        return []
+    a = float(alpha)
+    a = max(0.0, min(1.0, a))
+    m = float(values[0])
+    out = []
+    for v in values:
+        m = a * float(v) + (1.0 - a) * m
+        out.append(float(m))
+    return out
 
 
 def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
@@ -450,6 +501,66 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
                 raise RuntimeError(f"[v5.4 LockedAccRef] baseline_stats_path invalid: {baseline_stats_path}")
             st["acc_ref_source"] = f"baseline_stats_parse_error:{p}"
             return
+
+    # ===== baseline stdout curve (EXP-A1 stdout) =====
+    mode = str(_cfg_get(locked, "mode", "") or "").lower().strip()
+    if source in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
+        seed = int(st.get("seed", 0))
+        # Path template priority:
+        # 1) env BASELINE_STDOUT (absolute or relative to repo CWD which is project root)
+        # 2) locked.baseline_stdout_path
+        # 3) default: outputs/EXP-A1/seed{seed}/stdout
+        env_p = str(os.environ.get("BASELINE_STDOUT", "") or "").strip()
+        tmpl = env_p or str(_cfg_get(locked, "baseline_stdout_path", "") or "").strip() or "outputs/EXP-A1/seed{seed}/stdout"
+        p0 = Path(_format_seed_template(tmpl, seed))
+        # try common suffixes
+        candidates = [p0]
+        if p0.suffix == "":
+            candidates.append(Path(str(p0) + ".log"))
+            candidates.append(Path(str(p0) + ".txt"))
+
+        found = None
+        for c in candidates:
+            if c.exists() and c.is_file():
+                found = c
+                break
+
+        if found is None:
+            if strict:
+                raise RuntimeError(
+                    "[v5.4 LockedAccRef][curve_stdout] baseline stdout not found. "
+                    f"Tried: {', '.join(str(x) for x in candidates)}. "
+                    "Fix by setting env BASELINE_STDOUT or stable_hw.locked_acc_ref.baseline_stdout_path."
+                )
+            st["acc_ref_source"] = f"baseline_stdout_missing:{candidates[0]}"
+            return
+
+        acc_map = _parse_baseline_curve_from_stdout(found)
+        if not acc_map:
+            if strict:
+                raise RuntimeError(f"[v5.4 LockedAccRef][curve_stdout] failed to parse curve from: {found}")
+            st["acc_ref_source"] = f"baseline_stdout_parse_empty:{found}"
+            return
+
+        max_ep = max(acc_map.keys())
+        curve_raw: list[float] = []
+        last = None
+        for ep in range(max_ep + 1):
+            if ep in acc_map:
+                last = float(acc_map[ep])
+            # forward fill
+            if last is None:
+                last = 0.0
+            curve_raw.append(float(last))
+
+        alpha = float(_cfg_get(locked, "curve_ema_alpha", 0.2) or 0.2)
+        curve = _ema_smooth(curve_raw, alpha=alpha) if len(curve_raw) > 1 else curve_raw
+        st["acc_ref_curve_raw"] = curve_raw
+        st["acc_ref_curve"] = curve
+        st["acc_ref_source"] = f"baseline_stdout_curve:{found}"
+        st["acc_ref_locked"] = True  # means "reference curve ready"
+        # IMPORTANT: do NOT set st["acc_ref"] constant here; apply_accuracy_guard will set acc_ref(t) per epoch.
+        return
 
     # else: will be set by warmup_best when val metrics arrive
     st.setdefault("acc_ref_source", "warmup_best_pending")
@@ -648,14 +759,27 @@ def apply_accuracy_guard(
         best = st.get("warmup_acc_best")
         st["warmup_acc_best"] = cur if best is None else max(float(best), cur)
 
-    # freeze acc_ref from warmup best when reaching freeze_epoch (end of warmup)
-    if st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
-        if st.get("warmup_acc_best") is not None:
-            st["acc_ref"] = float(st["warmup_acc_best"])
-            st["acc_ref_source"] = "warmup_best"
-            st["acc_ref_locked"] = True
-            st["acc_ref_freeze_epoch"] = int(freeze_epoch)
-            st["acc_ref_locked_epoch"] = int(epoch)
+    # ===== acc_ref selection =====
+    curve = st.get("acc_ref_curve", None)
+    curve_margin = float(_cfg_get(_get_locked_cfg(stable_hw_cfg), "curve_margin", 0.0) or 0.0)
+
+    if isinstance(curve, list) and len(curve) > 0 and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
+        idx = int(epoch)
+        if idx >= len(curve):
+            idx = len(curve) - 1
+        st["acc_ref"] = float(curve[idx]) - float(curve_margin)
+        st["acc_ref_source"] = str(st.get("acc_ref_source", "baseline_stdout_curve"))
+        st["acc_ref_locked"] = True
+        st["acc_ref_epoch"] = int(idx)
+    else:
+        # fallback legacy: warmup_best constant ref
+        if st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
+            if st.get("warmup_acc_best") is not None:
+                st["acc_ref"] = float(st["warmup_acc_best"])
+                st["acc_ref_source"] = "warmup_best"
+                st["acc_ref_locked"] = True
+                st["acc_ref_freeze_epoch"] = int(freeze_epoch)
+                st["acc_ref_locked_epoch"] = int(epoch)
 
     acc_ref = st.get("acc_ref", None)
     if acc_ref is None:
@@ -720,11 +844,35 @@ def apply_accuracy_guard(
     st["acc_last"] = float(metric) if metric is not None else None
     st["acc_last_source"] = str(metric_key)
 
-    # threshold check
-    violate = False
-    if metric is not None:
-        violate = (float(acc_ref) - float(metric)) > float(eps_used)
-    margin = float(metric) - (float(acc_ref) - float(eps_used)) if metric is not None else 0.0
+    # ===== entry smoothing + consecutive trigger =====
+    use_acc_ema = bool(_cfg_get(ctrl, "use_acc_ema", True))
+    acc_ema_alpha = float(_cfg_get(ctrl, "acc_ema_alpha", 0.3) or 0.3)
+    k_enter = int(_cfg_get(ctrl, "k_enter", 2) or 2)
+
+    metric_enter = metric
+    if metric is not None and use_acc_ema:
+        prev = st.get("acc_used_ema", None)
+        if prev is None:
+            st["acc_used_ema"] = float(metric)
+        else:
+            st["acc_used_ema"] = float(acc_ema_alpha) * float(metric) + (1.0 - float(acc_ema_alpha)) * float(prev)
+        metric_enter = float(st["acc_used_ema"])
+
+    violate_inst = False
+    if metric_enter is not None:
+        violate_inst = (float(acc_ref) - float(metric_enter)) > float(eps_used)
+
+    # consecutive enter
+    if violate_inst:
+        st["below_cnt"] = int(st.get("below_cnt", 0)) + 1
+    else:
+        st["below_cnt"] = 0
+
+    violate = bool(int(st.get("below_cnt", 0)) >= int(k_enter))
+
+    # margin for exit/printing uses RAW metric (avoid EMA lag on exit)
+    metric_exit = metric
+    margin = float(metric_exit) - (float(acc_ref) - float(eps_used)) if metric_exit is not None else 0.0
     stop_on_violation = bool(_cfg_get(ctrl, "stop_on_violation", _cfg_get(gcfg, "stop_on_violation", False)))
     stop_training = bool(stop_on_violation and violate)
 
@@ -776,7 +924,7 @@ def apply_accuracy_guard(
     st["lambda_hw_effective"] = float(after)  # trainer must ONLY use this
     st["guard_mode"] = str(st["guard_mode"])
     st["in_recovery"] = bool(st["guard_mode"] in ("VIOLATE", "RECOVERY"))
-    st["acc_violation"] = bool(violate)
+    st["acc_violation"] = bool(violate_inst)
     st["guard_triggered"] = bool(violate)
     st["violate_streak"] = int(st.get("violate_streak", 0) + 1) if violate else 0
     st["acc_used_last"] = float(acc_used) if acc_used is not None else None

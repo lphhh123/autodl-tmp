@@ -1237,6 +1237,7 @@ def train_version_c(
         last_segments: List = []
         last_mapping: List[int] = []
         stable_hw_state: Dict[str, Any] = {}
+        stable_hw_state["seed"] = int(seed)
         stable_hw_state["run_signature"] = signature
         stable_hw_state["out_dir"] = str(out_dir)
         stable_hw_state["stable_hw_enabled"] = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
