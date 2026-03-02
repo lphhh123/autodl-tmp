@@ -239,6 +239,15 @@ def build_candidate_pool(
     S = int(assign.shape[0])
     Ns = int(sites_xy.shape[0])
 
+    # cluster_to_region is produced by assign_clusters_to_regions() and is usually a Python list.
+    # Do NOT assume it is a numpy array.
+    try:
+        n_ctr = int(len(cluster_to_region))
+    except Exception:
+        # extremely defensive fallback
+        cluster_to_region = list(cluster_to_region)
+        n_ctr = int(len(cluster_to_region))
+
     # cfg access helper (dict / OmegaConf / obj)
     def _get(obj, key, default=None):
         if obj is None:
@@ -392,7 +401,10 @@ def build_candidate_pool(
                 continue
 
             cid_cl = int(cluster_idx)
-            from_region = int(cluster_to_region[cid_cl]) if 0 <= cid_cl < int(cluster_to_region.shape[0]) else -1
+            from_region = int(cluster_to_region[cid_cl]) if 0 <= cid_cl < n_ctr else -1
+            # if mapping is missing for this cluster, treat as unknown region
+            if from_region < 0:
+                from_region = -1
 
             # pick target region != from_region when possible
             all_regions = list(region_sites.keys())
