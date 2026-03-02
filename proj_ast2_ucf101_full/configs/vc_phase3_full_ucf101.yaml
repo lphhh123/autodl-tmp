@@ -51,6 +51,10 @@ stable_hw:
       # Too strict + noisy fast-val (20 batches) => permanent VIOLATE. Relax and add hysteresis.
       epsilon_drop: 0.01
       hysteresis: 0.002
+      # avoid "lock then immediately violate" at freeze_epoch boundary
+      lock_grace_epochs: 1
+      # require consecutive drops before entering VIOLATE (anti-noise)
+      k_enter: 2
       cut_hw_loss_on_violate: true
       freeze_discrete_updates: true
       freeze_schedule_in_recovery: true

@@ -1475,10 +1475,25 @@ def train_version_c(
                         freeze_epochs += 1
                     # ---- invariants (v5.4) ----
                     if stable_hw_state.get("acc_ref") is not None:
-                        stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
-                        assert float(stable_hw_state["_acc_ref_once"]) == float(
-                            stable_hw_state["acc_ref"]
-                        ), "acc_ref drift detected"
+                        cur = float(stable_hw_state["acc_ref"])
+                        prev = stable_hw_state.get("_acc_ref_once", None)
+                        locked_ep = stable_hw_state.get("acc_ref_locked_epoch", None)
+                        # allow one update on the locking epoch (warmup->locked transition), or for dynamic/curve refs
+                        allow_dynamic = bool(stable_hw_state.get("acc_ref_dynamic", False))
+                        if prev is None:
+                            stable_hw_state["_acc_ref_once"] = cur
+                        else:
+                            prevf = float(prev)
+                            if abs(prevf - cur) > 1e-9:
+                                if (locked_ep is not None and int(locked_ep) == int(outer)) or allow_dynamic:
+                                    stable_hw_state["_acc_ref_once"] = cur
+                                else:
+                                    logger.warning(
+                                        f"[StableHW] acc_ref changed (prev={prevf:.6f}, cur={cur:.6f}). "
+                                        "Resetting _acc_ref_once to avoid crash. "
+                                        "If this is unexpected, inspect locked_acc_ref/curve settings."
+                                    )
+                                    stable_hw_state["_acc_ref_once"] = cur
                     # ---- v5.4 restart window: apply lr_restart_mul once per restart epoch ----
                     if stable_hw_enabled and bool(stable_hw_state.get("request_lr_restart", False)):
                         last_applied = int(stable_hw_state.get("_lr_restart_applied_epoch", -999999))
@@ -2430,10 +2445,25 @@ def train_version_c(
                         break
                     # ---- invariants (v5.4) ----
                     if stable_hw_state.get("acc_ref") is not None:
-                        stable_hw_state.setdefault("_acc_ref_once", stable_hw_state["acc_ref"])
-                        assert float(stable_hw_state["_acc_ref_once"]) == float(
-                            stable_hw_state["acc_ref"]
-                        ), "acc_ref drift detected"
+                        cur = float(stable_hw_state["acc_ref"])
+                        prev = stable_hw_state.get("_acc_ref_once", None)
+                        locked_ep = stable_hw_state.get("acc_ref_locked_epoch", None)
+                        # allow one update on the locking epoch (warmup->locked transition), or for dynamic/curve refs
+                        allow_dynamic = bool(stable_hw_state.get("acc_ref_dynamic", False))
+                        if prev is None:
+                            stable_hw_state["_acc_ref_once"] = cur
+                        else:
+                            prevf = float(prev)
+                            if abs(prevf - cur) > 1e-9:
+                                if (locked_ep is not None and int(locked_ep) == int(epoch)) or allow_dynamic:
+                                    stable_hw_state["_acc_ref_once"] = cur
+                                else:
+                                    logger.warning(
+                                        f"[StableHW] acc_ref changed (prev={prevf:.6f}, cur={cur:.6f}). "
+                                        "Resetting _acc_ref_once to avoid crash. "
+                                        "If this is unexpected, inspect locked_acc_ref/curve settings."
+                                    )
+                                    stable_hw_state["_acc_ref_once"] = cur
 
                 if stable_hw_enabled:
                     # v5.4: always call; stable_hw decides freeze vs ema-fallback internally

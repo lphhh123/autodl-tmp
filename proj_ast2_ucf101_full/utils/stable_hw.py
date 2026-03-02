@@ -790,6 +790,8 @@ def apply_accuracy_guard(
                 st["acc_ref_locked"] = True
                 st["acc_ref_freeze_epoch"] = int(freeze_epoch)
                 st["acc_ref_locked_epoch"] = int(epoch)
+                st["below_cnt"] = 0
+                st["acc_ref_just_locked"] = True
 
     acc_ref = st.get("acc_ref", None)
     if acc_ref is None:
@@ -857,6 +859,7 @@ def apply_accuracy_guard(
     # ===== entry smoothing + consecutive trigger =====
     use_acc_ema = bool(_cfg_get(ctrl, "use_acc_ema", True))
     acc_ema_alpha = float(_cfg_get(ctrl, "acc_ema_alpha", 0.3) or 0.3)
+    lock_grace_epochs = int(_cfg_get(ctrl, "lock_grace_epochs", 1) or 1)
     k_enter = int(_cfg_get(ctrl, "k_enter", 2) or 2)
 
     metric_enter = metric
@@ -871,6 +874,13 @@ def apply_accuracy_guard(
     violate_inst = False
     if metric_enter is not None:
         violate_inst = (float(acc_ref) - float(metric_enter)) > float(eps_used)
+
+    # grace window right after acc_ref is locked
+    locked_ep = st.get("acc_ref_locked_epoch", None)
+    if locked_ep is not None and (int(epoch) - int(locked_ep)) < int(lock_grace_epochs):
+        violate_inst = False
+        st["below_cnt"] = 0
+        st["acc_ref_just_locked"] = False
 
     # consecutive enter
     if violate_inst:
