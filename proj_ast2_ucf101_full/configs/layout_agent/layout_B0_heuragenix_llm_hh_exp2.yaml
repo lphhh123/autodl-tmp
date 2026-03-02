@@ -9,9 +9,9 @@ baseline:
   max_eval_calls: 50000
   max_steps: 1000000
   iterations_scale_factor: 1.0
-  selection_frequency: 25
-  num_candidate_heuristics: 2
-  rollout_budget: 0
+  selection_frequency: 10
+  num_candidate_heuristics: 8
+  rollout_budget: 2
   result_dir: result
   max_wallclock_sec: 3600
   require_main_evaluator: true

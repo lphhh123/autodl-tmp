@@ -7,11 +7,13 @@ detailed_place:
     # canonical type
     type: mixed
     mixed:
-      every_n_steps: 50
+      every_n_steps: 20
       k_actions: 4
 
     # LLM config (now will be used by VolcArkProvider.from_config_file)
     llm_config_file: configs/llm/api_model_ark.json
+
+    queue_window_steps: 60
 
     queue_enabled: true
     feasibility_check: true

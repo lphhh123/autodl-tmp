@@ -655,6 +655,17 @@ def run_detailed_place(
                 consecutive_queue_rejects = 0
                 queue_window_steps = int(_cfg_get(planner_cfg, "queue_window_steps", 30))
                 refresh_due_to_rejects = False
+                # ---- hard LLM scheduling / guardrails ----
+                last_llm_call_step = -10**9
+                llm_calls_total = 0
+                llm_max_calls_total = int(_cfg_get(planner_cfg, "llm_max_calls_total", 120))
+                llm_min_gap_steps = int(_cfg_get(planner_cfg, "llm_min_gap_steps", max(1, mixed_every if planner_type == "mixed" else 1)))
+
+                # refresh trigger should only be driven by LLM-sourced rejects
+                consecutive_llm_rejects = 0
+
+                # optional: allow mid-cycle refresh in mixed (default False to prevent thrash)
+                allow_midcycle_refresh = bool(_cfg_get(mixed_cfg, "allow_midcycle_refresh", False))
                 progress_every = int(_cfg_get(dp_cfg, "progress_every", 10))
                 save_every = int(_cfg_get(dp_cfg, "save_every", 50))
                 require_llm = bool(_cfg_get(planner_cfg, "require_llm", False))
@@ -815,27 +826,54 @@ def run_detailed_place(
                     llm_ok_step = 0
                     llm_n_pick_step = 0
 
-                    # mixed policy: call LLM only when needed (stagnation / forced explore), to avoid random degradation
-                    mixed_call_on_stagnation = bool(_cfg_get(mixed_cfg, "call_on_stagnation", True))
-                    mixed_stag_patience = int(_cfg_get(mixed_cfg, "stagnation_patience", stagnation_patience))
+                    # ---- LLM policy scheduling (hard, auditable) ----
+                    llm_policy = False
+                    llm_policy_reason = ""
 
-                    llm_policy = (planner_type == "llm")
-                    if planner_type == "mixed":
-                        if mixed_call_on_stagnation:
-                            llm_policy = bool(llm_provider is not None) and (force_explore_for_llm or (int(step - last_best_step) >= mixed_stag_patience))
-                        else:
-                            llm_policy = (mixed_every > 0 and step % mixed_every == 0)
-                    if forced_policy:
+                    if (not llm_disabled) and (llm_provider is not None):
+                        if planner_type == "llm":
+                            llm_policy = True
+                            llm_policy_reason = "planner=llm"
+                        elif planner_type == "mixed":
+                            # STRICT: obey schedule by default
+                            if mixed_every > 0 and (step % mixed_every == 0):
+                                llm_policy = True
+                                llm_policy_reason = "mixed_schedule"
+                            elif allow_midcycle_refresh and refresh_due_to_rejects:
+                                llm_policy = True
+                                llm_policy_reason = "mixed_midcycle_refresh"
+
+                    # ignore forced_policy for mixed to avoid policy thrash
+                    if forced_policy and planner_type == "llm":
                         if forced_policy.lower() == "heuristic":
                             llm_policy = False
+                            llm_policy_reason = "forced_policy=heuristic"
                         elif forced_policy.lower() == "llm":
-                            llm_policy = (planner_type in ("llm", "mixed") and llm_provider is not None)
-                    need_refresh = bool(llm_policy and llm_provider is not None and (not action_queue or refresh_due_to_rejects))
-                    if llm_disabled and llm_policy:
-                        need_refresh = False
-                        llm_called = 0
-                        fallback_reason_step = f"llm_disabled:{llm_disabled_reason}"
+                            llm_policy = (llm_provider is not None) and (not llm_disabled)
+                            llm_policy_reason = "forced_policy=llm"
+
+                    # rate limit + cap
+                    if llm_policy:
+                        if (step - last_llm_call_step) < llm_min_gap_steps:
+                            llm_policy = False
+                            llm_policy_reason = "rate_limited"
+                        elif llm_calls_total >= llm_max_calls_total:
+                            llm_policy = False
+                            llm_policy_reason = "cap_reached"
+                            llm_disabled = True
+                            llm_disabled_reason = "llm_max_calls_total"
+
+                    need_refresh = bool(
+                        llm_policy
+                        and (not action_queue or (refresh_due_to_rejects and allow_midcycle_refresh))
+                    )
+
                     llm_called = 1 if need_refresh else 0
+                    if need_refresh:
+                        last_llm_call_step = int(step)
+                        llm_calls_total += 1
+
+                    # consume refresh flag once per step
                     refresh_due_to_rejects = False
 
                     if llm_policy:
@@ -863,6 +901,8 @@ def run_detailed_place(
                         try:
                             t0 = time.perf_counter()
                             pick_ids = llm_provider.propose_pick(ss, k_actions) or []
+                            # sanitize picks: keep only valid ids in cand_map and not forbidden
+                            pick_ids = [int(pid) for pid in (pick_ids or []) if int(pid) in cand_map and int(pid) not in set(forbidden_ids)]
                             llm_latency_ms = int((time.perf_counter() - t0) * 1000)
                             usage = getattr(llm_provider, "last_usage", {}) or {}
                             llm_status_code_step = int(usage.get("status_code", 0) or 0)
@@ -990,6 +1030,22 @@ def run_detailed_place(
                                             "signature": action_copy.get("signature", cand.signature),
                                         }
                                     )
+                        # push actions into queue (MUST NOT depend on logging)
+                        expire_step = step + queue_window_steps
+                        queue_size_before_push = int(len(action_queue))
+                        if actions:
+                            if queue_enabled:
+                                for act in actions:
+                                    action_copy = copy.deepcopy(act)
+                                    if "signature" not in action_copy:
+                                        action_copy["signature"] = _signature_for_action(action_copy, assign)
+                                    action_copy["_src"] = "llm"
+                                    action_queue.append({"action": action_copy, "expire": expire_step})
+                            else:
+                                action_copy = copy.deepcopy(actions[0])
+                                action_copy["_src"] = "llm"
+                                action_queue = [{"action": action_copy, "expire": step}]
+
                         if usage_fp and hasattr(llm_provider, "last_usage"):
                             usage = dict(getattr(llm_provider, "last_usage") or {})
                             raw_text = str(usage.get("raw_preview", ""))
@@ -1000,26 +1056,15 @@ def run_detailed_place(
                             usage["best_d_total"] = best_d_total
                             usage["n_queue_push"] = len(actions)
                             usage["step"] = int(step)
+                            usage["llm_policy_reason"] = llm_policy_reason
+                            usage["mixed_every"] = int(mixed_every)
+                            usage["queue_enabled"] = int(queue_enabled)
+                            usage["queue_size_before"] = int(queue_size_before_push)
+                            usage["queue_size_after_push"] = int(len(action_queue))
+                            usage["llm_calls_total"] = int(llm_calls_total)
                             json.dump(usage, usage_fp)
                             usage_fp.write("\n")
                             usage_fp.flush()
-                            expire_step = step + queue_window_steps
-                            if queue_enabled:
-                                for act in actions:
-                                    action_copy = copy.deepcopy(act)
-                                    if "signature" not in action_copy:
-                                        action_copy["signature"] = _signature_for_action(action_copy, assign)
-                                    action_copy["_src"] = "llm"
-                                    action_queue.append({"action": action_copy, "expire": expire_step})
-                            elif actions:
-                                action_copy = copy.deepcopy(actions[0])
-                                action_copy["_src"] = "llm"
-                                action_queue = [
-                                    {
-                                        "action": action_copy,
-                                        "expire": step,
-                                    }
-                                ]
         
                     action_queue = [a for a in action_queue if a.get("expire", step) >= step]
                     # P3: if stagnating, force a strong exploration move to the front of the queue
@@ -1144,6 +1189,15 @@ def run_detailed_place(
                         # P3: forced explore bypasses tabu/inverse/cooldown filtering
                         if bool(action.get("_force_explore", 0)) or aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
                             break
+
+                        # blocked by anti-loop: do not permanently discard LLM actions immediately
+                        if str(action.get("_src", "")) == "llm" and queue_enabled:
+                            sc = int(action.get("_skip_count", 0)) + 1
+                            action["_skip_count"] = sc
+                            if sc <= 2:
+                                action_queue.append({"action": copy.deepcopy(action), "expire": step + max(1, queue_window_steps // 2)})
+                                continue
+                        continue
                     op = str(action.get("op", "none"))
                     sig_before = signature_for_assign(assign)
 
@@ -1234,6 +1288,7 @@ def run_detailed_place(
                             best_eval = dict(eval_out)
                             last_best_step = int(step)
                         consecutive_queue_rejects = 0
+                        consecutive_llm_rejects = 0
                     else:
                         layout_state.assign = assign
                         added = False
@@ -1243,7 +1298,14 @@ def run_detailed_place(
                             if failed_counts[cid] > 10:
                                 recent_failed_ids.add(cid)
                         consecutive_queue_rejects += 1
-                        if consecutive_queue_rejects >= 6:
+
+                        # only LLM-sourced rejects should trigger refresh
+                        if str(action.get("_src", "")) == "llm":
+                            consecutive_llm_rejects += 1
+                        else:
+                            consecutive_llm_rejects = 0
+
+                        if consecutive_llm_rejects >= 6:
                             refresh_due_to_rejects = True
         
                     T *= alpha
