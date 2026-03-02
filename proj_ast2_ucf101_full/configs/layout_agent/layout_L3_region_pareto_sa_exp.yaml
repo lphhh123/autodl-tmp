@@ -1,0 +1,8 @@
+_base_: ./layout_L3_region_pareto_sa.yaml
+
+layout_agent:
+  max_runtime_sec: 3600
+
+budget:
+  total_eval_budget: 50000
+  max_wallclock_sec: 3600

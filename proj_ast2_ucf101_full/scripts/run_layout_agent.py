@@ -548,13 +548,19 @@ def run_layout_agent(
         eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
         trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
 
+        trace_min = {}
+        for k in ("best_total", "best_comm", "best_therm"):
+            if k in trace_metrics:
+                trace_min[k] = trace_metrics.pop(k)
+
         report = {
             "run_id": run_id,
             "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
             "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
-            "best_total": float(best_eval.get("total_scalar", 0.0)) if best_eval else float(best_total or 0.0),
-            "best_comm": float(best_eval.get("comm_norm", best_comm)) if best_eval else float(best_comm),
-            "best_therm": float(best_eval.get("therm_norm", best_therm)) if best_eval else float(best_therm),
+            "selected_total_scalar": float(best_eval.get("total_scalar", 0.0)) if best_eval else float(best_total or 0.0),
+            "selected_comm_norm": float(best_eval.get("comm_norm", best_comm)) if best_eval else float(best_comm),
+            "selected_therm_norm": float(best_eval.get("therm_norm", best_therm)) if best_eval else float(best_therm),
+            "selected_penalty": best_eval.get("penalty", {}) if best_eval else {},
             "pareto_size": len(pareto.points),
             "pareto_front_size": len(pareto.points),
             "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
@@ -565,6 +571,7 @@ def run_layout_agent(
             "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
             "policy_switch": result.policy_meta.get("policy_switch") if result.policy_meta else None,
             "cache": result.policy_meta.get("cache") if result.policy_meta else None,
+            "trace_min": trace_min,
             **trace_metrics,
         }
         with (out_dir / "report.json").open("w", encoding="utf-8") as f:

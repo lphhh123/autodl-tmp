@@ -2,9 +2,21 @@ _base_: base_layout_exp.yaml
 
 detailed_place:
   planner:
-    type: llm_mixed_pick
+    # canonical type
+    type: mixed
+    mixed:
+      every_n_steps: 50
+      k_actions: 4
+
+    # LLM config (now will be used by VolcArkProvider.from_config_file)
     llm_config_file: configs/llm/api_model_ark.json
-    every_n_steps: 50
-    heuristics_dir: basic_heuristics
+
+    queue_enabled: true
+    feasibility_check: true
+
+    timeout_sec: 90
+    max_retry: 1
+
+    # reduce prompt size (handled in detailed_place via subset selection)
     num_candidates: 8
     max_candidates_per_bucket: 4

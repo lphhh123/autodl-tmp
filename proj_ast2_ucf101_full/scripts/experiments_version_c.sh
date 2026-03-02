@@ -145,6 +145,11 @@ run_layout () {
   local cfg="$1"
   local out="$2"
   ensure_layout_input
+  # Avoid OMP threads = 0 crash
+  if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
+  if [[ "${OPENBLAS_NUM_THREADS:-0}" -le 0 ]]; then export OPENBLAS_NUM_THREADS=1; fi
+  if [[ "${MKL_NUM_THREADS:-0}" -le 0 ]]; then export MKL_NUM_THREADS=1; fi
+  if [[ "${NUMEXPR_NUM_THREADS:-0}" -le 0 ]]; then export NUMEXPR_NUM_THREADS=1; fi
   python -m scripts.run_layout_agent \
     --layout_input outputs/P3/A3/layout_input.json \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
@@ -154,6 +159,11 @@ run_layout_heuragenix () {
   local cfg="$1"
   local out="$2"
   ensure_layout_input
+  # Avoid OMP threads = 0 crash
+  if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
+  if [[ "${OPENBLAS_NUM_THREADS:-0}" -le 0 ]]; then export OPENBLAS_NUM_THREADS=1; fi
+  if [[ "${MKL_NUM_THREADS:-0}" -le 0 ]]; then export MKL_NUM_THREADS=1; fi
+  if [[ "${NUMEXPR_NUM_THREADS:-0}" -le 0 ]]; then export NUMEXPR_NUM_THREADS=1; fi
   python -m scripts.run_layout_heuragenix \
     --layout_input outputs/P3/A3/layout_input.json \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
@@ -204,7 +214,7 @@ case "$EXP_ID" in
 
   EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "outputs/EXP-B1/seed${SEED}" ;;
   EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "outputs/EXP-B2/seed${SEED}" ;;
-  EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa.yaml "outputs/EXP-B3/seed${SEED}" ;;
+  EXP-B3) run_layout configs/layout_agent/layout_L3_region_pareto_sa_exp.yaml "outputs/EXP-B3/seed${SEED}" ;;
   EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;
   EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "outputs/EXP-B2-ab-nofeas/seed${SEED}" ;;
   EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "outputs/EXP-B2-ab-nodiverse/seed${SEED}" ;;
