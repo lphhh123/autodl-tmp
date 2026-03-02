@@ -149,10 +149,11 @@ def _apply_random_kick(assign: np.ndarray, idxs: List[int], site_ids: List[int])
 
 
 def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: Optional[List[int]]):
+    """Permutation-safe cluster move: sequentially relocate each cluster slot (swap if occupied)."""
     if not target_sites or len(target_sites) < len(cluster.slots):
         return
     for slot, site in zip(cluster.slots, target_sites):
-        assign[int(slot)] = int(site)
+        _apply_relocate(assign, int(slot), int(site))
 
 
 def signature_for_assign(assign: Any) -> str:
@@ -503,6 +504,9 @@ def run_detailed_place(
                         "seed_id": int(seed_id),
                         "time_ms": wall_time_ms,
                         "signature": assign_signature,
+                        "d_total": 0.0,
+                        "d_comm": 0.0,
+                        "d_therm": 0.0,
                         "delta_total": 0.0,
                         "delta_comm": 0.0,
                         "delta_therm": 0.0,
@@ -916,7 +920,16 @@ def run_detailed_place(
                         elif fallback_idx < len(fallback_candidates):
                             fb = fallback_candidates[fallback_idx]
                             fallback_idx += 1
-                            action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
+                            action_payload = {
+                                **copy.deepcopy(fb.action),
+                                "candidate_id": int(fb.id),
+                                "type": str(fb.type),
+                                "signature": str(fb.signature),
+                                "_cand_bucket": str(getattr(fb, "bucket", "")),
+                                "_cand_d_total": float(getattr(fb, "est", {}).get("d_total", 0.0) if isinstance(getattr(fb, "est", None), dict) else 0.0),
+                                "_cand_d_comm": float(getattr(fb, "est", {}).get("d_comm", 0.0) if isinstance(getattr(fb, "est", None), dict) else 0.0),
+                                "_cand_d_therm": float(getattr(fb, "est", {}).get("d_therm", 0.0) if isinstance(getattr(fb, "est", None), dict) else 0.0),
+                            }
                             action_payload["_src"] = "heuristic"
                         else:
                             action_payload = _sample_action(
@@ -960,6 +973,12 @@ def run_detailed_place(
                             est_total_new = cand_ref.est.get("total_new")
                             action.setdefault("type", cand_ref.type)
                             action.setdefault("signature", cand_ref.signature)
+                        if cand_ref is not None:
+                            action.setdefault("_cand_bucket", str(getattr(cand_ref, "bucket", "")))
+                            if isinstance(getattr(cand_ref, "est", None), dict):
+                                action.setdefault("_cand_d_total", float(cand_ref.est.get("d_total", 0.0)))
+                                action.setdefault("_cand_d_comm", float(cand_ref.est.get("d_comm", 0.0)))
+                                action.setdefault("_cand_d_therm", float(cand_ref.est.get("d_therm", 0.0)))
         
                         aspiration = est_total_new is not None and est_total_new < best_total_seen - aspiration_delta
                         tabu_hit = 1 if op_signature in tabu_signatures else 0
@@ -1085,6 +1104,9 @@ def run_detailed_place(
                         "seed_id": int(seed_id),
                         "time_ms": int(time_ms),
                         "signature": assign_signature,
+                        "d_total": float(delta),
+                        "d_comm": float(delta_comm),
+                        "d_therm": float(delta_therm),
                         "delta_total": float(delta),
                         "delta_comm": float(delta_comm),
                         "delta_therm": float(delta_therm),
@@ -1176,33 +1198,64 @@ def run_detailed_place(
             finally:
                 # --- v5.4: append finalize row (CSV) ---
                 try:
-                    # use last eval if exists; otherwise fall back to init metrics
-                    fin_total = float(locals().get("prev_total", 0.0))
-                    fin_comm = float(locals().get("prev_comm", 0.0))
-                    fin_therm = float(locals().get("prev_therm", 0.0))
-                    fin_sig_arr = locals().get("prev_assign", None)
-                    if fin_sig_arr is not None:
-                        fin_sig = signature_for_assign(fin_sig_arr)
-                    else:
-                        fin_sig = "assign:unknown"
+                    # Prefer the current in-scope eval_out/assign (the real final state)
+                    fin_eval = locals().get("eval_out", None)
+                    fin_assign_arr = locals().get("assign", None)
+
+                    if not isinstance(fin_assign_arr, np.ndarray):
+                        fin_assign_arr = locals().get("prev_assign", None)
+
+                    if fin_assign_arr is None:
+                        fin_assign_arr = np.asarray(assign_seed, dtype=int).copy()
+
+                    fin_sig = signature_for_assign(fin_assign_arr)
+
+                    # If eval_out missing (exception path), re-evaluate once to keep finalize consistent
+                    if not isinstance(fin_eval, dict):
+                        try:
+                            layout_state.assign = np.asarray(fin_assign_arr, dtype=int).copy()
+                            fin_eval = evaluator.evaluate(layout_state)
+                        except Exception:
+                            fin_eval = {
+                                "total_scalar": 0.0,
+                                "comm_norm": 0.0,
+                                "therm_norm": 0.0,
+                                "penalty": {"duplicate": 0.0, "boundary": 0.0},
+                            }
+
+                    fin_total = float(fin_eval.get("total_scalar", 0.0))
+                    fin_comm = float(fin_eval.get("comm_norm", 0.0))
+                    fin_therm = float(fin_eval.get("therm_norm", 0.0))
+                    pen = fin_eval.get("penalty", {}) or {}
+                    fin_dup = float(pen.get("duplicate", 0.0))
+                    fin_bnd = float(pen.get("boundary", 0.0))
+
                     fin_cache_key = _make_cache_key(fin_sig, objective_hash)
                     cache_hit_cum = int(eval_cache.hits) if eval_cache is not None else 0
                     cache_miss_cum = int(eval_cache.misses) if eval_cache is not None else 0
+
                     fin_row = {
                         "iter": int(steps) + 1,
                         "stage": "finalize",
                         "op": "finalize",
                         "op_args_json": json.dumps({"op": "finalize"}, ensure_ascii=False),
-                        "accepted": 1,
+                        # IMPORTANT: finalize must not affect accept_rate
+                        "accepted": 0,
                         "total_scalar": fin_total,
                         "comm_norm": fin_comm,
                         "therm_norm": fin_therm,
                         "pareto_added": 0,
-                        "duplicate_penalty": 0.0,
-                        "boundary_penalty": 0.0,
+                        "duplicate_penalty": fin_dup,
+                        "boundary_penalty": fin_bnd,
                         "seed_id": int(seed_id),
                         "time_ms": int((time.time() - start_time) * 1000),
                         "signature": fin_sig,
+
+                        # d_* required by v5.4 schema
+                        "d_total": 0.0,
+                        "d_comm": 0.0,
+                        "d_therm": 0.0,
+
                         "delta_total": 0.0,
                         "delta_comm": 0.0,
                         "delta_therm": 0.0,
