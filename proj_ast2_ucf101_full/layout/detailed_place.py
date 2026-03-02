@@ -701,6 +701,10 @@ def run_detailed_place(
                             T = max(T, sa_min_T)
                             last_reheat_step = int(step)
                             reheat_count += 1
+                    force_explore_for_llm = False
+                    if force_explore and (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled):
+                        # let LLM decide strong move on stagnation; do NOT inject deterministic forced action
+                        force_explore_for_llm = True
                     eval_calls_before = eval_calls_cum
                     h0 = eval_cache.hits if eval_cache is not None else 0
                     m0 = eval_cache.misses if eval_cache is not None else 0
@@ -795,6 +799,9 @@ def run_detailed_place(
                         layout_state.assign = base_assign
                     cand_map = {c.id: c for c in candidate_pool}
                     candidate_ids = [c.id for c in candidate_pool]
+                    if force_explore_for_llm:
+                        strong_types = {"kick", "cluster_move", "therm_swap", "relocate_free"}
+                        candidate_ids = [c.id for c in candidate_pool if str(c.type) in strong_types]
                     forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
         
                     llm_called = 0
@@ -808,7 +815,16 @@ def run_detailed_place(
                     llm_ok_step = 0
                     llm_n_pick_step = 0
 
-                    llm_policy = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+                    # mixed policy: call LLM only when needed (stagnation / forced explore), to avoid random degradation
+                    mixed_call_on_stagnation = bool(_cfg_get(mixed_cfg, "call_on_stagnation", True))
+                    mixed_stag_patience = int(_cfg_get(mixed_cfg, "stagnation_patience", stagnation_patience))
+
+                    llm_policy = (planner_type == "llm")
+                    if planner_type == "mixed":
+                        if mixed_call_on_stagnation:
+                            llm_policy = bool(llm_provider is not None) and (force_explore_for_llm or (int(step - last_best_step) >= mixed_stag_patience))
+                        else:
+                            llm_policy = (mixed_every > 0 and step % mixed_every == 0)
                     if forced_policy:
                         if forced_policy.lower() == "heuristic":
                             llm_policy = False
@@ -897,6 +913,61 @@ def run_detailed_place(
                                 )
                                 usage_fp.write("\n")
                                 usage_fp.flush()
+                        # ---- LLM gate: prevent LLM from degrading vs heuristic best ----
+                        forbidden_set = set(int(x) for x in forbidden_ids)
+                        allowed = [c for c in candidate_pool if int(c.id) not in forbidden_set]
+                        allowed.sort(key=lambda c: float(c.est.get("d_total", 0.0)))
+                        best_id = int(allowed[0].id) if allowed else None
+                        best_d = float(allowed[0].est.get("d_total", 0.0)) if allowed else 0.0
+
+                        gate_cfg = _cfg_get(planner_cfg, "llm_gate", {}) or {}
+                        gate_rel = float(_cfg_get(gate_cfg, "rel", 0.15))
+                        gate_abs = float(_cfg_get(gate_cfg, "abs", 500.0))
+                        gate_allow_uphill = bool(_cfg_get(gate_cfg, "allow_uphill", False))
+
+                        slack = max(gate_abs, gate_rel * max(1.0, abs(best_d)))
+
+                        def _ok_pid(pid: int) -> bool:
+                            cand = cand_map.get(int(pid))
+                            if cand is None:
+                                return False
+                            if int(pid) in forbidden_set:
+                                return False
+                            d = float(cand.est.get("d_total", 0.0))
+                            if (not gate_allow_uphill) and d > 0.0 + slack:
+                                return False
+                            if d > best_d + slack:
+                                return False
+                            act = cand.action if isinstance(cand.action, dict) else {}
+                            if str(cand.type) == "cluster_move":
+                                cid = int(act.get("cluster_id", -1))
+                                slots = act.get("cluster_slots", []) or []
+                                if not (0 <= cid < len(clusters)) and (not slots):
+                                    return False
+                            return True
+
+                        pick_ids_clean: List[int] = []
+                        seen = set()
+                        for pid in pick_ids:
+                            try:
+                                pid_int = int(pid)
+                            except Exception:
+                                continue
+                            if pid_int in seen:
+                                continue
+                            seen.add(pid_int)
+                            if _ok_pid(pid_int):
+                                pick_ids_clean.append(pid_int)
+
+                        if (not pick_ids_clean) and (best_id is not None):
+                            pick_ids_clean = [best_id]
+                            fallback_reason_step = (fallback_reason_step + ";llm_gate_fallback").strip(";")
+
+                        if best_id is not None and best_id not in pick_ids_clean:
+                            pick_ids_clean.append(best_id)
+
+                        pick_ids = pick_ids_clean
+
                         actions: List[Dict[str, Any]] = []
                         if pick_ids:
                             forbidden_history.append(pick_ids)
@@ -952,7 +1023,7 @@ def run_detailed_place(
         
                     action_queue = [a for a in action_queue if a.get("expire", step) >= step]
                     # P3: if stagnating, force a strong exploration move to the front of the queue
-                    if force_explore:
+                    if force_explore and (not force_explore_for_llm):
                         # choose best available strong move (kick > cluster_move > therm_swap)
                         strong_types = ("kick", "cluster_move", "therm_swap")
                         chosen = None
@@ -1023,13 +1094,23 @@ def run_detailed_place(
                             action["from_site"] = int(assign[int(action.get("i", -1))])
                         if op == "cluster_move":
                             cid = int(action.get("cluster_id", -1))
-                            if 0 <= cid < len(clusters) and clusters[cid].slots:
-                                slot_id = int(clusters[cid].slots[0])
+                            slots = [int(x) for x in (action.get("cluster_slots", []) or [])]
+
+                            cluster_obj = None
+                            if 0 <= cid < len(clusters) and getattr(clusters[cid], "slots", None):
+                                if clusters[cid].slots:
+                                    cluster_obj = clusters[cid]
+                            elif slots:
+                                cluster_obj = Cluster(cluster_id=-1, slots=slots, tdp_sum=0.0)
+                                action.setdefault("_cluster_id_invalid", int(cid))
+
+                            if cluster_obj is not None and cluster_obj.slots:
+                                slot_id = int(cluster_obj.slots[0])
                                 if 0 <= slot_id < len(assign):
                                     action["from_region"] = int(site_to_region[int(assign[slot_id])])
                                 if "target_sites" not in action:
                                     action["target_sites"] = _select_cluster_target_sites(
-                                        assign, clusters[cid], int(action.get("region_id", -1)), site_to_region, sites_xy
+                                        assign, cluster_obj, int(action.get("region_id", -1)), site_to_region, sites_xy
                                     )
                         if "signature" not in action:
                             action["signature"] = _signature_for_action(action, assign)
@@ -1064,7 +1145,8 @@ def run_detailed_place(
                         if bool(action.get("_force_explore", 0)) or aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
                             break
                     op = str(action.get("op", "none"))
-        
+                    sig_before = signature_for_assign(assign)
+
                     new_assign = assign.copy()
                     if op == "swap":
                         _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
@@ -1079,30 +1161,50 @@ def run_detailed_place(
                             [int(x) for x in (action.get("site_ids", []) or [])],
                         )
                     elif op == "cluster_move":
-                        cid = int(action.get("cluster_id", 0))
+                        cid = int(action.get("cluster_id", -1))
                         rid = int(action.get("region_id", 0))
-                        if 0 <= cid < len(clusters):
-                            cluster = clusters[cid]
+                        slots = [int(x) for x in (action.get("cluster_slots", []) or [])]
+
+                        cluster_obj = None
+                        if 0 <= cid < len(clusters) and getattr(clusters[cid], "slots", None) and clusters[cid].slots:
+                            cluster_obj = clusters[cid]
+                        elif slots:
+                            cluster_obj = Cluster(cluster_id=-1, slots=slots, tdp_sum=0.0)
+                            action.setdefault("_cluster_id_invalid", int(cid))
+
+                        if cluster_obj is not None and cluster_obj.slots:
                             target_sites = action.get("target_sites")
                             if not target_sites:
-                                target_sites = _select_cluster_target_sites(assign, cluster, rid, site_to_region, sites_xy)
+                                target_sites = _select_cluster_target_sites(assign, cluster_obj, rid, site_to_region, sites_xy)
                                 action["target_sites"] = target_sites
-                            _apply_cluster_move(new_assign, cluster, target_sites)
+                            _apply_cluster_move(new_assign, cluster_obj, target_sites)
         
                     layout_state.assign = new_assign
                     sig2 = signature_for_assign(new_assign)
-                    k2 = _make_cache_key(sig2, objective_hash)
-                    cached = eval_cache.get(k2) if eval_cache is not None else None
-                    if cached is None:
-                        eval_new = _evaluate(layout_state)
-                        if eval_cache is not None:
-                            eval_cache.put(k2, dict(eval_new))
+
+                    # IMPORTANT: no-op action must be treated as rejected (avoid polluting accept/pareto/knee)
+                    noop_action = (sig2 == sig_before)
+                    if noop_action:
+                        eval_new = dict(eval_out)
+                        delta = 0.0
+                        delta_comm = 0.0
+                        delta_therm = 0.0
                     else:
-                        eval_new = dict(cached)
-                    delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
-                    delta_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
-                    delta_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
-                    accept = (delta < 0) or (math.exp(-delta / max(T, 1e-6)) > float(rng.random()))
+                        k2 = _make_cache_key(sig2, objective_hash)
+                        cached = eval_cache.get(k2) if eval_cache is not None else None
+                        if cached is None:
+                            eval_new = _evaluate(layout_state)
+                            if eval_cache is not None:
+                                eval_cache.put(k2, dict(eval_new))
+                        else:
+                            eval_new = dict(cached)
+                        delta = float(eval_new["total_scalar"] - eval_out["total_scalar"])
+                        delta_comm = float(eval_new["comm_norm"] - eval_out["comm_norm"])
+                        delta_therm = float(eval_new["therm_norm"] - eval_out["therm_norm"])
+                    if noop_action:
+                        accept = False
+                    else:
+                        accept = (delta < 0) or (math.exp(-delta / max(T, 1e-6)) > float(rng.random()))
         
                     if accept:
                         assign = new_assign
@@ -1163,6 +1265,15 @@ def run_detailed_place(
                     cache_size = eval_cache.size if eval_cache is not None else 0
                     eval_calls_step = eval_calls_cum - eval_calls_before
 
+                    notes = (
+                        f"llm_call={int(llm_called)} status={llm_status_code_step} code={llm_error_code_step} ok={llm_ok_step} n_pick={llm_n_pick_step} "
+                        f"llm_ok/att={llm_success_count}/{llm_attempt_count}"
+                        if (int(llm_called) == 1 or (fallback_reason_step != ""))
+                        else ""
+                    )
+                    if noop_action:
+                        notes = (notes + ";noop_action").strip(";")
+
                     row = {
                         "iter": int(step),
                         "stage": stage_label,
@@ -1205,12 +1316,7 @@ def run_detailed_place(
                         "sim_eval_calls_cum": int(eval_calls_cum),
                         "lookahead_enabled": int(lookahead_enabled),
                         "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
-                        "notes": (
-                            f"llm_call={int(llm_called)} status={llm_status_code_step} code={llm_error_code_step} ok={llm_ok_step} n_pick={llm_n_pick_step} "
-                            f"llm_ok/att={llm_success_count}/{llm_attempt_count}"
-                            if (int(llm_called) == 1 or (fallback_reason_step != ""))
-                            else ""
-                        ),
+                        "notes": notes,
                     }
                     writer.writerow(row)
                     if recordings_fp is not None:

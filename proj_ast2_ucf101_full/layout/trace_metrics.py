@@ -164,6 +164,22 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
     improve_step_ratio = improve_steps / max(1, window_len)
     flat_step_ratio = flat_steps / max(1, window_len)
 
+    best_total_iter = 0
+    best_total_sig = ""
+    best_total_stage = ""
+    best_total_comm = 0.0
+    best_total_therm = 0.0
+    if obj_arr.size:
+        arg = int(np.argmin(obj_arr))
+        try:
+            best_total_iter = int(float(rows[arg].get("iter", 0) or 0))
+        except Exception:
+            best_total_iter = int(arg)
+        best_total_sig = str(signatures[arg]) if arg < len(signatures) else ""
+        best_total_stage = str(rows[arg].get("stage", "") or "")
+        best_total_comm = float(comm_vals[arg]) if arg < len(comm_vals) else 0.0
+        best_total_therm = float(therm_vals[arg]) if arg < len(therm_vals) else 0.0
+
     return {
         "accept_rate_overall": accept_rate_overall,
         "accept_rate_lastN": accept_rate_lastN,
@@ -186,4 +202,9 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
         "best_total": float(np.min(obj_arr)) if obj_arr.size else 0.0,
         "best_comm": float(np.min(comm_vals)) if comm_vals else 0.0,
         "best_therm": float(np.min(therm_vals)) if therm_vals else 0.0,
+        "best_total_iter": int(best_total_iter),
+        "best_total_signature": best_total_sig,
+        "best_total_stage": best_total_stage,
+        "best_total_comm": float(best_total_comm),
+        "best_total_therm": float(best_total_therm),
     }
