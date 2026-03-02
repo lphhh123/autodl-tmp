@@ -18,3 +18,16 @@ stable_hw:
   warmup:
     enabled: true
     epochs: 1
+  locked_acc_ref:
+    enabled: true
+    # Use per-epoch reference curve parsed from EXP-A1 stdout.
+    mode: curve_stdout
+    source: baseline_stdout_curve
+    baseline_stdout_path: outputs/EXP-A1/seed{seed}/stdout
+    curve_ema_alpha: 0.2
+    curve_margin: 0.0
+  accuracy_guard:
+    controller:
+      use_acc_ema: true
+      acc_ema_alpha: 0.3
+      k_enter: 2
