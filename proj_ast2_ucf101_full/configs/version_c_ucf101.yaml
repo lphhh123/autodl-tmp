@@ -24,8 +24,12 @@ stable_hw:
     mode: curve_stdout
     source: baseline_stdout_curve
     baseline_stdout_path: outputs/EXP-A1/seed{seed}/stdout
+    # Make reference consistent with fast-val used in guard; if both full/fast exist, pick fast.
+    # Options: fast (default), full, min
+    stdout_prefer_mode: fast
     curve_ema_alpha: 0.2
-    curve_margin: 0.0
+    # Extra slack on reference curve (in addition to epsilon_drop). Recommended: 0.01
+    curve_margin: 0.01
   accuracy_guard:
     controller:
       use_acc_ema: true

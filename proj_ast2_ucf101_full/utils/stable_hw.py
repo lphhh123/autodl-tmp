@@ -400,19 +400,19 @@ def _format_seed_template(path_tmpl: str, seed: int) -> str:
     return s
 
 
-def _parse_baseline_curve_from_stdout(stdout_path: Path) -> Dict[int, float]:
+def _parse_baseline_curve_from_stdout(stdout_path: Path, prefer: str = "fast") -> Dict[int, float]:
     """
     Parse baseline curve from EXP-A1 stdout.
 
     We expect lines like:
       [val] epoch=5 mode=full acc_clip=... acc_video=0.6008 ...
       [val] epoch=16 mode=fast ... acc_video=0.5510 ...
-    Prefer mode=full if present for the same epoch; otherwise use mode=fast.
+    Select reference by prefer mode when both full/fast exist for same epoch.
     Ignore mode=test.
     """
     pat = re.compile(r"\[val\].*epoch=(\d+).*mode=([a-zA-Z_]+).*acc_video=([0-9]*\.?[0-9]+)")
-    best_by_epoch: Dict[int, Tuple[int, float]] = {}  # epoch -> (priority, acc); full>fast
-    # priority: full=2, fast=1
+    by_epoch: Dict[int, Dict[str, float]] = {}  # epoch -> {"full": acc, "fast": acc}
+
     with stdout_path.open("r", errors="ignore") as f:
         for line in f:
             if "[val]" not in line:
@@ -425,14 +425,22 @@ def _parse_baseline_curve_from_stdout(stdout_path: Path) -> Dict[int, float]:
             acc = float(m.group(3))
             if mode == "test":
                 continue
-            pr = 2 if mode == "full" else 1
-            old = best_by_epoch.get(ep)
-            if old is None or pr > old[0]:
-                best_by_epoch[ep] = (pr, acc)
+            if ep not in by_epoch:
+                by_epoch[ep] = {}
+            if mode in ("full", "fast"):
+                by_epoch[ep][mode] = acc
 
+    prefer = str(prefer or "fast").lower().strip()
     out: Dict[int, float] = {}
-    for ep, (_, acc) in best_by_epoch.items():
-        out[int(ep)] = float(acc)
+    for ep, d in by_epoch.items():
+        if not isinstance(d, dict) or not d:
+            continue
+        if prefer == "min":
+            out[ep] = float(min(d.values()))
+        elif prefer == "full":
+            out[ep] = float(d.get("full", d.get("fast")))
+        else:  # default fast
+            out[ep] = float(d.get("fast", d.get("full")))
     return out
 
 
@@ -535,7 +543,9 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
             st["acc_ref_source"] = f"baseline_stdout_missing:{candidates[0]}"
             return
 
-        acc_map = _parse_baseline_curve_from_stdout(found)
+        prefer_mode = str(_cfg_get(locked, "stdout_prefer_mode", "fast") or "fast").lower().strip()
+        # prefer_mode: "fast" (recommended), "full", or "min"
+        acc_map = _parse_baseline_curve_from_stdout(found, prefer=prefer_mode)
         if not acc_map:
             if strict:
                 raise RuntimeError(f"[v5.4 LockedAccRef][curve_stdout] failed to parse curve from: {found}")
