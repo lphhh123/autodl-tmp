@@ -670,6 +670,86 @@ def _iter_recordings(recordings_path: Path) -> Iterable[Dict[str, Any]]:
             yield record
 
 
+def _recompute_hx_rows_with_main_evaluator(
+    hx_rows: List[Dict[str, Any]],
+    base_state: LayoutState,
+    evaluator: LayoutEvaluator,
+    strict: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Re-evaluate HeurAgenix recordings with *main-project* LayoutEvaluator to make
+    total_scalar/comm_norm/therm_norm comparable to Ours (apples-to-apples).
+    Also fills d_total/d_comm/d_therm (delta vs last accepted state) required by v5.4.
+    """
+    out: List[Dict[str, Any]] = []
+    eval_cache: Dict[str, Dict[str, Any]] = {}
+
+    prev_eval: Optional[Dict[str, float]] = None
+
+    for idx, rec0 in enumerate(hx_rows):
+        rec = dict(rec0)
+
+        assign_list = rec.get("assign", None)
+        if assign_list is None:
+            if strict:
+                raise ValueError(
+                    f"[heuragenix wrapper] recordings missing 'assign' at idx={idx}, keys={sorted(list(rec.keys()))}. "
+                    "Cannot re-evaluate for fairness."
+                )
+            out.append(rec)
+            continue
+
+        a = np.asarray(assign_list, dtype=int).reshape(-1)
+        sig = signature_from_assign(a)
+
+        if sig in eval_cache:
+            eo = eval_cache[sig]
+        else:
+            base_state.assign = a.copy()
+            eo = evaluator.evaluate(base_state)
+            eo = dict(eo)
+            eval_cache[sig] = eo
+
+        rec["signature"] = sig
+        rec["total_scalar"] = float(eo.get("total_scalar", 0.0))
+        rec["comm_norm"] = float(eo.get("comm_norm", 0.0))
+        rec["therm_norm"] = float(eo.get("therm_norm", 0.0))
+        pen = eo.get("penalty", {}) or {}
+        rec["duplicate_penalty"] = float(pen.get("duplicate", 0.0))
+        rec["boundary_penalty"] = float(pen.get("boundary", 0.0))
+
+        if prev_eval is None:
+            d_total = d_comm = d_therm = 0.0
+        else:
+            d_total = float(rec["total_scalar"]) - float(prev_eval["total_scalar"])
+            d_comm = float(rec["comm_norm"]) - float(prev_eval["comm_norm"])
+            d_therm = float(rec["therm_norm"]) - float(prev_eval["therm_norm"])
+
+        # v5.4 required fields
+        rec["d_total"] = float(d_total)
+        rec["d_comm"] = float(d_comm)
+        rec["d_therm"] = float(d_therm)
+
+        # keep legacy delta_* consistent too
+        rec["delta_total"] = float(d_total)
+        rec["delta_comm"] = float(d_comm)
+        rec["delta_therm"] = float(d_therm)
+
+        out.append(rec)
+
+        accepted = int(bool(rec.get("accepted", 1)))
+        stage = str(rec.get("stage", "heuragenix"))
+        # update baseline state only if accepted (mirrors SA semantics)
+        if prev_eval is None or (stage != "init" and accepted):
+            prev_eval = {
+                "total_scalar": float(rec["total_scalar"]),
+                "comm_norm": float(rec["comm_norm"]),
+                "therm_norm": float(rec["therm_norm"]),
+            }
+
+    return out
+
+
 def _count_jsonl_lines(p: Path) -> int:
     if p is None or (not p.exists()):
         return 0
@@ -892,6 +972,9 @@ def _write_trace_and_pareto(
                     "total_scalar": 0.0,
                     "comm_norm": 0.0,
                     "therm_norm": 0.0,
+                    "d_total": 0.0,
+                    "d_comm": 0.0,
+                    "d_therm": 0.0,
                     "delta_total": 0.0,
                     "delta_comm": 0.0,
                     "delta_therm": 0.0,
@@ -967,6 +1050,9 @@ def _write_trace_and_pareto(
                         "total_scalar": _num(r.get("total_scalar", 0.0), 0.0),
                         "comm_norm": _num(r.get("comm_norm", 0.0), 0.0),
                         "therm_norm": _num(r.get("therm_norm", 0.0), 0.0),
+                        "d_total": _num(r.get("d_total", r.get("delta_total", meta.get("delta_total", 0.0))), 0.0),
+                        "d_comm": _num(r.get("d_comm", r.get("delta_comm", meta.get("delta_comm", 0.0))), 0.0),
+                        "d_therm": _num(r.get("d_therm", r.get("delta_therm", meta.get("delta_therm", 0.0))), 0.0),
                         "delta_total": _num(r.get("delta_total", meta.get("delta_total", 0.0)), 0.0),
                         "delta_comm": _num(r.get("delta_comm", meta.get("delta_comm", 0.0)), 0.0),
                         "delta_therm": _num(r.get("delta_therm", meta.get("delta_therm", 0.0)), 0.0),
@@ -2393,9 +2479,11 @@ def main() -> None:
                 "eps_therm": float(pareto_cfg.get("eps_therm", 0.0)),
             }
         )
-        evaluator = _build_evaluator(layout_input=layout_input, objective_cfg=objective_cfg)
+        base_state, evaluator = _build_state_and_evaluator(layout_input=layout_input, cfg=cfg, objective_cfg=objective_cfg)
         objective_hash = evaluator.objective_hash()
-        hx_rows = list(_iter_recordings(recordings_path))
+        hx_rows_raw = list(_iter_recordings(recordings_path))
+        # strict=True: baseline 必须可重评估，否则口径不公平
+        hx_rows = _recompute_hx_rows_with_main_evaluator(hx_rows_raw, base_state=base_state, evaluator=evaluator, strict=True)
         budget_total = int(max_steps) if (max_steps is not None and int(max_steps) >= 0) else int(len(hx_rows))
         trace_cache_key = stable_hash({"objective_hash": objective_hash, "seed_id": int(seed), "method": method_label})
         # ---- v5.4 contract: auditable method fallback (requested vs effective) ----

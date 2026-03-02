@@ -174,9 +174,12 @@ def _apply_relocate(assign: np.ndarray, i: int, site_id: int) -> np.ndarray:
 
 
 def _apply_cluster_move(assign: np.ndarray, cluster_slots: List[int], target_sites: List[int]) -> np.ndarray:
+    """Permutation-safe cluster move: sequential relocate (swap if occupied)."""
     a = assign.copy()
     for k, s in enumerate(cluster_slots):
-        a[int(s)] = int(target_sites[k])
+        if k >= len(target_sites):
+            break
+        a = _apply_relocate(a, int(s), int(target_sites[k]))
     return a
 
 
@@ -768,6 +771,12 @@ def pick_ids_to_actions_sequential(
             # apply
             assign = _apply_relocate(assign, int(act["i"]), int(act["site_id"]))
             act["signature"] = _signature_for_action(act, base_assign=assign)
+            # audit fields (stay inside op_args_json in trace)
+            act["_cand_bucket"] = str(getattr(cand, "bucket", ""))
+            if isinstance(getattr(cand, "est", None), dict):
+                act["_cand_d_total"] = float(cand.est.get("d_total", 0.0))
+                act["_cand_d_comm"] = float(cand.est.get("d_comm", 0.0))
+                act["_cand_d_therm"] = float(cand.est.get("d_therm", 0.0))
 
         elif op == "swap":
             i = int(act.get("i", -1))
@@ -776,6 +785,12 @@ def pick_ids_to_actions_sequential(
             act["type"] = "swap"
             assign = _apply_swap(assign, i, j)
             act["signature"] = _signature_for_action(act, base_assign=assign)
+            # audit fields (stay inside op_args_json in trace)
+            act["_cand_bucket"] = str(getattr(cand, "bucket", ""))
+            if isinstance(getattr(cand, "est", None), dict):
+                act["_cand_d_total"] = float(cand.est.get("d_total", 0.0))
+                act["_cand_d_comm"] = float(cand.est.get("d_comm", 0.0))
+                act["_cand_d_therm"] = float(cand.est.get("d_therm", 0.0))
 
         elif op == "cluster_move":
             cid = int(act.get("cluster_id", -1))
@@ -803,6 +818,12 @@ def pick_ids_to_actions_sequential(
             act["type"] = "cluster_move"
             assign = _apply_cluster_move(assign, slots, tgt[: len(slots)])
             act["signature"] = _signature_for_action(act, base_assign=assign)
+            # audit fields (stay inside op_args_json in trace)
+            act["_cand_bucket"] = str(getattr(cand, "bucket", ""))
+            if isinstance(getattr(cand, "est", None), dict):
+                act["_cand_d_total"] = float(cand.est.get("d_total", 0.0))
+                act["_cand_d_comm"] = float(cand.est.get("d_comm", 0.0))
+                act["_cand_d_therm"] = float(cand.est.get("d_therm", 0.0))
 
         elif op == "random_kick":
             idxs = [int(x) for x in (act.get("idxs", []) or [])]
@@ -811,11 +832,23 @@ def pick_ids_to_actions_sequential(
             act["type"] = "random_kick"
             assign = _apply_random_kick(assign, idxs, site_ids)
             act["signature"] = _signature_for_action(act, base_assign=assign)
+            # audit fields (stay inside op_args_json in trace)
+            act["_cand_bucket"] = str(getattr(cand, "bucket", ""))
+            if isinstance(getattr(cand, "est", None), dict):
+                act["_cand_d_total"] = float(cand.est.get("d_total", 0.0))
+                act["_cand_d_comm"] = float(cand.est.get("d_comm", 0.0))
+                act["_cand_d_therm"] = float(cand.est.get("d_therm", 0.0))
 
         elif op == "noop":
             act["candidate_id"] = int(cand.id)
             act["type"] = "noop"
             act["signature"] = "noop"
+            # audit fields (stay inside op_args_json in trace)
+            act["_cand_bucket"] = str(getattr(cand, "bucket", ""))
+            if isinstance(getattr(cand, "est", None), dict):
+                act["_cand_d_total"] = float(cand.est.get("d_total", 0.0))
+                act["_cand_d_comm"] = float(cand.est.get("d_comm", 0.0))
+                act["_cand_d_therm"] = float(cand.est.get("d_therm", 0.0))
 
         else:
             continue
