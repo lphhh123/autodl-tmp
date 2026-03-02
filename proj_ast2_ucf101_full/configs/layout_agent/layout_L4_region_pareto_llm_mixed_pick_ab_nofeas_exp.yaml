@@ -2,4 +2,4 @@ _base_: ./layout_L4_region_pareto_llm_mixed_pick_exp.yaml
 
 detailed_place:
   planner:
-    feas_enabled: false
+    feasibility_check: false

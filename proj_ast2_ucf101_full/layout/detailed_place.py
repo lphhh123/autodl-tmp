@@ -68,6 +68,16 @@ def _cfg_get(cfg: Any, key: str, default=None):
         return getattr(cfg, key, default)
 
 
+def _normalize_planner_type(t: str) -> str:
+    t0 = (t or "").strip().lower()
+    alias = {
+        "llm_mixed_pick": "mixed",
+        "llm_mixed": "mixed",
+        "mixed_pick": "mixed",
+    }
+    return alias.get(t0, t0)
+
+
 def _build_run_signature(cfg: Any) -> Dict[str, Any]:
     lookahead_cfg = _cfg_get(cfg, "lookahead", {}) or {}
     ps_cfg = _cfg_get(cfg, "policy_switch", None)
@@ -305,12 +315,41 @@ def run_detailed_place(
 
     # ---- planner config ----
     planner_cfg = _cfg_get(dp_cfg, "planner", {"type": "heuristic"}) or {"type": "heuristic"}
-    planner_type = str(_cfg_get(planner_cfg, "type", "heuristic"))
+
+    planner_type_requested = str(_cfg_get(planner_cfg, "type", "heuristic"))
+    planner_type = _normalize_planner_type(planner_type_requested)
+
+    _valid_types = {"heuristic", "llm", "mixed"}
+    if planner_type not in _valid_types:
+        if trace_events_path is not None:
+            append_trace_event_v54(
+                trace_events_path,
+                "contract_override",
+                payload={
+                    "phase": "layout_detailed_place",
+                    "reason": "invalid_planner_type",
+                    "requested": {"planner.type": planner_type_requested},
+                    "effective": {"planner.type": "heuristic"},
+                },
+                step=0,
+            )
+        planner_type = "heuristic"
+
     mixed_cfg = _cfg_get(planner_cfg, "mixed", {}) or {}
-    mixed_every = int(_cfg_get(mixed_cfg, "every_n_steps", 200)) if planner_type == "mixed" else 0
-    k_actions = int(_cfg_get(mixed_cfg, "k_actions", 4))
+    mixed_every_val = _cfg_get(mixed_cfg, "every_n_steps", None)
+    if mixed_every_val is None:
+        mixed_every_val = _cfg_get(planner_cfg, "every_n_steps", None)
+    mixed_every = int(mixed_every_val) if (planner_type == "mixed" and mixed_every_val is not None) else (200 if planner_type == "mixed" else 0)
+
+    k_actions_val = _cfg_get(mixed_cfg, "k_actions", None)
+    if k_actions_val is None:
+        k_actions_val = _cfg_get(planner_cfg, "k_actions", None)
+    k_actions = int(k_actions_val) if k_actions_val is not None else 4
+
     queue_enabled = bool(_cfg_get(planner_cfg, "queue_enabled", True))
     feasibility_check = bool(_cfg_get(planner_cfg, "feasibility_check", True))
+    if _cfg_get(planner_cfg, "feasibility_check", None) is None and _cfg_get(planner_cfg, "feas_enabled", None) is not None:
+        feasibility_check = bool(_cfg_get(planner_cfg, "feas_enabled", True))
 
     timeout_sec = int(_cfg_get(planner_cfg, "timeout_sec", 90))
     max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
@@ -337,9 +376,16 @@ def run_detailed_place(
 
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
+    llm_cfg_path = _cfg_get(planner_cfg, "llm_config_file", None)
+
     if planner_type in ("llm", "mixed"):
         try:
-            llm_provider = VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
+            if llm_cfg_path:
+                llm_provider = VolcArkProvider.from_config_file(
+                    llm_cfg_path, timeout_sec=timeout_sec, max_retry=max_retry
+                )
+            else:
+                llm_provider = VolcArkProvider(timeout_sec=timeout_sec, max_retry=max_retry)
         except Exception as e:
             llm_provider = None
             llm_init_error = repr(e)
@@ -639,24 +685,23 @@ def run_detailed_place(
                     candidate_ids = [c.id for c in candidate_pool]
                     forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
         
-                    use_llm = 0
+                    llm_called = 0
                     llm_model = ""
                     llm_prompt_tokens = 0
                     llm_completion_tokens = 0
                     llm_latency_ms = 0
 
-                    use_llm = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
+                    llm_policy = (planner_type == "llm") or (planner_type == "mixed" and mixed_every > 0 and step % mixed_every == 0)
                     if forced_policy:
                         if forced_policy.lower() == "heuristic":
-                            use_llm = False
+                            llm_policy = False
                         elif forced_policy.lower() == "llm":
-                            use_llm = planner_type in ("llm", "mixed") and llm_provider is not None
-                    policy_name = forced_policy or ("llm" if use_llm else "heuristic")
-                    need_refresh = use_llm and llm_provider is not None and (not action_queue or refresh_due_to_rejects)
+                            llm_policy = (planner_type in ("llm", "mixed") and llm_provider is not None)
+                    need_refresh = bool(llm_policy and llm_provider is not None and (not action_queue or refresh_due_to_rejects))
+                    llm_called = 1 if need_refresh else 0
                     refresh_due_to_rejects = False
-        
-                    if policy_name == "llm":
-                        use_llm = 1
+
+                    if llm_policy:
                         llm_model = getattr(llm_provider, "model", "") if llm_provider is not None else ""
                     if need_refresh:
                         ss = build_state_summary(
@@ -745,11 +790,14 @@ def run_detailed_place(
                                     action_copy = copy.deepcopy(act)
                                     if "signature" not in action_copy:
                                         action_copy["signature"] = _signature_for_action(action_copy, assign)
+                                    action_copy["_src"] = "llm"
                                     action_queue.append({"action": action_copy, "expire": expire_step})
                             elif actions:
+                                action_copy = copy.deepcopy(actions[0])
+                                action_copy["_src"] = "llm"
                                 action_queue = [
                                     {
-                                        "action": copy.deepcopy(actions[0]),
+                                        "action": action_copy,
                                         "expire": step,
                                     }
                                 ]
@@ -778,6 +826,7 @@ def run_detailed_place(
                             fb = fallback_candidates[fallback_idx]
                             fallback_idx += 1
                             action_payload = {**copy.deepcopy(fb.action), "candidate_id": fb.id, "type": fb.type, "signature": fb.signature}
+                            action_payload["_src"] = "heuristic"
                         else:
                             action_payload = _sample_action(
                                 dp_cfg,
@@ -791,6 +840,7 @@ def run_detailed_place(
                                 cluster_to_region,
                                 py_rng,
                             )
+                            action_payload["_src"] = "heuristic"
         
                         action = copy.deepcopy(action_payload) if action_payload else {"op": "none"}
                         op = str(action.get("op", "none"))
@@ -943,7 +993,7 @@ def run_detailed_place(
                         "tabu_hit": int(tabu_hit),
                         "inverse_hit": int(inverse_hit),
                         "cooldown_hit": int(cooldown_hit),
-                        "policy": str(policy_name),
+                        "policy": "llm" if (action.get("_src", "") == "llm") else "heuristic",
                         "move": str(op),
                         "lookahead_k": int(lookahead_topk if lookahead_enabled else 0),
                         "cache_hit": int(cache_hit_step),
@@ -952,7 +1002,7 @@ def run_detailed_place(
                         "cache_saved_eval_calls_cum": int(h1),
                         "cache_key": cache_key,
                         "eval_calls_cum": int(eval_calls_cum),
-                        "llm_used": int(use_llm),
+                        "llm_used": int(llm_called),
                         "llm_fail_count": llm_fail_count,
                         "fallback_reason": fallback_reason,
                         "wall_time_ms_cum": int(wall_time_ms_cum),

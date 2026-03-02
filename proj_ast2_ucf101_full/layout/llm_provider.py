@@ -59,6 +59,33 @@ class VolcArkProvider(LLMProvider):
             self.api_key = self.api_key[7:].strip()
         self.last_usage = None
 
+    @classmethod
+    def from_config_file(cls, path: str, timeout_sec: int = 90, max_retry: int = 1):
+        from pathlib import Path
+
+        p = Path(path).expanduser()
+        js = json.loads(p.read_text(encoding="utf-8"))
+
+        api_key = (os.getenv("VOLC_ARK_API_KEY") or os.getenv("ARK_API_KEY") or str(js.get("api_key", ""))).strip()
+        model = (os.getenv("VOLC_ARK_MODEL") or str(js.get("model", ""))).strip()
+        url = str(js.get("url", "")).strip()
+
+        endpoint = url
+        if endpoint.rstrip("/").endswith("/chat/completions"):
+            endpoint = endpoint.rstrip("/")[:-len("/chat/completions")]
+        endpoint = endpoint.rstrip("/")
+
+        inst = cls(timeout_sec=timeout_sec, max_retry=max_retry)
+        if endpoint:
+            inst.endpoint = endpoint
+        if model:
+            inst.model = model
+        if api_key:
+            inst.api_key = api_key
+            if inst.api_key.lower().startswith("bearer "):
+                inst.api_key = inst.api_key[7:].strip()
+        return inst
+
     def _build_payload(self, state_summary: Dict, k: int, repair_raw: Optional[str] = None) -> Dict:
         system_prompt = (
             "STRICT PICK MODE.\n"
