@@ -16,6 +16,7 @@ import csv
 import hashlib
 import json
 import random
+import re
 import shutil
 import time
 import uuid
@@ -76,6 +77,43 @@ def _is_valid_assign(assign: list[int] | np.ndarray | None, S: int, Ns: int) -> 
     if len(assign) != int(S):
         return False
     return all(0 <= int(x) < int(Ns) for x in assign)
+
+
+def parse_llm_usage(llm_usage_path: Path) -> dict:
+    stats = {
+        "attempts": 0,
+        "ok": 0,
+        "status_code_counts": {},
+        "error_code_counts": {},
+        "fatal_seen": False,
+    }
+    if not llm_usage_path.exists():
+        return stats
+    raw = llm_usage_path.read_text(encoding="utf-8")
+    chunks = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if len(chunks) <= 1 and raw and "}\\n{" in raw:
+        chunks = [x.strip() for x in re.split(r"}\n(?=\{)", raw) if x.strip()]
+        chunks = [f"{x}}}" if not x.endswith("}") else x for x in chunks]
+
+    for rec in chunks:
+        try:
+            obj = json.loads(rec)
+        except Exception:
+            continue
+        if "status_code" not in obj and not obj.get("event", "").startswith("llm_"):
+            continue
+        stats["attempts"] += 1
+        if bool(obj.get("ok", False)):
+            stats["ok"] += 1
+        sc = str(obj.get("status_code", "") or "")
+        if sc:
+            stats["status_code_counts"][sc] = int(stats["status_code_counts"].get(sc, 0)) + 1
+        ec = str(obj.get("error_code", "") or "")
+        if ec:
+            stats["error_code_counts"][ec] = int(stats["error_code_counts"].get(ec, 0)) + 1
+        if bool(obj.get("fatal", False)):
+            stats["fatal_seen"] = True
+    return stats
 
 
 def _append_trace_events_from_csv(trace_events_path: Path, trace_csv: Path, run_id: str) -> int:
@@ -553,6 +591,16 @@ def run_layout_agent(
             if k in trace_metrics:
                 trace_min[k] = trace_metrics.pop(k)
 
+        llm_stats = parse_llm_usage(llm_usage_path)
+        llm_used_sum = 0
+        if trace_path.exists():
+            with trace_path.open("r", encoding="utf-8", newline="") as tf:
+                for row in csv.DictReader(tf):
+                    try:
+                        llm_used_sum += int(float(row.get("llm_used", 0) or 0))
+                    except Exception:
+                        continue
+
         report = {
             "run_id": run_id,
             "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
@@ -572,6 +620,14 @@ def run_layout_agent(
             "policy_switch": result.policy_meta.get("policy_switch") if result.policy_meta else None,
             "cache": result.policy_meta.get("cache") if result.policy_meta else None,
             "trace_min": trace_min,
+            "llm": {
+                "attempts": int(llm_stats.get("attempts", 0)),
+                "ok": int(llm_stats.get("ok", 0)),
+                "status_code_counts": llm_stats.get("status_code_counts", {}),
+                "error_code_counts": llm_stats.get("error_code_counts", {}),
+                "fatal_seen": bool(llm_stats.get("fatal_seen", False)),
+                "llm_used_sum": int(llm_used_sum),
+            },
             **trace_metrics,
         }
         with (out_dir / "report.json").open("w", encoding="utf-8") as f:

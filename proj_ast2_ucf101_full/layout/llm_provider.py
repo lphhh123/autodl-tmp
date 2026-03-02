@@ -66,8 +66,14 @@ class VolcArkProvider(LLMProvider):
         p = Path(path).expanduser()
         js = json.loads(p.read_text(encoding="utf-8"))
 
-        api_key = (os.getenv("VOLC_ARK_API_KEY") or os.getenv("ARK_API_KEY") or str(js.get("api_key", ""))).strip()
-        model = (os.getenv("VOLC_ARK_MODEL") or str(js.get("model", ""))).strip()
+        prefer_env_api_key = bool(js.get("prefer_env_api_key", True))
+        prefer_env_model = bool(js.get("prefer_env_model", True))
+        file_key = str(js.get("api_key", "")).strip()
+        env_key = (os.getenv("VOLC_ARK_API_KEY") or os.getenv("ARK_API_KEY") or "").strip()
+        api_key = (env_key or file_key) if prefer_env_api_key else (file_key or env_key)
+        file_model = str(js.get("model", "")).strip()
+        env_model = (os.getenv("VOLC_ARK_MODEL") or "").strip()
+        model = (env_model or file_model) if prefer_env_model else (file_model or env_model)
         url = str(js.get("url", "")).strip()
 
         endpoint = url
@@ -259,8 +265,29 @@ class VolcArkProvider(LLMProvider):
                 resp = None
                 resp, base_usage = do_request(payload)
                 if resp.status_code != 200:
-                    self.last_usage = {**base_usage, "ok": False, "resp": resp.text[:200]}
-                    last_error = Exception(f"HTTP {resp.status_code}")
+                    error_code = ""
+                    error_message = ""
+                    try:
+                        j = resp.json()
+                        err = j.get("error", {}) if isinstance(j, dict) else {}
+                        error_code = str(err.get("code", "") or "")
+                        error_message = str(err.get("message", "") or "")
+                    except Exception:
+                        pass
+                    fatal = bool(resp.status_code == 429 and error_code == "SetLimitExceeded")
+                    retryable = bool((resp.status_code in (429, 500, 502, 503)) and not fatal)
+                    self.last_usage = {
+                        **base_usage,
+                        "ok": False,
+                        "resp": resp.text[:200],
+                        "error_code": error_code,
+                        "error_message": error_message[:200],
+                        "fatal": fatal,
+                        "retryable": retryable,
+                    }
+                    last_error = Exception(f"HTTP {resp.status_code}:{error_code}")
+                    if fatal:
+                        break
                     continue
 
                 data = resp.json()

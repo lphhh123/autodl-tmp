@@ -2,6 +2,8 @@ _base_: base_layout_exp.yaml
 
 detailed_place:
   planner:
+    require_llm: true
+    disable_on_fatal: true
     # canonical type
     type: mixed
     mixed:
