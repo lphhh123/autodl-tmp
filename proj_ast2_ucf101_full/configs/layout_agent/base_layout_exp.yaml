@@ -80,6 +80,17 @@ detailed_place:
     final_size: 60
     diversity_enabled: true
     coverage_min_per_bucket: 6
+    bucket_order: ["swap", "relocate", "cluster_move", "therm_swap", "kick", "relocate_free"]
+  operator_bank:
+    enabled: true
+    therm_push_apart: true
+    random_kick:
+      enabled: true
+      ks: [3]
+      variants_per_k: 1
+    free_relocate:
+      enabled: true
+      num: 10
 
 alt_opt:
   enabled: false

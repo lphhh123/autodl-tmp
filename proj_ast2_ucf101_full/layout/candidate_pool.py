@@ -92,6 +92,18 @@ def _signature_for_action(action: Dict[str, Any], base_assign: Optional[np.ndarr
         except Exception:
             h = 0
         return f"cluster_move:{cid}:{from_region}->{to_region}:h{h}"
+    if op == "random_kick":
+        idxs = action.get("idxs", []) or []
+        site_ids = action.get("site_ids", []) or []
+        try:
+            idxs_arr = np.asarray(idxs, dtype=int).reshape(-1)
+            site_arr = np.asarray(site_ids, dtype=int).reshape(-1)
+            h = int(np.sum((idxs_arr + 7) * 2654435761 + (site_arr + 13) * 97531) % 1000003)
+        except Exception:
+            h = 0
+        return f"random_kick:k{len(idxs)}:h{h}"
+    if op == "noop":
+        return "noop"
     return f"{op}:unknown"
 
 
@@ -124,6 +136,10 @@ def inverse_signature(action: Dict[str, Any], base_assign: np.ndarray) -> str:
         inv["region_id"] = int(inv_from)
         inv["from_region"] = int(inv_to) if inv_to is not None else -1
         return _signature_for_action(inv, base_assign)
+    if op == "random_kick":
+        return _signature_for_action(action, base_assign)
+    if op == "noop":
+        return "noop"
     return "inv:unknown"
 
 
@@ -139,8 +155,21 @@ def _apply_swap(assign: np.ndarray, i: int, j: int) -> np.ndarray:
 
 
 def _apply_relocate(assign: np.ndarray, i: int, site_id: int) -> np.ndarray:
+    """Permutation-safe relocate (swap with occupant if needed).
+
+    This mirrors HeurAgenix RelocateOperator semantics and avoids duplicate penalties.
+    """
     a = assign.copy()
-    a[i] = int(site_id)
+    i = int(i)
+    site_id = int(site_id)
+    if i < 0 or i >= a.shape[0]:
+        return a
+    occ = np.where(a == site_id)[0]
+    j = int(occ[0]) if occ.size > 0 else -1
+    if j >= 0 and j != i:
+        a[i], a[j] = int(a[j]), int(a[i])
+        return a
+    a[i] = site_id
     return a
 
 
@@ -148,6 +177,26 @@ def _apply_cluster_move(assign: np.ndarray, cluster_slots: List[int], target_sit
     a = assign.copy()
     for k, s in enumerate(cluster_slots):
         a[int(s)] = int(target_sites[k])
+    return a
+
+
+def _apply_random_kick(assign: np.ndarray, idxs: List[int], site_ids: List[int]) -> np.ndarray:
+    """Apply a multi-slot kick while preserving permutation (swap-with-occupant)."""
+    a = assign.copy()
+    if not idxs or not site_ids:
+        return a
+    S = int(a.shape[0])
+    for ii, target in zip(idxs, site_ids):
+        i = int(ii)
+        if i < 0 or i >= S:
+            continue
+        t = int(target)
+        occ = np.where(a == t)[0]
+        j = int(occ[0]) if occ.size > 0 else -1
+        if j >= 0 and j != i:
+            a[i], a[j] = int(a[j]), int(a[i])
+        else:
+            a[i] = t
     return a
 
 
@@ -375,6 +424,67 @@ def build_candidate_pool(
             newa = _apply_cluster_move(assign, slots, uniq)
             _push("cluster_move", act, newa, bucket="cluster_move:rand")
 
+    # ----------------------------
+    # HeurAgenix-inspired extra operators (expand action pool)
+    # ----------------------------
+    opcfg = _get(dp, "operator_bank", {}) or {}
+    if bool(_get(opcfg, "enabled", False)):
+        # (a) therm-driven push apart: swap hottest slot with farthest slot
+        if bool(_get(opcfg, "therm_push_apart", True)) and len(cands) < raw_target_max:
+            try:
+                hot_idx = int(np.argmax(np.asarray(chip_tdp, dtype=float).reshape(-1)))
+                pos = sites_xy[np.asarray(assign, dtype=int)]
+                d = np.linalg.norm(pos - pos[hot_idx], axis=1)
+                far_idx = int(np.argmax(d))
+                if 0 <= hot_idx < S and 0 <= far_idx < S and hot_idx != far_idx:
+                    act = {"op": "swap", "i": int(hot_idx), "j": int(far_idx), "type": "swap"}
+                    newa = _apply_swap(assign, int(hot_idx), int(far_idx))
+                    _push("therm_swap", act, newa, bucket="therm_swap:push_apart")
+            except Exception:
+                pass
+
+        # (b) random kick macro move
+        kick_cfg = _get(opcfg, "random_kick", {}) or {}
+        if bool(_get(kick_cfg, "enabled", True)) and len(cands) < raw_target_max:
+            ks = _get(kick_cfg, "ks", [3]) or [3]
+            n_var = int(_get(kick_cfg, "variants_per_k", 1))
+            for k in ks:
+                k = max(1, min(int(k), S))
+                for _ in range(max(1, n_var)):
+                    try:
+                        if hasattr(rng, "sample"):
+                            idxs = rng.sample(list(range(S)), k)
+                        else:
+                            idxs = [int(_rng_randint(rng, 0, S)) for _ in range(k)]
+                        site_ids = [int(_rng_randint(rng, 0, Ns)) for _ in range(k)]
+                        act = {"op": "random_kick", "idxs": [int(x) for x in idxs], "site_ids": [int(x) for x in site_ids], "type": "random_kick"}
+                        newa = _apply_random_kick(assign, act["idxs"], act["site_ids"])
+                        _push("kick", act, newa, bucket=f"kick:k{k}")
+                    except Exception:
+                        continue
+                    if len(cands) >= raw_target_max:
+                        break
+                if len(cands) >= raw_target_max:
+                    break
+
+        # (c) relocate to a FREE site (HeurAgenix best_relocate_to_free family)
+        fr_cfg = _get(opcfg, "free_relocate", {}) or {}
+        if bool(_get(fr_cfg, "enabled", True)) and len(cands) < raw_target_max:
+            n_free = int(_get(fr_cfg, "num", 12))
+            used = set(int(x) for x in assign.tolist())
+            free_sites = [int(s) for s in range(Ns) if int(s) not in used]
+            if free_sites:
+                slot_order = top_slots[:] if top_slots else list(range(S))
+                for _ in range(n_free):
+                    i = int(slot_order[_rng_randint(rng, 0, len(slot_order))])
+                    to_site = int(free_sites[_rng_randint(rng, 0, len(free_sites))])
+                    from_site = int(assign[i])
+                    act = {"op": "relocate", "i": int(i), "site_id": int(to_site), "from_site": int(from_site), "type": "relocate"}
+                    newa = _apply_relocate(assign, i, int(to_site))
+                    _push("relocate_free", act, newa, bucket="relocate_free:free")
+                    if len(cands) >= raw_target_max:
+                        break
+
     # sort by best improvement (d_total ascending)
     cands.sort(key=lambda c: float(c.est.get("d_total", 0.0)))
 
@@ -389,7 +499,8 @@ def build_candidate_pool(
         used_ids = set()
 
         # first: minimum per bucket
-        for b in ["swap", "relocate", "cluster_move"]:
+        bucket_order = _get(cpcfg, "bucket_order", ["swap", "relocate", "cluster_move", "therm_swap", "kick", "relocate_free"]) or ["swap", "relocate", "cluster_move"]
+        for b in bucket_order:
             if b not in buckets:
                 continue
             for c in buckets[b][:coverage_min_per_bucket]:
@@ -539,6 +650,9 @@ def build_state_summary(*args, **kwargs) -> Dict[str, Any]:
                     "d_total": float(getattr(c, "est", {}).get("d_total", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
                     "d_comm": float(getattr(c, "est", {}).get("d_comm", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
                     "d_therm": float(getattr(c, "est", {}).get("d_therm", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
+                    "lookahead_score": float(getattr(c, "est", {}).get("lookahead_score", 0.0) if isinstance(getattr(c, "est", None), dict) else 0.0),
+                    "op": str(getattr(c, "action", {}).get("op", getattr(c, "type", ""))) if isinstance(getattr(c, "action", None), dict) else str(getattr(c, "type", "")),
+                    "op_args": (lambda a: {k: a.get(k) for k in ["i", "j", "site_id", "cluster_id", "region_id", "idxs", "site_ids"] if k in a})(getattr(c, "action", {}) if isinstance(getattr(c, "action", None), dict) else {}),
                 }
             )
         except Exception:
@@ -689,6 +803,19 @@ def pick_ids_to_actions_sequential(
             act["type"] = "cluster_move"
             assign = _apply_cluster_move(assign, slots, tgt[: len(slots)])
             act["signature"] = _signature_for_action(act, base_assign=assign)
+
+        elif op == "random_kick":
+            idxs = [int(x) for x in (act.get("idxs", []) or [])]
+            site_ids = [int(x) for x in (act.get("site_ids", []) or [])]
+            act["candidate_id"] = int(cand.id)
+            act["type"] = "random_kick"
+            assign = _apply_random_kick(assign, idxs, site_ids)
+            act["signature"] = _signature_for_action(act, base_assign=assign)
+
+        elif op == "noop":
+            act["candidate_id"] = int(cand.id)
+            act["type"] = "noop"
+            act["signature"] = "noop"
 
         else:
             continue
