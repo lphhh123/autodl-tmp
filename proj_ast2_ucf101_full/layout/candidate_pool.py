@@ -382,12 +382,18 @@ def build_candidate_pool(
         for _ in range(raw_n_cmov):
             if len(cands) >= raw_target_max:
                 break
-            cl = clusters[_rng_randint(rng, 0, len(clusters))]
+
+            # IMPORTANT: use list index as cluster_id (detailed_place uses clusters[cid])
+            cluster_idx = int(_rng_randint(rng, 0, len(clusters)))
+            cl = clusters[cluster_idx]
+
             slots = [int(s) for s in getattr(cl, "slots", [])]
             if not slots:
                 continue
-            cid_cl = int(getattr(cl, "id", -1))
+
+            cid_cl = int(cluster_idx)
             from_region = int(cluster_to_region[cid_cl]) if 0 <= cid_cl < int(cluster_to_region.shape[0]) else -1
+
             # pick target region != from_region when possible
             all_regions = list(region_sites.keys())
             if not all_regions:
@@ -395,15 +401,15 @@ def build_candidate_pool(
             tgt_region = int(all_regions[_rng_randint(rng, 0, len(all_regions))])
             if len(all_regions) > 1 and tgt_region == from_region:
                 tgt_region = int(all_regions[(all_regions.index(tgt_region) + 1) % len(all_regions)])
+
             cand_sites = region_sites.get(tgt_region, np.array([], dtype=int))
             if cand_sites.size < len(slots):
                 continue
 
-            # anchor: centroid of current cluster placement
             cur_sites = np.asarray([int(assign[s]) for s in slots], dtype=int)
             anchor = np.mean(sites_xy[cur_sites], axis=0)
             chosen = _nearest_sites(sites_xy, anchor, cand_sites, k=max(len(slots), 3 * len(slots)))
-            # ensure enough unique target sites
+
             uniq = []
             used = set()
             for sid in chosen:
@@ -419,6 +425,7 @@ def build_candidate_pool(
             act = {
                 "op": "cluster_move",
                 "cluster_id": int(cid_cl),
+                "cluster_slots": [int(x) for x in slots],
                 "from_region": int(from_region),
                 "region_id": int(tgt_region),
                 "target_sites": uniq,

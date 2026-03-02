@@ -587,7 +587,11 @@ def run_layout_agent(
         trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
 
         trace_min = {}
-        for k in ("best_total", "best_comm", "best_therm"):
+        for k in (
+            "best_total", "best_comm", "best_therm",
+            "best_total_iter", "best_total_signature", "best_total_stage",
+            "best_total_comm", "best_total_therm",
+        ):
             if k in trace_metrics:
                 trace_min[k] = trace_metrics.pop(k)
 
