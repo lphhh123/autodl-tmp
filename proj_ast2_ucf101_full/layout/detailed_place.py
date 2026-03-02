@@ -115,8 +115,37 @@ def _apply_swap(assign: np.ndarray, i: int, j: int):
     assign[i], assign[j] = assign[j], assign[i]
 
 
-def _apply_relocate(assign: np.ndarray, i: int, site_id: int):
+def _apply_relocate(assign: np.ndarray, i: int, site_id: int) -> int | None:
+    """Permutation-safe relocate (swap with occupant if needed)."""
+    i = int(i)
+    site_id = int(site_id)
+    if i < 0 or i >= assign.shape[0]:
+        return None
+    occ = np.where(assign == site_id)[0]
+    j = int(occ[0]) if occ.size > 0 else -1
+    if j >= 0 and j != i:
+        assign[i], assign[j] = int(assign[j]), int(assign[i])
+        return int(j)
     assign[i] = site_id
+    return None
+
+
+def _apply_random_kick(assign: np.ndarray, idxs: List[int], site_ids: List[int]) -> None:
+    """In-place kick: for each (idx,site) swap with occupant if exists, else set."""
+    if not idxs or not site_ids:
+        return
+    S = int(assign.shape[0])
+    for ii, target in zip(idxs, site_ids):
+        i = int(ii)
+        if i < 0 or i >= S:
+            continue
+        t = int(target)
+        occ = np.where(assign == t)[0]
+        j = int(occ[0]) if occ.size > 0 else -1
+        if j >= 0 and j != i:
+            assign[i], assign[j] = int(assign[j]), int(assign[i])
+        else:
+            assign[i] = t
 
 
 def _apply_cluster_move(assign: np.ndarray, cluster: Cluster, target_sites: Optional[List[int]]):
@@ -547,7 +576,18 @@ def run_detailed_place(
                     if op_local == "swap":
                         return [int(act.get("i", -1)), int(act.get("j", -1))]
                     if op_local == "relocate":
-                        return [int(act.get("i", -1))]
+                        slots = [int(act.get("i", -1))]
+                        j = act.get("degraded_swap_with", None)
+                        if j is not None:
+                            try:
+                                jj = int(j)
+                                if jj >= 0:
+                                    slots.append(jj)
+                            except Exception:
+                                pass
+                        return slots
+                    if op_local == "random_kick":
+                        return [int(x) for x in (act.get("idxs", []) or [])]
                     if op_local == "cluster_move":
                         cid = int(act.get("cluster_id", -1))
                         if 0 <= cid < len(clusters):
@@ -560,7 +600,15 @@ def run_detailed_place(
                     if op_local == "swap":
                         _apply_swap(new_assign, int(act.get("i", 0)), int(act.get("j", 0)))
                     elif op_local == "relocate":
-                        _apply_relocate(new_assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
+                        j = _apply_relocate(new_assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
+                        if j is not None:
+                            act["degraded_swap_with"] = int(j)
+                    elif op_local == "random_kick":
+                        _apply_random_kick(
+                            new_assign,
+                            [int(x) for x in (act.get("idxs", []) or [])],
+                            [int(x) for x in (act.get("site_ids", []) or [])],
+                        )
                     elif op_local == "cluster_move":
                         cid = int(act.get("cluster_id", 0))
                         rid = int(act.get("region_id", 0))
@@ -930,7 +978,15 @@ def run_detailed_place(
                     if op == "swap":
                         _apply_swap(new_assign, int(action.get("i", 0)), int(action.get("j", 0)))
                     elif op == "relocate":
-                        _apply_relocate(new_assign, int(action.get("i", 0)), int(action.get("site_id", 0)))
+                        j = _apply_relocate(new_assign, int(action.get("i", 0)), int(action.get("site_id", 0)))
+                        if j is not None and "degraded_swap_with" not in action:
+                            action["degraded_swap_with"] = int(j)
+                    elif op == "random_kick":
+                        _apply_random_kick(
+                            new_assign,
+                            [int(x) for x in (action.get("idxs", []) or [])],
+                            [int(x) for x in (action.get("site_ids", []) or [])],
+                        )
                     elif op == "cluster_move":
                         cid = int(action.get("cluster_id", 0))
                         rid = int(action.get("region_id", 0))

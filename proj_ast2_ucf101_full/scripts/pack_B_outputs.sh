@@ -21,6 +21,13 @@ for exp in outputs/EXP-B*; do
     [ -d "$seed" ] || continue
     seed_name=$(basename "$seed")
 
+    if [[ "$exp_name" == "EXP-B0" || "$exp_name" == "EXP-B0-random" ]]; then
+      out="_pack_B/${exp_name}_${seed_name}_FULL.tgz"
+      tar -czf "$out"         --exclude="**/heuragenix_internal/data/**"         --exclude="**/__heuragenix_work/**"         "$seed"
+      echo "[PACK] $out"
+      continue
+    fi
+
     latest_run_dir=$(ls -1td "$seed"/*/ 2>/dev/null | head -n 1 | sed 's:/*$::')
     if [ -n "$latest_run_dir" ] && [ -d "$latest_run_dir" ]; then
       run_id=$(basename "$latest_run_dir")
