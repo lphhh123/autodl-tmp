@@ -440,10 +440,26 @@ def run_detailed_place(
             step=0,
         )
 
-    # ---- SA params ----
+    # ---- SA params (P2: scale-aware + reheat) ----
     steps = int(_cfg_get(dp_cfg, "steps", 0))
-    T = float(_cfg_get(dp_cfg, "sa_T0", 1.0))
-    alpha = float(_cfg_get(dp_cfg, "sa_alpha", 0.999))
+
+    sa_cfg = _cfg_get(dp_cfg, "sa", {}) or {}
+    # backward compatible keys
+    T0_raw = float(_cfg_get(sa_cfg, "T0", _cfg_get(dp_cfg, "sa_T0", 1.0)))
+    alpha = float(_cfg_get(sa_cfg, "alpha", _cfg_get(dp_cfg, "sa_alpha", 0.999)))
+
+    # P2 defaults (can be overridden via dp_cfg.sa.*)
+    sa_min_T = float(_cfg_get(sa_cfg, "min_T", 1e-6))
+    sa_auto_scale = bool(_cfg_get(sa_cfg, "auto_scale", True))
+    sa_auto_scale_frac = float(_cfg_get(sa_cfg, "auto_scale_frac", 0.02))  # 2% of base_total when T0 too small
+
+    reheat_patience = int(_cfg_get(sa_cfg, "reheat_patience", 50))
+    reheat_factor = float(_cfg_get(sa_cfg, "reheat_factor", 3.0))
+    reheat_max_times = int(_cfg_get(sa_cfg, "reheat_max_times", 8))
+    reheat_cooldown = int(_cfg_get(sa_cfg, "reheat_cooldown", 30))
+
+    # runtime variables (set after first eval)
+    T = float(T0_raw)
 
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     out_dir = trace_path.parent
@@ -477,6 +493,14 @@ def run_detailed_place(
                     prev_total = float(eval_out.get("total_scalar", 0.0))
                     prev_comm = float(eval_out.get("comm_norm", 0.0))
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
+                    # P2: scale-aware temperature initialization.
+                    # If objective scale is large and T0 is tiny, SA degenerates to greedy.
+                    if sa_auto_scale:
+                        base_total0 = float(prev_total)
+                        if base_total0 > 1000.0 and T <= 10.0:
+                            T = max(T, sa_auto_scale_frac * base_total0)
+                    # enforce min_T
+                    T = max(T, sa_min_T)
                     prev_assign = assign.copy()
                     accepted_steps = 0
                     assign_signature = signature_for_assign(prev_assign)
@@ -636,6 +660,19 @@ def run_detailed_place(
                 require_llm = bool(_cfg_get(planner_cfg, "require_llm", False))
                 disable_on_fatal = bool(_cfg_get(planner_cfg, "disable_on_fatal", True))
 
+                # ---- P2/P3: stagnation & forced exploration state ----
+                last_best_step = 0
+                last_reheat_step = -10**9
+                reheat_count = 0
+
+                # P3 defaults (can be overridden via dp_cfg.explore.*)
+                explore_cfg = _cfg_get(dp_cfg, "explore", {}) or {}
+                stagnation_patience = int(_cfg_get(explore_cfg, "stagnation_patience", 50))
+                kick_cooldown_steps = int(_cfg_get(explore_cfg, "kick_cooldown_steps", 50))
+
+                # If stagnating, we force one strong move; prefer kick > cluster_move > therm_swap
+                force_explore_until = -1
+
                 for step in range(steps):
                     if trace_events_path is not None:
                         assert_cfg_sealed_or_violate(
@@ -648,6 +685,22 @@ def run_detailed_place(
                             trace_contract=trace_contract,
                         )
                     step_start = time.perf_counter()
+                    # P3: stagnation detection (based on global best)
+                    stagnation_steps = int(step - last_best_step)
+                    force_explore = False
+                    if stagnation_steps >= stagnation_patience and step > force_explore_until:
+                        force_explore = True
+                        force_explore_until = int(step + kick_cooldown_steps)
+
+                        # P2: reheat on stagnation (with cooldown)
+                        if (step - last_reheat_step) >= reheat_cooldown and reheat_count < reheat_max_times:
+                            T = max(T, reheat_factor * float(T0_raw))
+                            # also keep scale-aware floor if base_total huge
+                            if sa_auto_scale and float(eval_out.get("total_scalar", 0.0)) > 1000.0 and T <= 10.0:
+                                T = max(T, sa_auto_scale_frac * float(eval_out.get("total_scalar", 0.0)))
+                            T = max(T, sa_min_T)
+                            last_reheat_step = int(step)
+                            reheat_count += 1
                     eval_calls_before = eval_calls_cum
                     h0 = eval_cache.hits if eval_cache is not None else 0
                     m0 = eval_cache.misses if eval_cache is not None else 0
@@ -898,6 +951,24 @@ def run_detailed_place(
                                 ]
         
                     action_queue = [a for a in action_queue if a.get("expire", step) >= step]
+                    # P3: if stagnating, force a strong exploration move to the front of the queue
+                    if force_explore:
+                        # choose best available strong move (kick > cluster_move > therm_swap)
+                        strong_types = ("kick", "cluster_move", "therm_swap")
+                        chosen = None
+                        for ty in strong_types:
+                            pool = [c for c in candidate_pool if str(c.type) == ty and c.id not in forbidden_ids]
+                            if pool:
+                                pool.sort(key=lambda c: float(c.est.get("d_total", 0.0)))
+                                chosen = pool[0]
+                                break
+                        if chosen is not None:
+                            forced_action = {**copy.deepcopy(chosen.action), "candidate_id": int(chosen.id), "type": str(chosen.type), "signature": str(chosen.signature)}
+                            forced_action["_src"] = "forced"
+                            forced_action["_forced_by"] = "stagnation"
+                            forced_action["_force_explore"] = 1
+                            # put to front; expire immediately this step
+                            action_queue.insert(0, {"action": forced_action, "expire": int(step)})
                     fallback_candidates = [c for c in candidate_pool if c.id not in forbidden_ids]
                     if lookahead_scores:
                         fallback_candidates.sort(
@@ -989,7 +1060,8 @@ def run_detailed_place(
                                 cooldown_hit = 1
                                 break
         
-                        if aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
+                        # P3: forced explore bypasses tabu/inverse/cooldown filtering
+                        if bool(action.get("_force_explore", 0)) or aspiration or not (tabu_hit or inverse_hit or cooldown_hit):
                             break
                     op = str(action.get("op", "none"))
         
@@ -1058,6 +1130,7 @@ def run_detailed_place(
                             best_total_seen = float(eval_out.get("total_scalar", best_total_seen))
                             best_assign = assign.copy()
                             best_eval = dict(eval_out)
+                            last_best_step = int(step)
                         consecutive_queue_rejects = 0
                     else:
                         layout_state.assign = assign
@@ -1072,6 +1145,7 @@ def run_detailed_place(
                             refresh_due_to_rejects = True
         
                     T *= alpha
+                    T = max(T, sa_min_T)
         
                     assign_signature = signature_for_assign(assign)
                     op_args_obj = action
@@ -1173,6 +1247,9 @@ def run_detailed_place(
                             "queue_len": int(len(action_queue)),
                             "last_op": op,
                             "temperature": float(T),
+                            "stagnation_steps": int(step - last_best_step),
+                            "reheat_count": int(reheat_count),
+                            "force_explore": int(force_explore),
                             "policy_switch_enabled": bool(use_ps),
                             "policy_last_action_family": getattr(controller, "last_action_family", None),
                             "policy_last_policy": getattr(controller, "last_policy", None),

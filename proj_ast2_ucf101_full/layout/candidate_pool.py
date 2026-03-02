@@ -521,6 +521,9 @@ def build_candidate_pool(
             selected.append(c)
             used_ids.add(c.id)
 
+        # P1: post-sort after diversity coverage so strong moves (cluster/kick) are not buried.
+        # Keep selected set unchanged; only reorder by best improvement.
+        selected.sort(key=lambda c: float(c.est.get("d_total", 0.0)))
         cands = selected[:final_size]
     else:
         cands = cands[:final_size]
