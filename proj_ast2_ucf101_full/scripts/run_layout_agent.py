@@ -533,6 +533,7 @@ def run_layout_agent(
             {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
         )
 
+        J = 0.0
         if sa_only:
             # ===== SA-only baseline: no coarsen/regions/expand pipeline =====
             Ns = int(sites_xy.shape[0])
@@ -737,7 +738,7 @@ def run_layout_agent(
             "region_plan": {
                 "clusters": [c.slots for c in clusters],
                 "cluster_to_region": cluster_to_region,
-                "J": J,
+                "J": float(J) if J is not None else None,
             },
             "artifacts": {
                 "trace_csv": str(trace_path.absolute()),
