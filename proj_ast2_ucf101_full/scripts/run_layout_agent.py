@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
 
 from layout.alt_opt import run_alt_opt
 from layout.candidate_pool import signature_from_assign
-from layout.coarsen import coarsen_traffic
+from layout.coarsen import coarsen_traffic, Cluster
 from layout.detailed_place import run_detailed_place
 from layout.evaluator import LayoutEvaluator, LayoutState, compute_raw_terms_for_assign, evaluator_version
 from layout.expand import expand_clusters
@@ -43,7 +43,7 @@ from layout.global_place_region import assign_clusters_to_regions
 from layout.legalize import legalize_assign
 from layout.pareto import ParetoSet
 from layout.pareto_io import write_pareto_points_csv
-from layout.regions import build_regions
+from layout.regions import build_regions, Region
 from layout.sites import build_sites
 from layout.trace_metrics import compute_trace_metrics_from_csv
 from mapping.mapping_solver import MappingSolver
@@ -358,9 +358,13 @@ def run_layout_agent(
                 "layout_input": str(layout_input_path),
             }
         )
+    pipeline_mode = str(get_nested(cfg, "layout_agent.pipeline", "full")).strip().lower()
+    sa_only = pipeline_mode in ("sa_only", "sa", "detailed_only")
+    method_name = str(get_nested(cfg, "layout_agent.method_name", "ours_layout_agent"))
+
     sig = build_signature_v54(
         cfg,
-        method_name="ours_layout_agent",
+        method_name=method_name,
         overrides={"seed_global": int(seed), "seed_problem": int(seed)},
     )
     meta = init_trace_dir_v54(
@@ -370,7 +374,8 @@ def run_layout_agent(
         signature=sig,
         signature_v54=sig,
         run_meta={
-            "heuristic": "ours_layout_agent",
+            "heuristic": method_name,
+            "pipeline_mode": pipeline_mode,
             "layout_input": str(layout_input_path),
             "mode": "layout",
             "run_id": run_id,
@@ -528,47 +533,78 @@ def run_layout_agent(
             {"assign": assign_seed.copy(), "total_scalar": seed_eval["total_scalar"], "stage": "seed", "iter": 0, "seed": 0},
         )
 
-        # Stage1: coarsen
-        clusters, W = coarsen_traffic(
-            traffic_sym,
-            slot_tdp=chip_tdp,
-            target_num_clusters=int(cfg.coarsen.target_num_clusters),
-            min_merge_traffic=float(cfg.coarsen.min_merge_traffic),
-        )
+        if sa_only:
+            # ===== SA-only baseline: no coarsen/regions/expand pipeline =====
+            Ns = int(sites_xy.shape[0])
 
-        # Stage2: regions
-        regions, site_to_region = build_regions(
-            sites_xy_mm=sites_xy,
-            wafer_radius_mm=wafer_radius,
-            ring_edges_ratio=cfg.regions.ring_edges_ratio,
-            sectors_per_ring=cfg.regions.sectors_per_ring,
-            ring_score=cfg.regions.ring_score,
-            capacity_ratio=float(cfg.regions.capacity_ratio),
-        )
-        cluster_to_region, J = assign_clusters_to_regions(
-            clusters,
-            regions,
-            W,
-            lambda_graph=float(cfg.global_place_region.lambda_graph),
-            lambda_ring=float(cfg.global_place_region.lambda_ring),
-            lambda_cap=float(cfg.global_place_region.lambda_cap),
-            refine_cfg=cfg.global_place_region.get("refine", {}),
-            py_rng=random.Random(int(seed)),
-        )
+            # Trivial single region covering all sites
+            centroid = sites_xy.mean(axis=0).astype(np.float32) if Ns > 0 else np.zeros(2, dtype=np.float32)
+            regions = [
+                Region(
+                    region_id=0,
+                    ring_idx=0,
+                    sector_idx=0,
+                    site_ids=[int(i) for i in range(Ns)],
+                    capacity=Ns,
+                    centroid_xy_mm=centroid,
+                    ring_score=1.0,
+                )
+            ]
+            site_to_region = np.zeros((Ns,), dtype=int)
 
-        # Stage3: expand
-        assign_expand = expand_clusters(
-            clusters=clusters,
-            cluster_to_region=cluster_to_region,
-            regions=regions,
-            base_assign=np.full_like(assign_seed, -1),
-            traffic_sym=traffic_sym,
-            sites_xy=sites_xy,
-            intra_refine_steps=int(cfg.expand.get("intra_refine_steps", 0)),
-        )
+            # Trivial singleton clusters (avoid cluster_move; but keep structure for logging)
+            clusters = [Cluster(cluster_id=i, slots=[i], tdp_sum=float(chip_tdp[i])) for i in range(S)]
+            cluster_to_region = [0 for _ in range(len(clusters))]
 
-        # Stage4: legalize
-        assign_leg = legalize_assign(assign_expand, sites_xy, wafer_radius)
+            # Start SA from seed assignment; optionally legalize it (safe)
+            if bool(get_nested(cfg, "legalize.enabled", True)):
+                assign_leg = legalize_assign(assign_seed.copy(), sites_xy, wafer_radius)
+            else:
+                assign_leg = assign_seed.copy()
+
+        else:
+            # ===== Full pipeline (ours) =====
+            # Stage1: coarsen
+            clusters, W = coarsen_traffic(
+                traffic_sym,
+                slot_tdp=chip_tdp,
+                target_num_clusters=int(cfg.coarsen.target_num_clusters),
+                min_merge_traffic=float(cfg.coarsen.min_merge_traffic),
+            )
+
+            # Stage2: regions
+            regions, site_to_region = build_regions(
+                sites_xy_mm=sites_xy,
+                wafer_radius_mm=wafer_radius,
+                ring_edges_ratio=cfg.regions.ring_edges_ratio,
+                sectors_per_ring=cfg.regions.sectors_per_ring,
+                ring_score=cfg.regions.ring_score,
+                capacity_ratio=float(cfg.regions.capacity_ratio),
+            )
+            cluster_to_region, J = assign_clusters_to_regions(
+                clusters,
+                regions,
+                W,
+                lambda_graph=float(cfg.global_place_region.lambda_graph),
+                lambda_ring=float(cfg.global_place_region.lambda_ring),
+                lambda_cap=float(cfg.global_place_region.lambda_cap),
+                refine_cfg=cfg.global_place_region.get("refine", {}),
+                py_rng=random.Random(int(seed)),
+            )
+
+            # Stage3: expand
+            assign_expand = expand_clusters(
+                clusters=clusters,
+                cluster_to_region=cluster_to_region,
+                regions=regions,
+                base_assign=np.full_like(assign_seed, -1),
+                traffic_sym=traffic_sym,
+                sites_xy=sites_xy,
+                intra_refine_steps=int(cfg.expand.get("intra_refine_steps", 0)),
+            )
+
+            # Stage4: legalize
+            assign_leg = legalize_assign(assign_expand, sites_xy, wafer_radius)
         layout_state.assign = assign_leg
 
         # Stage5: detailed place
