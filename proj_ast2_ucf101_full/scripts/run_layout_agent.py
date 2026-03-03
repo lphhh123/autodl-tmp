@@ -22,6 +22,7 @@ import shutil
 import time
 import uuid
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -778,15 +779,55 @@ def main():
     cfg.train.out_dir = str(out_dir)
     cfg.out_dir = str(out_dir)
 
-    cfg = validate_and_fill_defaults(cfg, mode="layout")
+    # ---- v5.4 contract: preserve requested snapshot BEFORE any env overrides ----
+    def _strip_contract_local(container: Any) -> Any:
+        if not isinstance(container, dict):
+            return container
+        out = {}
+        for k, v in container.items():
+            if isinstance(k, str) and (k.startswith("_contract") or k == "contract"):
+                continue
+            out[k] = _strip_contract_local(v) if isinstance(v, dict) else v
+        return out
+
+    # Ensure _contract exists
+    if not hasattr(cfg, "_contract") or cfg._contract is None:
+        cfg._contract = OmegaConf.create({})
+
+    # Record requested snapshot if missing (pre-override, pre-seal)
+    if get_nested(cfg, "_contract.requested_config_snapshot", None) is None:
+        raw_req = OmegaConf.to_container(cfg, resolve=False)
+        cfg._contract.requested_config_snapshot = _strip_contract_local(raw_req)
+
+    # Ensure overrides list exists
+    if get_nested(cfg, "_contract.overrides", None) is None:
+        cfg._contract.overrides = []
+
+    # ---- Apply env overrides BEFORE sealing (validate_and_fill_defaults will seal) ----
     budget_override = os.environ.get("TOTAL_EVAL_BUDGET_OVERRIDE", "").strip()
     if budget_override:
         try:
             if not hasattr(cfg, "budget") or cfg.budget is None:
                 cfg.budget = OmegaConf.create({})
-            cfg.budget.total_eval_budget = int(budget_override)
+            old_val = int(getattr(cfg.budget, "total_eval_budget", 0) or 0)
+            new_val = int(budget_override)
+            cfg.budget.total_eval_budget = new_val
+
+            ov = list(get_nested(cfg, "_contract.overrides", []) or [])
+            ov.append(
+                {
+                    "path": "budget.total_eval_budget",
+                    "requested": old_val,
+                    "effective": new_val,
+                    "reason": "env:TOTAL_EVAL_BUDGET_OVERRIDE",
+                }
+            )
+            cfg._contract.overrides = ov
         except Exception:
             pass
+
+    # NOW seal + fill defaults (seal_digest matches final cfg)
+    cfg = validate_and_fill_defaults(cfg, mode="layout")
     seed_everything(int(args.seed))
 
     # dump config_used
