@@ -10,6 +10,7 @@ mkdir -p _pack_B
 tar -czf _pack_B/layout_input_P3A3.tgz \
   outputs/P3/A3/layout_input.json \
   outputs/P3/A3/layout_input_export \
+  outputs/P3/A3/instances \
   2>/dev/null || true
 
 # 1) pack latest run per EXP-B* per seed

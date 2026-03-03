@@ -8,7 +8,23 @@ SMOKE="${SMOKE:-0}"
 EXP_ID="${1:-}"
 SEED="${2:-0}"
 INSTANCE="${INSTANCE:-base}"
+# INSTANCE usage:
+#   INSTANCE=cluster4 bash scripts/experiments_version_c.sh EXP-B2 0
+#   INSTANCE=all      bash scripts/experiments_version_c.sh EXP-B2 0
+INSTANCE_LIST_DEFAULT=("chain_skip" "chain_skip_randw" "cluster4")
 BUDGET="${BUDGET:-10k}"
+
+if [[ "${INSTANCE}" == "all" ]]; then
+  echo "[INSTANCE] all -> running: ${INSTANCE_LIST_DEFAULT[*]}"
+  for inst in "${INSTANCE_LIST_DEFAULT[@]}"; do
+    echo ""
+    echo "============================================================"
+    echo "[INSTANCE] ${inst} :: ${EXP_ID} seed${SEED}"
+    echo "============================================================"
+    INSTANCE="${inst}" bash "$0" "${EXP_ID}" "${SEED}"
+  done
+  exit 0
+fi
 
 # ---- arg validation (avoid accidental extra tokens like "0andom") ----
 if [[ $# -gt 2 ]]; then
@@ -80,31 +96,52 @@ else
   export ENABLE_TF32="${ENABLE_TF32:-0}"
 fi
 
+resolve_layout_input() {
+  case "${INSTANCE}" in
+    base)
+      echo "outputs/P3/A3/layout_input.json"
+      ;;
+    chain_skip)
+      echo "outputs/P3/A3/instances/layout_input_chain_skip.json"
+      ;;
+    chain_skip_randw)
+      echo "outputs/P3/A3/instances/layout_input_chain_skip_randw_s${SEED}.json"
+      ;;
+    cluster4)
+      echo "outputs/P3/A3/instances/layout_input_cluster4_s${SEED}.json"
+      ;;
+    *)
+      echo "[ERROR] Unknown INSTANCE=${INSTANCE}"
+      exit 2
+      ;;
+  esac
+}
+
 # ---- ensure A3 middleware exists: outputs/P3/A3/layout_input.json ----
 ensure_layout_input() {
-  local LI="outputs/P3/A3/layout_input.json"
+  local LI_BASE="outputs/P3/A3/layout_input.json"
+  local LI
+  LI="$(resolve_layout_input)"
+
+  if [[ ! -f "${LI_BASE}" ]]; then
+    echo "[ensure_layout_input] MISSING: ${LI_BASE}"
+    echo "[ensure_layout_input] Generating via Version-C Phase3 ..."
+    python -m scripts.run_version_c --phase P3 --sub A3 || true
+  fi
+
+  if [[ "${INSTANCE}" != "base" && ! -f "${LI}" ]]; then
+    echo "[ensure_layout_input] instance missing: ${LI}"
+    echo "[ensure_layout_input] generating instances via scripts.make_layout_inputs ..."
+    python -m scripts.make_layout_inputs --base "${LI_BASE}" --out_dir "outputs/P3/A3/instances" --seed "${SEED}" || true
+  fi
+
   if [[ -f "${LI}" ]]; then
     echo "[ensure_layout_input] OK: ${LI}"
     return 0
   fi
 
-  echo "[ensure_layout_input] MISSING: ${LI}"
-  echo "[ensure_layout_input] Generating via Version-C Phase3 export (A3)..."
-
-  mkdir -p outputs/P3/A3
-
-  python -m scripts.run_version_c \
-    --cfg configs/vc_phase3_full_ucf101.yaml \
-    --out_dir outputs/P3/A3 \
-    --seed "${SEED}" \
-    --export_layout_input \
-    --export_dir outputs/P3/A3/layout_input_export
-
-  if [[ ! -f "${LI}" ]]; then
-    echo "[ensure_layout_input] FAILED: still missing ${LI}"
-    exit 3
-  fi
-  echo "[ensure_layout_input] GENERATED: ${LI}"
+  echo "[ensure_layout_input] STILL MISSING: ${LI}"
+  exit 2
 }
 
 run_ast () {
@@ -168,26 +205,6 @@ run_layout () {
   local cfg="$1"
   local out="$2"
   ensure_layout_input
-  python -m scripts.make_layout_inputs --base outputs/P3/A3/layout_input.json --out_dir outputs/P3/A3/instances --seed "${SEED}" >/dev/null 2>&1 || true
-  local layout_input=""
-  case "${INSTANCE}" in
-    base)
-      layout_input="outputs/P3/A3/layout_input.json"
-      ;;
-    chain_skip)
-      layout_input="outputs/P3/A3/instances/layout_input_chain_skip.json"
-      ;;
-    chain_skip_randw)
-      layout_input="outputs/P3/A3/instances/layout_input_chain_skip_randw_s${SEED}.json"
-      ;;
-    cluster4)
-      layout_input="outputs/P3/A3/instances/layout_input_cluster4_s${SEED}.json"
-      ;;
-    *)
-      echo "[ERROR] Unknown INSTANCE=${INSTANCE}"
-      exit 2
-      ;;
-  esac
   # Avoid OMP threads = 0 crash
   if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
   if [[ "${OPENBLAS_NUM_THREADS:-0}" -le 0 ]]; then export OPENBLAS_NUM_THREADS=1; fi
@@ -195,7 +212,7 @@ run_layout () {
   if [[ "${NUMEXPR_NUM_THREADS:-0}" -le 0 ]]; then export NUMEXPR_NUM_THREADS=1; fi
   export TOTAL_EVAL_BUDGET_OVERRIDE="${TOTAL_EVAL_BUDGET}"
   python -m scripts.run_layout_agent \
-    --layout_input "${layout_input}" \
+    --layout_input "$(resolve_layout_input)" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
@@ -203,26 +220,6 @@ run_layout_heuragenix () {
   local cfg="$1"
   local out="$2"
   ensure_layout_input
-  python -m scripts.make_layout_inputs --base outputs/P3/A3/layout_input.json --out_dir outputs/P3/A3/instances --seed "${SEED}" >/dev/null 2>&1 || true
-  local layout_input=""
-  case "${INSTANCE}" in
-    base)
-      layout_input="outputs/P3/A3/layout_input.json"
-      ;;
-    chain_skip)
-      layout_input="outputs/P3/A3/instances/layout_input_chain_skip.json"
-      ;;
-    chain_skip_randw)
-      layout_input="outputs/P3/A3/instances/layout_input_chain_skip_randw_s${SEED}.json"
-      ;;
-    cluster4)
-      layout_input="outputs/P3/A3/instances/layout_input_cluster4_s${SEED}.json"
-      ;;
-    *)
-      echo "[ERROR] Unknown INSTANCE=${INSTANCE}"
-      exit 2
-      ;;
-  esac
   # Avoid OMP threads = 0 crash
   if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
   if [[ "${OPENBLAS_NUM_THREADS:-0}" -le 0 ]]; then export OPENBLAS_NUM_THREADS=1; fi
@@ -230,13 +227,18 @@ run_layout_heuragenix () {
   if [[ "${NUMEXPR_NUM_THREADS:-0}" -le 0 ]]; then export NUMEXPR_NUM_THREADS=1; fi
   export TOTAL_EVAL_BUDGET_OVERRIDE="${TOTAL_EVAL_BUDGET}"
   python -m scripts.run_layout_heuragenix \
-    --layout_input "${layout_input}" \
+    --layout_input "$(resolve_layout_input)" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
 odir () {
-  # usage: odir EXP-A1
-  echo "${OUT_PREFIX}/${1}/seed${SEED}"
+  # usage: odir EXP-B1  -> outputs/EXP-B1[-INSTANCE]/seed${SEED}
+  local exp="$1"
+  if [[ "${INSTANCE}" == "base" ]]; then
+    echo "${OUT_PREFIX}/${exp}/seed${SEED}"
+  else
+    echo "${OUT_PREFIX}/${exp}-${INSTANCE}/seed${SEED}"
+  fi
 }
 
 case "$EXP_ID" in
@@ -274,16 +276,16 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation B (Layout)
   # -------------------------
-  EXP-B0)        run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp2.yaml      "outputs/EXP-B0/seed${SEED}" ;;
-  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp2.yaml   "outputs/EXP-B0-random/seed${SEED}" ;;
+  EXP-B0)        run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp2.yaml      "$(odir EXP-B0)" ;;
+  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp2.yaml   "$(odir EXP-B0-random)" ;;
 
-  EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "outputs/EXP-B1/seed${SEED}" ;;
-  EXP-B1-weak) run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml "outputs/EXP-B1-weak/seed${SEED}" ;;
-  EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "outputs/EXP-B2/seed${SEED}" ;;
-  EXP-B3) run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml "outputs/EXP-B3/seed${SEED}" ;;
-  EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;
-  EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "outputs/EXP-B2-ab-nofeas/seed${SEED}" ;;
-  EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "outputs/EXP-B2-ab-nodiverse/seed${SEED}" ;;
+  EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "$(odir EXP-B1)" ;;
+  EXP-B1-weak) run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml "$(odir EXP-B1-weak)" ;;
+  EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "$(odir EXP-B2)" ;;
+  EXP-B3) run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml "$(odir EXP-B3)" ;;
+  EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "$(odir EXP-B2-ab-noqueue)" ;;
+  EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "$(odir EXP-B2-ab-nofeas)" ;;
+  EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "$(odir EXP-B2-ab-nodiverse)" ;;
 
   # -------------------------
   # Appendix / Optional (kept but not required for main table)
