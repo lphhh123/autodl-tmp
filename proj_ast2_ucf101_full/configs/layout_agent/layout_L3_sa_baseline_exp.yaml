@@ -1,5 +1,9 @@
 _base_: base_layout_exp.yaml
 
+layout_agent:
+  pipeline: sa_only
+  method_name: sa_baseline
+
 detailed_place:
   # IMPORTANT: steps=0 => run until eval budget exhausted (BudgetExceeded)
   steps: 0

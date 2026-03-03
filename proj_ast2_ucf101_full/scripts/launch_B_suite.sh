@@ -7,11 +7,7 @@ cd "$ROOT"
 BUDGET="${BUDGET:-10k}"
 INSTANCE="${INSTANCE:-all}"
 SEEDS="${SEEDS:-0}"
-EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B0-strong EXP-B0-best1}"
-
-export HEURAGENIX_INCLUDE_LEGACY="${HEURAGENIX_INCLUDE_LEGACY:-1}"
-export V54_LLM_PICK_TEMPERATURE="${V54_LLM_PICK_TEMPERATURE:-0.3}"
-export V54_LLM_PICK_TOP_P="${V54_LLM_PICK_TOP_P:-0.9}"
+EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-noqueue EXP-B2-ab-nofeas EXP-B2-ab-nodiverse EXP-B3}"
 
 for seed in ${SEEDS}; do
   for exp in ${EXPS}; do

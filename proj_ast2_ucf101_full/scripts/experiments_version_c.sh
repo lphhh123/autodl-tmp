@@ -298,9 +298,9 @@ case "$EXP_ID" in
   EXP-B1-weak)   run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml                        EXP-B1-weak ;;
   EXP-B2)        run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml          EXP-B2 ;;
   EXP-B3)        run_layout_multi run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml                            EXP-B3 ;;
-  EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "$(odir EXP-B2-ab-noqueue)" ;;
-  EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "$(odir EXP-B2-ab-nofeas)" ;;
-  EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "$(odir EXP-B2-ab-nodiverse)" ;;
+  EXP-B2-ab-noqueue)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   EXP-B2-ab-noqueue ;;
+  EXP-B2-ab-nofeas)    run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    EXP-B2-ab-nofeas ;;
+  EXP-B2-ab-nodiverse) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml EXP-B2-ab-nodiverse ;;
 
   # -------------------------
   # Appendix / Optional (kept but not required for main table)
