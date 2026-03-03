@@ -8,6 +8,18 @@ SMOKE="${SMOKE:-0}"
 EXP_ID="${1:-}"
 SEED="${2:-0}"
 
+# ---- arg validation (avoid accidental extra tokens like "0andom") ----
+if [[ $# -gt 2 ]]; then
+  echo "[ERROR] Too many args. Usage: $0 <EXP_ID> [SEED]"
+  echo "  Got: $*"
+  exit 2
+fi
+
+if [[ -n "${SEED}" && ! "${SEED}" =~ ^[0-9]+$ ]]; then
+  echo "[ERROR] SEED must be an integer, got: ${SEED}"
+  exit 2
+fi
+
 # Default slim logging (can be overridden per run)
 export LOG_SLIM="${LOG_SLIM:-1}"
 export TQDM_DISABLE="${TQDM_DISABLE:-1}"
@@ -213,6 +225,7 @@ case "$EXP_ID" in
   EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp2.yaml   "outputs/EXP-B0-random/seed${SEED}" ;;
 
   EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "outputs/EXP-B1/seed${SEED}" ;;
+  EXP-B1-weak) run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml "outputs/EXP-B1-weak/seed${SEED}" ;;
   EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "outputs/EXP-B2/seed${SEED}" ;;
   EXP-B3) run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml "outputs/EXP-B3/seed${SEED}" ;;
   EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "outputs/EXP-B2-ab-noqueue/seed${SEED}" ;;

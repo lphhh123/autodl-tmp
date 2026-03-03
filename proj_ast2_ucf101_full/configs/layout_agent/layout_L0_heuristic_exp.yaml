@@ -1,22 +1,6 @@
 _base_: base_layout_exp.yaml
 
-# B1: weak heuristic baseline (candidate_pool + simple ops only)
+# B1 (strong): ours heuristic baseline, same action pool/candidate pool as base, but no LLM.
 detailed_place:
   planner:
     type: heuristic
-
-  operator_bank:
-    enabled: false
-
-  action_probs:
-    swap: 0.65
-    relocate: 0.35
-    cluster_move: 0.0
-
-  candidate_pool:
-    raw_target_size: 80
-    raw_target_max: 120
-    final_size: 30
-    diversity_enabled: true
-    coverage_min_per_bucket: 4
-    bucket_order: ["swap", "relocate"]
