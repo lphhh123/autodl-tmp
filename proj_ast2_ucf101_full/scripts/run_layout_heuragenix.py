@@ -18,6 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -25,6 +26,7 @@ import random
 import subprocess
 import shutil
 import time
+import traceback
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -494,7 +496,35 @@ def _materialize_strong_heuristic_dir(
         shutil.rmtree(dst)
     dst.mkdir(parents=True, exist_ok=True)
 
-    mapping = {"src_dir": str(src.resolve()), "dst_dir": str(dst.resolve()), "files": []}
+    def _smoke_load_heuristic_file(heuragenix_root: Path, file_path: Path) -> tuple[bool, str]:
+        inserted_paths: List[str] = []
+        for p in (heuragenix_root, heuragenix_root / "src"):
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+                inserted_paths.append(sp)
+        try:
+            module_name = f"_hx_strong_smoke_{file_path.stem}"
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            if spec is None or spec.loader is None:
+                return False, "spec_or_loader_none"
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            stem = file_path.stem
+            fn = getattr(module, stem, None)
+            if not callable(fn):
+                return False, f"missing_callable:{stem}"
+            return True, "ok"
+        except Exception:
+            return False, traceback.format_exc()
+        finally:
+            for sp in inserted_paths:
+                try:
+                    sys.path.remove(sp)
+                except ValueError:
+                    pass
+
+    mapping = {"src_dir": str(src.resolve()), "dst_dir": str(dst.resolve()), "files": [], "skipped": []}
     init_src = src / "__init__.py"
     if init_src.exists():
         shutil.copy2(init_src, dst / "__init__.py")
@@ -519,7 +549,24 @@ def _materialize_strong_heuristic_dir(
                 f"def {Path(new_name).stem}(problem_state, algorithm_data, **kwargs):\n"
                 f"    return _legacy_target(problem_state, algorithm_data, **kwargs)\n"
             )
-            (dst / new_name).write_text(shim, encoding="utf-8")
+            dst_file = dst / new_name
+            dst_file.write_text(shim, encoding="utf-8")
+            ok, reason = _smoke_load_heuristic_file(heuragenix_root, dst_file)
+            if not ok:
+                try:
+                    dst_file.unlink()
+                except FileNotFoundError:
+                    pass
+                mapping["skipped"].append(
+                    {
+                        "mode": "shim",
+                        "src": f.name,
+                        "dst": new_name,
+                        "target_func": target_func,
+                        "reason": reason,
+                    }
+                )
+                continue
             mapping["files"].append(
                 {
                     "mode": "shim",
@@ -533,7 +580,24 @@ def _materialize_strong_heuristic_dir(
         if f.name.startswith("_"):
             continue
 
-        shutil.copy2(f, dst / f.name)
+        dst_file = dst / f.name
+        shutil.copy2(f, dst_file)
+        ok, reason = _smoke_load_heuristic_file(heuragenix_root, dst_file)
+        if not ok:
+            try:
+                dst_file.unlink()
+            except FileNotFoundError:
+                pass
+            mapping["skipped"].append(
+                {
+                    "mode": "copy",
+                    "src": f.name,
+                    "dst": f.name,
+                    "target_func": Path(f.name).stem,
+                    "reason": reason,
+                }
+            )
+            continue
         mapping["files"].append(
             {
                 "mode": "copy",
@@ -546,6 +610,10 @@ def _materialize_strong_heuristic_dir(
     (trace_dir / "heuragenix_strong_heuristic_dir_map.json").write_text(
         json.dumps(mapping, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    print(
+        f"[HeurAgenix-Strong] kept={len(mapping['files'])} skipped={len(mapping['skipped'])} dir={dst}",
+        flush=True,
     )
     return dst_name
 
