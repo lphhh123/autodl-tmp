@@ -437,10 +437,12 @@ def run_detailed_place(
     max_retry = int(_cfg_get(planner_cfg, "max_retry", 1))
     stage_label = str(_cfg_get(dp_cfg, "stage_label", f"detailed_{planner_type}"))
 
-    lookahead_cfg = _cfg_get(dp_cfg, "lookahead", {}) or {}
-    lookahead_enabled = bool(_cfg_get(lookahead_cfg, "enabled", False))
-    lookahead_topk = int(_cfg_get(lookahead_cfg, "topk", 8))
-    lookahead_beta = float(_cfg_get(lookahead_cfg, "beta", 0.5))
+    look_cfg = _cfg_get(dp_cfg, "lookahead", {}) or {}
+    lookahead_enabled = bool(_cfg_get(look_cfg, "enabled", False))
+    lookahead_k = int(_cfg_get(look_cfg, "k", _cfg_get(look_cfg, "topk", 8)))
+    lookahead_r = int(_cfg_get(look_cfg, "r", 3))
+    lookahead_mc = int(_cfg_get(look_cfg, "mc", 2))
+    lookahead_alpha = float(_cfg_get(look_cfg, "alpha", 1.0))
 
     # ===== v5.4 Ours-B2+ controller (optional) =====
     ps_cfg = _cfg_get(dp_cfg, "policy_switch", None)
@@ -604,7 +606,7 @@ def run_detailed_place(
                         "cooldown_hit": 0,
                         "policy": "init",
                         "move": "init",
-                        "lookahead_k": int(lookahead_topk if lookahead_enabled else 0),
+                        "lookahead_k": int(lookahead_k if lookahead_enabled else 0),
                         "cache_hit": 0,
                         "cache_key": init_cache_key,
                         "objective_hash": objective_hash,
@@ -619,7 +621,7 @@ def run_detailed_place(
                         "accepted_steps_cum": accepted_steps,
                         "sim_eval_calls_cum": eval_calls_cum,
                         "lookahead_enabled": int(lookahead_enabled),
-                        "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
+                        "lookahead_r": float(lookahead_r) if lookahead_enabled else 0.0,
                         "notes": "",
                     }
                     writer.writerow(init_row)
@@ -687,31 +689,89 @@ def run_detailed_place(
                             return [int(s) for s in clusters[cid].slots]
                     return []
         
+                def _apply_action_inplace(assign_arr: np.ndarray, action: Dict[str, Any], clusters, site_to_region, sites_xy):
+                    op_local = str(action.get("op", "none"))
+                    if op_local == "swap":
+                        i = int(action.get("i", -1))
+                        j = int(action.get("j", -1))
+                        if 0 <= i < len(assign_arr) and 0 <= j < len(assign_arr) and i != j:
+                            _apply_swap(assign_arr, i, j)
+                        return
+                    if op_local == "relocate":
+                        i = int(action.get("i", -1))
+                        to_site = int(action.get("site_id", -1))
+                        if 0 <= i < len(assign_arr) and 0 <= to_site < len(site_to_region):
+                            _apply_relocate(assign_arr, i, to_site)
+                        return
+                    if op_local == "random_kick":
+                        _apply_random_kick(
+                            assign_arr,
+                            [int(x) for x in (action.get("idxs", []) or [])],
+                            [int(x) for x in (action.get("site_ids", []) or [])],
+                        )
+                        return
+                    if op_local == "cluster_move":
+                        cid = int(action.get("cluster_id", -1))
+                        slots = [int(x) for x in (action.get("cluster_slots", []) or [])]
+                        cluster_obj = None
+                        if 0 <= cid < len(clusters) and getattr(clusters[cid], "slots", None) and clusters[cid].slots:
+                            cluster_obj = clusters[cid]
+                        elif slots:
+                            cluster_obj = Cluster(cluster_id=-1, slots=slots, tdp_sum=0.0)
+                        if cluster_obj is None:
+                            return
+                        rid = int(action.get("region_id", 0))
+                        target_sites = action.get("target_sites")
+                        if not target_sites:
+                            target_sites = _select_cluster_target_sites(assign_arr, cluster_obj, rid, site_to_region, sites_xy)
+                        _apply_cluster_move(assign_arr, cluster_obj, target_sites)
+                        return
+
                 def _apply_action_for_candidate(base_assign: np.ndarray, act: Dict[str, Any]) -> np.ndarray:
                     new_assign = base_assign.copy()
-                    op_local = str(act.get("op", "none"))
-                    if op_local == "swap":
-                        _apply_swap(new_assign, int(act.get("i", 0)), int(act.get("j", 0)))
-                    elif op_local == "relocate":
-                        j = _apply_relocate(new_assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
-                        if j is not None:
-                            act["degraded_swap_with"] = int(j)
-                    elif op_local == "random_kick":
-                        _apply_random_kick(
-                            new_assign,
-                            [int(x) for x in (act.get("idxs", []) or [])],
-                            [int(x) for x in (act.get("site_ids", []) or [])],
-                        )
-                    elif op_local == "cluster_move":
-                        cid = int(act.get("cluster_id", 0))
-                        rid = int(act.get("region_id", 0))
-                        if 0 <= cid < len(clusters):
-                            cluster = clusters[cid]
-                            target_sites = act.get("target_sites")
-                            if not target_sites:
-                                target_sites = _select_cluster_target_sites(new_assign, cluster, rid, site_to_region, sites_xy)
-                            _apply_cluster_move(new_assign, cluster, target_sites)
+                    _apply_action_inplace(new_assign, act, clusters, site_to_region, sites_xy)
                     return new_assign
+
+                def _rollout_avg_total(assign0: np.ndarray, candidate_action: Dict[str, Any], r: int, mc: int) -> float:
+                    """Apply first action then r-1 greedy heuristic steps; return avg best total over MC rollouts."""
+                    totals: List[float] = []
+                    for _ in range(max(1, mc)):
+                        cur = assign0.copy()
+                        _apply_action_inplace(cur, candidate_action, clusters, site_to_region, sites_xy)
+                        layout_state.assign = cur
+                        e1 = _evaluate(layout_state)
+                        best_total = float(e1.get("total_scalar", 0.0))
+                        for _t in range(max(0, r - 1)):
+                            sub_pool = build_candidate_pool(
+                                cur,
+                                e1,
+                                evaluator,
+                                layout_state,
+                                traffic_sym,
+                                sites_xy,
+                                site_to_region,
+                                regions,
+                                clusters,
+                                cluster_to_region,
+                                chip_tdp,
+                                dp_cfg,
+                                rng,
+                                debug_out_path=None,
+                            )
+                            if not sub_pool:
+                                break
+                            sub_pool.sort(key=lambda c: float(c.est.get("d_total", 0.0)), reverse=True)
+                            act = sub_pool[0].action
+                            cur2 = cur.copy()
+                            _apply_action_inplace(cur2, act, clusters, site_to_region, sites_xy)
+                            layout_state.assign = cur2
+                            e2 = _evaluate(layout_state)
+                            best_total = min(best_total, float(e2.get("total_scalar", best_total)))
+                            cur = cur2
+                            e1 = e2
+                        totals.append(best_total)
+                    layout_state.assign = assign0
+                    return float(sum(totals) / max(1, len(totals)))
         
                 action_queue: List[Dict] = []
                 forbidden_history: List[List[int]] = []
@@ -815,66 +875,25 @@ def run_detailed_place(
                         if filtered:
                             candidate_pool = filtered
                     lookahead_scores: Dict[int, float] = {}
-                    if lookahead_enabled and len(candidate_pool) > 1:
-                        cand_infos: List[Dict[str, Any]] = []
-                        base_assign = assign.copy()
+                    if lookahead_enabled and planner_type == "mixed" and candidate_pool:
+                        candidate_pool.sort(key=lambda c: float(c.est.get("d_total", 0.0)), reverse=True)
+                        top = candidate_pool[: max(1, min(lookahead_k, len(candidate_pool)))]
+                        verified: Dict[int, float] = {}
+                        for cand in top:
+                            try:
+                                verified_score = _rollout_avg_total(assign, cand.action, r=lookahead_r, mc=lookahead_mc)
+                                verified[int(cand.id)] = float(verified_score)
+                            except Exception:
+                                continue
+
                         for cand in candidate_pool:
-                            action_copy = copy.deepcopy(cand.action)
-                            action_copy.setdefault("signature", cand.signature)
-                            new_assign = _apply_action_for_candidate(base_assign, action_copy)
-                            sig1 = signature_for_assign(new_assign)
-                            k1 = _make_cache_key(sig1, objective_hash)
-                            cached = eval_cache.get(k1) if eval_cache is not None else None
-                            if cached is None:
-                                layout_state.assign = new_assign
-                                eval_new = _evaluate(layout_state)
-                                if eval_cache is not None:
-                                    eval_cache.put(k1, dict(eval_new))
-                            else:
-                                eval_new = dict(cached)
-                            d_total = float(eval_out["total_scalar"] - eval_new["total_scalar"])
-                            cand_infos.append(
-                                {
-                                    "candidate": cand,
-                                    "new_assign": new_assign,
-                                    "d_total": d_total,
-                                    "apply_fn": lambda base, act=action_copy: _apply_action_for_candidate(base, act),
-                                }
-                            )
-        
-                        cand_infos_sorted = sorted(cand_infos, key=lambda x: x["d_total"], reverse=True)
-                        top = cand_infos_sorted[: min(lookahead_topk, len(cand_infos_sorted))]
-        
-                        for ci in top:
-                            best2 = None
-                            for cj in top:
-                                if cj is ci:
-                                    continue
-                                assign2 = cj["apply_fn"](ci["new_assign"])
-                                sig2 = signature_for_assign(assign2)
-                                k2 = _make_cache_key(sig2, objective_hash)
-                                cached2 = eval_cache.get(k2) if eval_cache is not None else None
-                                if cached2 is None:
-                                    layout_state.assign = assign2
-                                    eval2 = _evaluate(layout_state)
-                                    if eval_cache is not None:
-                                        eval_cache.put(k2, dict(eval2))
-                                else:
-                                    eval2 = dict(cached2)
-                                d2 = float(eval_out["total_scalar"] - eval2["total_scalar"])
-                                if best2 is None or d2 > best2:
-                                    best2 = d2
-                            ci["lookahead_best_d2"] = float(best2) if best2 is not None else 0.0
-                            ci["lookahead_score"] = float(ci["d_total"]) + lookahead_beta * float(ci["lookahead_best_d2"])
-        
-                        for ci in cand_infos:
-                            if "lookahead_score" not in ci:
-                                ci["lookahead_score"] = float(ci["d_total"])
-                            cand = ci["candidate"]
-                            if isinstance(getattr(cand, "est", None), dict):
-                                cand.est["lookahead_score"] = float(ci["lookahead_score"])
-                            lookahead_scores[int(cand.id)] = float(ci["lookahead_score"])
-                        layout_state.assign = base_assign
+                            cid = int(cand.id)
+                            if cid in verified and isinstance(cand.est, dict):
+                                cand.est["verified_total"] = float(verified[cid])
+                                cand.est["lookahead_score"] = -lookahead_alpha * float(verified[cid])
+                                lookahead_scores[cid] = float(cand.est["lookahead_score"])
+
+                        candidate_pool.sort(key=lambda c: float(c.est.get("verified_total", 1e30)))
                     cand_map = {c.id: c for c in candidate_pool}
                     candidate_ids = [c.id for c in candidate_pool]
                     if force_explore_for_llm:
@@ -1431,7 +1450,7 @@ def run_detailed_place(
                         "cooldown_hit": int(cooldown_hit),
                         "policy": "llm" if (action.get("_src", "") == "llm") else "heuristic",
                         "move": str(op),
-                        "lookahead_k": int(lookahead_topk if lookahead_enabled else 0),
+                        "lookahead_k": int(lookahead_k if lookahead_enabled else 0),
                         "cache_hit": int(cache_hit_step),
                         "cache_hit_cum": int(h1),
                         "cache_miss_cum": int(m1),
@@ -1445,7 +1464,7 @@ def run_detailed_place(
                         "accepted_steps_cum": int(accepted_steps),
                         "sim_eval_calls_cum": int(eval_calls_cum),
                         "lookahead_enabled": int(lookahead_enabled),
-                        "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
+                        "lookahead_r": float(lookahead_r) if lookahead_enabled else 0.0,
                         "notes": notes,
                     }
                     writer.writerow(row)
@@ -1597,7 +1616,7 @@ def run_detailed_place(
                         "accepted_steps_cum": int(accepted_steps),
                         "sim_eval_calls_cum": int(eval_calls_cum),
                         "lookahead_enabled": int(lookahead_enabled),
-                        "lookahead_r": float(lookahead_beta) if lookahead_enabled else 0.0,
+                        "lookahead_r": float(lookahead_r) if lookahead_enabled else 0.0,
                         "notes": "",
                     }
                     writer.writerow(fin_row)
@@ -1633,7 +1652,7 @@ def run_detailed_place(
         "steps": int(steps),
         "steps_planned": int(planned_steps),
         "steps_executed": int(last_step + 1) if last_step >= 0 else 0,
-        "lookahead": {"enabled": bool(lookahead_enabled), "topk": int(lookahead_topk), "beta": float(lookahead_beta)},
+        "lookahead": {"enabled": bool(lookahead_enabled), "k": int(lookahead_k), "r": int(lookahead_r), "mc": int(lookahead_mc), "alpha": float(lookahead_alpha)},
         "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
         "policy_switch": {
             "enabled": bool(use_ps),

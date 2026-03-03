@@ -7,6 +7,8 @@ cd "$ROOT"
 SMOKE="${SMOKE:-0}"
 EXP_ID="${1:-}"
 SEED="${2:-0}"
+INSTANCE="${INSTANCE:-base}"
+BUDGET="${BUDGET:-10k}"
 
 # ---- arg validation (avoid accidental extra tokens like "0andom") ----
 if [[ $# -gt 2 ]]; then
@@ -27,6 +29,15 @@ export TQDM_DISABLE="${TQDM_DISABLE:-1}"
 if [[ -z "$EXP_ID" ]]; then
   echo "Usage: $0 <EXP_ID> [SEED]"
   exit 1
+fi
+
+if [[ "${BUDGET}" == "10k" ]]; then
+  TOTAL_EVAL_BUDGET=10000
+elif [[ "${BUDGET}" == "50k" ]]; then
+  TOTAL_EVAL_BUDGET=50000
+else
+  echo "[ERROR] Unknown BUDGET=${BUDGET} (use 10k or 50k)"
+  exit 2
 fi
 
 # ---- OUTPUT PREFIX --------------------------------------------------------
@@ -157,13 +168,34 @@ run_layout () {
   local cfg="$1"
   local out="$2"
   ensure_layout_input
+  python -m scripts.make_layout_inputs --base outputs/P3/A3/layout_input.json --out_dir outputs/P3/A3/instances --seed "${SEED}" >/dev/null 2>&1 || true
+  local layout_input=""
+  case "${INSTANCE}" in
+    base)
+      layout_input="outputs/P3/A3/layout_input.json"
+      ;;
+    chain_skip)
+      layout_input="outputs/P3/A3/instances/layout_input_chain_skip.json"
+      ;;
+    chain_skip_randw)
+      layout_input="outputs/P3/A3/instances/layout_input_chain_skip_randw_s${SEED}.json"
+      ;;
+    cluster4)
+      layout_input="outputs/P3/A3/instances/layout_input_cluster4_s${SEED}.json"
+      ;;
+    *)
+      echo "[ERROR] Unknown INSTANCE=${INSTANCE}"
+      exit 2
+      ;;
+  esac
   # Avoid OMP threads = 0 crash
   if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
   if [[ "${OPENBLAS_NUM_THREADS:-0}" -le 0 ]]; then export OPENBLAS_NUM_THREADS=1; fi
   if [[ "${MKL_NUM_THREADS:-0}" -le 0 ]]; then export MKL_NUM_THREADS=1; fi
   if [[ "${NUMEXPR_NUM_THREADS:-0}" -le 0 ]]; then export NUMEXPR_NUM_THREADS=1; fi
+  export TOTAL_EVAL_BUDGET_OVERRIDE="${TOTAL_EVAL_BUDGET}"
   python -m scripts.run_layout_agent \
-    --layout_input outputs/P3/A3/layout_input.json \
+    --layout_input "${layout_input}" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
@@ -171,13 +203,34 @@ run_layout_heuragenix () {
   local cfg="$1"
   local out="$2"
   ensure_layout_input
+  python -m scripts.make_layout_inputs --base outputs/P3/A3/layout_input.json --out_dir outputs/P3/A3/instances --seed "${SEED}" >/dev/null 2>&1 || true
+  local layout_input=""
+  case "${INSTANCE}" in
+    base)
+      layout_input="outputs/P3/A3/layout_input.json"
+      ;;
+    chain_skip)
+      layout_input="outputs/P3/A3/instances/layout_input_chain_skip.json"
+      ;;
+    chain_skip_randw)
+      layout_input="outputs/P3/A3/instances/layout_input_chain_skip_randw_s${SEED}.json"
+      ;;
+    cluster4)
+      layout_input="outputs/P3/A3/instances/layout_input_cluster4_s${SEED}.json"
+      ;;
+    *)
+      echo "[ERROR] Unknown INSTANCE=${INSTANCE}"
+      exit 2
+      ;;
+  esac
   # Avoid OMP threads = 0 crash
   if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
   if [[ "${OPENBLAS_NUM_THREADS:-0}" -le 0 ]]; then export OPENBLAS_NUM_THREADS=1; fi
   if [[ "${MKL_NUM_THREADS:-0}" -le 0 ]]; then export MKL_NUM_THREADS=1; fi
   if [[ "${NUMEXPR_NUM_THREADS:-0}" -le 0 ]]; then export NUMEXPR_NUM_THREADS=1; fi
+  export TOTAL_EVAL_BUDGET_OVERRIDE="${TOTAL_EVAL_BUDGET}"
   python -m scripts.run_layout_heuragenix \
-    --layout_input outputs/P3/A3/layout_input.json \
+    --layout_input "${layout_input}" \
     --cfg "$cfg" --out_dir "$out" --seed "$SEED"
 }
 
