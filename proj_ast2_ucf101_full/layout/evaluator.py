@@ -17,6 +17,11 @@ def _evaluator_version() -> str:
     except Exception:
         return "unknown"
 
+
+def evaluator_version() -> str:
+    """Public alias for the evaluator code version (sha256 of layout/evaluator.py)."""
+    return _evaluator_version()
+
 @dataclass
 class LayoutState:
     S: int
@@ -128,3 +133,28 @@ class LayoutEvaluator:
     @property
     def evaluate_calls(self) -> int:
         return int(self.evaluator_calls)
+
+
+def compute_raw_terms_for_assign(
+    sites_xy_mm: np.ndarray,
+    assign: np.ndarray,
+    chip_tdp_w: np.ndarray,
+    traffic_bytes: np.ndarray,
+    sigma_mm: float,
+) -> Dict[str, float]:
+    """Compute raw (unnormalized) objective terms for a given assignment.
+
+    Used to (re)compute baseline.L_comm / baseline.L_therm so normalization matches the active objective_cfg.
+    """
+    ev = LayoutEvaluator(
+        sigma_mm=float(sigma_mm),
+        baseline={"L_comm_baseline": 1.0, "L_therm_baseline": 1.0},
+        scalar_w={"w_comm": 0.0, "w_therm": 0.0, "w_penalty": 0.0},
+    )
+    a = np.asarray(assign, dtype=int)
+    pos = np.asarray(sites_xy_mm, dtype=np.float32)[a]
+    traffic = np.asarray(traffic_bytes, dtype=float)
+    tdp = np.asarray(chip_tdp_w, dtype=float)
+    L_comm = float(ev._compute_comm(pos, traffic))
+    L_therm = float(ev._compute_therm(pos, tdp))
+    return {"L_comm": L_comm, "L_therm": L_therm}
