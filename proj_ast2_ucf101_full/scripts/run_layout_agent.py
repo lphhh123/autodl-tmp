@@ -533,33 +533,58 @@ def run_layout_agent(
 
         # Outputs
         write_pareto_points_csv(pareto, out_dir / "pareto_points.csv")
-        best_comm, best_therm, best_payload = pareto.knee_point()
-        best_assign = best_payload.get("assign", assign_final)
-        layout_state.assign = np.array(best_assign, dtype=int)
-        best_eval = None
-        if best_assign is not None and (not total_eval_budget or evaluator.evaluator_calls < total_eval_budget):
+
+        # weights for scalar selection
+        w_comm = float(cfg.objective.get("scalar_weights", {}).get("w_comm", 0.7))
+        w_therm = float(cfg.objective.get("scalar_weights", {}).get("w_therm", 0.3))
+
+        # knee point (trade-off visualization)
+        knee_comm, knee_therm, knee_payload = pareto.knee_point()
+        knee_assign = knee_payload.get("assign", assign_final)
+
+        # scalar-best point (for main comparisons)
+        sel_comm, sel_therm, sel_payload = pareto.best_by_scalar(w_comm=w_comm, w_therm=w_therm)
+        sel_assign = sel_payload.get("assign", assign_final)
+
+        # evaluate selected assign once to get consistent penalties/fields
+        layout_state.assign = np.array(sel_assign, dtype=int)
+        sel_eval = None
+        if sel_assign is not None and (not total_eval_budget or evaluator.evaluator_calls < total_eval_budget):
             evaluator.evaluate = _orig_eval
-            best_eval = evaluator.evaluate(layout_state)
+            sel_eval = evaluator.evaluate(layout_state)
+
         runtime_s = time.time() - start_time
-        best_total = float(best_eval.get("total_scalar", 0.0)) if best_eval else float(best_total or 0.0)
+        selected_total = float(sel_eval.get("total_scalar", 0.0)) if sel_eval else float(sel_payload.get("total_scalar", 0.0))
+
+        # optional: evaluate knee too (only if budget allows; best-effort)
+        knee_eval = None
+        if knee_assign is not None and (not total_eval_budget or evaluator.evaluator_calls < total_eval_budget):
+            layout_state.assign = np.array(knee_assign, dtype=int)
+            knee_eval = evaluator.evaluate(layout_state)
+        knee_total = float(knee_eval.get("total_scalar", 0.0)) if knee_eval else float(knee_payload.get("total_scalar", 0.0))
+
+        best_assign = sel_assign
+        best_total = selected_total
+
         layout_best = {
             "run_id": run_id,
-            "best": {
-                "assign": best_assign.tolist(),
-                "pos_xy_mm": sites_xy[best_assign].tolist(),
-                "objectives": {"comm_norm": best_comm, "therm_norm": best_therm},
-                "raw": {
-                    "L_comm": best_eval["L_comm"] if best_eval else None,
-                    "L_therm": best_eval["L_therm"] if best_eval else None,
-                },
-                "penalty": best_eval["penalty"] if best_eval else {},
-                "meta": {"stage": "knee_point"},
+            "selected": {
+                "assign": sel_assign.tolist() if hasattr(sel_assign, "tolist") else sel_assign,
+                "comm_norm": float(sel_comm),
+                "therm_norm": float(sel_therm),
+                "total_scalar": float(selected_total),
+            },
+            "knee": {
+                "assign": knee_assign.tolist() if hasattr(knee_assign, "tolist") else knee_assign,
+                "comm_norm": float(knee_comm),
+                "therm_norm": float(knee_therm),
+                "total_scalar": float(knee_total),
             },
             "pareto_front": [
                 {"comm_norm": p.comm_norm, "therm_norm": p.therm_norm} for p in pareto.points
             ],
             "selection": {
-                "method": cfg.pareto.get("selection", "knee_point_v1") if hasattr(cfg, "pareto") else "knee_point_v1",
+                "method": cfg.pareto.get("selection", "scalar_best_v1") if hasattr(cfg, "pareto") else "scalar_best_v1",
                 "pareto_size": len(pareto.points),
             },
             "region_plan": {
@@ -608,11 +633,13 @@ def run_layout_agent(
         report = {
             "run_id": run_id,
             "baseline": {"comm_norm": base_eval["comm_norm"], "therm_norm": base_eval["therm_norm"]},
-            "knee": {"comm_norm": best_comm, "therm_norm": best_therm},
-            "selected_total_scalar": float(best_eval.get("total_scalar", 0.0)) if best_eval else float(best_total or 0.0),
-            "selected_comm_norm": float(best_eval.get("comm_norm", best_comm)) if best_eval else float(best_comm),
-            "selected_therm_norm": float(best_eval.get("therm_norm", best_therm)) if best_eval else float(best_therm),
-            "selected_penalty": best_eval.get("penalty", {}) if best_eval else {},
+            # knee is for visualization/trade-off (not used as the main "selected" anymore)
+            "knee": {"comm_norm": float(knee_comm), "therm_norm": float(knee_therm), "total_scalar": float(knee_total)},
+            # selected is scalar-best under the objective weights (main comparison)
+            "selected_total_scalar": float(selected_total),
+            "selected_comm_norm": float(sel_eval.get("comm_norm", sel_comm)) if sel_eval else float(sel_comm),
+            "selected_therm_norm": float(sel_eval.get("therm_norm", sel_therm)) if sel_eval else float(sel_therm),
+            "selected_penalty": sel_eval.get("penalty", {}) if sel_eval else (sel_payload.get("penalty", {}) if isinstance(sel_payload, dict) else {}),
             "pareto_size": len(pareto.points),
             "pareto_front_size": len(pareto.points),
             "alt_opt_rounds": int(cfg.alt_opt.get("rounds", 0)) if hasattr(cfg, "alt_opt") else 0,
@@ -819,7 +846,7 @@ def main():
     )
     layout_best_path = out_dir / "layout_best.json"
     layout_best = json.loads(layout_best_path.read_text(encoding="utf-8")) if layout_best_path.exists() else {}
-    best_assign = layout_best.get("best", {}).get("assign", []) if isinstance(layout_best, dict) else []
+    best_assign = layout_best.get("selected", {}).get("assign", []) if isinstance(layout_best, dict) else []
     meta = {
         "mapping_signature": "",
         "layout_signature": signature_from_assign(best_assign) if best_assign else "",

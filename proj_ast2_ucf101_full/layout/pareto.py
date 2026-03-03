@@ -76,3 +76,23 @@ class ParetoSet:
                 best_idx = idx
         p = self.points[best_idx]
         return p.comm_norm, p.therm_norm, p.payload
+
+    def best_by_scalar(self, w_comm: float = 0.7, w_therm: float = 0.3) -> Tuple[float, float, dict]:
+        """
+        Pick the Pareto point that minimizes the scalar objective.
+        Prefer payload['total_scalar'] if present; otherwise compute w_comm*comm + w_therm*therm.
+        """
+        if not self.points:
+            return (float("inf"), float("inf"), {})
+        best = None
+        best_val = float("inf")
+        for p in self.points:
+            payload = p.payload or {}
+            if "total_scalar" in payload and payload["total_scalar"] is not None:
+                val = float(payload["total_scalar"])
+            else:
+                val = float(w_comm) * float(p.comm_norm) + float(w_therm) * float(p.therm_norm)
+            if val < best_val:
+                best_val = val
+                best = p
+        return best.comm_norm, best.therm_norm, best.payload
