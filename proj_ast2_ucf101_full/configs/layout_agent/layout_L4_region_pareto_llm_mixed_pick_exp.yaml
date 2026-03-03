@@ -24,3 +24,10 @@ detailed_place:
     # reduce prompt size (handled in detailed_place via subset selection)
     num_candidates: 8
     max_candidates_per_bucket: 4
+
+lookahead:
+  enabled: true
+  k: 8
+  r: 3
+  mc: 2
+  alpha: 1.0

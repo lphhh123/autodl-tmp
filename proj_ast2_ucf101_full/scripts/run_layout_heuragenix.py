@@ -1761,6 +1761,14 @@ def main() -> None:
     cfg.train.out_dir = str(out_dir)
     cfg.out_dir = str(out_dir)
     cfg = validate_and_fill_defaults(cfg, mode="layout")
+    budget_override = os.environ.get("TOTAL_EVAL_BUDGET_OVERRIDE", "").strip()
+    if budget_override:
+        try:
+            if not hasattr(cfg, "budget") or cfg.budget is None:
+                cfg.budget = OmegaConf.create({})
+            cfg.budget.total_eval_budget = int(budget_override)
+        except Exception:
+            pass
 
     # dump config_used
     try:
