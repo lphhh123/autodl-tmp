@@ -200,65 +200,116 @@ def _sample_action(
     cluster_to_region: List[int],
     py_rng: random.Random,
 ) -> Dict:
+    """
+    Sample a VALID move. Never return {"op":"none"}.
+    - swap: always pick i!=j (hot pairs if available, else random)
+    - relocate: always pick to_site != cur_site (prefer empty site in same region, else any other site)
+    - cluster_move: optional; if disabled or not available, fall back to swap
+    """
     probs = _cfg_get(cfg, "action_probs", {}) or {}
+    p_swap = float(probs.get("swap", 0.5))
+    p_reloc = float(probs.get("relocate", 0.3))
+    p_cmov = float(probs.get("cluster_move", 0.0))
+    tot = max(1e-9, p_swap + p_reloc + p_cmov)
 
-    # 1) swap: prioritize hot pairs
-    if py_rng.random() < float(probs.get("swap", 0.5)):
+    r = py_rng.random() * tot
+
+    S = int(assign.shape[0])
+    Ns = int(site_to_region.shape[0])
+
+    # --- swap ---
+    def _rand_swap():
+        i = py_rng.randrange(S)
+        j = py_rng.randrange(S)
+        while j == i:
+            j = py_rng.randrange(S)
+        return {"op": "swap", "i": int(i), "j": int(j)}
+
+    # --- relocate (permutation-safe relocate will swap if occupied) ---
+    def _rand_reloc():
+        reloc_cfg = _cfg_get(cfg, "relocate", {}) or {}
+        same_region_prob = float(reloc_cfg.get("same_region_prob", 0.8))
+        neighbor_k = int(reloc_cfg.get("neighbor_k", 30))
+
+        # choose a slot (hotter first if possible)
+        slot_scores = np.sum(traffic_sym, axis=1)
+        if chip_tdp is not None and len(chip_tdp) == slot_scores.shape[0]:
+            slot_scores = slot_scores + np.asarray(chip_tdp, dtype=float)
+        slot = int(np.argmax(slot_scores)) if float(np.sum(slot_scores)) > 0 else py_rng.randrange(S)
+
+        cur_site = int(assign[slot])
+        if cur_site < 0 or cur_site >= Ns:
+            # fallback to swap if state is invalid
+            return _rand_swap()
+
+        used = set(int(x) for x in assign.tolist())
+        empty_sites = [s for s in range(Ns) if int(s) not in used]
+        # if no empty sites, still relocate to a different site_id (perm-safe relocate will swap)
+        if not empty_sites:
+            to_site = py_rng.randrange(Ns)
+            while int(to_site) == int(cur_site):
+                to_site = py_rng.randrange(Ns)
+            return {"op": "relocate", "i": int(slot), "site_id": int(to_site), "from_site": int(cur_site)}
+
+        cur_region = int(site_to_region[cur_site])
+        candidates = [s for s in empty_sites if int(site_to_region[s]) == cur_region]
+        if (not candidates) or (py_rng.random() > same_region_prob):
+            candidates = empty_sites
+
+        # nearest candidates (optional)
+        try:
+            dists = [(sid, float(np.linalg.norm(sites_xy[cur_site] - sites_xy[sid]))) for sid in candidates]
+            dists.sort(key=lambda x: x[1])
+            chosen = dists[: max(1, min(neighbor_k, len(dists)))]
+            to_site = int(py_rng.choice(chosen)[0])
+        except Exception:
+            to_site = int(py_rng.choice(candidates))
+
+        if int(to_site) == int(cur_site):
+            # enforce change
+            to_site = int(py_rng.choice([s for s in candidates if int(s) != int(cur_site)] or candidates))
+        return {"op": "relocate", "i": int(slot), "site_id": int(to_site), "from_site": int(cur_site)}
+
+    # --- cluster_move (only if enabled and feasible) ---
+    def _rand_cluster_move():
+        if (not clusters) or (not regions):
+            return None
+        # pick heaviest cluster
+        clusters_sorted = sorted(clusters, key=lambda c: float(getattr(c, "tdp_sum", 0.0)), reverse=True)
+        c = clusters_sorted[0]
+        cid = int(getattr(c, "cluster_id", -1))
+        if cid < 0:
+            return None
+        cur_region = int(cluster_to_region[cid]) if (0 <= cid < len(cluster_to_region)) else -1
+        region_options = [r for r in regions if int(getattr(r, "region_id", -1)) != cur_region]
+        if not region_options:
+            return None
+        tgt = py_rng.choice(region_options)
+        act = {"op": "cluster_move", "cluster_id": int(cid), "region_id": int(getattr(tgt, "region_id", -1))}
+        # add slots fallback if available
+        if getattr(c, "slots", None):
+            act["cluster_slots"] = [int(x) for x in c.slots]
+        return act
+
+    if r < p_swap:
+        # prefer hot pairs if available
         hot_cfg = _cfg_get(cfg, "hot_sampling", {}) or {}
         top_k = int(hot_cfg.get("top_pairs_k", 10))
         top_pairs = _compute_top_pairs(traffic_sym, top_k)
         if top_pairs:
             i, j, _ = py_rng.choice(top_pairs)
-            return {"op": "swap", "i": int(i), "j": int(j)}
+            if int(i) != int(j):
+                return {"op": "swap", "i": int(i), "j": int(j)}
+        return _rand_swap()
 
-    # 2) relocate: prefer empty sites within same region
-    if py_rng.random() < float(probs.get("relocate", 0.3)):
-        reloc_cfg = _cfg_get(cfg, "relocate", {}) or {}
-        same_region_prob = float(reloc_cfg.get("same_region_prob", 0.8))
-        neighbor_k = int(reloc_cfg.get("neighbor_k", 30))
+    if r < p_swap + p_reloc:
+        return _rand_reloc()
 
-        slot_scores = traffic_sym.sum(axis=1)
-        if chip_tdp is not None and len(chip_tdp) == slot_scores.shape[0]:
-            slot_scores = slot_scores + chip_tdp
-
-        slot = int(np.argmax(slot_scores)) if float(slot_scores.sum()) > 0 else py_rng.randrange(traffic_sym.shape[0])
-
-        # NOTE: assign[slot] must be valid to index site_to_region
-        cur_site = int(assign[slot])
-        if cur_site < 0 or cur_site >= site_to_region.shape[0]:
-            return {"op": "none"}
-
-        current_region = int(site_to_region[cur_site])
-        used = set(int(x) for x in assign.tolist())
-        empty_sites = [s for s in range(site_to_region.shape[0]) if s not in used]
-        if not empty_sites:
-            return {"op": "none"}
-
-        candidates = [s for s in empty_sites if int(site_to_region[s]) == current_region]
-        if (not candidates) or (py_rng.random() > same_region_prob):
-            candidates = empty_sites
-
-        # choose nearest candidate sites
-        dists = [(sid, float(np.linalg.norm(sites_xy[cur_site] - sites_xy[sid]))) for sid in candidates]
-        dists.sort(key=lambda x: x[1])
-        chosen = dists[: max(1, min(neighbor_k, len(dists)))]
-        site_id = int(py_rng.choice(chosen)[0])
-        return {"op": "relocate", "i": int(slot), "site_id": int(site_id)}
-
-    # 3) cluster_move: move a heavy cluster to a different region
-    if clusters:
-        clusters_sorted = sorted(clusters, key=lambda c: float(getattr(c, "tdp_sum", 0.0)), reverse=True)
-        c = clusters_sorted[0]
-        target_region = regions[-1] if regions else None
-        if target_region is not None and cluster_to_region:
-            cur_region = int(cluster_to_region[c.cluster_id]) if c.cluster_id < len(cluster_to_region) else -1
-            region_options = [r for r in regions if int(r.region_id) != cur_region]
-            if region_options:
-                target_region = py_rng.choice(region_options)
-        if target_region is not None:
-            return {"op": "cluster_move", "cluster_id": int(c.cluster_id), "region_id": int(target_region.region_id)}
-
-    return {"op": "none"}
+    # cluster_move branch
+    cm = _rand_cluster_move()
+    if cm is not None:
+        return cm
+    return _rand_swap()
 
 
 def run_detailed_place(
@@ -443,6 +494,11 @@ def run_detailed_place(
     # ---- SA params (P2: scale-aware + reheat) ----
     steps = int(_cfg_get(dp_cfg, "steps", 0))
 
+    # steps<=0 means "run until eval budget is exhausted"
+    planned_steps = int(steps)
+    if steps <= 0:
+        steps = 10**9
+
     sa_cfg = _cfg_get(dp_cfg, "sa", {}) or {}
     # backward compatible keys
     T0_raw = float(_cfg_get(sa_cfg, "T0", _cfg_get(dp_cfg, "sa_T0", 1.0)))
@@ -468,6 +524,7 @@ def run_detailed_place(
     start_time = time.time()
     wall_start = time.perf_counter()
     eval_calls_cum = 0
+    last_step = -1
     best_solution = None
     report = None
     try:
@@ -685,6 +742,7 @@ def run_detailed_place(
                 force_explore_until = -1
 
                 for step in range(steps):
+                    last_step = int(step)
                     if trace_events_path is not None:
                         assert_cfg_sealed_or_violate(
                             cfg=cfg,
@@ -1480,7 +1538,7 @@ def run_detailed_place(
                     cache_miss_cum = int(eval_cache.misses) if eval_cache is not None else 0
 
                     fin_row = {
-                        "iter": int(steps) + 1,
+                        "iter": int(last_step + 1) if last_step >= 0 else 0,
                         "stage": "finalize",
                         "op": "finalize",
                         "op_args_json": json.dumps({"op": "finalize"}, ensure_ascii=False),
@@ -1558,6 +1616,8 @@ def run_detailed_place(
     policy_meta = {
         "planner_type": planner_type,
         "steps": int(steps),
+        "steps_planned": int(planned_steps),
+        "steps_executed": int(last_step + 1) if last_step >= 0 else 0,
         "lookahead": {"enabled": bool(lookahead_enabled), "topk": int(lookahead_topk), "beta": float(lookahead_beta)},
         "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
         "policy_switch": {

@@ -1,8 +1,21 @@
 _base_: base_layout_exp.yaml
 
 detailed_place:
-  planner:
-    type: heuristic
+  # IMPORTANT: steps=0 => run until eval budget exhausted (BudgetExceeded)
+  steps: 0
+  stage_label: detailed_sa
+
+  # SA parameters (can keep base defaults)
+  sa_T0: 1.0
+  sa_alpha: 0.9995
+
+  # Keep only simple actions for SA baseline
+  action_probs:
+    swap: 0.60
+    relocate: 0.40
+    cluster_move: 0.0
+
+  # Disable candidate pool entirely for SA baseline
   candidate_pool:
     raw_target_size: 0
     raw_target_max: 0

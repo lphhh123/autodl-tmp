@@ -713,18 +713,26 @@ def run_layout_agent(
             raise
         finally:
             reason = "ok" if (ok and trace_append_err is None) else f"trace_append_error:{trace_append_err}"
+            # prefer actual executed steps from detailed_place meta if available
+            steps_exec = 0
+            try:
+                steps_exec = int(getattr(result, "policy_meta", {}).get("steps_executed", 0))
+            except Exception:
+                steps_exec = 0
+            if steps_exec <= 0:
+                steps_exec = int(getattr(evaluator, "evaluator_calls", 0)) if evaluator is not None else 0
             if trace_dir is not None:
                 update_trace_summary(
                     trace_dir,
                     ok=bool(ok and trace_append_err is None),
                     reason=reason,
-                    steps_done=int(planned_steps or steps_done),
+                    steps_done=int(steps_exec),
                     best_solution_valid=bool(ok and best_assign is not None),
                 )
                 finalize_trace_dir(
                     trace_events_path,
                     reason=reason,
-                    steps_done=int(planned_steps or steps_done),
+                    steps_done=int(steps_exec),
                     best_solution_valid=bool(ok and best_assign is not None),
                 )
             if trace_path.exists():
