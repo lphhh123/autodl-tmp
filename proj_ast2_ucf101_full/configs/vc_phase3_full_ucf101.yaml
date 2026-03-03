@@ -6,13 +6,15 @@ stable_hw:
   hw_ref_source: "baseline_stats"
   locked_acc_ref:
     enabled: true
-    source: "warmup_best"
-    acc_ref1: 0.0
-    acc_ref5: 0.0
-    strict: true
-    # IMPORTANT: do NOT lock acc_ref on epoch0/1; it is too noisy and causes permanent VIOLATE.
-    # Align with AST warmup (ast.schedule.warmup_epochs=15) so discrete updates are allowed early.
+    # Same-epoch baseline reference curve parsed from EXP-A1 stdout
+    source: "baseline_stdout_curve"
+    mode: "curve_stdout"
+    baseline_stdout_path: "outputs/EXP-A1/seed{seed}/stdout"
+    stdout_prefer_mode: "fast"
+    curve_ema_alpha: 0.2
+    curve_margin: 0.01
     freeze_epoch: 15
+    strict: true
   no_drift:
     enabled: true
     allow_update: false
@@ -49,12 +51,14 @@ stable_hw:
     controller:
       metric: val_acc1
       # Too strict + noisy fast-val (20 batches) => permanent VIOLATE. Relax and add hysteresis.
-      epsilon_drop: 0.01
+      epsilon_drop: 0.02
       hysteresis: 0.002
       # avoid "lock then immediately violate" at freeze_epoch boundary
       lock_grace_epochs: 1
       # require consecutive drops before entering VIOLATE (anti-noise)
       k_enter: 2
+      use_acc_ema: true
+      acc_ema_alpha: 0.3
       cut_hw_loss_on_violate: true
       freeze_discrete_updates: true
       freeze_schedule_in_recovery: true
@@ -70,3 +74,4 @@ stable_hw:
     track_live_in_inner_steps: false
 train:
   mode: version_c
+  acc_drop_max: 0.02

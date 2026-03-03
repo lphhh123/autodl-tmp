@@ -781,6 +781,10 @@ def apply_accuracy_guard(
         st["acc_ref_source"] = str(st.get("acc_ref_source", "baseline_stdout_curve"))
         st["acc_ref_locked"] = True
         st["acc_ref_epoch"] = int(idx)
+        if st.get("acc_ref_locked_epoch") is None:
+            st["acc_ref_locked_epoch"] = int(epoch)
+            st["below_cnt"] = 0
+            st["acc_ref_just_locked"] = True
     else:
         # fallback legacy: warmup_best constant ref
         if st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
@@ -889,6 +893,18 @@ def apply_accuracy_guard(
         st["below_cnt"] = 0
 
     violate = bool(int(st.get("below_cnt", 0)) >= int(k_enter))
+
+    # --- telemetry for logging/debug ---
+    st["acc_used_raw"] = float(metric) if metric is not None else None
+    st["acc_used_enter"] = float(metric_enter) if metric_enter is not None else None
+    st["acc_ref_value"] = float(acc_ref) if acc_ref is not None else None
+    st["eps_enter"] = float(eps_used)
+    st["acc_drop_enter"] = (float(acc_ref) - float(metric_enter)) if (acc_ref is not None and metric_enter is not None) else None
+    st["below_cnt"] = int(st.get("below_cnt", 0))
+    st["k_enter"] = int(k_enter)
+    st["lock_grace_epochs"] = int(lock_grace_epochs)
+    st["violate_inst"] = bool(violate_inst)
+    st["violate_entered"] = bool(violate)
 
     # margin for exit/printing uses RAW metric (avoid EMA lag on exit)
     metric_exit = metric

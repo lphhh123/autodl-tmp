@@ -2521,12 +2521,17 @@ def train_version_c(
                 )
                 logger.info(
                     f"[StableHW][epoch={outer}] "
-                    f"lambda_base={stable_hw_state.get('lambda_hw_base')}, "
-                    f"lambda_eff={stable_hw_state.get('lambda_hw_effective')}, "
-                    f"acc_ref={stable_hw_state.get('acc_ref')}, "
-                    f"acc_floor={stable_hw_state.get('acc_floor')}, "
-                    f"locked={stable_hw_state.get('locked_acc_ref', stable_hw_state.get('acc_ref_locked'))}, "
-                    f"allow_discrete={stable_hw_state.get('allow_discrete_updates')}"
+                    f"mode={stable_hw_state.get('guard_mode')} "
+                    f"acc_used_raw={stable_hw_state.get('acc_used_raw')} "
+                    f"acc_used_ema={stable_hw_state.get('acc_used_enter')} "
+                    f"acc_ref={stable_hw_state.get('acc_ref_value', stable_hw_state.get('acc_ref'))} "
+                    f"eps={stable_hw_state.get('eps_enter')} "
+                    f"drop={stable_hw_state.get('acc_drop_enter')} "
+                    f"below={stable_hw_state.get('below_cnt')}/{stable_hw_state.get('k_enter')} "
+                    f"lambda_base={stable_hw_state.get('lambda_hw_base')} "
+                    f"lambda_eff={stable_hw_state.get('lambda_hw_effective')} "
+                    f"allow_discrete={stable_hw_state.get('allow_discrete_updates')} "
+                    f"freeze_schedule={stable_hw_state.get('freeze_schedule')}"
                 )
                 # ---- v5.4: auditable acc source for gating / locked ref (SPEC_C) ----
                 acc_used_source = stable_hw_state.get("acc_used_source", None)
