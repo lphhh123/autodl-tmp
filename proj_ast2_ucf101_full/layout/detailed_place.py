@@ -541,12 +541,20 @@ def run_detailed_place(
             try:
                 if True:
                     # initial eval
-                    def _evaluate(state: LayoutState) -> Dict[str, Any]:
+                    def _sync_eval_calls():
                         nonlocal eval_calls_cum
-                        eval_calls_cum += 1
-                        return evaluator.evaluate(state)
+                        try:
+                            eval_calls_cum = int(getattr(evaluator, "evaluator_calls", eval_calls_cum))
+                        except Exception:
+                            pass
+
+                    def _evaluate(state: LayoutState) -> Dict[str, Any]:
+                        out = evaluator.evaluate(state)
+                        _sync_eval_calls()
+                        return out
 
                     eval_out = _evaluate(layout_state)
+                    _sync_eval_calls()
                     prev_total = float(eval_out.get("total_scalar", 0.0))
                     prev_comm = float(eval_out.get("comm_norm", 0.0))
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
@@ -774,7 +782,7 @@ def run_detailed_place(
                     if force_explore and (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled):
                         # let LLM decide strong move on stagnation; do NOT inject deterministic forced action
                         force_explore_for_llm = True
-                    eval_calls_before = eval_calls_cum
+                    eval_calls_before = int(getattr(evaluator, "evaluator_calls", eval_calls_cum))
                     h0 = eval_cache.hits if eval_cache is not None else 0
                     m0 = eval_cache.misses if eval_cache is not None else 0
                     forced_family = None
@@ -799,6 +807,7 @@ def run_detailed_place(
                         rng,
                         debug_out_path=(out_dir / "candidate_pool_debug.json") if step == 0 else None,
                     )
+                    _sync_eval_calls()
                     if forced_family:
                         filtered = [
                             c for c in candidate_pool if str(c.action.get("op", "")).lower() == forced_family.lower()
@@ -1383,6 +1392,7 @@ def run_detailed_place(
                     cache_hit_step = h1 - h0
                     cache_miss_step = m1 - m0
                     cache_size = eval_cache.size if eval_cache is not None else 0
+                    _sync_eval_calls()
                     eval_calls_step = eval_calls_cum - eval_calls_before
 
                     notes = (
@@ -1536,6 +1546,11 @@ def run_detailed_place(
                     fin_cache_key = _make_cache_key(fin_sig, objective_hash)
                     cache_hit_cum = int(eval_cache.hits) if eval_cache is not None else 0
                     cache_miss_cum = int(eval_cache.misses) if eval_cache is not None else 0
+
+                    try:
+                        eval_calls_cum = int(getattr(evaluator, "evaluator_calls", eval_calls_cum))
+                    except Exception:
+                        pass
 
                     fin_row = {
                         "iter": int(last_step + 1) if last_step >= 0 else 0,

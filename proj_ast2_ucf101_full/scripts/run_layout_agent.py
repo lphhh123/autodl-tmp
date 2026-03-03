@@ -506,7 +506,9 @@ def run_layout_agent(
             )
         except _BudgetExceeded:
             budget_exhausted = True
-            _, _, payload = pareto.knee_point()
+            w_comm = float(cfg.objective.get("scalar_weights", {}).get("w_comm", 0.7))
+            w_therm = float(cfg.objective.get("scalar_weights", {}).get("w_therm", 0.3))
+            _, _, payload = pareto.best_by_scalar(w_comm=w_comm, w_therm=w_therm)
             best_assign = payload.get("assign", None)
             best_total = payload.get("total_scalar", None)
             result = SimpleNamespace(assign=assign_leg, policy_meta={})
