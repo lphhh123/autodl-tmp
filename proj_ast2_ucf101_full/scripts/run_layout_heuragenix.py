@@ -480,8 +480,9 @@ def _materialize_strong_heuristic_dir(
 ) -> str:
     """
     Create a derived heuristic_dir under HeurAgenix repo with legacy heuristics included.
-    HeurAgenix upstream filters out files starting with '_' when building heuristic_pool_files,
-    so we copy _legacy_*.py as legacy_*.py into <heuristic_dir>_strong.
+    HeurAgenix upstream filters out files starting with '_' when building heuristic_pool_files.
+    For `_legacy_*.py`, generate shim modules as `legacy_*.py` so dynamic loading via
+    spec_from_file_location works with absolute import and expected function name.
     """
     src = heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir
     if not src.exists():
@@ -489,12 +490,16 @@ def _materialize_strong_heuristic_dir(
 
     dst_name = f"{heuristic_dir}_strong"
     dst = heuragenix_root / "src" / "problems" / problem / "heuristics" / dst_name
+    if dst.exists():
+        shutil.rmtree(dst)
     dst.mkdir(parents=True, exist_ok=True)
 
     mapping = {"src_dir": str(src.resolve()), "dst_dir": str(dst.resolve()), "files": []}
     init_src = src / "__init__.py"
     if init_src.exists():
         shutil.copy2(init_src, dst / "__init__.py")
+    else:
+        (dst / "__init__.py").write_text("", encoding="utf-8")
 
     for f in sorted(src.iterdir()):
         if not (f.is_file() and f.suffix == ".py"):
@@ -502,13 +507,41 @@ def _materialize_strong_heuristic_dir(
         if f.name == "__init__.py":
             continue
 
-        if f.name.startswith("_"):
-            new_name = f.name.lstrip("_")
-        else:
-            new_name = f.name
+        if f.name.startswith("_legacy_"):
+            new_name = f.name[1:]
+            target_func = f.stem.removeprefix("_legacy_")
+            module_import = (
+                f"src.problems.{problem}.heuristics.{heuristic_dir}.{f.stem}"
+            )
+            shim = (
+                f"from {module_import} import *\n"
+                f"from {module_import} import {target_func} as _legacy_target\n\n"
+                f"def {Path(new_name).stem}(problem_state, algorithm_data, **kwargs):\n"
+                f"    return _legacy_target(problem_state, algorithm_data, **kwargs)\n"
+            )
+            (dst / new_name).write_text(shim, encoding="utf-8")
+            mapping["files"].append(
+                {
+                    "mode": "shim",
+                    "src": f.name,
+                    "dst": new_name,
+                    "target_func": target_func,
+                }
+            )
+            continue
 
-        shutil.copy2(f, dst / new_name)
-        mapping["files"].append({"src": f.name, "dst": new_name})
+        if f.name.startswith("_"):
+            continue
+
+        shutil.copy2(f, dst / f.name)
+        mapping["files"].append(
+            {
+                "mode": "copy",
+                "src": f.name,
+                "dst": f.name,
+                "target_func": Path(f.name).stem,
+            }
+        )
 
     (trace_dir / "heuragenix_strong_heuristic_dir_map.json").write_text(
         json.dumps(mapping, indent=2, ensure_ascii=False),
