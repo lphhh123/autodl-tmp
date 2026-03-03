@@ -4,6 +4,18 @@ import random
 from copy import deepcopy
 from typing import Dict, Any, List, Tuple
 
+# --- bootstrap sys.path so this script can import project modules ---
+import sys
+from pathlib import Path
+_THIS = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS.parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+# ---------------------------------------------------------------
+
+import numpy as np
+from layout.evaluator import compute_raw_terms_for_assign, evaluator_version
+
 
 def _load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -97,9 +109,39 @@ def main():
     ap.add_argument("--base", type=str, default="outputs/P3/A3/layout_input.json")
     ap.add_argument("--out_dir", type=str, default="outputs/P3/A3/instances")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--sigma_mm", type=float, default=None,
+                    help="sigma_mm used to recompute baseline L_therm (default: read from base baseline.objective_cfg.sigma_mm or 20.0)")
     args = ap.parse_args()
 
     base = _load_json(args.base)
+
+    sigma_mm = args.sigma_mm
+    if sigma_mm is None:
+        sigma_mm = float(base.get("baseline", {}).get("objective_cfg", {}).get("sigma_mm", 20.0))
+
+    def _recompute_baseline_fields(x: Dict[str, Any], sigma: float) -> None:
+        sites_xy = np.asarray(x.get("sites", {}).get("sites_xy", []), dtype=np.float32)
+        assign_grid = np.asarray(x.get("baseline", {}).get("assign_grid", []), dtype=int)
+        tdp = np.asarray(x.get("slots", {}).get("tdp", []), dtype=float)
+        traffic = np.asarray(x.get("mapping", {}).get("traffic_matrix", []), dtype=float)
+        if sites_xy.size == 0 or assign_grid.size == 0 or tdp.size == 0 or traffic.size == 0:
+            raise ValueError("[make_layout_inputs] cannot recompute baseline: missing sites_xy/assign_grid/tdp/traffic_matrix")
+        raw = compute_raw_terms_for_assign(
+            sites_xy_mm=sites_xy,
+            assign=assign_grid,
+            chip_tdp_w=tdp,
+            traffic_bytes=traffic,
+            sigma_mm=float(sigma),
+        )
+        x.setdefault("baseline", {})["L_comm"] = float(raw["L_comm"])
+        x.setdefault("baseline", {})["L_therm"] = float(raw["L_therm"])
+        x.setdefault("baseline", {})["objective_cfg"] = {
+            "objective_version": "v5.4",
+            "sigma_mm": float(sigma),
+            "evaluator_version": evaluator_version(),
+            "baseline_schema": "assign_grid+traffic+tdp",
+        }
+
     inp = deepcopy(base)
 
     S = int(inp.get("S", 16))
@@ -117,6 +159,7 @@ def main():
     _apply_edges(m1, edges1)
     inst1["mapping"]["traffic_matrix"] = m1
     inst1["instance_name"] = "chain_skip"
+    _recompute_baseline_fields(inst1, sigma_mm)
     _save_json(inst1, os.path.join(args.out_dir, "layout_input_chain_skip.json"))
 
     # Instance 2: chain+skip randomized weights
@@ -126,6 +169,7 @@ def main():
     _apply_edges(m2, edges2)
     inst2["mapping"]["traffic_matrix"] = m2
     inst2["instance_name"] = f"chain_skip_randw_s{args.seed}"
+    _recompute_baseline_fields(inst2, sigma_mm)
     _save_json(inst2, os.path.join(args.out_dir, f"layout_input_chain_skip_randw_s{args.seed}.json"))
 
     # Instance 3: 4-cluster structure
@@ -135,6 +179,7 @@ def main():
     _apply_edges(m3, edges3)
     inst3["mapping"]["traffic_matrix"] = m3
     inst3["instance_name"] = f"cluster4_s{args.seed}"
+    _recompute_baseline_fields(inst3, sigma_mm)
     _save_json(inst3, os.path.join(args.out_dir, f"layout_input_cluster4_s{args.seed}.json"))
 
     print("[make_layout_inputs] wrote:")

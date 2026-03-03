@@ -37,7 +37,7 @@ from layout.alt_opt import run_alt_opt
 from layout.candidate_pool import signature_from_assign
 from layout.coarsen import coarsen_traffic
 from layout.detailed_place import run_detailed_place
-from layout.evaluator import LayoutEvaluator, LayoutState
+from layout.evaluator import LayoutEvaluator, LayoutState, compute_raw_terms_for_assign, evaluator_version
 from layout.expand import expand_clusters
 from layout.global_place_region import assign_clusters_to_regions
 from layout.legalize import legalize_assign
@@ -71,6 +71,94 @@ def load_layout_input(path: Path) -> dict:
 
 def compute_oscillation_metrics(trace_path: Path, window: int, eps_flat: float) -> dict:
     return compute_trace_metrics_from_csv(trace_path, window, eps_flat)
+
+
+def _prepare_baseline_for_run(
+    layout_input: dict,
+    sites_xy: np.ndarray,
+    assign_grid: np.ndarray,
+    chip_tdp: np.ndarray,
+    traffic: np.ndarray,
+    sigma_target: float,
+    policy: str,
+) -> tuple[dict, dict]:
+    baseline_in = layout_input.get("baseline", {}) or {}
+    obj_in = baseline_in.get("objective_cfg", {}) if isinstance(baseline_in, dict) else {}
+    sigma_in = None
+    ev_ver_in = None
+    if isinstance(obj_in, dict):
+        try:
+            sigma_in = float(obj_in.get("sigma_mm")) if obj_in.get("sigma_mm") is not None else None
+        except Exception:
+            sigma_in = None
+        ev_ver_in = obj_in.get("evaluator_version", None)
+
+    Lc_in = baseline_in.get("L_comm", None) if isinstance(baseline_in, dict) else None
+    Lt_in = baseline_in.get("L_therm", None) if isinstance(baseline_in, dict) else None
+
+    need = False
+    reasons = []
+    if Lc_in is None or Lt_in is None:
+        need = True
+        reasons.append("missing_baseline_terms")
+    if sigma_in is None:
+        need = True
+        reasons.append("missing_baseline_sigma_mm")
+    if sigma_in is not None and abs(float(sigma_in) - float(sigma_target)) > 1e-6:
+        need = True
+        reasons.append(f"sigma_mismatch:{sigma_in}->{sigma_target}")
+    if ev_ver_in is not None and str(ev_ver_in) != str(evaluator_version()):
+        need = True
+        reasons.append("evaluator_version_mismatch")
+
+    if need and policy == "error":
+        raise ValueError(
+            "[LayoutBaselineGuard] baseline objective_cfg incompatible with current cfg.objective.sigma_mm. "
+            f"policy=error, reasons={reasons}. "
+            "Fix by regenerating layout_input baseline with same sigma_mm, or set LAYOUT_BASELINE_POLICY=auto."
+        )
+
+    if need:
+        raw = compute_raw_terms_for_assign(
+            sites_xy_mm=sites_xy,
+            assign=assign_grid,
+            chip_tdp_w=chip_tdp,
+            traffic_bytes=traffic,
+            sigma_mm=float(sigma_target),
+        )
+        L_comm = float(raw["L_comm"])
+        L_therm = float(raw["L_therm"])
+        source = "recomputed"
+    else:
+        L_comm = float(Lc_in)
+        L_therm = float(Lt_in)
+        source = "input"
+
+    baseline_used = {
+        "L_comm": float(L_comm),
+        "L_therm": float(L_therm),
+        "objective_cfg": {
+            "objective_version": "v5.4",
+            "sigma_mm": float(sigma_target),
+            "evaluator_version": evaluator_version(),
+            "baseline_schema": "assign_grid+traffic+tdp",
+        },
+        "source": source,
+    }
+    baseline_meta = {
+        "policy": str(policy),
+        "recomputed": bool(need),
+        "reasons": reasons,
+        "sigma_in": sigma_in,
+        "sigma_used": float(sigma_target),
+        "L_comm_in": float(Lc_in) if Lc_in is not None else None,
+        "L_therm_in": float(Lt_in) if Lt_in is not None else None,
+        "L_comm_used": float(L_comm),
+        "L_therm_used": float(L_therm),
+        "evaluator_version_used": evaluator_version(),
+        "evaluator_version_in": str(ev_ver_in) if ev_ver_in is not None else None,
+    }
+    return baseline_used, baseline_meta
 
 
 def _is_valid_assign(assign: list[int] | np.ndarray | None, S: int, Ns: int) -> bool:
@@ -239,6 +327,23 @@ def run_layout_agent(
     if not layout_input_path:
         raise RuntimeError("Missing layout_input: please set cfg.layout_input or pass layout_input_path")
     layout_input = load_layout_input(Path(layout_input_path))
+    instance_name = str(layout_input.get("instance_name", "base"))
+    baseline_policy = str(os.environ.get("LAYOUT_BASELINE_POLICY", "auto")).strip().lower()
+    _sites_xy_for_base = np.array(layout_input["sites"]["sites_xy"], dtype=np.float32)
+    _assign_grid_for_base = np.array(layout_input["baseline"]["assign_grid"], dtype=int)
+    _chip_tdp_for_base = np.array(layout_input["slots"]["tdp"], dtype=float)
+    _traffic_for_base = np.array(layout_input["mapping"]["traffic_matrix"], dtype=float)
+
+    baseline_used, baseline_meta = _prepare_baseline_for_run(
+        layout_input=layout_input,
+        sites_xy=_sites_xy_for_base,
+        assign_grid=_assign_grid_for_base,
+        chip_tdp=_chip_tdp_for_base,
+        traffic=_traffic_for_base,
+        sigma_target=float(cfg.objective.sigma_mm),
+        policy=baseline_policy,
+    )
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     base_out = Path(getattr(cfg, "output_dir", out_dir))
@@ -273,6 +378,8 @@ def run_layout_agent(
             "requested": {"method": "layout_agent"},
             "effective": {"method": "layout_agent"},
             "seal_check_policy": {"kind": "per_step", "interval": 1},
+            "layout_instance_name": instance_name,
+            "baseline_guard": baseline_meta,
         },
         required_signature_fields=REQUIRED_SIGNATURE_FIELDS,
     )
@@ -341,8 +448,8 @@ def run_layout_agent(
         evaluator = LayoutEvaluator(
             sigma_mm=float(cfg.objective.sigma_mm),
             baseline={
-                "L_comm_baseline": float(layout_input["baseline"].get("L_comm", 1.0)),
-                "L_therm_baseline": float(layout_input["baseline"].get("L_therm", 1.0)),
+                "L_comm_baseline": float(baseline_used.get("L_comm", 1.0)),
+                "L_therm_baseline": float(baseline_used.get("L_therm", 1.0)),
             },
             scalar_w={
                 "w_comm": float(cfg.objective.scalar_weights.w_comm),
