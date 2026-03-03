@@ -1191,6 +1191,8 @@ def run_detailed_place(
                         candidate_pool.sort(key=lambda c: float(c.est.get("verified_total", 1e30)))
                     cand_map = {c.id: c for c in candidate_pool}
                     candidate_ids = [c.id for c in candidate_pool]
+                    # forbidden ids (shared by MPVS + legacy LLM pipeline)
+                    forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
 
                     # ==========================
                     # MPVS (Macro Propose–Verify Search): proposer + verifier decides
@@ -1217,7 +1219,7 @@ def run_detailed_place(
                         llm_every = int(_cfg_get(prop_cfg, "llm_every_n_steps", 10))
                         use_llm_now = (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0) and (int(step) % max(1, llm_every) == 0)
 
-                        forbidden_set = set(int(x) for x in forbidden_ids)
+                        forbidden_set = set(forbidden_ids)
                         cand_sorted = sorted([c for c in candidate_pool if int(c.id) not in forbidden_set], key=lambda c: float(c.est.get("d_total", 0.0)))
                         heur_cands = cand_sorted[: max(0, min(k_heur, len(cand_sorted)))]
 
@@ -1436,7 +1438,7 @@ def run_detailed_place(
                     if force_explore_for_llm:
                         strong_types = {"kick", "cluster_move", "therm_swap", "relocate_free"}
                         candidate_ids = [c.id for c in candidate_pool if str(c.type) in strong_types]
-                    forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
+                    # forbidden_ids computed earlier (shared)
         
                     llm_called = 0
                     llm_model = ""
