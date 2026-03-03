@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 import yaml
+import logging
 
 
 @dataclass
@@ -20,6 +21,8 @@ class StableHWDecision:
     request_lr_restart: bool
     reason: Dict[str, Any]
     state: Dict[str, Any]
+
+logger = logging.getLogger(__name__)
 
 """
 StableHW v5.4 field ownership:
@@ -570,6 +573,19 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
         st["acc_ref_source"] = f"baseline_stdout_curve:{found}"
         st["acc_ref_locked"] = True  # means "reference curve ready"
         # IMPORTANT: do NOT set st["acc_ref"] constant here; apply_accuracy_guard will set acc_ref(t) per epoch.
+        try:
+            curve_margin = float(_cfg_get(locked, "curve_margin", 0.0) or 0.0)
+            logger.info(
+                "[LockedAccRef] loaded baseline stdout curve: path=%s prefer=%s curve_len=%s max_ep=%s ema_alpha=%.3f curve_margin=%.3f",
+                str(found),
+                str(prefer_mode),
+                int(len(curve)),
+                int(max_ep),
+                float(alpha),
+                float(curve_margin),
+            )
+        except Exception:
+            pass
         return
 
     # else: will be set by warmup_best when val metrics arrive
@@ -819,6 +835,20 @@ def apply_accuracy_guard(
             st["acc_drop"] = float(max(0.0, float(acc_ref) - float(metric_now)))
         else:
             st["acc_drop"] = 0.0
+
+        # Make warmup logs informative (avoid None spam in early epochs)
+        st["acc_used_raw"] = float(metric_now) if metric_now is not None else None
+        if metric_now is not None and st.get("acc_used_ema", None) is None:
+            st["acc_used_ema"] = float(metric_now)
+        st["acc_used_enter"] = float(st.get("acc_used_ema")) if st.get("acc_used_ema") is not None else st["acc_used_raw"]
+        st["acc_ref_value"] = None
+        st["eps_enter"] = float(eps_used)
+        st["acc_drop_enter"] = None
+        st["below_cnt"] = int(st.get("below_cnt", 0) or 0)
+        st["k_enter"] = int(_cfg_get(ctrl, "k_enter", 2) or 2)
+        st["lock_grace_epochs"] = int(_cfg_get(ctrl, "lock_grace_epochs", 1) or 1)
+        st["violate_inst"] = False
+        st["violate_entered"] = False
 
         # eps_used is the effective drop threshold (after any hysteresis)
         st["acc_drop_max"] = float(eps_used)
