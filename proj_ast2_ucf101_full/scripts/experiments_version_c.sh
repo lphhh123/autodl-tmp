@@ -14,18 +14,6 @@ INSTANCE="${INSTANCE:-base}"
 INSTANCE_LIST_DEFAULT=("chain_skip" "chain_skip_randw" "cluster4")
 BUDGET="${BUDGET:-10k}"
 
-if [[ "${INSTANCE}" == "all" ]]; then
-  echo "[INSTANCE] all -> running: ${INSTANCE_LIST_DEFAULT[*]}"
-  for inst in "${INSTANCE_LIST_DEFAULT[@]}"; do
-    echo ""
-    echo "============================================================"
-    echo "[INSTANCE] ${inst} :: ${EXP_ID} seed${SEED}"
-    echo "============================================================"
-    INSTANCE="${inst}" bash "$0" "${EXP_ID}" "${SEED}"
-  done
-  exit 0
-fi
-
 # ---- arg validation (avoid accidental extra tokens like "0andom") ----
 if [[ $# -gt 2 ]]; then
   echo "[ERROR] Too many args. Usage: $0 <EXP_ID> [SEED]"
@@ -241,6 +229,31 @@ odir () {
   fi
 }
 
+layout_outdir () {
+  # usage: layout_outdir EXP-B2 chain_skip
+  local exp="$1"
+  local inst="$2"
+  if [[ "${inst}" == "base" ]]; then
+    echo "${OUT_PREFIX}/${exp}/seed${SEED}"
+  else
+    echo "${OUT_PREFIX}/${exp}-${inst}/seed${SEED}"
+  fi
+}
+
+run_layout_multi () {
+  # usage: run_layout_multi run_layout <cfg> <exp_name>
+  local runner="$1"
+  local cfg="$2"
+  local exp="$3"
+  if [[ "${INSTANCE}" == "all" ]]; then
+    for inst in chain_skip chain_skip_randw cluster4; do
+      INSTANCE="$inst" ${runner} "${cfg}" "$(layout_outdir "${exp}" "${inst}")"
+    done
+  else
+    ${runner} "${cfg}" "$(layout_outdir "${exp}" "${INSTANCE}")"
+  fi
+}
+
 case "$EXP_ID" in
   # -------------------------
   # Innovation A (Main/Core)
@@ -276,13 +289,15 @@ case "$EXP_ID" in
   # -------------------------
   # Innovation B (Layout)
   # -------------------------
-  EXP-B0)        run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp2.yaml      "$(odir EXP-B0)" ;;
-  EXP-B0-random) run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp2.yaml   "$(odir EXP-B0-random)" ;;
+  EXP-B0)        run_layout_multi run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_exp2.yaml       EXP-B0 ;;
+  EXP-B0-strong) run_layout_multi run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_llm_hh_strong.yaml     EXP-B0-strong ;;
+  EXP-B0-best1)  run_layout_multi run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_best_single.yaml        EXP-B0-best1 ;;
+  EXP-B0-random) run_layout_multi run_layout_heuragenix configs/layout_agent/layout_B0_heuragenix_random_hh_exp2.yaml     EXP-B0-random ;;
 
-  EXP-B1) run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml "$(odir EXP-B1)" ;;
-  EXP-B1-weak) run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml "$(odir EXP-B1-weak)" ;;
-  EXP-B2) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml "$(odir EXP-B2)" ;;
-  EXP-B3) run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml "$(odir EXP-B3)" ;;
+  EXP-B1)        run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml                             EXP-B1 ;;
+  EXP-B1-weak)   run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml                        EXP-B1-weak ;;
+  EXP-B2)        run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_exp.yaml          EXP-B2 ;;
+  EXP-B3)        run_layout_multi run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml                            EXP-B3 ;;
   EXP-B2-ab-noqueue)   run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   "$(odir EXP-B2-ab-noqueue)" ;;
   EXP-B2-ab-nofeas)    run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    "$(odir EXP-B2-ab-nofeas)" ;;
   EXP-B2-ab-nodiverse) run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml "$(odir EXP-B2-ab-nodiverse)" ;;

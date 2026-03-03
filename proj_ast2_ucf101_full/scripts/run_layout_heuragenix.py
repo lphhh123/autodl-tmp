@@ -475,6 +475,48 @@ def _ensure_heuragenix_syspath(heuragenix_root: Path) -> None:
             sys.path.insert(0, sp)
 
 
+def _materialize_strong_heuristic_dir(
+    *, heuragenix_root: Path, problem: str, heuristic_dir: str, trace_dir: Path
+) -> str:
+    """
+    Create a derived heuristic_dir under HeurAgenix repo with legacy heuristics included.
+    HeurAgenix upstream filters out files starting with '_' when building heuristic_pool_files,
+    so we copy _legacy_*.py as legacy_*.py into <heuristic_dir>_strong.
+    """
+    src = heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir
+    if not src.exists():
+        raise FileNotFoundError(f"heuristic_dir not found: {src.resolve()}")
+
+    dst_name = f"{heuristic_dir}_strong"
+    dst = heuragenix_root / "src" / "problems" / problem / "heuristics" / dst_name
+    dst.mkdir(parents=True, exist_ok=True)
+
+    mapping = {"src_dir": str(src.resolve()), "dst_dir": str(dst.resolve()), "files": []}
+    init_src = src / "__init__.py"
+    if init_src.exists():
+        shutil.copy2(init_src, dst / "__init__.py")
+
+    for f in sorted(src.iterdir()):
+        if not (f.is_file() and f.suffix == ".py"):
+            continue
+        if f.name == "__init__.py":
+            continue
+
+        if f.name.startswith("_"):
+            new_name = f.name.lstrip("_")
+        else:
+            new_name = f.name
+
+        shutil.copy2(f, dst / new_name)
+        mapping["files"].append({"src": f.name, "dst": new_name})
+
+    (trace_dir / "heuragenix_strong_heuristic_dir_map.json").write_text(
+        json.dumps(mapping, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return dst_name
+
+
 def _resolve_llm_config_path(baseline_cfg, heuragenix_root: Path) -> Path:
     llm_cfg = baseline_cfg.get("llm_config_file", "")
     if not llm_cfg:
@@ -1525,10 +1567,13 @@ def _run_heuragenix_inprocess(
     heur_dir = heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir
     if not heur_dir.exists():
         raise FileNotFoundError(f"heuristic_dir not found: {heur_dir.resolve()}")
+    allow_legacy = str(baseline_cfg.get("include_legacy_heuristics", "")).strip().lower() in ("1", "true", "yes", "y")
+    if os.environ.get("HEURAGENIX_INCLUDE_LEGACY", "").strip().lower() in ("1", "true", "yes", "y"):
+        allow_legacy = True
     heuristic_pool_files = [
         f.stem
         for f in heur_dir.iterdir()
-        if f.is_file() and f.suffix == ".py" and not f.name.startswith("_") and f.name != "__init__.py"
+        if f.is_file() and f.suffix == ".py" and f.name != "__init__.py" and (allow_legacy or (not f.name.startswith("_")))
     ]
 
     out_dir = (output_root / problem / case_name / "result" / method).resolve()
@@ -2036,6 +2081,9 @@ def main() -> None:
 
     try:
         problem = str(baseline_cfg.get("problem", "wafer_layout"))
+        include_legacy = str(baseline_cfg.get("include_legacy_heuristics", "")).strip().lower() in ("1", "true", "yes", "y")
+        if str(os.environ.get("HEURAGENIX_INCLUDE_LEGACY", "")).strip().lower() in ("1", "true", "yes", "y"):
+            include_legacy = True
         internal_out = out_dir / "heuragenix_internal"
         internal_out.mkdir(parents=True, exist_ok=True)
         heuragenix_cfg = getattr(cfg, "heuragenix", None)
@@ -2055,6 +2103,13 @@ def main() -> None:
         data_root_requested = os.path.abspath(str(data_root_cfg)) if data_root_cfg else ""
         output_root_requested = os.path.abspath(str(output_root_cfg)) if output_root_cfg else ""
         heuristic_dir = str(baseline_cfg.get("heuristic_dir", "basic_heuristics"))
+        if include_legacy:
+            heuristic_dir = _materialize_strong_heuristic_dir(
+                heuragenix_root=heuragenix_root,
+                problem=problem,
+                heuristic_dir=heuristic_dir,
+                trace_dir=trace_dir,
+            )
         selection_frequency = int(baseline_cfg.get("selection_frequency", 5))
         num_candidate_heuristics = int(baseline_cfg.get("num_candidate_heuristics", 4))
         rollout_budget = int(baseline_cfg.get("rollout_budget", 0))
@@ -2111,6 +2166,16 @@ def main() -> None:
         except Exception:
             result_dir = "result"
         engines_to_freshen = [baseline_method]
+        if baseline_method == "best_single_sweep":
+            heur_dir_abs = (heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir).resolve()
+            if heur_dir_abs.exists():
+                sweep_skip = set(x.strip() for x in str(baseline_cfg.get("sweep_skip", "do_nothing")).split(",") if x.strip())
+                sweep_engines = [
+                    p.stem
+                    for p in sorted(heur_dir_abs.iterdir())
+                    if p.is_file() and p.suffix == ".py" and p.name != "__init__.py" and p.stem not in sweep_skip
+                ]
+                engines_to_freshen.extend(sweep_engines)
         if fallback_method and fallback_method not in engines_to_freshen:
             engines_to_freshen.append(fallback_method)
         _freshen_internal_result_dirs(
@@ -2325,7 +2390,96 @@ def main() -> None:
         print(f"[bridge] AMLT_OUTPUT_DIR={env['AMLT_OUTPUT_DIR']}")
         timeout_s = int(max_wallclock_sec) if max_wallclock_sec else None
         result = None
-        if run_mode == "inprocess":
+        skip_primary_launch = False
+        if baseline_method == "best_single_sweep":
+            _append_llm_usage_for_run({"ok": True, "event": "best_single_sweep_start", "include_legacy": include_legacy})
+
+            heur_dir_abs = (heuragenix_root / "src" / "problems" / problem / "heuristics" / heuristic_dir).resolve()
+            cand_engines = [
+                p.stem
+                for p in sorted(heur_dir_abs.iterdir())
+                if p.is_file() and p.suffix == ".py" and p.name != "__init__.py"
+            ]
+            skip = set(x.strip() for x in str(baseline_cfg.get("sweep_skip", "do_nothing")).split(",") if x.strip())
+            cand_engines = [c for c in cand_engines if c and c not in skip]
+
+            sweep_runs = []
+            for cand in cand_engines:
+                launch_cmd = [
+                    sys.executable,
+                    str(heuragenix_root / "launch_hyper_heuristic.py"),
+                    "-p", problem,
+                    "-e", cand,
+                    "-d", heuristic_dir,
+                    "-t", str(case_path),
+                    "-n", f"{iters_sf}",
+                    "-m", str(selection_frequency),
+                    "-c", "1",
+                    "-b", "0",
+                    "-r", "result",
+                    "--seed", str(seed),
+                ]
+                if max_steps is not None:
+                    launch_cmd.extend(["--max_steps", str(max_steps)])
+
+                _append_llm_usage_for_run({"ok": True, "event": "best_single_sweep_run", "engine": cand})
+                try:
+                    _run_subprocess_with_progress(
+                        launch_cmd=launch_cmd,
+                        cwd=heuragenix_root,
+                        env=env,
+                        trace_dir=trace_dir,
+                        tag=f"best1_{cand}",
+                        internal_output_dir=(output_root / problem / case_name / "result" / cand),
+                        total_eval_budget=int(total_eval_budget),
+                        max_steps=max_steps,
+                        timeout_s=int(max_wallclock_sec) if max_wallclock_sec else None,
+                        poll_s=float(get_nested(cfg, "progress.poll_sec", 0.5)),
+                    )
+                except Exception as exc:
+                    _append_llm_usage_for_run({"ok": False, "event": "best_single_sweep_run_failed", "engine": cand, "error": repr(exc)})
+                rec_path = (output_root / problem / case_name / "result" / cand / "recordings.jsonl").resolve()
+                sweep_runs.append({"engine": cand, "recordings": str(rec_path)})
+
+            pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
+            objective_cfg = _build_objective_cfg(cfg)
+            objective_cfg.update({"eps_comm": float(pareto_cfg.get("eps_comm", 0.0)), "eps_therm": float(pareto_cfg.get("eps_therm", 0.0))})
+            base_state, evaluator = _build_state_and_evaluator(layout_input=layout_input, cfg=cfg, objective_cfg=objective_cfg)
+
+            scored = []
+            for item in sweep_runs:
+                rp = Path(item["recordings"])
+                if not rp.exists():
+                    scored.append({**item, "ok": False, "best_total": None})
+                    continue
+                hx_rows_raw = list(_iter_recordings(rp))
+                hx_rows = _recompute_hx_rows_with_main_evaluator(hx_rows_raw, base_state=base_state, evaluator=evaluator, strict=True)
+                best_total = None
+                for r in hx_rows:
+                    v = r.get("selected_total_scalar", None)
+                    if v is None:
+                        continue
+                    v = float(v)
+                    if best_total is None or v < best_total:
+                        best_total = v
+                scored.append({**item, "ok": True, "best_total": best_total})
+
+            scored_ok = [s for s in scored if s.get("ok") and s.get("best_total") is not None]
+            scored_ok.sort(key=lambda x: float(x["best_total"]))
+            best_engine = scored_ok[0]["engine"] if scored_ok else (cand_engines[0] if cand_engines else baseline_method)
+
+            (trace_dir / "best_single_sweep_summary.json").write_text(
+                json.dumps({"requested": "best_single_sweep", "best_engine": best_engine, "scored": scored}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            _append_llm_usage_for_run({"ok": True, "event": "best_single_sweep_done", "best_engine": best_engine})
+
+            method = str(best_engine)
+            method_label = f"heuragenix:{baseline_method}"
+            output_dir = output_root / problem / case_name / "result" / method
+            skip_primary_launch = True
+
+        if (not skip_primary_launch) and run_mode == "inprocess":
             try:
                 output_dir = _run_heuragenix_inprocess(
                     heuragenix_root=heuragenix_root,
@@ -2353,7 +2507,7 @@ def main() -> None:
                 )
                 run_mode = "subprocess"
     
-        if run_mode != "inprocess":
+        if (not skip_primary_launch) and run_mode != "inprocess":
             # llm_config has already been resolved by _resolve_llm_config_path(...)
             if method == "llm_hh" and (llm_config is None or (not Path(llm_config).exists())):
                 raise FileNotFoundError(
@@ -2637,7 +2791,11 @@ def main() -> None:
             _append_llm_usage_for_run(
                 {"ok": False, "event": "recordings_missing", "path": str(recordings_path), "engine": method}
             )
-        method_label = f"heuragenix:{method}"
+        if baseline_method == "best_single_sweep":
+            method_label = f"heuragenix:{baseline_method}"
+            fallback_used = method != baseline_method
+        else:
+            method_label = f"heuragenix:{method}"
         pareto_cfg = cfg.get("pareto", {}) if isinstance(cfg, dict) else cfg.pareto
         objective_cfg = _build_objective_cfg(cfg)
         objective_cfg.update(
