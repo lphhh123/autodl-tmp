@@ -1,0 +1,46 @@
+_base_: base_layout_exp.yaml
+
+detailed_place:
+  planner:
+    type: mixed
+    require_llm: false
+    mixed:
+      every_n_steps: 20
+      k_actions: 4
+    llm_config_file: configs/llm/api_model_ark.json
+    queue_enabled: false
+    feasibility_check: false
+
+  mpvs:
+    enabled: true
+    cache_size: 12000
+    proposer:
+      k_heur: 6
+      k_llm: 3
+      llm_every_n_steps: 10
+    macros:
+      enabled: true
+      names: ["therm", "comm", "escape", "cluster"]
+      max_macros: 3
+      n_steps: 3
+    verifier:
+      horizon: 3
+      mc: 2
+      greedy_topm: 1
+      refine_sa_calls: 20
+      pool_override:
+        raw_target_size: 24
+        raw_target_max: 30
+        final_size: 10
+        diversity_enabled: false
+        coverage_min_per_bucket: 0
+    accept:
+      enabled: true
+      use_temperature: true
+    memory:
+      enabled: true
+      ttl_steps: 8
+      max_size: 32
+
+lookahead:
+  enabled: false

@@ -458,6 +458,16 @@ def run_detailed_place(
             seed=int(base_seed),
         )
 
+    mpvs_cfg = _cfg_get(dp_cfg, "mpvs", {}) or {}
+    mpvs_enabled = bool(_cfg_get(mpvs_cfg, "enabled", False))
+
+    mpvs_cache = None
+    if mpvs_enabled:
+        # independent cache for verifier evaluations (do NOT depend on policy_switch)
+        mpvs_cache = EvalCache(max_size=int(_cfg_get(mpvs_cfg, "cache_size", 12000)))
+
+    mpvs_mem: List[Dict[str, Any]] = []  # success memory entries: {"plan":..., "expire":int, "score":float}
+
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
     llm_cfg_path = _cfg_get(planner_cfg, "llm_config_file", None)
@@ -553,6 +563,24 @@ def run_detailed_place(
                     def _evaluate(state: LayoutState) -> Dict[str, Any]:
                         out = evaluator.evaluate(state)
                         _sync_eval_calls()
+                        return out
+
+                    def _evaluate_assign_cached(assign_arr: np.ndarray) -> Dict[str, Any]:
+                        nonlocal eval_calls_cum
+                        if mpvs_cache is None:
+                            layout_state.assign = assign_arr
+                            out = evaluator.evaluate(layout_state)
+                            _sync_eval_calls()
+                            return out
+                        sig = signature_for_assign(assign_arr)
+                        ck = _make_cache_key(sig, objective_hash)
+                        hit = mpvs_cache.get(ck)
+                        if hit is not None:
+                            return dict(hit)
+                        layout_state.assign = assign_arr
+                        out = evaluator.evaluate(layout_state)
+                        _sync_eval_calls()
+                        mpvs_cache.put(ck, dict(out))
                         return out
 
                     eval_out = _evaluate(layout_state)
@@ -760,7 +788,7 @@ def run_detailed_place(
                             )
                             if not sub_pool:
                                 break
-                            sub_pool.sort(key=lambda c: float(c.est.get("d_total", 0.0)), reverse=True)
+                            sub_pool.sort(key=lambda c: float(c.est.get("d_total", 0.0)), reverse=False)
                             act = sub_pool[0].action
                             cur2 = cur.copy()
                             _apply_action_inplace(cur2, act, clusters, site_to_region, sites_xy)
@@ -808,6 +836,273 @@ def run_detailed_place(
 
                 # If stagnating, we force one strong move; prefer kick > cluster_move > therm_swap
                 force_explore_until = -1
+
+                def _dp_cfg_with_pool_override(overrides: Dict[str, Any]) -> Dict[str, Any]:
+                    # build_candidate_pool expects a dp_cfg-like object; pass plain dict
+                    base_cp = _cfg_get(dp_cfg, "candidate_pool", {}) or {}
+                    return {
+                        "candidate_pool": {**dict(base_cp), **dict(overrides)},
+                        "action_probs": dict(_cfg_get(dp_cfg, "action_probs", {}) or {}),
+                        "relocate": dict(_cfg_get(dp_cfg, "relocate", {}) or {}),
+                        "hot_sampling": dict(_cfg_get(dp_cfg, "hot_sampling", {}) or {}),
+                        "operator_bank": dict(_cfg_get(dp_cfg, "operator_bank", {}) or {}),
+                    }
+
+                ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
+                ver_pool_over = dict(_cfg_get(ver_cfg, "pool_override", {}) or {})
+                # safe defaults if not provided
+                if not ver_pool_over:
+                    ver_pool_over = {
+                        "raw_target_size": 24,
+                        "raw_target_max": 30,
+                        "final_size": 10,
+                        "diversity_enabled": False,
+                        "coverage_min_per_bucket": 0,
+                    }
+                dp_cfg_ver = _dp_cfg_with_pool_override(ver_pool_over)
+
+                def _pick_best_from_pool(
+                    pool: List[Any],
+                    prefer_types: Optional[List[str]] = None,
+                    score_key: str = "d_total",
+                ):
+                    if not pool:
+                        return None
+                    cand_list = pool
+                    if prefer_types:
+                        filt = [c for c in pool if str(getattr(c, "type", "")) in set(prefer_types)]
+                        if filt:
+                            cand_list = filt
+                    cand_list = sorted(cand_list, key=lambda c: float(getattr(c, "est", {}).get(score_key, 0.0)))
+                    return cand_list[0] if cand_list else None
+
+                def _build_small_pool(cur_assign: np.ndarray, cur_eval: Dict[str, Any]) -> List[Any]:
+                    p = build_candidate_pool(
+                        cur_assign,
+                        cur_eval,
+                        evaluator,
+                        layout_state,
+                        traffic_sym,
+                        sites_xy,
+                        site_to_region,
+                        regions,
+                        clusters,
+                        cluster_to_region,
+                        chip_tdp,
+                        dp_cfg_ver,
+                        rng,
+                        debug_out_path=None,
+                    )
+                    _sync_eval_calls()
+                    return p
+
+                def _apply_action_inplace_simple(assign_arr: np.ndarray, act: Dict[str, Any]) -> None:
+                    op = str(act.get("op", "none")).lower()
+                    if op == "swap":
+                        _apply_swap(assign_arr, int(act.get("i", 0)), int(act.get("j", 0)))
+                        return
+                    if op == "relocate":
+                        _apply_relocate(assign_arr, int(act.get("i", 0)), int(act.get("site_id", 0)))
+                        return
+                    if op == "random_kick":
+                        _apply_random_kick(assign_arr, [int(x) for x in (act.get("idxs", []) or [])], [int(x) for x in (act.get("site_ids", []) or [])])
+                        return
+                    if op == "cluster_move":
+                        cid = int(act.get("cluster_id", -1))
+                        slots = [int(x) for x in (act.get("cluster_slots", []) or [])]
+                        cluster_obj = None
+                        if 0 <= cid < len(clusters) and getattr(clusters[cid], "slots", None) and clusters[cid].slots:
+                            cluster_obj = clusters[cid]
+                        elif slots:
+                            cluster_obj = Cluster(cluster_id=-1, slots=slots, tdp_sum=0.0)
+                        if cluster_obj is None:
+                            return
+                        target_sites = act.get("target_sites")
+                        if not target_sites:
+                            rid = int(act.get("region_id", 0))
+                            target_sites = _select_cluster_target_sites(assign_arr, cluster_obj, rid, site_to_region, sites_xy)
+                        _apply_cluster_move(assign_arr, cluster_obj, target_sites)
+                        return
+
+                def _exec_macro(
+                    name: str,
+                    assign0: np.ndarray,
+                    eval0: Dict[str, Any],
+                    n_steps: int = 3,
+                ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray]:
+                    cur = assign0.copy()
+                    cur_eval = dict(eval0)
+                    best_total = float(cur_eval.get("total_scalar", 0.0))
+                    best_assign = cur.copy()
+                    best_eval = dict(cur_eval)
+                    executed: List[Dict[str, Any]] = []
+
+                    for t in range(max(1, int(n_steps))):
+                        pool = _build_small_pool(cur, cur_eval)
+                        if name == "therm":
+                            prefer = ["therm_swap"] if t == 0 else (["relocate_free", "relocate"] if t == 1 else None)
+                            key = "d_therm" if t == 0 else "d_total"
+                        elif name == "comm":
+                            prefer = ["swap"] if t == 0 else None
+                            key = "d_comm" if t == 0 else "d_total"
+                        elif name == "escape":
+                            prefer = ["kick"] if t == 0 else None
+                            key = "d_total"
+                        elif name == "cluster":
+                            prefer = ["cluster_move"] if t == 0 else (["relocate_free", "relocate"] if t == 1 else None)
+                            key = "d_total"
+                        else:
+                            prefer, key = None, "d_total"
+
+                        cand = _pick_best_from_pool(pool, prefer_types=prefer, score_key=key)
+                        if cand is None:
+                            break
+                        act = copy.deepcopy(getattr(cand, "action", {}) or {})
+                        act.setdefault("candidate_id", int(getattr(cand, "id", -1)))
+                        act.setdefault("type", str(getattr(cand, "type", "")))
+                        executed.append(act)
+
+                        _apply_action_inplace_simple(cur, act)
+                        cur_eval = _evaluate_assign_cached(cur)
+
+                        v = float(cur_eval.get("total_scalar", best_total))
+                        if v < best_total:
+                            best_total = v
+                            best_assign = cur.copy()
+                            best_eval = dict(cur_eval)
+
+                    return best_assign, best_eval, best_total, executed, cur
+
+                def _refine_sa(
+                    assign_start: np.ndarray,
+                    eval_start: Dict[str, Any],
+                    n_calls: int,
+                    T_ref: float,
+                ) -> Tuple[np.ndarray, Dict[str, Any], float]:
+                    cur = assign_start.copy()
+                    cur_eval = dict(eval_start)
+                    best_total = float(cur_eval.get("total_scalar", 0.0))
+                    best_assign = cur.copy()
+                    best_eval = dict(cur_eval)
+
+                    Tloc = max(sa_min_T, float(T_ref))
+                    for _ in range(max(0, int(n_calls))):
+                        act = _sample_action(
+                            dp_cfg,
+                            traffic_sym,
+                            site_to_region,
+                            regions,
+                            clusters,
+                            cur,
+                            sites_xy,
+                            chip_tdp,
+                            cluster_to_region,
+                            py_rng,
+                        )
+                        trial = cur.copy()
+                        _apply_action_inplace_simple(trial, act)
+                        trial_eval = _evaluate_assign_cached(trial)
+                        dt = float(trial_eval.get("total_scalar", 0.0)) - float(cur_eval.get("total_scalar", 0.0))
+                        accept = (dt <= 0.0) or (py_rng.random() < math.exp(-dt / max(sa_min_T, Tloc)))
+                        if accept:
+                            cur = trial
+                            cur_eval = trial_eval
+                            if float(cur_eval.get("total_scalar", 0.0)) < best_total:
+                                best_total = float(cur_eval.get("total_scalar", 0.0))
+                                best_assign = cur.copy()
+                                best_eval = dict(cur_eval)
+                        Tloc = max(sa_min_T, Tloc * 0.999)
+                    return best_assign, best_eval, best_total
+
+                def _verify_plan(
+                    plan: Dict[str, Any],
+                    assign0: np.ndarray,
+                    eval0: Dict[str, Any],
+                ) -> Dict[str, Any]:
+                    horizon = int(_cfg_get(ver_cfg, "horizon", 3))
+                    mc = int(_cfg_get(ver_cfg, "mc", 2))
+                    n_steps_macro = int(_cfg_get(_cfg_get(mpvs_cfg, "macros", {}) or {}, "n_steps", 3))
+                    refine_calls = int(_cfg_get(ver_cfg, "refine_sa_calls", 20))
+                    greedy_topm = int(_cfg_get(ver_cfg, "greedy_topm", 1))
+
+                    best_total_all = float(eval0.get("total_scalar", 0.0))
+                    best_assign_all = assign0.copy()
+                    best_eval_all = dict(eval0)
+                    best_actions_all: List[Dict[str, Any]] = []
+                    best_final_assign = assign0.copy()
+
+                    for _mc in range(max(1, mc)):
+                        cur = assign0.copy()
+                        cur_eval = dict(eval0)
+                        actions_exec: List[Dict[str, Any]] = []
+                        best_total = float(cur_eval.get("total_scalar", 0.0))
+                        best_assign = cur.copy()
+                        best_eval = dict(cur_eval)
+
+                        if plan.get("kind") == "macro":
+                            b_assign, b_eval, b_total, acts, cur_after = _exec_macro(
+                                str(plan.get("name", "macro")),
+                                cur,
+                                cur_eval,
+                                n_steps=n_steps_macro,
+                            )
+                            actions_exec.extend(acts)
+                            cur = cur_after
+                            cur_eval = _evaluate_assign_cached(cur)
+                            if b_total < best_total:
+                                best_total, best_assign, best_eval = b_total, b_assign, b_eval
+                        else:
+                            cand = plan.get("cand", None)
+                            act = copy.deepcopy(getattr(cand, "action", {}) or {})
+                            act.setdefault("candidate_id", int(getattr(cand, "id", -1)))
+                            act.setdefault("type", str(getattr(cand, "type", "")))
+                            actions_exec.append(act)
+                            _apply_action_inplace_simple(cur, act)
+                            cur_eval = _evaluate_assign_cached(cur)
+                            v = float(cur_eval.get("total_scalar", best_total))
+                            if v < best_total:
+                                best_total = v
+                                best_assign = cur.copy()
+                                best_eval = dict(cur_eval)
+
+                        for _t in range(max(0, horizon - 1)):
+                            pool = _build_small_pool(cur, cur_eval)
+                            if not pool:
+                                break
+                            pool_sorted = sorted(pool, key=lambda c: float(getattr(c, "est", {}).get("d_total", 0.0)))
+                            topm = pool_sorted[: max(1, min(len(pool_sorted), greedy_topm))]
+                            chosen = topm[_rng_randint(rng, 0, len(topm))] if len(topm) > 1 else topm[0]
+                            act2 = copy.deepcopy(getattr(chosen, "action", {}) or {})
+                            act2.setdefault("candidate_id", int(getattr(chosen, "id", -1)))
+                            act2.setdefault("type", str(getattr(chosen, "type", "")))
+                            actions_exec.append(act2)
+                            _apply_action_inplace_simple(cur, act2)
+                            cur_eval = _evaluate_assign_cached(cur)
+                            v2 = float(cur_eval.get("total_scalar", best_total))
+                            if v2 < best_total:
+                                best_total = v2
+                                best_assign = cur.copy()
+                                best_eval = dict(cur_eval)
+
+                        T_ref = max(sa_min_T, 0.2 * float(T))
+                        r_assign, r_eval, r_total = _refine_sa(best_assign, best_eval, refine_calls, T_ref=T_ref)
+                        if r_total < best_total:
+                            best_total, best_assign, best_eval = r_total, r_assign, r_eval
+
+                        if best_total < best_total_all:
+                            best_total_all = best_total
+                            best_assign_all = best_assign.copy()
+                            best_eval_all = dict(best_eval)
+                            best_actions_all = list(actions_exec)
+                            best_final_assign = cur.copy()
+
+                    return {
+                        "verified_best_total": float(best_total_all),
+                        "best_assign": best_assign_all,
+                        "best_eval": best_eval_all,
+                        "actions": best_actions_all,
+                        "final_assign": best_final_assign,
+                    }
 
                 for step in range(steps):
                     last_step = int(step)
@@ -896,6 +1191,248 @@ def run_detailed_place(
                         candidate_pool.sort(key=lambda c: float(c.est.get("verified_total", 1e30)))
                     cand_map = {c.id: c for c in candidate_pool}
                     candidate_ids = [c.id for c in candidate_pool]
+
+                    # ==========================
+                    # MPVS (Macro Propose–Verify Search): proposer + verifier decides
+                    # ==========================
+                    if mpvs_enabled:
+                        prev_total0 = float(eval_out.get("total_scalar", 0.0))
+                        prev_comm0 = float(eval_out.get("comm_norm", 0.0))
+                        prev_therm0 = float(eval_out.get("therm_norm", 0.0))
+                        mpvs_h0 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
+                        mem_cfg = _cfg_get(mpvs_cfg, "memory", {}) or {}
+                        mem_enabled = bool(_cfg_get(mem_cfg, "enabled", True))
+                        mem_ttl = int(_cfg_get(mem_cfg, "ttl_steps", 8))
+                        mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
+                        if mem_enabled:
+                            mpvs_mem[:] = [m for m in mpvs_mem if int(m.get("expire", -1)) >= int(step)]
+                            mpvs_mem.sort(key=lambda x: float(x.get("score", 1e30)))
+                            mpvs_mem[:] = mpvs_mem[:mem_max]
+                        else:
+                            mpvs_mem[:] = []
+
+                        prop_cfg = _cfg_get(mpvs_cfg, "proposer", {}) or {}
+                        k_heur = int(_cfg_get(prop_cfg, "k_heur", 6))
+                        k_llm = int(_cfg_get(prop_cfg, "k_llm", 3))
+                        llm_every = int(_cfg_get(prop_cfg, "llm_every_n_steps", 10))
+                        use_llm_now = (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0) and (int(step) % max(1, llm_every) == 0)
+
+                        forbidden_set = set(int(x) for x in forbidden_ids)
+                        cand_sorted = sorted([c for c in candidate_pool if int(c.id) not in forbidden_set], key=lambda c: float(c.est.get("d_total", 0.0)))
+                        heur_cands = cand_sorted[: max(0, min(k_heur, len(cand_sorted)))]
+
+                        llm_cands: List[Any] = []
+                        llm_pick_ids: List[int] = []
+                        if use_llm_now:
+                            ss = build_state_summary(
+                                step,
+                                T,
+                                eval_out,
+                                traffic_sym,
+                                assign,
+                                site_to_region,
+                                chip_tdp,
+                                clusters,
+                                regions,
+                                candidate_pool,
+                                candidate_ids,
+                                forbidden_ids,
+                                max(1, k_llm),
+                            )
+                            try:
+                                llm_pick_ids = llm_provider.propose_pick(ss, max(1, k_llm)) or []
+                                llm_pick_ids = [int(pid) for pid in llm_pick_ids if int(pid) in cand_map and int(pid) not in forbidden_set]
+                            except Exception:
+                                llm_pick_ids = []
+                            for pid in llm_pick_ids:
+                                cc = cand_map.get(int(pid))
+                                if cc is not None:
+                                    llm_cands.append(cc)
+
+                        macro_cfg = _cfg_get(mpvs_cfg, "macros", {}) or {}
+                        macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
+                        macro_names = list(_cfg_get(macro_cfg, "names", ["therm", "comm", "escape", "cluster"]) or [])
+                        macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
+                        macro_names = macro_names[: max(0, min(len(macro_names), macro_max))] if macro_enabled else []
+
+                        mem_plans = []
+                        if mpvs_mem:
+                            mem_plans.append(mpvs_mem[0]["plan"])
+
+                        plans: List[Dict[str, Any]] = []
+                        seen_plan = set()
+
+                        def _add_plan(pl: Dict[str, Any]):
+                            k = stable_hash(pl)
+                            if k in seen_plan:
+                                return
+                            seen_plan.add(k)
+                            plans.append(pl)
+
+                        for c in heur_cands:
+                            _add_plan({"kind": "atomic", "id": int(c.id), "cand": c})
+                        for c in llm_cands:
+                            _add_plan({"kind": "atomic", "id": int(c.id), "cand": c, "src": "llm"})
+                        for mn in macro_names:
+                            _add_plan({"kind": "macro", "name": str(mn)})
+                        for pl in mem_plans:
+                            _add_plan(pl)
+
+                        ab_cfg = _cfg_get(mpvs_cfg, "ablation", {}) or {}
+                        disable_verifier = bool(_cfg_get(ab_cfg, "no_verifier", False))
+                        disable_macro = bool(_cfg_get(ab_cfg, "no_macro", False))
+                        disable_llm = bool(_cfg_get(ab_cfg, "no_llm", False))
+                        if disable_llm:
+                            plans = [p for p in plans if not (p.get("src") == "llm")]
+                        if disable_macro:
+                            plans = [p for p in plans if p.get("kind") != "macro"]
+
+                        best_plan = None
+                        best_v = None
+                        best_res = None
+                        for pl in plans:
+                            if disable_verifier:
+                                if pl.get("kind") == "macro":
+                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name","macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg,"n_steps",3)))
+                                    v = float(b_total)
+                                    res = {"verified_best_total": v, "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                                else:
+                                    cand = pl.get("cand", None)
+                                    v = float(getattr(cand, "est", {}).get("total_new", 1e30))
+                                    res = {"verified_best_total": v, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand,"action",{}) or {})]}
+                            else:
+                                res = _verify_plan(pl, assign, eval_out)
+                                v = float(res.get("verified_best_total", 1e30))
+                            if best_v is None or v < best_v:
+                                best_v = v
+                                best_plan = pl
+                                best_res = res
+
+                        if best_plan is None or best_res is None:
+                            pass
+                        else:
+                            cur_total = float(eval_out.get("total_scalar", 0.0))
+                            vbest = float(best_res.get("verified_best_total", cur_total))
+                            delta_v = vbest - cur_total
+
+                            acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
+                            use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
+                            enabled_acc = bool(_cfg_get(acc_cfg, "enabled", True))
+                            Tacc = max(sa_min_T, float(T) if use_temp else 1.0)
+
+                            accept = True
+                            if enabled_acc:
+                                if delta_v <= 0.0:
+                                    accept = True
+                                else:
+                                    accept = (py_rng.random() < math.exp(-delta_v / Tacc))
+
+                            chosen_actions = best_res.get("actions", []) or []
+                            op_args_obj = {
+                                "op": "macro" if best_plan.get("kind") == "macro" else str((chosen_actions[0] if chosen_actions else {}).get("op","none")),
+                                "mpvs_kind": str(best_plan.get("kind")),
+                                "macro_name": str(best_plan.get("name","")) if best_plan.get("kind")=="macro" else "",
+                                "sub_ops": [str(a.get("op","")) for a in chosen_actions[:6]],
+                                "n_sub": int(len(chosen_actions)),
+                                "verified_best_total": float(vbest),
+                                "src": str(best_plan.get("src","heuristic")),
+                            }
+                            if best_plan.get("kind") == "macro":
+                                op_for_trace = "macro"
+                            else:
+                                op_for_trace = str((chosen_actions[0] if chosen_actions else {}).get("op", "none"))
+
+                            if accept:
+                                assign = np.asarray(best_res.get("best_assign", assign), dtype=int).copy()
+                                eval_out = dict(best_res.get("best_eval", eval_out))
+                                prev_total = float(eval_out.get("total_scalar", prev_total))
+                                prev_comm = float(eval_out.get("comm_norm", prev_comm))
+                                prev_therm = float(eval_out.get("therm_norm", prev_therm))
+                                accepted_steps += 1
+                                if prev_total < best_total_seen:
+                                    best_total_seen = prev_total
+                                    last_best_step = int(step)
+                                if mem_enabled and (delta_v < 0.0):
+                                    mpvs_mem.append(
+                                        {
+                                            "plan": {"kind": best_plan.get("kind"), "name": best_plan.get("name",""), "id": int(best_plan.get("id",-1)), "src": best_plan.get("src","")},
+                                            "expire": int(step + mem_ttl),
+                                            "score": float(vbest),
+                                        }
+                                    )
+
+                            T = max(sa_min_T, float(T) * float(alpha))
+
+                            assign_sig = signature_for_assign(assign)
+                            op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
+                            wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
+                            h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
+                            m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
+                            cache_saved_eval_calls_cum = h1
+
+                            row = {
+                                "iter": int(step),
+                                "stage": stage_label,
+                                "op": op_for_trace,
+                                "op_args_json": op_args_json,
+                                "accepted": 1 if accept else 0,
+                                "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
+                                "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
+                                "therm_norm": float(eval_out.get("therm_norm", prev_therm0)),
+                                "pareto_added": 0,
+                                "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
+                                "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
+                                "seed_id": int(seed_id),
+                                "time_ms": int((time.perf_counter() - step_start) * 1000),
+                                "signature": assign_sig,
+                                "d_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
+                                "d_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
+                                "d_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
+                                "delta_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
+                                "delta_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
+                                "delta_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
+                                "tabu_hit": 0,
+                                "inverse_hit": 0,
+                                "cooldown_hit": 0,
+                                "policy": "mpvs",
+                                "move": str(best_plan.get("kind")),
+                                "lookahead_k": int(lookahead_k if lookahead_enabled else 0),
+                                "cache_hit": 1 if (mpvs_cache is not None and h1 > mpvs_h0) else 0,
+                                "cache_key": "",
+                                "objective_hash": objective_hash,
+                                "eval_calls_cum": int(eval_calls_cum),
+                                "cache_hit_cum": h1,
+                                "cache_miss_cum": m1,
+                                "cache_saved_eval_calls_cum": cache_saved_eval_calls_cum,
+                                "llm_used": 1 if use_llm_now and (not disable_llm) else 0,
+                                "llm_fail_count": int(llm_fail_count),
+                                "fallback_reason": "",
+                                "wall_time_ms_cum": wall_time_ms,
+                                "accepted_steps_cum": int(accepted_steps),
+                                "sim_eval_calls_cum": int(eval_calls_cum),
+                                "lookahead_enabled": 0,
+                                "lookahead_r": 0,
+                                "notes": json.dumps(
+                                    {
+                                        "mpvs": {
+                                            "n_plans": int(len(plans)),
+                                            "best_kind": str(best_plan.get("kind")),
+                                            "macro": str(best_plan.get("name","")),
+                                            "verified_best_total": float(vbest),
+                                            "delta_v": float(delta_v),
+                                            "horizon": int(_cfg_get(ver_cfg,"horizon",3)),
+                                            "mc": int(_cfg_get(ver_cfg,"mc",2)),
+                                            "refine_sa_calls": int(_cfg_get(ver_cfg,"refine_sa_calls",20)),
+                                            "use_llm_now": int(use_llm_now),
+                                            "llm_pick_ids": llm_pick_ids[:8],
+                                        }
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            writer.writerow(row)
+                            continue
+
                     if force_explore_for_llm:
                         strong_types = {"kick", "cluster_move", "therm_swap", "relocate_free"}
                         candidate_ids = [c.id for c in candidate_pool if str(c.type) in strong_types]
