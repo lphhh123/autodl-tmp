@@ -34,9 +34,19 @@ def _rng_randint(rng, low: int, high: int) -> int:
 def signature_from_assign(assign: Any) -> str:
     """
     Canonical signature for an assignment vector (trace.csv uses this).
-    Accepts: list[int] / np.ndarray / anything array-like of ints.
+    Accepts: list[int] / np.ndarray / torch.Tensor / anything array-like of ints.
     """
     try:
+        # torch.Tensor (possibly on GPU) -> numpy
+        if hasattr(assign, "detach") and hasattr(assign, "cpu"):
+            try:
+                import torch  # optional dependency; safe if torch exists
+                if isinstance(assign, torch.Tensor):
+                    assign = assign.detach().cpu().numpy()
+            except Exception:
+                # best-effort fallback
+                assign = assign.detach().cpu().numpy()
+
         a = np.asarray(assign, dtype=int).reshape(-1)
         return "assign:" + ",".join(str(int(x)) for x in a.tolist())
     except Exception:

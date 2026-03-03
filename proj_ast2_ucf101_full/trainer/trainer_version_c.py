@@ -1307,6 +1307,38 @@ def train_version_c(
 
             # init_hw_refs_from_baseline_stats accepts stable_hw_cfg but NOT output_dir
             init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
+
+            # ---- v5.4: fail-fast preflight for LockedAccRef (baseline stdout curve) ----
+            try:
+                pre_decision, _ = apply_accuracy_guard(
+                    epoch=0,
+                    stable_hw_cfg=cfg,
+                    stable_hw_state=stable_hw_state,
+                    val_metric_or_none=None,
+                    has_val_this_epoch=False,
+                    train_ema_or_none=None,
+                )
+                stable_hw_state = pre_decision.state
+            except Exception as e:
+                raise RuntimeError(
+                    "[P0][v5.4] LockedAccRef preflight failed before training. "
+                    "Check BASELINE_STDOUT / stable_hw.locked_acc_ref.baseline_stdout_path and ensure stdout contains "
+                    "lines like: [val] epoch=.. mode=fast/full acc_video=.."
+                ) from e
+
+            try:
+                locked2 = getattr(getattr(cfg, "stable_hw", None), "locked_acc_ref", None)
+                freeze_ep = int(getattr(locked2, "freeze_epoch", 0) or 0) if locked2 is not None else 0
+                curve2 = stable_hw_state.get("acc_ref_curve", None)
+                if isinstance(curve2, list) and len(curve2) > 0:
+                    logger.info(
+                        "[LockedAccRef] preflight ok: source=%s curve_len=%s freeze_epoch=%s",
+                        str(stable_hw_state.get("acc_ref_source", "")),
+                        int(len(curve2)),
+                        int(freeze_ep),
+                    )
+            except Exception:
+                pass
         (out_dir / "stable_hw_state.json").write_text(
             safe_dumps(stable_hw_state, indent=2),
             encoding="utf-8",
@@ -2293,6 +2325,24 @@ def train_version_c(
                     max_batches=max_eval_batches,
                     aggregate=val_agg,
                 )
+                # ---- audit-friendly [val] line (used by LockedAccRef curve parser) ----
+                try:
+                    n_val = len(val_loader)
+                except Exception:
+                    n_val = -1
+                if int(max_eval_batches) <= 0 or (n_val > 0 and int(max_eval_batches) >= int(n_val)):
+                    val_mode = "full"
+                else:
+                    val_mode = "fast"
+                if val_acc1 is not None:
+                    logger.info(
+                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f (pref=%s)",
+                        int(outer),
+                        str(val_mode),
+                        float(val_acc1),
+                        float(val_acc1),
+                        str(val_agg),
+                    )
                 if stable_hw_enabled:
                     stable_decision, _ = apply_accuracy_guard(
                         epoch=outer,
