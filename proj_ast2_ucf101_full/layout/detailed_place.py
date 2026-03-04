@@ -496,9 +496,6 @@ def run_detailed_place(
         "pareto_added": 0,
         "macro_gate_blocked": 0,
         "macro_gate_allowed": 0,
-        "mid_verified": 0,
-        "full_verified": 0,
-        "include_src_skipped": 0,
     }
 
     # Providers: always have heuristic; LLM optional
@@ -564,34 +561,12 @@ def run_detailed_place(
 
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     out_dir = trace_path.parent
-
-    # instance_tag: prefer authoritative trace_header.json(run_meta.layout_instance_name)
-    instance_tag = "chain_skip"
-    try:
-        header_path = out_dir / "trace_header.json"
-        inst_name = ""
-        if header_path.exists():
-            header_payload = json.loads(header_path.read_text(encoding="utf-8"))
-            run_meta = header_payload.get("run_meta", {}) or {}
-            inst_name = str(run_meta.get("layout_instance_name", "") or "").lower()
-
-        if "randw" in inst_name:
-            instance_tag = "randw"
-        elif "cluster4" in inst_name:
-            instance_tag = "cluster4"
-        elif "chain_skip" in inst_name:
-            instance_tag = "chain_skip"
-        else:
-            # fallback: legacy heuristic by path only if header missing/unknown
-            _p = str(trace_path).lower()
-            if ("randw" in _p) or ("chain_skip_randw" in _p):
-                instance_tag = "randw"
-            elif "cluster4" in _p:
-                instance_tag = "cluster4"
-            else:
-                instance_tag = "chain_skip"
-    except Exception:
-        # ultra-safe fallback
+    _p = str(trace_path).lower()
+    if ("randw" in _p) or ("chain_skip_randw" in _p):
+        instance_tag = "randw"
+    elif "cluster4" in _p:
+        instance_tag = "cluster4"
+    else:
         instance_tag = "chain_skip"
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
     recordings_fp = recordings_path.open("w", encoding="utf-8") if recordings_path else None
@@ -1087,27 +1062,12 @@ def run_detailed_place(
                     assign0: np.ndarray,
                     eval0: Dict[str, Any],
                     stagnation: int,
-                    level: str = "full",
                 ) -> Dict[str, Any]:
                     horizon = int(_cfg_get(ver_cfg, "horizon", 3))
                     mc = int(_cfg_get(ver_cfg, "mc", 2))
                     n_steps_macro = int(_cfg_get(_cfg_get(mpvs_cfg, "macros", {}) or {}, "n_steps", 3))
                     refine_calls = int(_cfg_get(ver_cfg, "refine_sa_calls", 20))
                     greedy_topm = int(_cfg_get(ver_cfg, "greedy_topm", 1))
-
-                    level0 = str(level or "full").strip().lower()
-                    if level0 not in ("full", "mid"):
-                        level0 = "full"
-
-                    prog_cfg = _cfg_get(ver_cfg, "progressive", {}) or {}
-                    if level0 == "mid":
-                        horizon = min(horizon, int(_cfg_get(prog_cfg, "mid_horizon_cap", 1)))
-                        mc = min(mc, int(_cfg_get(prog_cfg, "mid_mc_cap", 1)))
-                        greedy_topm = min(greedy_topm, int(_cfg_get(prog_cfg, "mid_greedy_topm_cap", 1)))
-                        refine_calls = min(refine_calls, int(_cfg_get(prog_cfg, "mid_refine_sa_calls_cap", 0)))
-                        # mid macro: only run very short macro steps
-                        mid_msteps = int(_cfg_get(prog_cfg, "mid_macro_steps_cap", int(_cfg_get(ver_cfg, "fast_macro_steps", 1))))
-                        n_steps_macro = min(n_steps_macro, max(1, mid_msteps))
 
                     # randw needs more steps; keep verifier lighter at early stagnation
                     if instance_tag == "randw":
@@ -1117,9 +1077,6 @@ def run_detailed_place(
                             mc = min(mc, int(_cfg_get(ver_cfg, "randw_early_mc_cap", 1)))
                             refine_calls = min(refine_calls, int(_cfg_get(ver_cfg, "randw_early_refine_cap", 8)))
                             n_steps_macro = min(n_steps_macro, int(_cfg_get(ver_cfg, "randw_early_macro_steps_cap", 2)))
-                            if level0 == "mid":
-                                refine_calls = 0
-                                horizon = min(horizon, 1)
 
                     rem = int(_budget_remaining())
                     # budget-adaptive downgrade to avoid exhausting budget in a few MPVS steps
@@ -1138,16 +1095,6 @@ def run_detailed_place(
                         horizon = min(horizon, 3)
                         mc = min(mc, 2)
                         refine_calls = min(refine_calls, 12)
-
-                    verifier_meta = {
-                        "level": str(level0),
-                        "horizon": int(horizon),
-                        "mc": int(mc),
-                        "greedy_topm": int(greedy_topm),
-                        "refine_sa_calls": int(refine_calls),
-                        "n_steps_macro": int(n_steps_macro),
-                        "budget_remaining": int(rem),
-                    }
 
                     best_total_all = float(eval0.get("total_scalar", 0.0))
                     best_assign_all = assign0.copy()
@@ -1226,7 +1173,6 @@ def run_detailed_place(
                         "best_eval": best_eval_all,
                         "actions": best_actions_all,
                         "final_assign": best_final_assign,
-                        "verifier_meta": verifier_meta,
                     }
 
                 for step in range(steps):
@@ -1630,149 +1576,74 @@ def run_detailed_place(
                                     return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
                                 except Exception:
                                     return 1e30, {"mode": "error"}
+
                             scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
                             for pl in plans:
                                 cheap, cmeta = _cheap_score(pl)
                                 scored.append((float(cheap), pl, cmeta))
 
                             sorted_scored = sorted(scored, key=lambda x: float(x[0]))
+                            full_verify_list: List[Dict[str, Any]] = []
+                            full_verify_keys: set[str] = set()
 
                             def _plan_key(pl: Dict[str, Any]) -> str:
                                 return f"A:{int(pl.get('id', -1))}" if pl.get("kind") == "atomic" else f"M:{pl.get('src', '')}:{pl.get('name', '')}"
 
-                            # ---- progressive config ----
-                            prog_cfg = _cfg_get(ver_cfg, "progressive", {}) or {}
-                            progressive_enabled = bool(_cfg_get(prog_cfg, "enabled", False))
-                            mid_verify_topk = int(_cfg_get(prog_cfg, "mid_verify_topk", max(3, int(full_verify_topk))))
-                            trig_early = float(_cfg_get(prog_cfg, "full_verify_trigger_margin_early", 0.0004))
-                            trig_late = float(_cfg_get(prog_cfg, "full_verify_trigger_margin_late", 0.00015))
-                            trig_sw = int(_cfg_get(prog_cfg, "full_verify_trigger_switch_stagnation", 15))
-                            trig_randw_scale = float(_cfg_get(prog_cfg, "full_verify_trigger_randw_scale", 1.0))
+                            for _, pl, _ in sorted_scored[: max(0, full_verify_topk)]:
+                                pk = _plan_key(pl)
+                                if pk not in full_verify_keys:
+                                    full_verify_list.append(pl)
+                                    full_verify_keys.add(pk)
 
-                            # ---- include source policy (conditional include) ----
-                            # backward-compat: old key full_verify_always_include_sources acts as MID include list
-                            _mid_src = _cfg_get(ver_cfg, "always_include_sources_mid", None)
-                            if _mid_src is None:
-                                _mid_src = _cfg_get(ver_cfg, "full_verify_always_include_sources", ["heuristic", "macro", "llm_macro", "mem"])
-                            _full_src = _cfg_get(ver_cfg, "always_include_sources_full", None)
-                            if _full_src is None:
-                                # keep old behavior if progressive disabled; otherwise default to heuristic-only full include
-                                _full_src = list(_mid_src) if (not progressive_enabled) else ["heuristic"]
+                            if full_verify_always_include_sources:
+                                for src in full_verify_always_include_sources:
+                                    src_scored = [it for it in sorted_scored if str(it[1].get("src", "")) == src]
+                                    if not src_scored:
+                                        continue
+                                    _, pl, _ = src_scored[0]
+                                    pk = _plan_key(pl)
+                                    if pk not in full_verify_keys:
+                                        full_verify_list.append(pl)
+                                        full_verify_keys.add(pk)
 
-                            always_include_mid_sources = set(str(x) for x in (_mid_src or []))
-                            always_include_full_sources = set(str(x) for x in (_full_src or []))
-
-                            inc_min_stagn = dict(_cfg_get(ver_cfg, "include_sources_min_stagnation", {}) or {})
-                            inc_min_stagn_randw = dict(_cfg_get(ver_cfg, "include_sources_min_stagnation_randw", {}) or {})
-                            inc_min_budget = dict(_cfg_get(ver_cfg, "include_sources_min_budget", {}) or {})
-                            inc_excl_inst = dict(_cfg_get(ver_cfg, "include_sources_exclude_instances", {}) or {})
-
-                            def _norm_src_key(k: str) -> str:
-                                return str(k or "").strip()
-
-                            def _should_include_src(src: str) -> bool:
-                                s = _norm_src_key(src)
-                                if not s:
-                                    return False
-                                # instance exclusion
-                                excl = inc_excl_inst.get(s, []) or []
-                                if instance_tag in set(str(x) for x in excl):
-                                    return False
-                                # min stagnation (randw override)
-                                th = inc_min_stagn.get(s, 0)
-                                if instance_tag == "randw" and s in inc_min_stagn_randw:
-                                    th = inc_min_stagn_randw.get(s, th)
-                                if int(stagn) < int(th):
-                                    return False
-                                # min budget
-                                bth = inc_min_budget.get(s, 0)
-                                if int(_budget_remaining()) < int(bth):
-                                    return False
-                                return True
-
-                            # ---- choose mid-verify set (screen gate) ----
-                            mid_verify_keys: set[str] = set()
-                            # (1) top-k by cheap score
-                            for _, pl, _ in sorted_scored[: max(0, mid_verify_topk)]:
-                                mid_verify_keys.add(_plan_key(pl))
-
-                            # (2) ensure heuristic baseline is always mid-verified
-                            heur_scored = [it for it in sorted_scored if str(it[1].get("src", "")) == "heuristic"]
-                            if heur_scored:
-                                mid_verify_keys.add(_plan_key(heur_scored[0][1]))
-
-                            # (3) conditional include for MID sources (macro/mem/llm_macro etc)
-                            for src in list(always_include_mid_sources):
-                                if src == "heuristic":
-                                    continue
-                                if not _should_include_src(src):
-                                    mpvs_stats["include_src_skipped"] = int(mpvs_stats.get("include_src_skipped", 0)) + 1
-                                    continue
-                                src_scored = [it for it in sorted_scored if str(it[1].get("src", "")) == str(src)]
-                                if not src_scored:
-                                    continue
-                                mid_verify_keys.add(_plan_key(src_scored[0][1]))
-
-                            # ---- first pass: run MID verification (very light) ----
-                            per_plan = []
                             for cheap, pl, cmeta in sorted_scored:
                                 pk = _plan_key(pl)
-
-                                verify_level = "none"
-                                res = None
-                                v_raw = float(cheap)
-                                v_eff = float(cheap)
-                                calls_spent = 0
-
-                                if disable_verifier:
-                                    # keep legacy no-verifier behavior (ablation); do not call verifier
-                                    if pl.get("kind") == "macro":
-                                        calls_b = int(getattr(evaluator, "evaluator_calls", 0))
-                                        b_assign, b_eval, b_total, acts, _cur = _exec_macro(
-                                            str(pl.get("name", "macro")),
-                                            assign,
-                                            eval_out,
-                                            n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)),
-                                        )
-                                        calls_a = int(getattr(evaluator, "evaluator_calls", 0))
-                                        calls_spent = max(0, calls_a - calls_b)
-                                        res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
-                                        v_raw = float(b_total)
-                                        v_eff = float(b_total)
-                                        verify_level = "none"
+                                do_full_verify = disable_verifier or (pk in full_verify_keys)
+                                if do_full_verify:
+                                    calls_b = int(getattr(evaluator, "evaluator_calls", 0))
+                                    if disable_verifier:
+                                        if pl.get("kind") == "macro":
+                                            b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
+                                            res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                                        else:
+                                            cand = pl.get("cand", None)
+                                            v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
+                                            res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
                                     else:
-                                        cand = pl.get("cand", None)
-                                        v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
-                                        res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
-                                        v_raw = float(v0)
-                                        v_eff = float(v0)
-                                        verify_level = "none"
-                                else:
-                                    if pk in mid_verify_keys:
-                                        calls_b = int(getattr(evaluator, "evaluator_calls", 0))
-                                        res = _verify_plan(pl, assign, eval_out, stagn, level="mid")
-                                        calls_a = int(getattr(evaluator, "evaluator_calls", 0))
-                                        calls_spent = max(0, calls_a - calls_b)
-                                        verify_level = "mid"
-                                        mpvs_stats["mid_verified"] = int(mpvs_stats.get("mid_verified", 0)) + 1
-
-                                        v_raw = float(res.get("verified_best_total", 1e30))
+                                        res = _verify_plan(pl, assign, eval_out, stagn)
+                                    calls_a = int(getattr(evaluator, "evaluator_calls", 0))
+                                    calls_spent = max(0, calls_a - calls_b)
+                                    v_raw = float(res.get("verified_best_total", 1e30))
+                                    v_eff = v_raw
+                                    try:
+                                        if direction_bias == "bias_comm":
+                                            best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
+                                            cur_comm = float(eval_out.get("comm_norm", 0.0))
+                                            improve = max(0.0, cur_comm - best_comm)
+                                            v_eff = v_raw - bias_beta * improve
+                                        elif direction_bias == "bias_therm":
+                                            best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
+                                            cur_th = float(eval_out.get("therm_norm", 0.0))
+                                            improve = max(0.0, cur_th - best_th)
+                                            v_eff = v_raw - bias_beta * improve
+                                    except Exception:
                                         v_eff = v_raw
-                                        try:
-                                            if direction_bias == "bias_comm":
-                                                best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
-                                                cur_comm = float(eval_out.get("comm_norm", 0.0))
-                                                improve = max(0.0, cur_comm - best_comm)
-                                                v_eff = v_raw - bias_beta * improve
-                                            elif direction_bias == "bias_therm":
-                                                best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
-                                                cur_th = float(eval_out.get("therm_norm", 0.0))
-                                                improve = max(0.0, cur_th - best_th)
-                                                v_eff = v_raw - bias_beta * improve
-                                        except Exception:
-                                            v_eff = v_raw
+                                else:
+                                    res = None
+                                    v_raw = float(cheap)
+                                    v_eff = float(cheap)
+                                    calls_spent = 0
 
-                                mpvs_stats["verifier_calls_spent"] += int(calls_spent)
                                 per_plan.append(
                                     {
                                         "plan": pl,
@@ -1780,9 +1651,8 @@ def run_detailed_place(
                                         "v_raw": float(v_raw),
                                         "v_eff": float(v_eff),
                                         "cheap_meta": cmeta,
-                                        "verify_level": str(verify_level),
+                                        "full_verified": bool(do_full_verify),
                                         "calls_spent": int(calls_spent),
-                                        "verifier_meta": (res.get("verifier_meta") if isinstance(res, dict) else None),
                                     }
                                 )
                                 mpvs_stats["plans_scored"] += 1
@@ -1791,105 +1661,6 @@ def run_detailed_place(
                                     mpvs_stats["macro_scored"] += 1
                                 if pl.get("src") == "mem":
                                     mpvs_stats["mem_scored"] += 1
-
-                            # ---- helper: find best heuristic entry (baseline) ----
-                            best_heur_entry = None
-                            for ent in per_plan:
-                                if str(ent["plan"].get("src", "")) != "heuristic":
-                                    continue
-                                if best_heur_entry is None or float(ent["v_raw"]) < float(best_heur_entry["v_raw"]) - 1e-12:
-                                    best_heur_entry = ent
-
-                            # If heuristic somehow not mid-verified (shouldn't happen), force mid verify for it
-                            if (not disable_verifier) and best_heur_entry is not None and str(best_heur_entry.get("verify_level")) == "none":
-                                pl = best_heur_entry["plan"]
-                                calls_b = int(getattr(evaluator, "evaluator_calls", 0))
-                                res = _verify_plan(pl, assign, eval_out, stagn, level="mid")
-                                calls_a = int(getattr(evaluator, "evaluator_calls", 0))
-                                best_heur_entry["calls_spent"] = int(best_heur_entry.get("calls_spent", 0)) + max(0, calls_a - calls_b)
-                                best_heur_entry["res"] = res
-                                best_heur_entry["verify_level"] = "mid"
-                                best_heur_entry["verifier_meta"] = res.get("verifier_meta")
-                                best_heur_entry["v_raw"] = float(res.get("verified_best_total", 1e30))
-                                best_heur_entry["v_eff"] = float(best_heur_entry["v_raw"])
-                                mpvs_stats["mid_verified"] = int(mpvs_stats.get("mid_verified", 0)) + 1
-                                mpvs_stats["verifier_calls_spent"] += max(0, calls_a - calls_b)
-
-                            # ---- second pass: choose which plans deserve FULL verification (win gate) ----
-                            if (not disable_verifier) and progressive_enabled and best_heur_entry is not None:
-                                trig = float(trig_early if int(stagn) < int(trig_sw) else trig_late)
-                                if instance_tag == "randw":
-                                    trig *= float(trig_randw_scale)
-
-                                full_candidates: List[Dict[str, Any]] = []
-                                # (A) conditional always-include FULL sources
-                                for src in list(always_include_full_sources):
-                                    if src == "heuristic":
-                                        continue
-                                    if not _should_include_src(src):
-                                        continue
-                                    src_ents = [e for e in per_plan if str(e["plan"].get("src", "")) == str(src)]
-                                    if not src_ents:
-                                        continue
-                                    src_ents = sorted(src_ents, key=lambda e: float(e.get("v_raw", 1e30)))
-                                    full_candidates.append(src_ents[0])
-
-                                # (B) promising candidates: must beat heuristic by trig on MID score
-                                hv = float(best_heur_entry.get("v_raw", 1e30))
-                                for ent in per_plan:
-                                    if ent is best_heur_entry:
-                                        continue
-                                    if str(ent.get("verify_level")) != "mid":
-                                        continue
-                                    src = str(ent["plan"].get("src", ""))
-                                    # only allow expensive sources when include policy says OK
-                                    if src in {"macro", "llm_macro", "mem"} and (not _should_include_src(src)):
-                                        continue
-                                    if float(ent.get("v_raw", 1e30)) <= hv - float(trig):
-                                        full_candidates.append(ent)
-
-                                # de-dup by key and keep best few
-                                uniq_map: Dict[str, Dict[str, Any]] = {}
-                                for ent in full_candidates:
-                                    pk = _plan_key(ent["plan"])
-                                    if pk not in uniq_map or float(ent.get("v_raw", 1e30)) < float(uniq_map[pk].get("v_raw", 1e30)) - 1e-12:
-                                        uniq_map[pk] = ent
-                                uniq_list = sorted(list(uniq_map.values()), key=lambda e: float(e.get("v_raw", 1e30)))
-                                uniq_list = uniq_list[: max(0, int(full_verify_topk))]
-
-                                # run FULL verify for selected candidates
-                                for ent in uniq_list:
-                                    if str(ent.get("verify_level")) == "full":
-                                        continue
-                                    pl = ent["plan"]
-                                    calls_b = int(getattr(evaluator, "evaluator_calls", 0))
-                                    res = _verify_plan(pl, assign, eval_out, stagn, level="full")
-                                    calls_a = int(getattr(evaluator, "evaluator_calls", 0))
-                                    ent["calls_spent"] = int(ent.get("calls_spent", 0)) + max(0, calls_a - calls_b)
-                                    ent["res"] = res
-                                    ent["verify_level"] = "full"
-                                    ent["verifier_meta"] = res.get("verifier_meta")
-                                    ent["v_raw"] = float(res.get("verified_best_total", 1e30))
-                                    ent["v_eff"] = float(ent["v_raw"])
-                                    # re-apply direction bias on full result
-                                    try:
-                                        if direction_bias == "bias_comm":
-                                            best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
-                                            cur_comm = float(eval_out.get("comm_norm", 0.0))
-                                            improve = max(0.0, cur_comm - best_comm)
-                                            ent["v_eff"] = float(ent["v_raw"]) - bias_beta * improve
-                                        elif direction_bias == "bias_therm":
-                                            best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
-                                            cur_th = float(eval_out.get("therm_norm", 0.0))
-                                            improve = max(0.0, cur_th - best_th)
-                                            ent["v_eff"] = float(ent["v_raw"]) - bias_beta * improve
-                                    except Exception:
-                                        ent["v_eff"] = float(ent["v_raw"])
-
-                                    mpvs_stats["full_verified"] = int(mpvs_stats.get("full_verified", 0)) + 1
-                                    mpvs_stats["verifier_calls_spent"] += max(0, calls_a - calls_b)
-
-                            # NOTE: best_heur_entry will be recomputed below (existing code) based on updated per_plan
 
                             best_heur_entry = None
                             for ent in per_plan:
@@ -2111,10 +1882,6 @@ def run_detailed_place(
                                         {
                                             "mpvs": {
                                                 "n_plans": int(len(plans)),
-                                                "n_mid_verified": int(mpvs_stats.get("mid_verified", 0)),
-                                                "n_full_verified": int(mpvs_stats.get("full_verified", 0)),
-                                                "include_src_skipped": int(mpvs_stats.get("include_src_skipped", 0)),
-                                                "budget_remaining": int(_budget_remaining()),
                                                 "best_kind": str(best_plan.get("kind")),
                                                 "macro": str(best_plan.get("name","")),
                                                 "verified_best_total": float(vbest),
