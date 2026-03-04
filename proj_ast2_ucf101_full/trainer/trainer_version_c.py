@@ -5,6 +5,7 @@ import json
 import math
 import random
 import os
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch.amp import GradScaler, autocast
@@ -256,11 +258,32 @@ def _atomic_torch_save(obj, dst: Path) -> None:
             pass
 
 
+class ModelEMA:
+    def __init__(self, model: nn.Module, decay: float = 0.9999):
+        self.decay = float(decay)
+        self.ema = deepcopy(model).eval()
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    def update(self, model: nn.Module) -> None:
+        with torch.no_grad():
+            msd = model.state_dict()
+            for k, v in self.ema.state_dict().items():
+                if k in msd:
+                    v.copy_(v * self.decay + msd[k] * (1.0 - self.decay))
+
+
+def _topk_correct_frac(logits: torch.Tensor, target: torch.Tensor, k: int) -> torch.Tensor:
+    topk = logits.topk(k, dim=1).indices
+    return topk.eq(target.view(-1, 1)).any(dim=1).float()
+
+
 def save_checkpoint_version_c(
     out_dir: Path,
     tag: str,
     *,
     model: torch.nn.Module,
+    ema_model: Optional[ModelEMA],
     optimizer: torch.optim.Optimizer,
     scaler: Optional[GradScaler],
     epoch: int,
@@ -277,6 +300,7 @@ def save_checkpoint_version_c(
         "seal_digest": str(seal_digest),
         "run_id": str(run_id),
         "model": model.state_dict(),
+        "ema": (ema_model.ema.state_dict() if ema_model is not None else None),
         "optimizer": optimizer.state_dict(),
         "scaler": (scaler.state_dict() if scaler is not None else None),
     }
@@ -284,7 +308,7 @@ def save_checkpoint_version_c(
     return ckpt_path
 
 
-def maybe_auto_resume_version_c(out_dir: Path, model, optimizer, scaler, logger):
+def maybe_auto_resume_version_c(out_dir: Path, model, ema_model, optimizer, scaler, logger):
     auto_resume = str(os.environ.get("AUTO_RESUME", "0")).strip().lower() in ("1", "true", "yes", "y", "on")
     if not auto_resume:
         return 0, None
@@ -301,6 +325,11 @@ def maybe_auto_resume_version_c(out_dir: Path, model, optimizer, scaler, logger)
         if scaler is not None and isinstance(ckpt, dict) and ckpt.get("scaler", None) is not None:
             try:
                 scaler.load_state_dict(ckpt["scaler"])
+            except Exception:
+                pass
+        if ema_model is not None and isinstance(ckpt, dict) and ckpt.get("ema", None) is not None:
+            try:
+                ema_model.ema.load_state_dict(ckpt["ema"], strict=True)
             except Exception:
                 pass
         last_epoch = int(ckpt.get("epoch", -1)) if isinstance(ckpt, dict) else -1
@@ -1141,6 +1170,13 @@ def train_version_c(
         # to avoid accidental "training from scratch".
         maybe_load_pretrained(cfg=cfg, model=model, logger=logger)
 
+        ema_cfg = getattr(cfg.train, "ema", None)
+        ema_enabled = bool(getattr(ema_cfg, "enabled", False))
+        ema_decay = float(getattr(ema_cfg, "decay", 0.9999) or 0.9999)
+        ema_eval = bool(getattr(ema_cfg, "eval", True))
+        ema_model = ModelEMA(model, decay=ema_decay) if ema_enabled else None
+        logger.info("[EMA] enabled=%s decay=%.6f eval=%s", bool(ema_enabled), float(ema_decay), bool(ema_eval))
+
         lr = _as_float(cfg.train.lr, "cfg.train.lr")
         weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
         optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -1160,6 +1196,32 @@ def train_version_c(
         library = ChipletLibrary(cfg.hw.gpu_yaml)
         chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
         optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
+
+        label_smoothing = float(getattr(cfg.train, "label_smoothing", 0.0) or 0.0)
+        mixup_alpha = float(getattr(cfg.train, "mixup_alpha", 0.0) or 0.0)
+        mixup_prob = float(getattr(cfg.train, "mixup_prob", 1.0) or 1.0)
+        mixup_switch_off_epoch = int(getattr(cfg.train, "mixup_switch_off_epoch", -1) or -1)
+
+        lr_schedule = str(getattr(cfg.train, "lr_schedule", "none") or "none").lower()
+        min_lr = float(getattr(cfg.train, "min_lr", 0.0) or 0.0)
+        warmup_epochs = int(getattr(cfg.train, "warmup_epochs", 0) or 0)
+        outer_epochs_total = int(getattr(cfg.training, "outer_epochs", getattr(cfg.train, "epochs", 0)) or 0)
+        inner_steps_ast_cfg = int(getattr(cfg.training, "inner_steps_ast", 0) or 0)
+        steps_per_outer = len(loader) if (inner_steps_ast_cfg <= 0 and hasattr(loader, "__len__")) else max(1, inner_steps_ast_cfg)
+        warmup_steps = int(warmup_epochs) * int(steps_per_outer)
+        total_steps = int(outer_epochs_total) * int(steps_per_outer)
+
+        def _compute_lr(global_step: int) -> float:
+            if lr_schedule != "cosine":
+                return float(lr)
+            if total_steps <= 0:
+                return float(lr)
+            if warmup_steps > 0 and global_step < warmup_steps:
+                return float(lr) * float(global_step + 1) / float(max(1, warmup_steps))
+            denom = max(1, total_steps - warmup_steps)
+            progress = float(global_step - warmup_steps) / float(denom)
+            progress = max(0.0, min(1.0, progress))
+            return float(min_lr) + 0.5 * (float(lr) - float(min_lr)) * (1.0 + math.cos(math.pi * progress))
 
         proxy_weight_dir = str(getattr(cfg.hw, "weight_dir", "") or getattr(cfg.hw, "proxy_weight_dir", ""))
         if not proxy_weight_dir:
@@ -1233,7 +1295,6 @@ def train_version_c(
         layout_opt_grad_clip = float(_get_iso_cfg_value(iso_cfg_global, "layout_opt_grad_clip", 1.0) or 1.0)
         layout_opt = None
 
-        global_step = 0
         last_segments: List = []
         last_mapping: List[int] = []
         stable_hw_state: Dict[str, Any] = {}
@@ -1446,9 +1507,10 @@ def train_version_c(
         freeze_epochs = 0
         total_epochs = 0
         try:
-            start_outer, best_from_ckpt = maybe_auto_resume_version_c(out_dir, model, optimizer, scaler, logger)
+            start_outer, best_from_ckpt = maybe_auto_resume_version_c(out_dir, model, ema_model, optimizer, scaler, logger)
             if best_from_ckpt is not None:
                 best_acc1 = float(best_from_ckpt)
+            global_step = int(start_outer) * int(steps_per_outer)
             for outer in range(start_outer, cfg.training.outer_epochs):
                 assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=outer)
                 ran_epochs += 1
@@ -1566,6 +1628,8 @@ def train_version_c(
                 if isinstance(ast_sched, dict) and ast_sched.get("phase") != "disabled":
                     lambda_ast_eff = float(ast_sched.get("lambda_ast", lambda_ast_eff))
                     _apply_ast_runtime_overrides_to_model(model, cfg, ast_sched)
+                    if ema_model is not None:
+                        _apply_ast_runtime_overrides_to_model(ema_model.ema, cfg, ast_sched)
 
                     # Log at key transition points and whenever we freeze/unfreeze (prevents blind 3-day runs).
                     sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
@@ -1733,11 +1797,37 @@ def train_version_c(
                 for step, batch in step_iter:
                     x = batch["video"].to(device)
                     y = batch["label"].to(device)
+                    mixup_enabled = (
+                        mixup_alpha > 0.0
+                        and (random.random() < mixup_prob)
+                        and (mixup_switch_off_epoch < 0 or outer < mixup_switch_off_epoch)
+                    )
+                    y_a = y
+                    y_b = y
+                    mixup_lam = 1.0
+                    audio = batch.get("audio", None)
+                    if mixup_enabled:
+                        mixup_lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                        perm = torch.randperm(x.size(0), device=x.device)
+                        x = x * mixup_lam + x[perm] * (1.0 - mixup_lam)
+                        if audio is not None:
+                            audio = audio.to(device)
+                            audio = audio * mixup_lam + audio[perm] * (1.0 - mixup_lam)
+                        y_b = y[perm]
+                    if lr_schedule == "cosine":
+                        lr_cur = _compute_lr(global_step)
+                        for pg in optimizer_model.param_groups:
+                            pg["lr"] = lr_cur
+                        for pg in optimizer_alpha.param_groups:
+                            pg["lr"] = lr_cur
                     optimizer_model.zero_grad()
                     optimizer_alpha.zero_grad()
                     with autocast(device_type, enabled=cfg.train.amp):
                         if model_type == "video_audio":
-                            logits, info = model(x, batch["audio"].to(device), return_intermediate=True)
+                            if audio is None:
+                                audio = batch["audio"]
+                            audio = audio.to(device)
+                            logits, info = model(x, audio, return_intermediate=True)
                         else:
                             logits, info = model(x, return_intermediate=True)
                         run_state["last_model_info"] = info
@@ -1748,7 +1838,13 @@ def train_version_c(
                             optimizer_model.zero_grad(set_to_none=True)
                             optimizer_alpha.zero_grad(set_to_none=True)
                             continue
-                        L_task = F.cross_entropy(logits, y)
+                        if mixup_enabled:
+                            L_task = (
+                                mixup_lam * F.cross_entropy(logits, y_a, label_smoothing=label_smoothing)
+                                + (1.0 - mixup_lam) * F.cross_entropy(logits, y_b, label_smoothing=label_smoothing)
+                            )
+                        else:
+                            L_task = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
                         model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
                         slot_out = chiplet_slots(hard=False)
                         alpha = slot_out["alpha"]
@@ -2063,8 +2159,19 @@ def train_version_c(
                             every_steps=nan_guard_warn_every_steps,
                             first_n=3,
                         )
+                    if ema_model is not None:
+                        try:
+                            ema_model.update(model)
+                        except Exception:
+                            pass
                     if step % log_interval_steps == 0:
-                        acc1 = (logits.argmax(dim=1) == y).float().mean()
+                        with torch.no_grad():
+                            if mixup_enabled:
+                                top1_a = _topk_correct_frac(logits.detach(), y_a, 1)
+                                top1_b = _topk_correct_frac(logits.detach(), y_b, 1)
+                                acc1 = (mixup_lam * top1_a + (1.0 - mixup_lam) * top1_b).mean()
+                            else:
+                                acc1 = _topk_correct_frac(logits.detach(), y, 1).mean()
                         last_acc1 = float(acc1.item())
                         best_acc1 = float(acc1.item()) if best_acc1 is None else max(best_acc1, float(acc1.item()))
                         if stable_hw_enabled:
@@ -2317,8 +2424,9 @@ def train_version_c(
                         )
 
                 val_agg = str(getattr(getattr(cfg, "data", object()), "eval_aggregate", "clip"))
+                eval_model = ema_model.ema if (ema_model is not None and ema_eval) else model
                 val_acc1 = eval_acc1(
-                    model,
+                    eval_model,
                     val_loader,
                     device,
                     model_type=str(getattr(cfg.training, "model_type", "video")),
@@ -2336,12 +2444,13 @@ def train_version_c(
                     val_mode = "fast"
                 if val_acc1 is not None:
                     logger.info(
-                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f (pref=%s)",
+                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f (pref=%s eval_model=%s)",
                         int(outer),
                         str(val_mode),
                         float(val_acc1),
                         float(val_acc1),
                         str(val_agg),
+                        "ema" if (ema_model is not None and ema_eval) else "raw",
                     )
                 if stable_hw_enabled:
                     stable_decision, _ = apply_accuracy_guard(
@@ -2638,6 +2747,7 @@ def train_version_c(
                         out_dir,
                         "last",
                         model=model,
+                        ema_model=ema_model,
                         optimizer=optimizer,
                         scaler=scaler,
                         epoch=outer,
@@ -2650,6 +2760,7 @@ def train_version_c(
                             out_dir,
                             "best",
                             model=model,
+                            ema_model=ema_model,
                             optimizer=optimizer,
                             scaler=scaler,
                             epoch=outer,

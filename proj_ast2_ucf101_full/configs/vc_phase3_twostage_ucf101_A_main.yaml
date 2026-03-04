@@ -13,6 +13,9 @@ data:
   window_retention:
     enabled: false
 
+  runtime_tstart_jitter: 8
+  frame_sampling_train: "segment_random"
+  frame_sampling_eval: "linspace"
 test:
   run_final_test: true
 
@@ -23,7 +26,23 @@ training:
   # Keep evaluation (val_acc1) unchanged.
   compute_hw_when_lambda0: false
 
+model:
+  drop_rate: 0.1
+  attn_drop: 0.1
+  drop_path_rate: 0.15
+
 train:
+  lr_schedule: "cosine"
+  min_lr: 1e-6
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  mixup_prob: 1.0
+  nan_guard: true
+  skip_step_on_nonfinite: true
+  ema:
+    enabled: true
+    decay: 0.9998
+    eval: true
   grad_clip_norm: 1.0
   warn_every_steps: 200
   nan_guard_warn_every_steps: 200

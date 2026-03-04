@@ -6,10 +6,10 @@ stable_hw:
   hw_ref_source: "baseline_stats"
   locked_acc_ref:
     enabled: true
-    # Same-epoch baseline reference curve parsed from EXP-A1 stdout
+    # Same-epoch baseline reference curve parsed from EXP-A2 stdout
     source: "baseline_stdout_curve"
     mode: "curve_stdout"
-    baseline_stdout_path: "outputs/EXP-A1/seed{seed}/stdout"
+    baseline_stdout_path: "outputs/EXP-A2/seed{seed}/stdout"
     stdout_prefer_mode: "fast"
     curve_ema_alpha: 0.2
     curve_margin: 0.01
