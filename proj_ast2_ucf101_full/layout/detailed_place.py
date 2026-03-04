@@ -467,6 +467,7 @@ def run_detailed_place(
         mpvs_cache = EvalCache(max_size=int(_cfg_get(mpvs_cfg, "cache_size", 12000)))
 
     mpvs_mem: List[Dict[str, Any]] = []  # success memory entries: {"plan":..., "expire":int, "score":float}
+    mpvs_explore_left = 0
 
     total_eval_budget = int(get_nested(cfg, "budget.total_eval_budget", 0) or 0)
 
@@ -1269,11 +1270,145 @@ def run_detailed_place(
                         k_heur = int(_cfg_get(prop_cfg, "k_heur", 6))
                         k_llm = int(_cfg_get(prop_cfg, "k_llm", 3))
                         llm_every = int(_cfg_get(prop_cfg, "llm_every_n_steps", 10))
+
+                        stagn = int(step - last_best_step) if "last_best_step" in locals() else int(step)
+                        explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
+                        explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
+                        explore_stagn = int(_cfg_get(explore_cfg, "when_stagnation_ge", 12))
+                        explore_max_consecutive = int(_cfg_get(explore_cfg, "max_consecutive_steps", 2))
+                        explore_mode = str(_cfg_get(explore_cfg, "mode", "hybrid")).lower()
+
+                        do_explore = False
+                        if explore_mode == "always":
+                            do_explore = True
+                        else:
+                            if stagn >= explore_stagn:
+                                do_explore = True
+                            elif int(step) % max(1, explore_every) == 0:
+                                do_explore = True
+
+                        if do_explore and mpvs_explore_left <= 0:
+                            mpvs_explore_left = explore_max_consecutive
+                        do_explore = do_explore and (mpvs_explore_left > 0)
+
                         use_llm_now = (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0) and (int(step) % max(1, llm_every) == 0)
+                        use_llm_now = use_llm_now and do_explore
 
                         forbidden_set = set(forbidden_ids)
                         cand_sorted = sorted([c for c in candidate_pool if int(c.id) not in forbidden_set], key=lambda c: float(c.est.get("d_total", 0.0)))
                         heur_cands = cand_sorted[: max(0, min(k_heur, len(cand_sorted)))]
+
+                        if not do_explore:
+                            if heur_cands:
+                                best_c = heur_cands[0]
+                                act = copy.deepcopy(getattr(best_c, "action", {}) or {})
+                                act.setdefault("candidate_id", int(getattr(best_c, "id", -1)))
+                                act.setdefault("type", str(getattr(best_c, "type", "")))
+
+                                trial = assign.copy()
+                                _apply_action_inplace_simple(trial, act)
+                                trial_eval = _evaluate_assign_cached(trial)
+
+                                cur_total = float(eval_out.get("total_scalar", 0.0))
+                                new_total = float(trial_eval.get("total_scalar", 0.0))
+                                delta_v = new_total - cur_total
+
+                                acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
+                                use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
+                                enabled_acc = bool(_cfg_get(acc_cfg, "enabled", True))
+                                Tacc = max(sa_min_T, float(T) if use_temp else 1.0)
+
+                                accept = True
+                                if enabled_acc:
+                                    if delta_v <= 0.0:
+                                        accept = True
+                                    else:
+                                        accept = (py_rng.random() < math.exp(-delta_v / Tacc))
+
+                                added = False
+                                if accept:
+                                    assign = trial
+                                    eval_out = dict(trial_eval)
+                                    prev_total = float(eval_out.get("total_scalar", prev_total))
+                                    prev_comm = float(eval_out.get("comm_norm", prev_comm))
+                                    prev_therm = float(eval_out.get("therm_norm", prev_therm))
+                                    accepted_steps += 1
+                                    if prev_total < best_total_seen:
+                                        best_total_seen = prev_total
+                                        last_best_step = int(step)
+                                    try:
+                                        added = pareto.add(
+                                            eval_out["comm_norm"],
+                                            eval_out["therm_norm"],
+                                            {
+                                                "assign": assign.copy(),
+                                                "total_scalar": float(eval_out["total_scalar"]),
+                                                "stage": stage_label,
+                                                "iter": int(step + 1),
+                                                "seed": int(seed_id),
+                                            },
+                                        )
+                                    except Exception:
+                                        added = False
+
+                                T = max(sa_min_T, float(T) * float(alpha))
+
+                                assign_sig = signature_for_assign(assign)
+                                wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
+                                h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
+                                m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
+                                cache_saved_eval_calls_cum = h1
+                                op_args_obj = {"src": "heuristic_fast", "candidate_id": int(act.get("candidate_id", -1))}
+                                row = {
+                                    "iter": int(step),
+                                    "stage": stage_label,
+                                    "op": str(act.get("op", "none")),
+                                    "op_args_json": json.dumps(op_args_obj, ensure_ascii=False),
+                                    "accepted": 1 if accept else 0,
+                                    "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
+                                    "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
+                                    "therm_norm": float(eval_out.get("therm_norm", prev_therm0)),
+                                    "pareto_added": 1 if (accept and added) else 0,
+                                    "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
+                                    "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
+                                    "seed_id": int(seed_id),
+                                    "time_ms": int((time.perf_counter() - step_start) * 1000),
+                                    "signature": assign_sig,
+                                    "d_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
+                                    "d_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
+                                    "d_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
+                                    "delta_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
+                                    "delta_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
+                                    "delta_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
+                                    "tabu_hit": 0,
+                                    "inverse_hit": 0,
+                                    "cooldown_hit": 0,
+                                    "policy": "mpvs_fast",
+                                    "move": str(act.get("type", "")),
+                                    "lookahead_k": int(lookahead_k if lookahead_enabled else 0),
+                                    "cache_hit": 1 if (mpvs_cache is not None and h1 > mpvs_h0) else 0,
+                                    "cache_key": "",
+                                    "objective_hash": objective_hash,
+                                    "eval_calls_cum": int(eval_calls_cum),
+                                    "cache_hit_cum": h1,
+                                    "cache_miss_cum": m1,
+                                    "cache_saved_eval_calls_cum": cache_saved_eval_calls_cum,
+                                    "llm_used": 0,
+                                    "llm_fail_count": int(llm_fail_count),
+                                    "fallback_reason": "",
+                                    "wall_time_ms_cum": wall_time_ms,
+                                    "accepted_steps_cum": int(accepted_steps),
+                                    "sim_eval_calls_cum": int(eval_calls_cum),
+                                    "lookahead_enabled": 0,
+                                    "lookahead_r": 0,
+                                    "notes": json.dumps({"mpvs": {"fast_exploit": 1}}, ensure_ascii=False),
+                                }
+                                writer.writerow(row)
+                            if do_explore:
+                                mpvs_explore_left -= 1
+                            else:
+                                mpvs_explore_left = 0
+                            continue
 
                         llm_cands: List[Any] = []
                         llm_pick_ids: List[int] = []
@@ -1370,7 +1505,6 @@ def run_detailed_place(
                                 if cc is not None:
                                     llm_cands.append(cc)
 
-                        stagn = int(step - last_best_step) if "last_best_step" in locals() else int(step)
                         macro_cfg = _cfg_get(mpvs_cfg, "macros", {}) or {}
                         macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
                         base_macros = list(_cfg_get(macro_cfg, "base", ["therm", "comm"]) or [])
@@ -1471,7 +1605,7 @@ def run_detailed_place(
                         max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
                         early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
                         tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
-                        full_verify_topk = int(_cfg_get(ver_cfg, "full_verify_topk", 4))
+                        full_verify_topk = int(_cfg_get(ver_cfg, "full_verify_topk", 3))
                         fast_macro_steps = int(_cfg_get(ver_cfg, "fast_macro_steps", 1))
                         safe_enabled = bool(_cfg_get(ver_cfg, "safe_enabled", True))
                         safe_eps_early = float(_cfg_get(ver_cfg, "safe_eps_early", 0.0005))
@@ -1513,8 +1647,7 @@ def run_detailed_place(
                         def _cheap_score(pl: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
                             try:
                                 if pl.get("kind") == "macro":
-                                    _ba, _be, b_total, _acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=max(1, fast_macro_steps))
-                                    return float(b_total), {"mode": "macro_fast", "fast_total": float(b_total)}
+                                    return float(eval_out.get("total_scalar", 0.0)), {"mode": "macro_neutral"}
                                 cand = pl.get("cand", None)
                                 return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
                             except Exception:
@@ -1802,6 +1935,10 @@ def run_detailed_place(
                                 ),
                             }
                             writer.writerow(row)
+                            if do_explore:
+                                mpvs_explore_left -= 1
+                            else:
+                                mpvs_explore_left = 0
                             continue
 
                     if force_explore_for_llm:
