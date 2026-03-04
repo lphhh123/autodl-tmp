@@ -43,6 +43,13 @@ detailed_place:
       tie_eps: 0.002
       tie_explore_when_stagnation_ge: 10
       direction_bias_beta: 0.02
+      full_verify_topk: 4
+      fast_macro_steps: 1
+      safe_enabled: true
+      safe_eps_early: 0.0005
+      safe_eps_late: 0.002
+      safe_eps_switch_stagnation: 15
+      full_verify_always_include_sources: ["heuristic", "macro", "llm_macro", "mem"]
       pool_override:
         raw_target_size: 24
         raw_target_max: 30
@@ -58,4 +65,5 @@ detailed_place:
       max_size: 32
       enable_when_stagnation_ge: 8
 
-  enabled: false
+  lookahead:
+    enabled: false

@@ -1471,6 +1471,15 @@ def run_detailed_place(
                         max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
                         early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
                         tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
+                        full_verify_topk = int(_cfg_get(ver_cfg, "full_verify_topk", 4))
+                        fast_macro_steps = int(_cfg_get(ver_cfg, "fast_macro_steps", 1))
+                        safe_enabled = bool(_cfg_get(ver_cfg, "safe_enabled", True))
+                        safe_eps_early = float(_cfg_get(ver_cfg, "safe_eps_early", 0.0005))
+                        safe_eps_late = float(_cfg_get(ver_cfg, "safe_eps_late", 0.002))
+                        safe_eps_switch_stagnation = int(_cfg_get(ver_cfg, "safe_eps_switch_stagnation", 15))
+                        full_verify_always_include_sources = set(
+                            str(x) for x in (_cfg_get(ver_cfg, "full_verify_always_include_sources", ["heuristic", "macro", "llm_macro", "mem"]) or [])
+                        )
                         if len(plans) > max_plans:
                             plans = plans[:max_plans]
 
@@ -1482,6 +1491,8 @@ def run_detailed_place(
                         def _src_prio(s: str) -> int:
                             # early: exploit (prefer heuristic), late: explore (prefer mem/llm_macro/macro)
                             if stagn < tie_stagn_th:
+                                if stagn < 10:
+                                    return {"heuristic": 5, "llm_atomic": 4, "macro": 2, "llm_macro": 1, "mem": 0}.get(str(s), 0)
                                 return {"heuristic": 5, "llm_atomic": 4, "macro": 3, "llm_macro": 2, "mem": 1}.get(str(s), 0)
                             return {"mem": 5, "llm_macro": 4, "macro": 3, "llm_atomic": 2, "heuristic": 1}.get(str(s), 0)
 
@@ -1495,54 +1506,141 @@ def run_detailed_place(
                         best_plan = None
                         best_v = None
                         best_res = None
+                        best_v_raw = None
                         cur_total = float(eval_out.get("total_scalar", 0.0))
-                        for pl in plans:
-                            if disable_verifier:
-                                if pl.get("kind") == "macro":
-                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name","macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg,"n_steps",3)))
-                                    v = float(b_total)
-                                    res = {"verified_best_total": v, "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
-                                else:
-                                    cand = pl.get("cand", None)
-                                    v = float(getattr(cand, "est", {}).get("total_new", 1e30))
-                                    res = {"verified_best_total": v, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand,"action",{}) or {})]}
-                            else:
-                                res = _verify_plan(pl, assign, eval_out)
-                                v = float(res.get("verified_best_total", 1e30))
+                        per_plan: List[Dict[str, Any]] = []
 
-                            v_eff = v
+                        def _cheap_score(pl: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
                             try:
-                                if direction_bias == "bias_comm":
-                                    best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
-                                    cur_comm = float(eval_out.get("comm_norm", 0.0))
-                                    improve = max(0.0, cur_comm - best_comm)
-                                    v_eff = v - bias_beta * improve
-                                elif direction_bias == "bias_therm":
-                                    best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
-                                    cur_th = float(eval_out.get("therm_norm", 0.0))
-                                    improve = max(0.0, cur_th - best_th)
-                                    v_eff = v - bias_beta * improve
+                                if pl.get("kind") == "macro":
+                                    _ba, _be, b_total, _acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=max(1, fast_macro_steps))
+                                    return float(b_total), {"mode": "macro_fast", "fast_total": float(b_total)}
+                                cand = pl.get("cand", None)
+                                return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
                             except Exception:
-                                v_eff = v
+                                return 1e30, {"mode": "error"}
 
-                            if best_v is None or v_eff < best_v - 1e-12:
-                                best_v = v_eff
-                                best_plan = pl
-                                best_res = res
+                        scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+                        for pl in plans:
+                            cheap, cmeta = _cheap_score(pl)
+                            scored.append((float(cheap), pl, cmeta))
+
+                        sorted_scored = sorted(scored, key=lambda x: float(x[0]))
+                        full_verify_list: List[Dict[str, Any]] = []
+                        full_verify_keys: set[str] = set()
+
+                        def _plan_key(pl: Dict[str, Any]) -> str:
+                            return f"A:{int(pl.get('id', -1))}" if pl.get("kind") == "atomic" else f"M:{pl.get('src', '')}:{pl.get('name', '')}"
+
+                        for _, pl, _ in sorted_scored[: max(0, full_verify_topk)]:
+                            pk = _plan_key(pl)
+                            if pk not in full_verify_keys:
+                                full_verify_list.append(pl)
+                                full_verify_keys.add(pk)
+
+                        if full_verify_always_include_sources:
+                            for src in full_verify_always_include_sources:
+                                src_scored = [it for it in sorted_scored if str(it[1].get("src", "")) == src]
+                                if not src_scored:
+                                    continue
+                                _, pl, _ = src_scored[0]
+                                pk = _plan_key(pl)
+                                if pk not in full_verify_keys:
+                                    full_verify_list.append(pl)
+                                    full_verify_keys.add(pk)
+
+                        for cheap, pl, cmeta in sorted_scored:
+                            pk = _plan_key(pl)
+                            do_full_verify = disable_verifier or (pk in full_verify_keys)
+                            if do_full_verify:
+                                if disable_verifier:
+                                    if pl.get("kind") == "macro":
+                                        b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
+                                        res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                                    else:
+                                        cand = pl.get("cand", None)
+                                        v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
+                                        res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
+                                else:
+                                    res = _verify_plan(pl, assign, eval_out)
+                                v_raw = float(res.get("verified_best_total", 1e30))
+                                v_eff = v_raw
+                                try:
+                                    if direction_bias == "bias_comm":
+                                        best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
+                                        cur_comm = float(eval_out.get("comm_norm", 0.0))
+                                        improve = max(0.0, cur_comm - best_comm)
+                                        v_eff = v_raw - bias_beta * improve
+                                    elif direction_bias == "bias_therm":
+                                        best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
+                                        cur_th = float(eval_out.get("therm_norm", 0.0))
+                                        improve = max(0.0, cur_th - best_th)
+                                        v_eff = v_raw - bias_beta * improve
+                                except Exception:
+                                    v_eff = v_raw
                             else:
-                                if abs(v_eff - float(best_v)) <= tie_eps:
-                                    if _plan_prio(pl) > _plan_prio(best_plan):
-                                        best_v = v_eff
-                                        best_plan = pl
-                                        best_res = res
+                                res = None
+                                v_raw = float(cheap)
+                                v_eff = float(cheap)
+
+                            per_plan.append(
+                                {
+                                    "plan": pl,
+                                    "res": res,
+                                    "v_raw": float(v_raw),
+                                    "v_eff": float(v_eff),
+                                    "cheap_meta": cmeta,
+                                    "full_verified": bool(do_full_verify),
+                                }
+                            )
                             mpvs_stats["plans_scored"] += 1
-                            cover.add(str(pl.get("src","")))
+                            cover.add(str(pl.get("src", "")))
                             if pl.get("src") == "macro":
                                 mpvs_stats["macro_scored"] += 1
                             if pl.get("src") == "mem":
                                 mpvs_stats["mem_scored"] += 1
-                            if (best_v is not None) and (len(cover) >= min_cover) and (best_v <= float(cur_total) - early_margin):
-                                break
+
+                        best_heur_entry = None
+                        for ent in per_plan:
+                            if str(ent["plan"].get("src", "")) != "heuristic":
+                                continue
+                            if best_heur_entry is None or float(ent["v_raw"]) < float(best_heur_entry["v_raw"]) - 1e-12:
+                                best_heur_entry = ent
+
+                        for ent in per_plan:
+                            pl = ent["plan"]
+                            v_eff = float(ent["v_eff"])
+                            if best_v is None or v_eff < best_v - 1e-12:
+                                best_v = v_eff
+                                best_v_raw = float(ent["v_raw"])
+                                best_plan = pl
+                                best_res = ent["res"]
+                            elif abs(v_eff - float(best_v)) <= tie_eps and best_plan is not None:
+                                if _plan_prio(pl) > _plan_prio(best_plan):
+                                    best_v = v_eff
+                                    best_v_raw = float(ent["v_raw"])
+                                    best_plan = pl
+                                    best_res = ent["res"]
+
+                        if (best_v is not None) and (len(cover) >= min_cover) and (best_v <= float(cur_total) - early_margin):
+                            pass
+
+                        if safe_enabled and best_plan is not None and best_heur_entry is not None:
+                            safe_eps = safe_eps_early if int(stagn) < safe_eps_switch_stagnation else safe_eps_late
+                            if str(best_plan.get("src", "")) != "heuristic" and float(best_v_raw if best_v_raw is not None else 1e30) > float(best_heur_entry["v_raw"]) + float(safe_eps):
+                                best_plan = best_heur_entry["plan"]
+                                best_res = best_heur_entry["res"]
+                                best_v = float(best_heur_entry["v_eff"])
+                                best_v_raw = float(best_heur_entry["v_raw"])
+
+                        if best_plan is not None and best_res is None:
+                            if best_plan.get("kind") == "macro":
+                                b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(best_plan.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
+                                best_res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                            else:
+                                cand = best_plan.get("cand", None)
+                                v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
+                                best_res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
 
                         if best_plan is None or best_res is None:
                             pass

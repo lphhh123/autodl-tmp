@@ -110,7 +110,8 @@ class VolcArkProvider(LLMProvider):
             "OPTIMIZATION GOAL (EXPLORATION-AWARE):\n"
             "- DO NOT behave like a greedy sorter by d_total.\n"
             "- You are selecting a *diverse* set of candidates for a downstream verifier (lookahead).\n"
-            "- If any candidate has type in {\"macro\",\"direction\",\"virtual\"} or id>=900000, you MUST include at least ONE such candidate.\n"
+            "- MUST include >=1 macro candidate when present.\n"
+            "- If any candidate has type \"direction\" (or id in [900101,900102]), you MUST include exactly ONE direction candidate in your pick list.\n"
             "- Always include at least ONE non-swap candidate if available (relocate / therm_swap / kick / cluster_move / macro).\n"
             "- Prefer a mix: (1) one strong improvement (negative d_total), (2) one comm-focused (negative d_comm), (3) one therm-focused (negative d_therm), (4) one exploration candidate (kick/therm_swap/cluster_move/macro).\n"
             "- You may pick candidates with slightly worse d_total if they diversify type or target different objective dimensions.\n\n"
@@ -118,7 +119,7 @@ class VolcArkProvider(LLMProvider):
             "- Do NOT always pick the smallest IDs.\n"
             "- Do NOT always pick the same pattern (e.g., 0-1,1-2,2-3 swaps).\n"
             "- Use the provided candidate list only.\n"
-            "- Avoid choosing only candidates with the smallest d_total; include at least one macro/direction when present.\n"
+            "- Avoid choosing only candidates with the smallest d_total; include macro and direction constraints above when present.\n"
         )
 
         if repair_raw is None:
