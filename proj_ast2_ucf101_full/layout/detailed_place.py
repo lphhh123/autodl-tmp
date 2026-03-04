@@ -468,6 +468,29 @@ def run_detailed_place(
 
     mpvs_mem: List[Dict[str, Any]] = []  # success memory entries: {"plan":..., "expire":int, "score":float}
 
+    total_eval_budget = int(get_nested(cfg, "budget.total_eval_budget", 0) or 0)
+
+    def _budget_remaining() -> int:
+        if total_eval_budget <= 0:
+            return 10**18
+        try:
+            used = int(getattr(evaluator, "evaluator_calls", 0))
+        except Exception:
+            used = 0
+        return max(0, int(total_eval_budget) - int(used))
+
+    mpvs_stats = {
+        "enabled": bool(mpvs_enabled),
+        "llm_calls": 0,
+        "llm_ok": 0,
+        "macro_selected": 0,
+        "memory_selected": 0,
+        "plans_scored": 0,
+        "verifier_calls_spent": 0,
+        "steps_mpvs": 0,
+        "pareto_added": 0,
+    }
+
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
     llm_cfg_path = _cfg_get(planner_cfg, "llm_config_file", None)
@@ -877,6 +900,12 @@ def run_detailed_place(
                     return cand_list[0] if cand_list else None
 
                 def _build_small_pool(cur_assign: np.ndarray, cur_eval: Dict[str, Any]) -> List[Any]:
+                    rem = int(_budget_remaining())
+                    dp_cfg_use = dp_cfg_ver
+                    if rem < 2500:
+                        dp_cfg_use = _dp_cfg_with_pool_override({"raw_target_size": 10, "raw_target_max": 12, "final_size": 5, "diversity_enabled": False, "coverage_min_per_bucket": 0})
+                    elif rem < 8000:
+                        dp_cfg_use = _dp_cfg_with_pool_override({"raw_target_size": 14, "raw_target_max": 18, "final_size": 7, "diversity_enabled": False, "coverage_min_per_bucket": 0})
                     p = build_candidate_pool(
                         cur_assign,
                         cur_eval,
@@ -889,7 +918,7 @@ def run_detailed_place(
                         clusters,
                         cluster_to_region,
                         chip_tdp,
-                        dp_cfg_ver,
+                        dp_cfg_use,
                         rng,
                         debug_out_path=None,
                     )
@@ -1024,6 +1053,24 @@ def run_detailed_place(
                     n_steps_macro = int(_cfg_get(_cfg_get(mpvs_cfg, "macros", {}) or {}, "n_steps", 3))
                     refine_calls = int(_cfg_get(ver_cfg, "refine_sa_calls", 20))
                     greedy_topm = int(_cfg_get(ver_cfg, "greedy_topm", 1))
+
+                    rem = int(_budget_remaining())
+                    # budget-adaptive downgrade to avoid exhausting budget in a few MPVS steps
+                    if rem < 2500:
+                        horizon = min(horizon, 1)
+                        mc = 1
+                        refine_calls = 0
+                        greedy_topm = 1
+                        n_steps_macro = min(n_steps_macro, 1)
+                    elif rem < 8000:
+                        horizon = min(horizon, 2)
+                        mc = min(mc, 1)
+                        refine_calls = min(refine_calls, 5)
+                        n_steps_macro = min(n_steps_macro, 2)
+                    elif rem < 16000:
+                        horizon = min(horizon, 3)
+                        mc = min(mc, 2)
+                        refine_calls = min(refine_calls, 12)
 
                     best_total_all = float(eval0.get("total_scalar", 0.0))
                     best_assign_all = assign0.copy()
@@ -1198,6 +1245,7 @@ def run_detailed_place(
                     # MPVS (Macro Propose–Verify Search): proposer + verifier decides
                     # ==========================
                     if mpvs_enabled:
+                        calls0 = int(getattr(evaluator, "evaluator_calls", 0))
                         prev_total0 = float(eval_out.get("total_scalar", 0.0))
                         prev_comm0 = float(eval_out.get("comm_norm", 0.0))
                         prev_therm0 = float(eval_out.get("therm_norm", 0.0))
@@ -1246,16 +1294,40 @@ def run_detailed_place(
                                 llm_pick_ids = [int(pid) for pid in llm_pick_ids if int(pid) in cand_map and int(pid) not in forbidden_set]
                             except Exception:
                                 llm_pick_ids = []
+                            if usage_fp is not None:
+                                mpvs_stats["llm_calls"] += 1
+                                # llm_provider may expose last_usage
+                                usage = getattr(llm_provider, "last_usage", None)
+                                rec = {
+                                    "event": "mpvs_llm_call",
+                                    "step": int(step),
+                                    "k": int(max(1, k_llm)),
+                                    "picked": [int(x) for x in llm_pick_ids],
+                                    "ok": 1 if llm_pick_ids else 0,
+                                    "usage": usage,
+                                }
+                                usage_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                usage_fp.flush()
+                                if llm_pick_ids:
+                                    mpvs_stats["llm_ok"] += 1
                             for pid in llm_pick_ids:
                                 cc = cand_map.get(int(pid))
                                 if cc is not None:
                                     llm_cands.append(cc)
 
+                        stagn = int(step - last_best_step) if "last_best_step" in locals() else int(step)
                         macro_cfg = _cfg_get(mpvs_cfg, "macros", {}) or {}
                         macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
-                        macro_names = list(_cfg_get(macro_cfg, "names", ["therm", "comm", "escape", "cluster"]) or [])
+                        base_macros = list(_cfg_get(macro_cfg, "base", ["therm", "comm"]) or [])
+                        extra_macros = list(_cfg_get(macro_cfg, "extra_on_stagnation", ["escape", "cluster"]) or [])
+                        macro_stagn_th = int(_cfg_get(macro_cfg, "enable_extra_when_stagnation_ge", 25))
+                        macro_names = []
+                        if macro_enabled:
+                            macro_names.extend([str(x) for x in base_macros])
+                            if stagn >= macro_stagn_th:
+                                macro_names.extend([str(x) for x in extra_macros])
                         macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
-                        macro_names = macro_names[: max(0, min(len(macro_names), macro_max))] if macro_enabled else []
+                        macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
 
                         mem_plans = []
                         if mpvs_mem:
@@ -1264,8 +1336,15 @@ def run_detailed_place(
                         plans: List[Dict[str, Any]] = []
                         seen_plan = set()
 
+                        def _plan_key(pl: Dict[str, Any]) -> str:
+                            if pl.get("kind") == "atomic":
+                                return f"A:{int(pl.get('id',-1))}"
+                            if pl.get("kind") == "macro":
+                                return f"M:{str(pl.get('name',''))}"
+                            return stable_hash(pl)
+
                         def _add_plan(pl: Dict[str, Any]):
-                            k = stable_hash(pl)
+                            k = _plan_key(pl)
                             if k in seen_plan:
                                 return
                             seen_plan.add(k)
@@ -1289,9 +1368,28 @@ def run_detailed_place(
                         if disable_macro:
                             plans = [p for p in plans if p.get("kind") != "macro"]
 
+                        # normalize plans: atomic plan must carry cand
+                        norm_plans = []
+                        for pl in plans:
+                            if pl.get("kind") == "atomic":
+                                cid = int(pl.get("id", -1))
+                                if "cand" not in pl or pl.get("cand") is None:
+                                    pl["cand"] = cand_map.get(cid)
+                                if pl.get("cand") is None:
+                                    continue
+                            norm_plans.append(pl)
+                        plans = norm_plans
+
+                        ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
+                        max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
+                        early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
+                        if len(plans) > max_plans:
+                            plans = plans[:max_plans]
+
                         best_plan = None
                         best_v = None
                         best_res = None
+                        cur_total = float(eval_out.get("total_scalar", 0.0))
                         for pl in plans:
                             if disable_verifier:
                                 if pl.get("kind") == "macro":
@@ -1309,11 +1407,14 @@ def run_detailed_place(
                                 best_v = v
                                 best_plan = pl
                                 best_res = res
+                            mpvs_stats["plans_scored"] += 1
+                            if (best_v is not None) and (best_v <= float(cur_total) - early_margin):
+                                # strong improvement already found; stop scoring more plans to save budget
+                                break
 
                         if best_plan is None or best_res is None:
                             pass
                         else:
-                            cur_total = float(eval_out.get("total_scalar", 0.0))
                             vbest = float(best_res.get("verified_best_total", cur_total))
                             delta_v = vbest - cur_total
 
@@ -1354,6 +1455,24 @@ def run_detailed_place(
                                 if prev_total < best_total_seen:
                                     best_total_seen = prev_total
                                     last_best_step = int(step)
+                                # IMPORTANT: MPVS must contribute to pareto, otherwise run_layout_agent selection stays at init
+                                try:
+                                    added = pareto.add(
+                                        eval_out["comm_norm"],
+                                        eval_out["therm_norm"],
+                                        {
+                                            "assign": assign.copy(),
+                                            "total_scalar": float(eval_out["total_scalar"]),
+                                            "stage": stage_label,
+                                            "iter": int(step + 1),
+                                            "seed": int(seed_id),
+                                        },
+                                    )
+                                    if added:
+                                        mpvs_stats["pareto_added"] += 1
+                                except Exception:
+                                    added = False
+
                                 if mem_enabled and (delta_v < 0.0):
                                     mpvs_mem.append(
                                         {
@@ -1362,6 +1481,8 @@ def run_detailed_place(
                                             "score": float(vbest),
                                         }
                                     )
+                            else:
+                                added = False
 
                             T = max(sa_min_T, float(T) * float(alpha))
 
@@ -1371,6 +1492,13 @@ def run_detailed_place(
                             h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
                             m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
                             cache_saved_eval_calls_cum = h1
+                            calls1 = int(getattr(evaluator, "evaluator_calls", 0))
+                            mpvs_stats["verifier_calls_spent"] += max(0, calls1 - calls0)
+                            mpvs_stats["steps_mpvs"] += 1
+                            if best_plan.get("kind") == "macro" and accept:
+                                mpvs_stats["macro_selected"] += 1
+                            if best_plan.get("src") == "mem" and accept:
+                                mpvs_stats["memory_selected"] += 1
 
                             row = {
                                 "iter": int(step),
@@ -1381,7 +1509,7 @@ def run_detailed_place(
                                 "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
                                 "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
                                 "therm_norm": float(eval_out.get("therm_norm", prev_therm0)),
-                                "pareto_added": 0,
+                                "pareto_added": 1 if (accept and added) else 0,
                                 "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
                                 "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
                                 "seed_id": int(seed_id),
@@ -2202,6 +2330,8 @@ def run_detailed_place(
         "cache": {"hit_rate": float(eval_cache.hit_rate) if eval_cache is not None else None},
         "run_signature": _build_run_signature(dp_cfg),
     }
+    if mpvs_enabled:
+        policy_meta["mpvs"] = mpvs_stats
     (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
 
     return DetailedPlaceResult(assign=assign, pareto=pareto, trace_path=trace_path, policy_meta=policy_meta)
