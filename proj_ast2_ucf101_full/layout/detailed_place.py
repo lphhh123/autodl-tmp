@@ -1245,6 +1245,8 @@ def run_detailed_place(
                     candidate_ids = [c.id for c in candidate_pool]
                     # forbidden ids (shared by MPVS + legacy LLM pipeline)
                     forbidden_ids = list({pid for recent in forbidden_history[-3:] for pid in recent} | recent_failed_ids)
+                    mpvs_exploit_override = False
+                    forced_mpvs_policy = ""
 
                     # ==========================
                     # MPVS (Macro Propose–Verify Search): proposer + verifier decides
@@ -1275,6 +1277,7 @@ def run_detailed_place(
                         explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
                         explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
                         explore_stagn = int(_cfg_get(explore_cfg, "when_stagnation_ge", 12))
+                        warmup_steps = int(_cfg_get(explore_cfg, "warmup_steps", 30))
                         explore_max_consecutive = int(_cfg_get(explore_cfg, "max_consecutive_steps", 2))
                         explore_mode = str(_cfg_get(explore_cfg, "mode", "hybrid")).lower()
 
@@ -1284,34 +1287,399 @@ def run_detailed_place(
                         else:
                             if stagn >= explore_stagn:
                                 do_explore = True
-                            elif int(step) % max(1, explore_every) == 0:
+                            elif (int(step) >= warmup_steps) and (int(step) % max(1, explore_every) == 0):
                                 do_explore = True
 
                         if do_explore and mpvs_explore_left <= 0:
                             mpvs_explore_left = explore_max_consecutive
                         do_explore = do_explore and (mpvs_explore_left > 0)
 
-                        use_llm_now = (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0) and (int(step) % max(1, llm_every) == 0)
-                        use_llm_now = use_llm_now and do_explore
+                        mpvs_exploit_override = bool(mpvs_enabled and (not do_explore))
+                        if mpvs_exploit_override:
+                            # Exploit phase: disable legacy LLM/queue and clear any leftover queued actions
+                            action_queue = []
+                            forced_mpvs_policy = "heuristic"
+                        else:
+                            forced_mpvs_policy = ""
 
-                        forbidden_set = set(forbidden_ids)
-                        cand_sorted = sorted([c for c in candidate_pool if int(c.id) not in forbidden_set], key=lambda c: float(c.est.get("d_total", 0.0)))
-                        heur_cands = cand_sorted[: max(0, min(k_heur, len(cand_sorted)))]
+                        if do_explore:
+                            use_llm_now = (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0) and (int(step) % max(1, llm_every) == 0)
+                            use_llm_now = use_llm_now and do_explore
 
-                        if not do_explore:
-                            if heur_cands:
-                                best_c = heur_cands[0]
-                                act = copy.deepcopy(getattr(best_c, "action", {}) or {})
-                                act.setdefault("candidate_id", int(getattr(best_c, "id", -1)))
-                                act.setdefault("type", str(getattr(best_c, "type", "")))
+                            forbidden_set = set(forbidden_ids)
+                            cand_sorted = sorted([c for c in candidate_pool if int(c.id) not in forbidden_set], key=lambda c: float(c.est.get("d_total", 0.0)))
+                            heur_cands = cand_sorted[: max(0, min(k_heur, len(cand_sorted)))]
 
-                                trial = assign.copy()
-                                _apply_action_inplace_simple(trial, act)
-                                trial_eval = _evaluate_assign_cached(trial)
+                            llm_cands: List[Any] = []
+                            llm_pick_ids: List[int] = []
+                            llm_macro_plans: List[Dict[str, Any]] = []
+                            direction_bias: Optional[str] = None
+                            # Virtual candidates (LLM can pick these IDs to propose macro/direction)
+                            # Macro IDs
+                            V_MACRO = {
+                                900001: "therm",
+                                900002: "comm",
+                                900003: "escape",
+                                900004: "cluster",
+                            }
+                            # Direction IDs (optional, used as a "bias" tag in verifier scoring)
+                            V_DIR = {
+                                900101: "bias_comm",
+                                900102: "bias_therm",
+                            }
+                            virtual_candidates = []
+                            for vid, name in V_MACRO.items():
+                                virtual_candidates.append(
+                                    {
+                                        "id": int(vid),
+                                        "type": "macro",
+                                        "signature": f"V:macro:{name}",
+                                        "d_total": 0.0,
+                                        "d_comm": 0.0,
+                                        "d_therm": 0.0,
+                                        "op": "macro",
+                                        "op_args": {"macro_name": name},
+                                    }
+                                )
+                            for vid, name in V_DIR.items():
+                                virtual_candidates.append(
+                                    {
+                                        "id": int(vid),
+                                        "type": "direction",
+                                        "signature": f"V:dir:{name}",
+                                        "d_total": 0.0,
+                                        "d_comm": 0.0,
+                                        "d_therm": 0.0,
+                                        "op": "direction",
+                                        "op_args": {"direction": name},
+                                    }
+                                )
+                            if use_llm_now:
+                                ss = build_state_summary(
+                                    step=int(step),
+                                    T=float(T),
+                                    eval_out=eval_out,
+                                    traffic_sym=traffic_sym,
+                                    assign=assign,
+                                    site_to_region=site_to_region,
+                                    chip_tdp=chip_tdp,
+                                    clusters=clusters,
+                                    regions=regions,
+                                    candidates=candidate_pool,
+                                    candidate_ids=candidate_ids,
+                                    forbidden_ids=forbidden_ids,
+                                    k_actions=max(1, k_llm),
+                                    virtual_candidates=virtual_candidates,
+                                )
+                                try:
+                                    llm_pick_ids = llm_provider.propose_pick(ss, max(1, k_llm)) or []
+                                    llm_pick_ids = [int(pid) for pid in llm_pick_ids if int(pid) not in forbidden_set]
+                                except Exception:
+                                    llm_pick_ids = []
+                                if usage_fp is not None:
+                                    mpvs_stats["llm_calls"] += 1
+                                    # llm_provider may expose last_usage
+                                    usage = getattr(llm_provider, "last_usage", None)
+                                    rec = {
+                                        "event": "mpvs_llm_call",
+                                        "step": int(step),
+                                        "k": int(max(1, k_llm)),
+                                        "picked": [int(x) for x in llm_pick_ids],
+                                        "picked_virtual": [int(x) for x in llm_pick_ids if int(x) >= 900000],
+                                        "ok": 1 if llm_pick_ids else 0,
+                                        "usage": usage,
+                                    }
+                                    usage_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                    usage_fp.flush()
+                                    if llm_pick_ids:
+                                        mpvs_stats["llm_ok"] += 1
+                                for pid in llm_pick_ids:
+                                    pid = int(pid)
+                                    if pid in V_MACRO:
+                                        llm_macro_plans.append({"kind": "macro", "name": str(V_MACRO[pid]), "src": "llm_macro"})
+                                        continue
+                                    if pid in V_DIR:
+                                        direction_bias = str(V_DIR[pid])
+                                        continue
+                                    cc = cand_map.get(pid)
+                                    if cc is not None:
+                                        llm_cands.append(cc)
 
-                                cur_total = float(eval_out.get("total_scalar", 0.0))
-                                new_total = float(trial_eval.get("total_scalar", 0.0))
-                                delta_v = new_total - cur_total
+                            macro_cfg = _cfg_get(mpvs_cfg, "macros", {}) or {}
+                            macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
+                            base_macros = list(_cfg_get(macro_cfg, "base", ["therm", "comm"]) or [])
+                            extra_macros = list(_cfg_get(macro_cfg, "extra_on_stagnation", ["escape", "cluster"]) or [])
+
+                            base_stagn_th = int(_cfg_get(macro_cfg, "enable_base_when_stagnation_ge", 5))
+                            extra_stagn_th = int(_cfg_get(macro_cfg, "enable_extra_when_stagnation_ge", 25))
+
+                            macro_names = []
+                            if macro_enabled:
+                                if stagn >= base_stagn_th:
+                                    macro_names.extend([str(x) for x in base_macros])
+                                if stagn >= extra_stagn_th:
+                                    macro_names.extend([str(x) for x in extra_macros])
+
+                            macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
+                            macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
+
+                            # --- plan groups (with src tags) ---
+                            heur_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"heuristic"} for c in heur_cands]
+                            llm_atomic_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"llm_atomic"} for c in llm_cands]
+                            macro_plans = [{"kind":"macro","name":str(mn),"src":"macro"} for mn in macro_names]
+                            # llm_macro_plans already built above when use_llm_now
+                            if "llm_macro_plans" not in locals():
+                                llm_macro_plans = []
+
+                            # memory only enabled when stagnation large
+                            mem_plans = []
+                            mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
+                            if mem_enabled and mpvs_mem and (stagn >= mem_stagn_th):
+                                # top-1 memory plan; force src=mem
+                                mp = dict(mpvs_mem[0]["plan"])
+                                mp["src"] = "mem"
+                                mem_plans.append(mp)
+
+                            # --- quota config ---
+                            quota_cfg = _cfg_get(prop_cfg, "quota", {}) or {}
+                            q_heur = int(quota_cfg.get("heur", k_heur))
+                            q_llm_atomic = int(quota_cfg.get("llm_atomic", 2))
+                            q_llm_macro = int(quota_cfg.get("llm_macro", 2))
+                            q_macro = int(quota_cfg.get("macro", 2))
+                            q_mem = int(quota_cfg.get("mem", 1))
+
+                            heur_plans = heur_plans[:max(0, q_heur)]
+                            llm_atomic_plans = llm_atomic_plans[:max(0, q_llm_atomic)]
+                            llm_macro_plans = llm_macro_plans[:max(0, q_llm_macro)]
+                            macro_plans = macro_plans[:max(0, q_macro)]
+                            mem_plans = mem_plans[:max(0, q_mem)]
+
+                            # --- interleave plans: ensure each source appears at least once when available ---
+                            def _interleave(groups):
+                                out = []
+                                # first pass: one per group
+                                for g in groups:
+                                    if g:
+                                        out.append(g.pop(0))
+                                # round-robin
+                                while any(groups):
+                                    for g in groups:
+                                        if g:
+                                            out.append(g.pop(0))
+                                return out
+
+                            plans = _interleave([mem_plans, llm_macro_plans, macro_plans, llm_atomic_plans, heur_plans])
+                            # de-dup by stable key
+                            seen_plan = set()
+                            uniq = []
+                            for pl in plans:
+                                k = f"A:{int(pl.get('id',-1))}" if pl.get("kind")=="atomic" else f"M:{pl.get('src','')}:{pl.get('name','')}"
+                                if k in seen_plan:
+                                    continue
+                                seen_plan.add(k)
+                                uniq.append(pl)
+                            plans = uniq
+
+                            ab_cfg = _cfg_get(mpvs_cfg, "ablation", {}) or {}
+                            disable_verifier = bool(_cfg_get(ab_cfg, "no_verifier", False))
+                            disable_macro = bool(_cfg_get(ab_cfg, "no_macro", False))
+                            disable_llm = bool(_cfg_get(ab_cfg, "no_llm", False))
+                            if disable_llm:
+                                plans = [p for p in plans if not str(p.get("src", "")).startswith("llm")]
+                            if disable_macro:
+                                plans = [p for p in plans if p.get("kind") != "macro"]
+
+                            # normalize plans: atomic plan must carry cand
+                            norm_plans = []
+                            for pl in plans:
+                                if pl.get("kind") == "atomic":
+                                    cid = int(pl.get("id", -1))
+                                    if "cand" not in pl or pl.get("cand") is None:
+                                        pl["cand"] = cand_map.get(cid)
+                                    if pl.get("cand") is None:
+                                        continue
+                                norm_plans.append(pl)
+                            plans = norm_plans
+
+                            ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
+                            max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
+                            early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
+                            tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
+                            full_verify_topk = int(_cfg_get(ver_cfg, "full_verify_topk", 3))
+                            fast_macro_steps = int(_cfg_get(ver_cfg, "fast_macro_steps", 1))
+                            safe_enabled = bool(_cfg_get(ver_cfg, "safe_enabled", True))
+                            safe_eps_early = float(_cfg_get(ver_cfg, "safe_eps_early", 0.0005))
+                            safe_eps_late = float(_cfg_get(ver_cfg, "safe_eps_late", 0.002))
+                            safe_eps_switch_stagnation = int(_cfg_get(ver_cfg, "safe_eps_switch_stagnation", 15))
+                            full_verify_always_include_sources = set(
+                                str(x) for x in (_cfg_get(ver_cfg, "full_verify_always_include_sources", ["heuristic", "macro", "llm_macro", "mem"]) or [])
+                            )
+                            if len(plans) > max_plans:
+                                plans = plans[:max_plans]
+
+                            # early-stop gating: must cover enough sources first
+                            min_cover = int(_cfg_get(ver_cfg, "min_cover_groups", 3))
+                            cover = set()
+                            tie_stagn_th = int(_cfg_get(ver_cfg, "tie_explore_when_stagnation_ge", 10))
+
+                            def _src_prio(s: str) -> int:
+                                # early: exploit (prefer heuristic), late: explore (prefer mem/llm_macro/macro)
+                                if stagn < tie_stagn_th:
+                                    if stagn < 10:
+                                        return {"heuristic": 5, "llm_atomic": 4, "macro": 2, "llm_macro": 1, "mem": 0}.get(str(s), 0)
+                                    return {"heuristic": 5, "llm_atomic": 4, "macro": 3, "llm_macro": 2, "mem": 1}.get(str(s), 0)
+                                return {"mem": 5, "llm_macro": 4, "macro": 3, "llm_atomic": 2, "heuristic": 1}.get(str(s), 0)
+
+                            def _plan_prio(pl: Dict[str, Any]) -> float:
+                                p = float(_src_prio(pl.get("src", "")))
+                                if direction_bias and pl.get("src") in {"llm_atomic", "llm_macro"}:
+                                    p += 0.25
+                                return p
+
+                            bias_beta = float(_cfg_get(ver_cfg, "direction_bias_beta", 0.02))
+                            best_plan = None
+                            best_v = None
+                            best_res = None
+                            best_v_raw = None
+                            cur_total = float(eval_out.get("total_scalar", 0.0))
+                            per_plan: List[Dict[str, Any]] = []
+
+                            def _cheap_score(pl: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
+                                try:
+                                    if pl.get("kind") == "macro":
+                                        return float(eval_out.get("total_scalar", 0.0)), {"mode": "macro_neutral"}
+                                    cand = pl.get("cand", None)
+                                    return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
+                                except Exception:
+                                    return 1e30, {"mode": "error"}
+
+                            scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+                            for pl in plans:
+                                cheap, cmeta = _cheap_score(pl)
+                                scored.append((float(cheap), pl, cmeta))
+
+                            sorted_scored = sorted(scored, key=lambda x: float(x[0]))
+                            full_verify_list: List[Dict[str, Any]] = []
+                            full_verify_keys: set[str] = set()
+
+                            def _plan_key(pl: Dict[str, Any]) -> str:
+                                return f"A:{int(pl.get('id', -1))}" if pl.get("kind") == "atomic" else f"M:{pl.get('src', '')}:{pl.get('name', '')}"
+
+                            for _, pl, _ in sorted_scored[: max(0, full_verify_topk)]:
+                                pk = _plan_key(pl)
+                                if pk not in full_verify_keys:
+                                    full_verify_list.append(pl)
+                                    full_verify_keys.add(pk)
+
+                            if full_verify_always_include_sources:
+                                for src in full_verify_always_include_sources:
+                                    src_scored = [it for it in sorted_scored if str(it[1].get("src", "")) == src]
+                                    if not src_scored:
+                                        continue
+                                    _, pl, _ = src_scored[0]
+                                    pk = _plan_key(pl)
+                                    if pk not in full_verify_keys:
+                                        full_verify_list.append(pl)
+                                        full_verify_keys.add(pk)
+
+                            for cheap, pl, cmeta in sorted_scored:
+                                pk = _plan_key(pl)
+                                do_full_verify = disable_verifier or (pk in full_verify_keys)
+                                if do_full_verify:
+                                    if disable_verifier:
+                                        if pl.get("kind") == "macro":
+                                            b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
+                                            res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                                        else:
+                                            cand = pl.get("cand", None)
+                                            v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
+                                            res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
+                                    else:
+                                        res = _verify_plan(pl, assign, eval_out)
+                                    v_raw = float(res.get("verified_best_total", 1e30))
+                                    v_eff = v_raw
+                                    try:
+                                        if direction_bias == "bias_comm":
+                                            best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
+                                            cur_comm = float(eval_out.get("comm_norm", 0.0))
+                                            improve = max(0.0, cur_comm - best_comm)
+                                            v_eff = v_raw - bias_beta * improve
+                                        elif direction_bias == "bias_therm":
+                                            best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
+                                            cur_th = float(eval_out.get("therm_norm", 0.0))
+                                            improve = max(0.0, cur_th - best_th)
+                                            v_eff = v_raw - bias_beta * improve
+                                    except Exception:
+                                        v_eff = v_raw
+                                else:
+                                    res = None
+                                    v_raw = float(cheap)
+                                    v_eff = float(cheap)
+
+                                per_plan.append(
+                                    {
+                                        "plan": pl,
+                                        "res": res,
+                                        "v_raw": float(v_raw),
+                                        "v_eff": float(v_eff),
+                                        "cheap_meta": cmeta,
+                                        "full_verified": bool(do_full_verify),
+                                    }
+                                )
+                                mpvs_stats["plans_scored"] += 1
+                                cover.add(str(pl.get("src", "")))
+                                if pl.get("src") == "macro":
+                                    mpvs_stats["macro_scored"] += 1
+                                if pl.get("src") == "mem":
+                                    mpvs_stats["mem_scored"] += 1
+
+                            best_heur_entry = None
+                            for ent in per_plan:
+                                if str(ent["plan"].get("src", "")) != "heuristic":
+                                    continue
+                                if best_heur_entry is None or float(ent["v_raw"]) < float(best_heur_entry["v_raw"]) - 1e-12:
+                                    best_heur_entry = ent
+
+                            for ent in per_plan:
+                                pl = ent["plan"]
+                                v_eff = float(ent["v_eff"])
+                                if best_v is None or v_eff < best_v - 1e-12:
+                                    best_v = v_eff
+                                    best_v_raw = float(ent["v_raw"])
+                                    best_plan = pl
+                                    best_res = ent["res"]
+                                elif abs(v_eff - float(best_v)) <= tie_eps and best_plan is not None:
+                                    if _plan_prio(pl) > _plan_prio(best_plan):
+                                        best_v = v_eff
+                                        best_v_raw = float(ent["v_raw"])
+                                        best_plan = pl
+                                        best_res = ent["res"]
+
+                            if (best_v is not None) and (len(cover) >= min_cover) and (best_v <= float(cur_total) - early_margin):
+                                pass
+
+                            if safe_enabled and best_plan is not None and best_heur_entry is not None:
+                                safe_eps = safe_eps_early if int(stagn) < safe_eps_switch_stagnation else safe_eps_late
+                                if str(best_plan.get("src", "")) != "heuristic" and float(best_v_raw if best_v_raw is not None else 1e30) > float(best_heur_entry["v_raw"]) + float(safe_eps):
+                                    best_plan = best_heur_entry["plan"]
+                                    best_res = best_heur_entry["res"]
+                                    best_v = float(best_heur_entry["v_eff"])
+                                    best_v_raw = float(best_heur_entry["v_raw"])
+
+                            if best_plan is not None and best_res is None:
+                                if best_plan.get("kind") == "macro":
+                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(best_plan.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
+                                    best_res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                                else:
+                                    cand = best_plan.get("cand", None)
+                                    v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
+                                    best_res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
+
+                            if best_plan is None or best_res is None:
+                                pass
+                            else:
+                                vbest = float(best_res.get("verified_best_total", cur_total))
+                                delta_v = vbest - cur_total
 
                                 acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
                                 use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
@@ -1325,10 +1693,24 @@ def run_detailed_place(
                                     else:
                                         accept = (py_rng.random() < math.exp(-delta_v / Tacc))
 
-                                added = False
+                                chosen_actions = best_res.get("actions", []) or []
+                                op_args_obj = {
+                                    "op": "macro" if best_plan.get("kind") == "macro" else str((chosen_actions[0] if chosen_actions else {}).get("op","none")),
+                                    "mpvs_kind": str(best_plan.get("kind")),
+                                    "macro_name": str(best_plan.get("name","")) if best_plan.get("kind")=="macro" else "",
+                                    "sub_ops": [str(a.get("op","")) for a in chosen_actions[:6]],
+                                    "n_sub": int(len(chosen_actions)),
+                                    "verified_best_total": float(vbest),
+                                    "src": str(best_plan.get("src","heuristic")),
+                                }
+                                if best_plan.get("kind") == "macro":
+                                    op_for_trace = "macro"
+                                else:
+                                    op_for_trace = str((chosen_actions[0] if chosen_actions else {}).get("op", "none"))
+
                                 if accept:
-                                    assign = trial
-                                    eval_out = dict(trial_eval)
+                                    assign = np.asarray(best_res.get("best_assign", assign), dtype=int).copy()
+                                    eval_out = dict(best_res.get("best_eval", eval_out))
                                     prev_total = float(eval_out.get("total_scalar", prev_total))
                                     prev_comm = float(eval_out.get("comm_norm", prev_comm))
                                     prev_therm = float(eval_out.get("therm_norm", prev_therm))
@@ -1336,6 +1718,7 @@ def run_detailed_place(
                                     if prev_total < best_total_seen:
                                         best_total_seen = prev_total
                                         last_best_step = int(step)
+                                    # IMPORTANT: MPVS must contribute to pareto, otherwise run_layout_agent selection stays at init
                                     try:
                                         added = pareto.add(
                                             eval_out["comm_norm"],
@@ -1348,22 +1731,54 @@ def run_detailed_place(
                                                 "seed": int(seed_id),
                                             },
                                         )
+                                        if added:
+                                            mpvs_stats["pareto_added"] += 1
                                     except Exception:
                                         added = False
+
+                                    if mem_enabled and (delta_v < 0.0):
+                                        mpvs_mem.append(
+                                            {
+                                                "plan": {
+                                                    "kind": best_plan.get("kind"),
+                                                    "name": best_plan.get("name",""),
+                                                    "id": int(best_plan.get("id",-1)),
+                                                    "src": "mem",
+                                                },
+                                                "expire": int(step + mem_ttl),
+                                                "score": float(vbest),
+                                            }
+                                        )
+                                else:
+                                    added = False
 
                                 T = max(sa_min_T, float(T) * float(alpha))
 
                                 assign_sig = signature_for_assign(assign)
+                                op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
                                 wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
                                 h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
                                 m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
                                 cache_saved_eval_calls_cum = h1
-                                op_args_obj = {"src": "heuristic_fast", "candidate_id": int(act.get("candidate_id", -1))}
+                                calls1 = int(getattr(evaluator, "evaluator_calls", 0))
+                                mpvs_stats["verifier_calls_spent"] += max(0, calls1 - calls0)
+                                mpvs_stats["steps_mpvs"] += 1
+                                if accept:
+                                    src_sel = str(best_plan.get("src", ""))
+                                    if src_sel == "llm_macro":
+                                        mpvs_stats["llm_macro_selected"] += 1
+                                    if src_sel == "llm_atomic":
+                                        mpvs_stats["llm_selected"] += 1
+                                    if src_sel == "macro":
+                                        mpvs_stats["macro_selected"] += 1
+                                    if src_sel == "mem":
+                                        mpvs_stats["memory_selected"] += 1
+
                                 row = {
                                     "iter": int(step),
                                     "stage": stage_label,
-                                    "op": str(act.get("op", "none")),
-                                    "op_args_json": json.dumps(op_args_obj, ensure_ascii=False),
+                                    "op": op_for_trace,
+                                    "op_args_json": op_args_json,
                                     "accepted": 1 if accept else 0,
                                     "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
                                     "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
@@ -1383,8 +1798,8 @@ def run_detailed_place(
                                     "tabu_hit": 0,
                                     "inverse_hit": 0,
                                     "cooldown_hit": 0,
-                                    "policy": "mpvs_fast",
-                                    "move": str(act.get("type", "")),
+                                    "policy": "mpvs",
+                                    "move": str(best_plan.get("kind")),
                                     "lookahead_k": int(lookahead_k if lookahead_enabled else 0),
                                     "cache_hit": 1 if (mpvs_cache is not None and h1 > mpvs_h0) else 0,
                                     "cache_key": "",
@@ -1393,7 +1808,7 @@ def run_detailed_place(
                                     "cache_hit_cum": h1,
                                     "cache_miss_cum": m1,
                                     "cache_saved_eval_calls_cum": cache_saved_eval_calls_cum,
-                                    "llm_used": 0,
+                                    "llm_used": 1 if use_llm_now and (not disable_llm) else 0,
                                     "llm_fail_count": int(llm_fail_count),
                                     "fallback_reason": "",
                                     "wall_time_ms_cum": wall_time_ms,
@@ -1401,545 +1816,30 @@ def run_detailed_place(
                                     "sim_eval_calls_cum": int(eval_calls_cum),
                                     "lookahead_enabled": 0,
                                     "lookahead_r": 0,
-                                    "notes": json.dumps({"mpvs": {"fast_exploit": 1}}, ensure_ascii=False),
+                                    "notes": json.dumps(
+                                        {
+                                            "mpvs": {
+                                                "n_plans": int(len(plans)),
+                                                "best_kind": str(best_plan.get("kind")),
+                                                "macro": str(best_plan.get("name","")),
+                                                "verified_best_total": float(vbest),
+                                                "delta_v": float(delta_v),
+                                                "horizon": int(_cfg_get(ver_cfg,"horizon",3)),
+                                                "mc": int(_cfg_get(ver_cfg,"mc",2)),
+                                                "refine_sa_calls": int(_cfg_get(ver_cfg,"refine_sa_calls",20)),
+                                                "use_llm_now": int(use_llm_now),
+                                                "llm_pick_ids": llm_pick_ids[:8],
+                                            }
+                                        },
+                                        ensure_ascii=False,
+                                    ),
                                 }
                                 writer.writerow(row)
-                            if do_explore:
-                                mpvs_explore_left -= 1
-                            else:
-                                mpvs_explore_left = 0
-                            continue
-
-                        llm_cands: List[Any] = []
-                        llm_pick_ids: List[int] = []
-                        llm_macro_plans: List[Dict[str, Any]] = []
-                        direction_bias: Optional[str] = None
-                        # Virtual candidates (LLM can pick these IDs to propose macro/direction)
-                        # Macro IDs
-                        V_MACRO = {
-                            900001: "therm",
-                            900002: "comm",
-                            900003: "escape",
-                            900004: "cluster",
-                        }
-                        # Direction IDs (optional, used as a "bias" tag in verifier scoring)
-                        V_DIR = {
-                            900101: "bias_comm",
-                            900102: "bias_therm",
-                        }
-                        virtual_candidates = []
-                        for vid, name in V_MACRO.items():
-                            virtual_candidates.append(
-                                {
-                                    "id": int(vid),
-                                    "type": "macro",
-                                    "signature": f"V:macro:{name}",
-                                    "d_total": 0.0,
-                                    "d_comm": 0.0,
-                                    "d_therm": 0.0,
-                                    "op": "macro",
-                                    "op_args": {"macro_name": name},
-                                }
-                            )
-                        for vid, name in V_DIR.items():
-                            virtual_candidates.append(
-                                {
-                                    "id": int(vid),
-                                    "type": "direction",
-                                    "signature": f"V:dir:{name}",
-                                    "d_total": 0.0,
-                                    "d_comm": 0.0,
-                                    "d_therm": 0.0,
-                                    "op": "direction",
-                                    "op_args": {"direction": name},
-                                }
-                            )
-                        if use_llm_now:
-                            ss = build_state_summary(
-                                step=int(step),
-                                T=float(T),
-                                eval_out=eval_out,
-                                traffic_sym=traffic_sym,
-                                assign=assign,
-                                site_to_region=site_to_region,
-                                chip_tdp=chip_tdp,
-                                clusters=clusters,
-                                regions=regions,
-                                candidates=candidate_pool,
-                                candidate_ids=candidate_ids,
-                                forbidden_ids=forbidden_ids,
-                                k_actions=max(1, k_llm),
-                                virtual_candidates=virtual_candidates,
-                            )
-                            try:
-                                llm_pick_ids = llm_provider.propose_pick(ss, max(1, k_llm)) or []
-                                llm_pick_ids = [int(pid) for pid in llm_pick_ids if int(pid) not in forbidden_set]
-                            except Exception:
-                                llm_pick_ids = []
-                            if usage_fp is not None:
-                                mpvs_stats["llm_calls"] += 1
-                                # llm_provider may expose last_usage
-                                usage = getattr(llm_provider, "last_usage", None)
-                                rec = {
-                                    "event": "mpvs_llm_call",
-                                    "step": int(step),
-                                    "k": int(max(1, k_llm)),
-                                    "picked": [int(x) for x in llm_pick_ids],
-                                    "picked_virtual": [int(x) for x in llm_pick_ids if int(x) >= 900000],
-                                    "ok": 1 if llm_pick_ids else 0,
-                                    "usage": usage,
-                                }
-                                usage_fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                                usage_fp.flush()
-                                if llm_pick_ids:
-                                    mpvs_stats["llm_ok"] += 1
-                            for pid in llm_pick_ids:
-                                pid = int(pid)
-                                if pid in V_MACRO:
-                                    llm_macro_plans.append({"kind": "macro", "name": str(V_MACRO[pid]), "src": "llm_macro"})
-                                    continue
-                                if pid in V_DIR:
-                                    direction_bias = str(V_DIR[pid])
-                                    continue
-                                cc = cand_map.get(pid)
-                                if cc is not None:
-                                    llm_cands.append(cc)
-
-                        macro_cfg = _cfg_get(mpvs_cfg, "macros", {}) or {}
-                        macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
-                        base_macros = list(_cfg_get(macro_cfg, "base", ["therm", "comm"]) or [])
-                        extra_macros = list(_cfg_get(macro_cfg, "extra_on_stagnation", ["escape", "cluster"]) or [])
-
-                        base_stagn_th = int(_cfg_get(macro_cfg, "enable_base_when_stagnation_ge", 5))
-                        extra_stagn_th = int(_cfg_get(macro_cfg, "enable_extra_when_stagnation_ge", 25))
-
-                        macro_names = []
-                        if macro_enabled:
-                            if stagn >= base_stagn_th:
-                                macro_names.extend([str(x) for x in base_macros])
-                            if stagn >= extra_stagn_th:
-                                macro_names.extend([str(x) for x in extra_macros])
-
-                        macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
-                        macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
-
-                        # --- plan groups (with src tags) ---
-                        heur_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"heuristic"} for c in heur_cands]
-                        llm_atomic_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"llm_atomic"} for c in llm_cands]
-                        macro_plans = [{"kind":"macro","name":str(mn),"src":"macro"} for mn in macro_names]
-                        # llm_macro_plans already built above when use_llm_now
-                        if "llm_macro_plans" not in locals():
-                            llm_macro_plans = []
-
-                        # memory only enabled when stagnation large
-                        mem_plans = []
-                        mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
-                        if mem_enabled and mpvs_mem and (stagn >= mem_stagn_th):
-                            # top-1 memory plan; force src=mem
-                            mp = dict(mpvs_mem[0]["plan"])
-                            mp["src"] = "mem"
-                            mem_plans.append(mp)
-
-                        # --- quota config ---
-                        quota_cfg = _cfg_get(prop_cfg, "quota", {}) or {}
-                        q_heur = int(quota_cfg.get("heur", k_heur))
-                        q_llm_atomic = int(quota_cfg.get("llm_atomic", 2))
-                        q_llm_macro = int(quota_cfg.get("llm_macro", 2))
-                        q_macro = int(quota_cfg.get("macro", 2))
-                        q_mem = int(quota_cfg.get("mem", 1))
-
-                        heur_plans = heur_plans[:max(0, q_heur)]
-                        llm_atomic_plans = llm_atomic_plans[:max(0, q_llm_atomic)]
-                        llm_macro_plans = llm_macro_plans[:max(0, q_llm_macro)]
-                        macro_plans = macro_plans[:max(0, q_macro)]
-                        mem_plans = mem_plans[:max(0, q_mem)]
-
-                        # --- interleave plans: ensure each source appears at least once when available ---
-                        def _interleave(groups):
-                            out = []
-                            # first pass: one per group
-                            for g in groups:
-                                if g:
-                                    out.append(g.pop(0))
-                            # round-robin
-                            while any(groups):
-                                for g in groups:
-                                    if g:
-                                        out.append(g.pop(0))
-                            return out
-
-                        plans = _interleave([mem_plans, llm_macro_plans, macro_plans, llm_atomic_plans, heur_plans])
-                        # de-dup by stable key
-                        seen_plan = set()
-                        uniq = []
-                        for pl in plans:
-                            k = f"A:{int(pl.get('id',-1))}" if pl.get("kind")=="atomic" else f"M:{pl.get('src','')}:{pl.get('name','')}"
-                            if k in seen_plan:
-                                continue
-                            seen_plan.add(k)
-                            uniq.append(pl)
-                        plans = uniq
-
-                        ab_cfg = _cfg_get(mpvs_cfg, "ablation", {}) or {}
-                        disable_verifier = bool(_cfg_get(ab_cfg, "no_verifier", False))
-                        disable_macro = bool(_cfg_get(ab_cfg, "no_macro", False))
-                        disable_llm = bool(_cfg_get(ab_cfg, "no_llm", False))
-                        if disable_llm:
-                            plans = [p for p in plans if not str(p.get("src", "")).startswith("llm")]
-                        if disable_macro:
-                            plans = [p for p in plans if p.get("kind") != "macro"]
-
-                        # normalize plans: atomic plan must carry cand
-                        norm_plans = []
-                        for pl in plans:
-                            if pl.get("kind") == "atomic":
-                                cid = int(pl.get("id", -1))
-                                if "cand" not in pl or pl.get("cand") is None:
-                                    pl["cand"] = cand_map.get(cid)
-                                if pl.get("cand") is None:
-                                    continue
-                            norm_plans.append(pl)
-                        plans = norm_plans
-
-                        ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
-                        max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
-                        early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
-                        tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
-                        full_verify_topk = int(_cfg_get(ver_cfg, "full_verify_topk", 3))
-                        fast_macro_steps = int(_cfg_get(ver_cfg, "fast_macro_steps", 1))
-                        safe_enabled = bool(_cfg_get(ver_cfg, "safe_enabled", True))
-                        safe_eps_early = float(_cfg_get(ver_cfg, "safe_eps_early", 0.0005))
-                        safe_eps_late = float(_cfg_get(ver_cfg, "safe_eps_late", 0.002))
-                        safe_eps_switch_stagnation = int(_cfg_get(ver_cfg, "safe_eps_switch_stagnation", 15))
-                        full_verify_always_include_sources = set(
-                            str(x) for x in (_cfg_get(ver_cfg, "full_verify_always_include_sources", ["heuristic", "macro", "llm_macro", "mem"]) or [])
-                        )
-                        if len(plans) > max_plans:
-                            plans = plans[:max_plans]
-
-                        # early-stop gating: must cover enough sources first
-                        min_cover = int(_cfg_get(ver_cfg, "min_cover_groups", 3))
-                        cover = set()
-                        tie_stagn_th = int(_cfg_get(ver_cfg, "tie_explore_when_stagnation_ge", 10))
-
-                        def _src_prio(s: str) -> int:
-                            # early: exploit (prefer heuristic), late: explore (prefer mem/llm_macro/macro)
-                            if stagn < tie_stagn_th:
-                                if stagn < 10:
-                                    return {"heuristic": 5, "llm_atomic": 4, "macro": 2, "llm_macro": 1, "mem": 0}.get(str(s), 0)
-                                return {"heuristic": 5, "llm_atomic": 4, "macro": 3, "llm_macro": 2, "mem": 1}.get(str(s), 0)
-                            return {"mem": 5, "llm_macro": 4, "macro": 3, "llm_atomic": 2, "heuristic": 1}.get(str(s), 0)
-
-                        def _plan_prio(pl: Dict[str, Any]) -> float:
-                            p = float(_src_prio(pl.get("src", "")))
-                            if direction_bias and pl.get("src") in {"llm_atomic", "llm_macro"}:
-                                p += 0.25
-                            return p
-
-                        bias_beta = float(_cfg_get(ver_cfg, "direction_bias_beta", 0.02))
-                        best_plan = None
-                        best_v = None
-                        best_res = None
-                        best_v_raw = None
-                        cur_total = float(eval_out.get("total_scalar", 0.0))
-                        per_plan: List[Dict[str, Any]] = []
-
-                        def _cheap_score(pl: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
-                            try:
-                                if pl.get("kind") == "macro":
-                                    return float(eval_out.get("total_scalar", 0.0)), {"mode": "macro_neutral"}
-                                cand = pl.get("cand", None)
-                                return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
-                            except Exception:
-                                return 1e30, {"mode": "error"}
-
-                        scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
-                        for pl in plans:
-                            cheap, cmeta = _cheap_score(pl)
-                            scored.append((float(cheap), pl, cmeta))
-
-                        sorted_scored = sorted(scored, key=lambda x: float(x[0]))
-                        full_verify_list: List[Dict[str, Any]] = []
-                        full_verify_keys: set[str] = set()
-
-                        def _plan_key(pl: Dict[str, Any]) -> str:
-                            return f"A:{int(pl.get('id', -1))}" if pl.get("kind") == "atomic" else f"M:{pl.get('src', '')}:{pl.get('name', '')}"
-
-                        for _, pl, _ in sorted_scored[: max(0, full_verify_topk)]:
-                            pk = _plan_key(pl)
-                            if pk not in full_verify_keys:
-                                full_verify_list.append(pl)
-                                full_verify_keys.add(pk)
-
-                        if full_verify_always_include_sources:
-                            for src in full_verify_always_include_sources:
-                                src_scored = [it for it in sorted_scored if str(it[1].get("src", "")) == src]
-                                if not src_scored:
-                                    continue
-                                _, pl, _ = src_scored[0]
-                                pk = _plan_key(pl)
-                                if pk not in full_verify_keys:
-                                    full_verify_list.append(pl)
-                                    full_verify_keys.add(pk)
-
-                        for cheap, pl, cmeta in sorted_scored:
-                            pk = _plan_key(pl)
-                            do_full_verify = disable_verifier or (pk in full_verify_keys)
-                            if do_full_verify:
-                                if disable_verifier:
-                                    if pl.get("kind") == "macro":
-                                        b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
-                                        res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
-                                    else:
-                                        cand = pl.get("cand", None)
-                                        v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
-                                        res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
+                                if do_explore:
+                                    mpvs_explore_left -= 1
                                 else:
-                                    res = _verify_plan(pl, assign, eval_out)
-                                v_raw = float(res.get("verified_best_total", 1e30))
-                                v_eff = v_raw
-                                try:
-                                    if direction_bias == "bias_comm":
-                                        best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
-                                        cur_comm = float(eval_out.get("comm_norm", 0.0))
-                                        improve = max(0.0, cur_comm - best_comm)
-                                        v_eff = v_raw - bias_beta * improve
-                                    elif direction_bias == "bias_therm":
-                                        best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
-                                        cur_th = float(eval_out.get("therm_norm", 0.0))
-                                        improve = max(0.0, cur_th - best_th)
-                                        v_eff = v_raw - bias_beta * improve
-                                except Exception:
-                                    v_eff = v_raw
-                            else:
-                                res = None
-                                v_raw = float(cheap)
-                                v_eff = float(cheap)
-
-                            per_plan.append(
-                                {
-                                    "plan": pl,
-                                    "res": res,
-                                    "v_raw": float(v_raw),
-                                    "v_eff": float(v_eff),
-                                    "cheap_meta": cmeta,
-                                    "full_verified": bool(do_full_verify),
-                                }
-                            )
-                            mpvs_stats["plans_scored"] += 1
-                            cover.add(str(pl.get("src", "")))
-                            if pl.get("src") == "macro":
-                                mpvs_stats["macro_scored"] += 1
-                            if pl.get("src") == "mem":
-                                mpvs_stats["mem_scored"] += 1
-
-                        best_heur_entry = None
-                        for ent in per_plan:
-                            if str(ent["plan"].get("src", "")) != "heuristic":
+                                    mpvs_explore_left = 0
                                 continue
-                            if best_heur_entry is None or float(ent["v_raw"]) < float(best_heur_entry["v_raw"]) - 1e-12:
-                                best_heur_entry = ent
-
-                        for ent in per_plan:
-                            pl = ent["plan"]
-                            v_eff = float(ent["v_eff"])
-                            if best_v is None or v_eff < best_v - 1e-12:
-                                best_v = v_eff
-                                best_v_raw = float(ent["v_raw"])
-                                best_plan = pl
-                                best_res = ent["res"]
-                            elif abs(v_eff - float(best_v)) <= tie_eps and best_plan is not None:
-                                if _plan_prio(pl) > _plan_prio(best_plan):
-                                    best_v = v_eff
-                                    best_v_raw = float(ent["v_raw"])
-                                    best_plan = pl
-                                    best_res = ent["res"]
-
-                        if (best_v is not None) and (len(cover) >= min_cover) and (best_v <= float(cur_total) - early_margin):
-                            pass
-
-                        if safe_enabled and best_plan is not None and best_heur_entry is not None:
-                            safe_eps = safe_eps_early if int(stagn) < safe_eps_switch_stagnation else safe_eps_late
-                            if str(best_plan.get("src", "")) != "heuristic" and float(best_v_raw if best_v_raw is not None else 1e30) > float(best_heur_entry["v_raw"]) + float(safe_eps):
-                                best_plan = best_heur_entry["plan"]
-                                best_res = best_heur_entry["res"]
-                                best_v = float(best_heur_entry["v_eff"])
-                                best_v_raw = float(best_heur_entry["v_raw"])
-
-                        if best_plan is not None and best_res is None:
-                            if best_plan.get("kind") == "macro":
-                                b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(best_plan.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
-                                best_res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
-                            else:
-                                cand = best_plan.get("cand", None)
-                                v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
-                                best_res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
-
-                        if best_plan is None or best_res is None:
-                            pass
-                        else:
-                            vbest = float(best_res.get("verified_best_total", cur_total))
-                            delta_v = vbest - cur_total
-
-                            acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
-                            use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
-                            enabled_acc = bool(_cfg_get(acc_cfg, "enabled", True))
-                            Tacc = max(sa_min_T, float(T) if use_temp else 1.0)
-
-                            accept = True
-                            if enabled_acc:
-                                if delta_v <= 0.0:
-                                    accept = True
-                                else:
-                                    accept = (py_rng.random() < math.exp(-delta_v / Tacc))
-
-                            chosen_actions = best_res.get("actions", []) or []
-                            op_args_obj = {
-                                "op": "macro" if best_plan.get("kind") == "macro" else str((chosen_actions[0] if chosen_actions else {}).get("op","none")),
-                                "mpvs_kind": str(best_plan.get("kind")),
-                                "macro_name": str(best_plan.get("name","")) if best_plan.get("kind")=="macro" else "",
-                                "sub_ops": [str(a.get("op","")) for a in chosen_actions[:6]],
-                                "n_sub": int(len(chosen_actions)),
-                                "verified_best_total": float(vbest),
-                                "src": str(best_plan.get("src","heuristic")),
-                            }
-                            if best_plan.get("kind") == "macro":
-                                op_for_trace = "macro"
-                            else:
-                                op_for_trace = str((chosen_actions[0] if chosen_actions else {}).get("op", "none"))
-
-                            if accept:
-                                assign = np.asarray(best_res.get("best_assign", assign), dtype=int).copy()
-                                eval_out = dict(best_res.get("best_eval", eval_out))
-                                prev_total = float(eval_out.get("total_scalar", prev_total))
-                                prev_comm = float(eval_out.get("comm_norm", prev_comm))
-                                prev_therm = float(eval_out.get("therm_norm", prev_therm))
-                                accepted_steps += 1
-                                if prev_total < best_total_seen:
-                                    best_total_seen = prev_total
-                                    last_best_step = int(step)
-                                # IMPORTANT: MPVS must contribute to pareto, otherwise run_layout_agent selection stays at init
-                                try:
-                                    added = pareto.add(
-                                        eval_out["comm_norm"],
-                                        eval_out["therm_norm"],
-                                        {
-                                            "assign": assign.copy(),
-                                            "total_scalar": float(eval_out["total_scalar"]),
-                                            "stage": stage_label,
-                                            "iter": int(step + 1),
-                                            "seed": int(seed_id),
-                                        },
-                                    )
-                                    if added:
-                                        mpvs_stats["pareto_added"] += 1
-                                except Exception:
-                                    added = False
-
-                                if mem_enabled and (delta_v < 0.0):
-                                    mpvs_mem.append(
-                                        {
-                                            "plan": {
-                                                "kind": best_plan.get("kind"),
-                                                "name": best_plan.get("name",""),
-                                                "id": int(best_plan.get("id",-1)),
-                                                "src": "mem",
-                                            },
-                                            "expire": int(step + mem_ttl),
-                                            "score": float(vbest),
-                                        }
-                                    )
-                            else:
-                                added = False
-
-                            T = max(sa_min_T, float(T) * float(alpha))
-
-                            assign_sig = signature_for_assign(assign)
-                            op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
-                            wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
-                            h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
-                            m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
-                            cache_saved_eval_calls_cum = h1
-                            calls1 = int(getattr(evaluator, "evaluator_calls", 0))
-                            mpvs_stats["verifier_calls_spent"] += max(0, calls1 - calls0)
-                            mpvs_stats["steps_mpvs"] += 1
-                            if accept:
-                                src_sel = str(best_plan.get("src", ""))
-                                if src_sel == "llm_macro":
-                                    mpvs_stats["llm_macro_selected"] += 1
-                                if src_sel == "llm_atomic":
-                                    mpvs_stats["llm_selected"] += 1
-                                if src_sel == "macro":
-                                    mpvs_stats["macro_selected"] += 1
-                                if src_sel == "mem":
-                                    mpvs_stats["memory_selected"] += 1
-
-                            row = {
-                                "iter": int(step),
-                                "stage": stage_label,
-                                "op": op_for_trace,
-                                "op_args_json": op_args_json,
-                                "accepted": 1 if accept else 0,
-                                "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
-                                "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
-                                "therm_norm": float(eval_out.get("therm_norm", prev_therm0)),
-                                "pareto_added": 1 if (accept and added) else 0,
-                                "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
-                                "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
-                                "seed_id": int(seed_id),
-                                "time_ms": int((time.perf_counter() - step_start) * 1000),
-                                "signature": assign_sig,
-                                "d_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
-                                "d_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
-                                "d_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
-                                "delta_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
-                                "delta_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
-                                "delta_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
-                                "tabu_hit": 0,
-                                "inverse_hit": 0,
-                                "cooldown_hit": 0,
-                                "policy": "mpvs",
-                                "move": str(best_plan.get("kind")),
-                                "lookahead_k": int(lookahead_k if lookahead_enabled else 0),
-                                "cache_hit": 1 if (mpvs_cache is not None and h1 > mpvs_h0) else 0,
-                                "cache_key": "",
-                                "objective_hash": objective_hash,
-                                "eval_calls_cum": int(eval_calls_cum),
-                                "cache_hit_cum": h1,
-                                "cache_miss_cum": m1,
-                                "cache_saved_eval_calls_cum": cache_saved_eval_calls_cum,
-                                "llm_used": 1 if use_llm_now and (not disable_llm) else 0,
-                                "llm_fail_count": int(llm_fail_count),
-                                "fallback_reason": "",
-                                "wall_time_ms_cum": wall_time_ms,
-                                "accepted_steps_cum": int(accepted_steps),
-                                "sim_eval_calls_cum": int(eval_calls_cum),
-                                "lookahead_enabled": 0,
-                                "lookahead_r": 0,
-                                "notes": json.dumps(
-                                    {
-                                        "mpvs": {
-                                            "n_plans": int(len(plans)),
-                                            "best_kind": str(best_plan.get("kind")),
-                                            "macro": str(best_plan.get("name","")),
-                                            "verified_best_total": float(vbest),
-                                            "delta_v": float(delta_v),
-                                            "horizon": int(_cfg_get(ver_cfg,"horizon",3)),
-                                            "mc": int(_cfg_get(ver_cfg,"mc",2)),
-                                            "refine_sa_calls": int(_cfg_get(ver_cfg,"refine_sa_calls",20)),
-                                            "use_llm_now": int(use_llm_now),
-                                            "llm_pick_ids": llm_pick_ids[:8],
-                                        }
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            }
-                            writer.writerow(row)
-                            if do_explore:
-                                mpvs_explore_left -= 1
-                            else:
-                                mpvs_explore_left = 0
-                            continue
 
                     if force_explore_for_llm:
                         strong_types = {"kick", "cluster_move", "therm_swap", "relocate_free"}
@@ -1957,11 +1857,16 @@ def run_detailed_place(
                     llm_ok_step = 0
                     llm_n_pick_step = 0
 
+                    llm_disabled_effective = bool(llm_disabled or mpvs_exploit_override)
+                    queue_enabled_effective = bool(queue_enabled and (not mpvs_exploit_override))
+                    if forced_mpvs_policy:
+                        forced_policy = forced_mpvs_policy
+
                     # ---- LLM policy scheduling (hard, auditable) ----
                     llm_policy = False
                     llm_policy_reason = ""
 
-                    if (not llm_disabled) and (llm_provider is not None):
+                    if (not llm_disabled_effective) and (llm_provider is not None):
                         if planner_type == "llm":
                             llm_policy = True
                             llm_policy_reason = "planner=llm"
@@ -2165,7 +2070,7 @@ def run_detailed_place(
                         expire_step = step + queue_window_steps
                         queue_size_before_push = int(len(action_queue))
                         if actions:
-                            if queue_enabled:
+                            if queue_enabled_effective:
                                 for act in actions:
                                     action_copy = copy.deepcopy(act)
                                     if "signature" not in action_copy:
@@ -2189,7 +2094,7 @@ def run_detailed_place(
                             usage["step"] = int(step)
                             usage["llm_policy_reason"] = llm_policy_reason
                             usage["mixed_every"] = int(mixed_every)
-                            usage["queue_enabled"] = int(queue_enabled)
+                            usage["queue_enabled"] = int(queue_enabled_effective)
                             usage["queue_size_before"] = int(queue_size_before_push)
                             usage["queue_size_after_push"] = int(len(action_queue))
                             usage["llm_calls_total"] = int(llm_calls_total)
@@ -2322,7 +2227,7 @@ def run_detailed_place(
                             break
 
                         # blocked by anti-loop: do not permanently discard LLM actions immediately
-                        if str(action.get("_src", "")) == "llm" and queue_enabled:
+                        if str(action.get("_src", "")) == "llm" and queue_enabled_effective:
                             sc = int(action.get("_skip_count", 0)) + 1
                             action["_skip_count"] = sc
                             if sc <= 2:
