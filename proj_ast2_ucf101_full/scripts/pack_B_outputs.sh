@@ -6,17 +6,41 @@ cd "$(dirname "$0")/.."
 rm -rf _pack_B
 mkdir -p _pack_B
 
+# Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
+DEFAULT_PACK_EXPS="EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B3"
+PACK_EXPS="${PACK_EXPS:-$DEFAULT_PACK_EXPS}"
+
+# Whether to include legacy B0/B0* (default off)
+PACK_INCLUDE_B0="${PACK_INCLUDE_B0:-0}"
+
 # 0) layout_input
 tar -czf _pack_B/layout_input_P3A3.tgz \
+  --ignore-failed-read \
   outputs/P3/A3/layout_input.json \
-  outputs/P3/A3/layout_input_export \
   outputs/P3/A3/instances \
   2>/dev/null || true
 
-# 1) pack latest run per EXP-B* per seed
-for exp in outputs/EXP-B*; do
+# 1) pack latest run per selected EXP-B* prefixes per seed
+exp_dirs=()
+for prefix in ${PACK_EXPS}; do
+  for d in outputs/${prefix}*; do
+    [ -d "$d" ] || continue
+    exp_dirs+=("$d")
+  done
+done
+
+# de-dup
+mapfile -t exp_dirs < <(printf "%s\n" "${exp_dirs[@]}" | sort -u)
+
+for exp in "${exp_dirs[@]}"; do
   [ -d "$exp" ] || continue
   exp_name=$(basename "$exp")
+
+  if [[ "$PACK_INCLUDE_B0" != "1" ]]; then
+    if [[ "$exp_name" == EXP-B0* ]]; then
+      continue
+    fi
+  fi
 
   for seed in "$exp"/seed*; do
     [ -d "$seed" ] || continue
@@ -24,30 +48,58 @@ for exp in outputs/EXP-B*; do
 
     if [[ "$exp_name" == "EXP-B0" || "$exp_name" == "EXP-B0-random" ]]; then
       out="_pack_B/${exp_name}_${seed_name}_FULL.tgz"
-      tar -czf "$out"         --exclude="**/heuragenix_internal/data/**"         --exclude="**/__heuragenix_work/**"         "$seed"
+      tar -czf "$out" \
+        --ignore-failed-read \
+        --exclude="**/heuragenix_internal/data/**" \
+        --exclude="**/__heuragenix_work/**" \
+        "$seed" \
+        2>/dev/null || true
       echo "[PACK] $out"
       continue
     fi
 
-    latest_run_dir=$(ls -1td "$seed"/*/ 2>/dev/null | head -n 1 | sed 's:/*$::')
+    latest_run_dir=$(
+      find "$seed" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr \
+        | awk '{print $2}' \
+        | while read -r d; do
+            [ -f "$d/manifest.json" ] && { echo "$d"; break; }
+          done
+    )
     if [ -n "$latest_run_dir" ] && [ -d "$latest_run_dir" ]; then
       run_id=$(basename "$latest_run_dir")
       out="_pack_B/${exp_name}_${seed_name}_${run_id}.tgz"
       tar -czf "$out" \
+        --ignore-failed-read \
         --exclude="**/heuragenix_internal/data/**" \
+        --exclude="**/recordings.jsonl" \
+        --exclude="**/trace_events.jsonl" \
+        --exclude="**/candidate_pool_debug.json" \
+        --exclude="**/*.npy" --exclude="**/*.npz" \
+        --exclude="**/*.pt" --exclude="**/*.pth" --exclude="**/*.ckpt" \
+        --exclude="**/__pycache__/**" \
         "$seed/$run_id" \
-        2>/dev/null
+        2>/dev/null || true
       echo "[PACK] $out"
     else
-      out="_pack_B/${exp_name}_${seed_name}.tgz"
-      tar -czf "$out" --exclude="**/heuragenix_internal/data/**" "$seed"
-      echo "[PACK] $out (no run_id dir found)"
+      out="_pack_B/${exp_name}_${seed_name}_NO_RUNID.tgz"
+      tar -czf "$out" \
+        --ignore-failed-read \
+        "$seed/trace.csv" \
+        "$seed/report.json" \
+        "$seed/layout_best.json" \
+        "$seed/llm_usage.jsonl" \
+        "$seed/manifest.json" \
+        "$seed/effective_config_snapshot.yaml" \
+        2>/dev/null || true
+      echo "[PACK] $out (no run_id dir found; packed minimal seed files)"
     fi
   done
 done
 
 # 2) scripts and configs
 tar -czf _pack_B/B_cfg_and_scripts.tgz \
+  --ignore-failed-read \
   scripts/experiments_version_c.sh \
   scripts/run_layout_agent.py \
   layout \
@@ -57,6 +109,6 @@ tar -czf _pack_B/B_cfg_and_scripts.tgz \
 
 # 3) final package (exclude self)
 rm -f _pack_B/ALL_B_PACKS.tgz
-tar --exclude=ALL_B_PACKS.tgz -czf _pack_B/ALL_B_PACKS.tgz -C _pack_B .
+tar --ignore-failed-read --exclude=ALL_B_PACKS.tgz -czf _pack_B/ALL_B_PACKS.tgz -C _pack_B . 2>/dev/null || true
 
 ls -lh _pack_B
