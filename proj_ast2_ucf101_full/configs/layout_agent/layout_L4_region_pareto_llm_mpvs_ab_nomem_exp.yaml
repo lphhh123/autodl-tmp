@@ -1,0 +1,12 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        mem: 0
+    memory:
+      enabled: false
+    verifier:
+      full_verify_always_include_sources: ["heuristic", "macro", "llm_macro"]
+    ablation:
+      no_mem: true
