@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BUDGET="${BUDGET:-10k}"
+BUDGET="${BUDGET:-50k}"
 INSTANCE="${INSTANCE:-all}"
 SEEDS="${SEEDS:-0}"
 EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B3}"

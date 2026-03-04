@@ -652,12 +652,20 @@ def run_layout_agent(
             )
         except _BudgetExceeded:
             budget_exhausted = True
+            # choose best scalar point from pareto and DO NOT revert to assign_leg
             w_comm = float(cfg.objective.get("scalar_weights", {}).get("w_comm", 0.7))
             w_therm = float(cfg.objective.get("scalar_weights", {}).get("w_therm", 0.3))
             _, _, payload = pareto.best_by_scalar(w_comm=w_comm, w_therm=w_therm)
             best_assign = payload.get("assign", None)
             best_total = payload.get("total_scalar", None)
-            result = SimpleNamespace(assign=assign_leg, policy_meta={})
+
+            if best_assign is None:
+                best_assign = layout_state.assign.copy()
+
+            result = SimpleNamespace(
+                assign=np.array(best_assign, dtype=int),
+                policy_meta={"budget_exhausted": True},
+            )
         assign_final = result.assign
 
         # Stage6: alt-opt (optional)
@@ -798,6 +806,7 @@ def run_layout_agent(
             "evaluate_calls": int(getattr(evaluator, "evaluate_calls", 0)),
             "policy_switch": result.policy_meta.get("policy_switch") if result.policy_meta else None,
             "cache": result.policy_meta.get("cache") if result.policy_meta else None,
+            "mpvs": result.policy_meta.get("mpvs") if getattr(result, "policy_meta", None) else None,
             "trace_min": trace_min,
             "llm": {
                 "attempts": int(llm_stats.get("attempts", 0)),

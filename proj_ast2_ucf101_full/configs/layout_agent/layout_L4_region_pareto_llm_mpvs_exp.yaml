@@ -15,19 +15,23 @@ detailed_place:
     enabled: true
     cache_size: 12000
     proposer:
-      k_heur: 6
-      k_llm: 3
-      llm_every_n_steps: 10
+      k_heur: 8
+      k_llm: 4
+      llm_every_n_steps: 5
     macros:
       enabled: true
-      names: ["therm", "comm", "escape", "cluster"]
+      base: ["therm", "comm"]
+      extra_on_stagnation: ["escape", "cluster"]
+      enable_extra_when_stagnation_ge: 25
       max_macros: 3
       n_steps: 3
     verifier:
-      horizon: 3
+      horizon: 4
       mc: 2
       greedy_topm: 1
-      refine_sa_calls: 20
+      refine_sa_calls: 30
+      max_plans: 12
+      early_stop_margin: 0.01
       pool_override:
         raw_target_size: 24
         raw_target_max: 30
@@ -42,5 +46,4 @@ detailed_place:
       ttl_steps: 8
       max_size: 32
 
-lookahead:
   enabled: false
