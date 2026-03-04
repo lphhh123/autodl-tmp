@@ -51,7 +51,7 @@ stable_hw:
     controller:
       metric: val_acc1
       # Too strict + noisy fast-val (20 batches) => permanent VIOLATE. Relax and add hysteresis.
-      epsilon_drop: 0.02
+      epsilon_drop: 0.025
       hysteresis: 0.002
       # avoid "lock then immediately violate" at freeze_epoch boundary
       lock_grace_epochs: 1
@@ -74,4 +74,4 @@ stable_hw:
     track_live_in_inner_steps: false
 train:
   mode: version_c
-  acc_drop_max: 0.02
+  acc_drop_max: 0.025

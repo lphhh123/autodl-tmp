@@ -3,7 +3,7 @@ train:
   mode: version_c
   # v5.4 contract: keep aligned with stable_hw.accuracy_guard.controller.epsilon_drop
   # to avoid "stable_hw.acc_drop_max missing/0; force to 0.002" fallback logs.
-  acc_drop_max: 0.02
+  acc_drop_max: 0.025
   # Reduce log bloat from repeated per-step warnings in Version-C runs.
   # 0 => auto (use LOG_INTERVAL_STEPS / default 200)
   warn_every_steps: 200
@@ -32,7 +32,7 @@ stable_hw:
     curve_margin: 0.01
   accuracy_guard:
     controller:
-      epsilon_drop: 0.02
+      epsilon_drop: 0.025
       use_acc_ema: true
       acc_ema_alpha: 0.3
       k_enter: 2
