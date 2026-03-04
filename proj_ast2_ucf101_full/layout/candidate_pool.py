@@ -723,6 +723,31 @@ def build_state_summary(*args, **kwargs) -> Dict[str, Any]:
             except Exception:
                 continue
 
+    # If caller provides candidate_ids (typically atomic IDs), we must still include
+    # virtual candidate IDs, otherwise virtual picks (e.g. 900xxx) will be rejected
+    # by downstream provider-side validation.
+    if candidate_ids is not None and virtual_candidates:
+        v_ids: List[int] = []
+        for vc in virtual_candidates:
+            try:
+                vid = int(vc.get("id", -1))
+            except Exception:
+                continue
+            if vid >= 0:
+                v_ids.append(vid)
+        merged: List[int] = []
+        seen_ids = set()
+        for x in list(candidate_ids) + v_ids:
+            try:
+                xi = int(x)
+            except Exception:
+                continue
+            if xi < 0 or xi in seen_ids:
+                continue
+            seen_ids.add(xi)
+            merged.append(xi)
+        candidate_ids = merged
+
     # candidate_ids / forbidden_ids defaults
     if candidate_ids is None:
         candidate_ids = [int(r["id"]) for r in cand_rows if int(r.get("id", -1)) >= 0]

@@ -1375,12 +1375,17 @@ def run_detailed_place(
                         macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
                         base_macros = list(_cfg_get(macro_cfg, "base", ["therm", "comm"]) or [])
                         extra_macros = list(_cfg_get(macro_cfg, "extra_on_stagnation", ["escape", "cluster"]) or [])
-                        macro_stagn_th = int(_cfg_get(macro_cfg, "enable_extra_when_stagnation_ge", 25))
+
+                        base_stagn_th = int(_cfg_get(macro_cfg, "enable_base_when_stagnation_ge", 5))
+                        extra_stagn_th = int(_cfg_get(macro_cfg, "enable_extra_when_stagnation_ge", 25))
+
                         macro_names = []
                         if macro_enabled:
-                            macro_names.extend([str(x) for x in base_macros])
-                            if stagn >= macro_stagn_th:
+                            if stagn >= base_stagn_th:
+                                macro_names.extend([str(x) for x in base_macros])
+                            if stagn >= extra_stagn_th:
                                 macro_names.extend([str(x) for x in extra_macros])
+
                         macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
                         macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
 
@@ -1394,7 +1399,7 @@ def run_detailed_place(
 
                         # memory only enabled when stagnation large
                         mem_plans = []
-                        mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 15))
+                        mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
                         if mem_enabled and mpvs_mem and (stagn >= mem_stagn_th):
                             # top-1 memory plan; force src=mem
                             mp = dict(mpvs_mem[0]["plan"])
@@ -1472,8 +1477,12 @@ def run_detailed_place(
                         # early-stop gating: must cover enough sources first
                         min_cover = int(_cfg_get(ver_cfg, "min_cover_groups", 3))
                         cover = set()
+                        tie_stagn_th = int(_cfg_get(ver_cfg, "tie_explore_when_stagnation_ge", 10))
+
                         def _src_prio(s: str) -> int:
-                            # larger is better
+                            # early: exploit (prefer heuristic), late: explore (prefer mem/llm_macro/macro)
+                            if stagn < tie_stagn_th:
+                                return {"heuristic": 5, "llm_atomic": 4, "macro": 3, "llm_macro": 2, "mem": 1}.get(str(s), 0)
                             return {"mem": 5, "llm_macro": 4, "macro": 3, "llm_atomic": 2, "heuristic": 1}.get(str(s), 0)
 
                         def _plan_prio(pl: Dict[str, Any]) -> float:
@@ -1482,6 +1491,7 @@ def run_detailed_place(
                                 p += 0.25
                             return p
 
+                        bias_beta = float(_cfg_get(ver_cfg, "direction_bias_beta", 0.02))
                         best_plan = None
                         best_v = None
                         best_res = None
@@ -1499,14 +1509,30 @@ def run_detailed_place(
                             else:
                                 res = _verify_plan(pl, assign, eval_out)
                                 v = float(res.get("verified_best_total", 1e30))
-                            if best_v is None or v < best_v - 1e-12:
-                                best_v = v
+
+                            v_eff = v
+                            try:
+                                if direction_bias == "bias_comm":
+                                    best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
+                                    cur_comm = float(eval_out.get("comm_norm", 0.0))
+                                    improve = max(0.0, cur_comm - best_comm)
+                                    v_eff = v - bias_beta * improve
+                                elif direction_bias == "bias_therm":
+                                    best_th = float(res.get("best_eval", {}).get("therm_norm", 0.0))
+                                    cur_th = float(eval_out.get("therm_norm", 0.0))
+                                    improve = max(0.0, cur_th - best_th)
+                                    v_eff = v - bias_beta * improve
+                            except Exception:
+                                v_eff = v
+
+                            if best_v is None or v_eff < best_v - 1e-12:
+                                best_v = v_eff
                                 best_plan = pl
                                 best_res = res
                             else:
-                                if abs(v - float(best_v)) <= tie_eps:
+                                if abs(v_eff - float(best_v)) <= tie_eps:
                                     if _plan_prio(pl) > _plan_prio(best_plan):
-                                        best_v = v
+                                        best_v = v_eff
                                         best_plan = pl
                                         best_res = res
                             mpvs_stats["plans_scored"] += 1
