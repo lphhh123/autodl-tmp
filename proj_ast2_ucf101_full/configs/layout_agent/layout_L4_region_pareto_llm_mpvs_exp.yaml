@@ -56,6 +56,41 @@ detailed_place:
       safe_eps_late: 0.002
       safe_eps_switch_stagnation: 15
       full_verify_always_include_sources: ["heuristic", "macro", "llm_macro", "mem"]
+      # Progressive verification: cheap -> mid(light) -> full(only when promising)
+      progressive:
+        enabled: true
+        mid_verify_topk: 6
+        mid_horizon_cap: 1
+        mid_mc_cap: 1
+        mid_greedy_topm_cap: 1
+        mid_refine_sa_calls_cap: 0
+        mid_macro_steps_cap: 1
+        full_verify_trigger_margin_early: 0.0004
+        full_verify_trigger_margin_late: 0.00015
+        full_verify_trigger_switch_stagnation: 15
+        full_verify_trigger_randw_scale: 1.5
+
+      # MID: ensure coverage; FULL: only heuristic is unconditional (others need to be promising)
+      always_include_sources_mid: ["heuristic", "macro", "llm_macro", "mem"]
+      always_include_sources_full: ["heuristic"]
+
+      # Conditional include gates (avoid randw early overhead)
+      include_sources_min_stagnation:
+        macro: 8
+        llm_macro: 8
+        mem: 10
+      include_sources_min_stagnation_randw:
+        macro: 20
+        llm_macro: 20
+        mem: 12
+      include_sources_min_budget:
+        macro: 4000
+        llm_macro: 4000
+        mem: 4000
+      include_sources_exclude_instances:
+        macro: []
+        llm_macro: []
+        mem: []
       macro_gain_gate_enabled: true
       macro_gain_margin_early: 0.001
       macro_gain_margin_late: 0.0002
