@@ -246,9 +246,36 @@ run_layout_multi () {
   local cfg="$2"
   local exp="$3"
   if [[ "${INSTANCE}" == "all" ]]; then
-    for inst in chain_skip chain_skip_randw cluster4; do
-      INSTANCE="$inst" ${runner} "${cfg}" "$(layout_outdir "${exp}" "${inst}")"
-    done
+    if [[ "${INSTANCE_PARALLEL:-0}" == "1" ]]; then
+      echo "[run_layout_multi] INSTANCE_PARALLEL=1 INSTANCE_MAX_JOBS=${INSTANCE_MAX_JOBS:-3}"
+      local pids=()
+      local fail=0
+      for inst in chain_skip chain_skip_randw cluster4; do
+        (
+          INSTANCE="$inst" ${runner} "${cfg}" "$(layout_outdir "${exp}" "${inst}")"
+        ) &
+        pids+=("$!")
+        while [[ "$(jobs -rp | wc -l)" -ge "${INSTANCE_MAX_JOBS:-3}" ]]; do
+          if ! wait -n; then
+            fail=1
+            break
+          fi
+        done
+        [[ "${fail}" == "0" ]] || break
+      done
+      if [[ "${fail}" == "0" ]]; then
+        for pid in "${pids[@]}"; do
+          if ! wait "${pid}"; then
+            fail=1
+          fi
+        done
+      fi
+      [[ "${fail}" == "0" ]] || { echo "[run_layout_multi] ERROR: instance job failed."; exit 1; }
+    else
+      for inst in chain_skip chain_skip_randw cluster4; do
+        INSTANCE="$inst" ${runner} "${cfg}" "$(layout_outdir "${exp}" "${inst}")"
+      done
+    fi
   else
     ${runner} "${cfg}" "$(layout_outdir "${exp}" "${INSTANCE}")"
   fi
