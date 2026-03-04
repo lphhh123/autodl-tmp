@@ -23,7 +23,9 @@ sanitize_tag() {
     return 0
   fi
   # keep filename-safe charset
-  echo "$s" | tr -c 'A-Za-z0-9_.-+' '_'
+  # Use C locale to avoid locale-dependent range parsing in tr.
+  # Put '-' at the end so it is treated literally.
+  LC_ALL=C echo "$s" | tr -c 'A-Za-z0-9_.+-' '_'
 }
 
 TAG_SUFFIX=""
