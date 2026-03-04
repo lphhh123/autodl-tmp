@@ -172,6 +172,17 @@ def _get_accuracy_guard_cfg(cfg_or_stable: Any) -> dict:
 
     ctrl = _cfg_get(guard, "controller", None)
 
+    # Normalize controller into a plain dict (DictConfig is NOT isinstance(dict))
+    if ctrl is None:
+        ctrl = {}
+    if isinstance(ctrl, dict):
+        ctrl = dict(ctrl)
+    else:
+        try:
+            ctrl = {k: ctrl[k] for k in ctrl}
+        except Exception:
+            ctrl = {}
+
     # ===== v5.4 SPEC field alias mapping (metric_key/threshold/hysteresis/consecutive_trigger) =====
     # NOTE: keep everything in `ctrl` so downstream uses controller.*
     if isinstance(ctrl, dict):
@@ -225,7 +236,11 @@ def _get_accuracy_guard_cfg(cfg_or_stable: Any) -> dict:
             ctrl["cut_hw_loss_on_violate"] = bool(ctrl.pop("cut_hw_loss_on_drop"))
 
     eps = float(_cfg_get(ctrl, "epsilon_drop", 0.0))
-    ctrl["epsilon_drop"] = max(eps, 0.0)
+    enabled = bool(_cfg_get(guard_cfg, "enabled", True))
+    if enabled and eps <= 0.0:
+        raise ValueError("[P0][v5.4] stable_hw.accuracy_guard.controller.epsilon_drop must be > 0. "
+                         "If you want to disable guard, set stable_hw.accuracy_guard.enabled=false.")
+    ctrl["epsilon_drop"] = float(eps)
 
     guard_cfg["controller"] = ctrl
     return guard_cfg

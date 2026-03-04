@@ -20,10 +20,10 @@ stable_hw:
     epochs: 1
   locked_acc_ref:
     enabled: true
-    # Use per-epoch reference curve parsed from EXP-A1 stdout.
+    # Use per-epoch reference curve parsed from EXP-A2 stdout.
     mode: curve_stdout
     source: baseline_stdout_curve
-    baseline_stdout_path: outputs/EXP-A1/seed{seed}/stdout
+    baseline_stdout_path: outputs/EXP-A2/seed{seed}/stdout
     # Make reference consistent with fast-val used in guard; if both full/fast exist, pick fast.
     # Options: fast (default), full, min
     stdout_prefer_mode: fast
