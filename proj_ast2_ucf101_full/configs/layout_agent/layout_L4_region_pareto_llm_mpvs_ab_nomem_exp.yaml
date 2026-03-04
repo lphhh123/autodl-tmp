@@ -8,5 +8,7 @@ detailed_place:
       enabled: false
     verifier:
       full_verify_always_include_sources: ["heuristic", "macro", "llm_macro"]
+      always_include_sources_mid: ["heuristic", "macro", "llm_macro"]
+      always_include_sources_full: ["heuristic"]
     ablation:
       no_mem: true
