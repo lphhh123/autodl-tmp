@@ -7,7 +7,7 @@ cd "$ROOT"
 BUDGET="${BUDGET:-50k}"
 INSTANCE="${INSTANCE:-all}"
 SEEDS="${SEEDS:-0}"
-EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B3}"
+EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem EXP-B3}"
 
 for seed in ${SEEDS}; do
   for exp in ${EXPS}; do

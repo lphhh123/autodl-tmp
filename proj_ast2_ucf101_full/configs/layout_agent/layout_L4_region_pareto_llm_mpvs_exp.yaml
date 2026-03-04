@@ -56,6 +56,18 @@ detailed_place:
       safe_eps_late: 0.002
       safe_eps_switch_stagnation: 15
       full_verify_always_include_sources: ["heuristic", "macro", "llm_macro", "mem"]
+      macro_gain_gate_enabled: true
+      macro_gain_margin_early: 0.001
+      macro_gain_margin_late: 0.0002
+      macro_gain_switch_stagnation: 20
+      macro_gain_randw_scale: 1.5
+      macro_cost_lambda: 2e-7
+
+      randw_switch_stagnation: 20
+      randw_early_horizon_cap: 2
+      randw_early_mc_cap: 1
+      randw_early_refine_cap: 8
+      randw_early_macro_steps_cap: 2
       pool_override:
         raw_target_size: 24
         raw_target_max: 30

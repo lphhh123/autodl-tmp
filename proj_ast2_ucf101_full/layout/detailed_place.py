@@ -494,6 +494,8 @@ def run_detailed_place(
         "verifier_calls_spent": 0,
         "steps_mpvs": 0,
         "pareto_added": 0,
+        "macro_gate_blocked": 0,
+        "macro_gate_allowed": 0,
     }
 
     # Providers: always have heuristic; LLM optional
@@ -559,6 +561,13 @@ def run_detailed_place(
 
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     out_dir = trace_path.parent
+    _p = str(trace_path).lower()
+    if ("randw" in _p) or ("chain_skip_randw" in _p):
+        instance_tag = "randw"
+    elif "cluster4" in _p:
+        instance_tag = "cluster4"
+    else:
+        instance_tag = "chain_skip"
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
     recordings_fp = recordings_path.open("w", encoding="utf-8") if recordings_path else None
     start_time = time.time()
@@ -1052,12 +1061,22 @@ def run_detailed_place(
                     plan: Dict[str, Any],
                     assign0: np.ndarray,
                     eval0: Dict[str, Any],
+                    stagnation: int,
                 ) -> Dict[str, Any]:
                     horizon = int(_cfg_get(ver_cfg, "horizon", 3))
                     mc = int(_cfg_get(ver_cfg, "mc", 2))
                     n_steps_macro = int(_cfg_get(_cfg_get(mpvs_cfg, "macros", {}) or {}, "n_steps", 3))
                     refine_calls = int(_cfg_get(ver_cfg, "refine_sa_calls", 20))
                     greedy_topm = int(_cfg_get(ver_cfg, "greedy_topm", 1))
+
+                    # randw needs more steps; keep verifier lighter at early stagnation
+                    if instance_tag == "randw":
+                        sw = int(_cfg_get(ver_cfg, "randw_switch_stagnation", 20))
+                        if int(stagnation) < sw:
+                            horizon = min(horizon, int(_cfg_get(ver_cfg, "randw_early_horizon_cap", 2)))
+                            mc = min(mc, int(_cfg_get(ver_cfg, "randw_early_mc_cap", 1)))
+                            refine_calls = min(refine_calls, int(_cfg_get(ver_cfg, "randw_early_refine_cap", 8)))
+                            n_steps_macro = min(n_steps_macro, int(_cfg_get(ver_cfg, "randw_early_macro_steps_cap", 2)))
 
                     rem = int(_budget_remaining())
                     # budget-adaptive downgrade to avoid exhausting budget in a few MPVS steps
@@ -1259,6 +1278,11 @@ def run_detailed_place(
                         mpvs_h0 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
                         mem_cfg = _cfg_get(mpvs_cfg, "memory", {}) or {}
                         mem_enabled = bool(_cfg_get(mem_cfg, "enabled", True))
+                        ab_cfg = _cfg_get(mpvs_cfg, "ablation", {}) or {}
+                        disable_mem = bool(_cfg_get(ab_cfg, "no_mem", False))
+                        if disable_mem:
+                            mem_enabled = False
+                            mpvs_mem[:] = []
                         mem_ttl = int(_cfg_get(mem_cfg, "ttl_steps", 8))
                         mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
                         if mem_enabled:
@@ -1586,6 +1610,7 @@ def run_detailed_place(
                                 pk = _plan_key(pl)
                                 do_full_verify = disable_verifier or (pk in full_verify_keys)
                                 if do_full_verify:
+                                    calls_b = int(getattr(evaluator, "evaluator_calls", 0))
                                     if disable_verifier:
                                         if pl.get("kind") == "macro":
                                             b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
@@ -1595,7 +1620,9 @@ def run_detailed_place(
                                             v0 = float(getattr(cand, "est", {}).get("total_new", 1e30))
                                             res = {"verified_best_total": v0, "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": [copy.deepcopy(getattr(cand, "action", {}) or {})]}
                                     else:
-                                        res = _verify_plan(pl, assign, eval_out)
+                                        res = _verify_plan(pl, assign, eval_out, stagn)
+                                    calls_a = int(getattr(evaluator, "evaluator_calls", 0))
+                                    calls_spent = max(0, calls_a - calls_b)
                                     v_raw = float(res.get("verified_best_total", 1e30))
                                     v_eff = v_raw
                                     try:
@@ -1615,6 +1642,7 @@ def run_detailed_place(
                                     res = None
                                     v_raw = float(cheap)
                                     v_eff = float(cheap)
+                                    calls_spent = 0
 
                                 per_plan.append(
                                     {
@@ -1624,6 +1652,7 @@ def run_detailed_place(
                                         "v_eff": float(v_eff),
                                         "cheap_meta": cmeta,
                                         "full_verified": bool(do_full_verify),
+                                        "calls_spent": int(calls_spent),
                                     }
                                 )
                                 mpvs_stats["plans_scored"] += 1
@@ -1640,6 +1669,7 @@ def run_detailed_place(
                                 if best_heur_entry is None or float(ent["v_raw"]) < float(best_heur_entry["v_raw"]) - 1e-12:
                                     best_heur_entry = ent
 
+                            best_ent = None
                             for ent in per_plan:
                                 pl = ent["plan"]
                                 v_eff = float(ent["v_eff"])
@@ -1648,12 +1678,14 @@ def run_detailed_place(
                                     best_v_raw = float(ent["v_raw"])
                                     best_plan = pl
                                     best_res = ent["res"]
+                                    best_ent = ent
                                 elif abs(v_eff - float(best_v)) <= tie_eps and best_plan is not None:
                                     if _plan_prio(pl) > _plan_prio(best_plan):
                                         best_v = v_eff
                                         best_v_raw = float(ent["v_raw"])
                                         best_plan = pl
                                         best_res = ent["res"]
+                                        best_ent = ent
 
                             if (best_v is not None) and (len(cover) >= min_cover) and (best_v <= float(cur_total) - early_margin):
                                 pass
@@ -1665,6 +1697,36 @@ def run_detailed_place(
                                     best_res = best_heur_entry["res"]
                                     best_v = float(best_heur_entry["v_eff"])
                                     best_v_raw = float(best_heur_entry["v_raw"])
+                                    best_ent = best_heur_entry
+
+                            macro_gate_enabled = bool(_cfg_get(ver_cfg, "macro_gain_gate_enabled", True))
+                            if macro_gate_enabled and best_plan is not None and best_heur_entry is not None and best_ent is not None:
+                                src = str(best_plan.get("src", ""))
+                                if src in {"macro", "llm_macro"}:
+                                    gain_sw = int(_cfg_get(ver_cfg, "macro_gain_switch_stagnation", 20))
+                                    gain_early = float(_cfg_get(ver_cfg, "macro_gain_margin_early", 0.001))
+                                    gain_late = float(_cfg_get(ver_cfg, "macro_gain_margin_late", 0.0002))
+                                    req = gain_early if int(stagn) < gain_sw else gain_late
+                                    if instance_tag == "randw":
+                                        req *= float(_cfg_get(ver_cfg, "macro_gain_randw_scale", 1.5))
+
+                                    lam = float(_cfg_get(ver_cfg, "macro_cost_lambda", 2e-7))
+                                    cb = float(best_ent.get("calls_spent", 0))
+                                    ch = float(best_heur_entry.get("calls_spent", 0))
+                                    extra = max(0.0, cb - ch)
+                                    req = float(req) + float(lam) * float(extra)
+
+                                    # Require macro to beat heuristic by req (lower is better)
+                                    if float(best_v_raw if best_v_raw is not None else 1e30) > float(best_heur_entry["v_raw"]) - float(req):
+                                        # fallback to heuristic
+                                        mpvs_stats["macro_gate_blocked"] = int(mpvs_stats.get("macro_gate_blocked", 0)) + 1
+                                        best_plan = best_heur_entry["plan"]
+                                        best_res = best_heur_entry["res"]
+                                        best_v = float(best_heur_entry["v_eff"])
+                                        best_v_raw = float(best_heur_entry["v_raw"])
+                                        best_ent = best_heur_entry
+                                    else:
+                                        mpvs_stats["macro_gate_allowed"] = int(mpvs_stats.get("macro_gate_allowed", 0)) + 1
 
                             if best_plan is not None and best_res is None:
                                 if best_plan.get("kind") == "macro":
