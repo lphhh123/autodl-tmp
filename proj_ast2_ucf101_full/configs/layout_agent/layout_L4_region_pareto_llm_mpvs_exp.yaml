@@ -32,18 +32,23 @@ detailed_place:
       enable_extra_when_stagnation_ge: 25
       max_macros: 3
       n_steps: 3
+    explore:
+      mode: hybrid
+      every_n_steps: 12
+      when_stagnation_ge: 12
+      max_consecutive_steps: 2
     verifier:
-      horizon: 4
-      mc: 2
+      horizon: 3
+      mc: 1
       greedy_topm: 1
-      refine_sa_calls: 30
+      refine_sa_calls: 12
       max_plans: 12
       early_stop_margin: 0.01
       min_cover_groups: 3
       tie_eps: 0.002
       tie_explore_when_stagnation_ge: 10
       direction_bias_beta: 0.02
-      full_verify_topk: 4
+      full_verify_topk: 3
       fast_macro_steps: 1
       safe_enabled: true
       safe_eps_early: 0.0005
