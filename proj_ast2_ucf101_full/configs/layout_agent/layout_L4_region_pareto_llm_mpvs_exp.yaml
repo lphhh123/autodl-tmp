@@ -18,6 +18,12 @@ detailed_place:
       k_heur: 8
       k_llm: 4
       llm_every_n_steps: 5
+      quota:
+        heur: 6
+        llm_atomic: 2
+        llm_macro: 2
+        macro: 2
+        mem: 1
     macros:
       enabled: true
       base: ["therm", "comm"]
@@ -32,6 +38,8 @@ detailed_place:
       refine_sa_calls: 30
       max_plans: 12
       early_stop_margin: 0.01
+      min_cover_groups: 3
+      tie_eps: 0.002
       pool_override:
         raw_target_size: 24
         raw_target_max: 30
@@ -45,5 +53,6 @@ detailed_place:
       enabled: true
       ttl_steps: 8
       max_size: 32
+      enable_when_stagnation_ge: 15
 
   enabled: false
