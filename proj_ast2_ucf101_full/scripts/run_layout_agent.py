@@ -979,6 +979,79 @@ def main():
         except Exception:
             pass
 
+    # ---- Objective scalar weight overrides (for sweeps) ----
+    # Supported env:
+    #   SCALAR_WEIGHTS_OVERRIDE="w_therm,w_comm"   e.g. "0.3,0.7"
+    #   SCALAR_W_THERM_OVERRIDE="0.3"
+    #   SCALAR_W_COMM_OVERRIDE="0.7"
+    # If both are present, SCALAR_WEIGHTS_OVERRIDE takes priority.
+    w_pair = os.environ.get("SCALAR_WEIGHTS_OVERRIDE", "").strip()
+    w_therm_env = os.environ.get("SCALAR_W_THERM_OVERRIDE", "").strip()
+    w_comm_env = os.environ.get("SCALAR_W_COMM_OVERRIDE", "").strip()
+
+    def _to_float(x: str):
+        try:
+            return float(str(x).strip())
+        except Exception:
+            return None
+
+    new_w_therm = None
+    new_w_comm = None
+    if w_pair:
+        try:
+            parts = [p for p in w_pair.replace(" ", "").split(",") if p != ""]
+            if len(parts) == 2:
+                new_w_therm = _to_float(parts[0])
+                new_w_comm = _to_float(parts[1])
+        except Exception:
+            pass
+    else:
+        if w_therm_env:
+            new_w_therm = _to_float(w_therm_env)
+        if w_comm_env:
+            new_w_comm = _to_float(w_comm_env)
+
+    if (new_w_therm is not None) or (new_w_comm is not None):
+        try:
+            if not hasattr(cfg, "objective") or cfg.objective is None:
+                cfg.objective = OmegaConf.create({})
+            if not hasattr(cfg.objective, "scalar_weights") or cfg.objective.scalar_weights is None:
+                cfg.objective.scalar_weights = OmegaConf.create({})
+
+            old_comm = float(getattr(cfg.objective.scalar_weights, "w_comm", 0.7) or 0.7)
+            old_therm = float(getattr(cfg.objective.scalar_weights, "w_therm", 0.3) or 0.3)
+            eff_comm = float(new_w_comm) if new_w_comm is not None else old_comm
+            eff_therm = float(new_w_therm) if new_w_therm is not None else old_therm
+
+            s = eff_comm + eff_therm
+            if s > 0:
+                eff_comm = eff_comm / s
+                eff_therm = eff_therm / s
+
+            cfg.objective.scalar_weights.w_comm = float(eff_comm)
+            cfg.objective.scalar_weights.w_therm = float(eff_therm)
+
+            ov = list(get_nested(cfg, "_contract.overrides", []) or [])
+            ov.append(
+                {
+                    "path": "objective.scalar_weights.w_comm",
+                    "requested": old_comm,
+                    "effective": float(eff_comm),
+                    "reason": "env:SCALAR_WEIGHTS_OVERRIDE" if w_pair else "env:SCALAR_W_COMM_OVERRIDE/SCALAR_W_THERM_OVERRIDE",
+                }
+            )
+            ov.append(
+                {
+                    "path": "objective.scalar_weights.w_therm",
+                    "requested": old_therm,
+                    "effective": float(eff_therm),
+                    "reason": "env:SCALAR_WEIGHTS_OVERRIDE" if w_pair else "env:SCALAR_W_COMM_OVERRIDE/SCALAR_W_THERM_OVERRIDE",
+                }
+            )
+            cfg._contract.overrides = ov
+        except Exception:
+            pass
+
     # NOW seal + fill defaults (seal_digest matches final cfg)
     cfg = validate_and_fill_defaults(cfg, mode="layout")
     seed_everything(int(args.seed))

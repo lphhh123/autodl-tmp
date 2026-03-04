@@ -13,6 +13,24 @@ INSTANCE="${INSTANCE:-base}"
 #   INSTANCE=all      bash scripts/experiments_version_c.sh EXP-B2 0
 INSTANCE_LIST_DEFAULT=("chain_skip" "chain_skip_randw" "cluster4")
 BUDGET="${BUDGET:-10k}"
+# Optional tag appended to output directories/log symlinks to avoid collisions in sweeps
+RUN_TAG="${RUN_TAG:-}"
+
+sanitize_tag() {
+  local s="${1:-}"
+  if [[ -z "$s" ]]; then
+    echo ""
+    return 0
+  fi
+  # keep filename-safe charset
+  echo "$s" | tr -c 'A-Za-z0-9_.-+' '_'
+}
+
+TAG_SUFFIX=""
+RUN_TAG_SAFE="$(sanitize_tag "${RUN_TAG}")"
+if [[ -n "${RUN_TAG_SAFE}" ]]; then
+  TAG_SUFFIX="-${RUN_TAG_SAFE}"
+fi
 
 # ---- arg validation (avoid accidental extra tokens like "0andom") ----
 if [[ $# -gt 2 ]]; then
@@ -35,12 +53,30 @@ if [[ -z "$EXP_ID" ]]; then
   exit 1
 fi
 
-if [[ "${BUDGET}" == "10k" ]]; then
-  TOTAL_EVAL_BUDGET=10000
-elif [[ "${BUDGET}" == "50k" ]]; then
-  TOTAL_EVAL_BUDGET=50000
-else
-  echo "[ERROR] Unknown BUDGET=${BUDGET} (use 10k or 50k)"
+parse_budget_to_int() {
+  local b="${1:-}"
+  b="$(echo "$b" | tr '[:upper:]' '[:lower:]')"
+  # allow raw integer
+  if [[ "$b" =~ ^[0-9]+$ ]]; then
+    echo "$b"
+    return 0
+  fi
+  # allow 50k / 200k / 2m
+  if [[ "$b" =~ ^[0-9]+k$ ]]; then
+    echo $((10#${b%k} * 1000))
+    return 0
+  fi
+  if [[ "$b" =~ ^[0-9]+m$ ]]; then
+    echo $((10#${b%m} * 1000000))
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+TOTAL_EVAL_BUDGET="$(parse_budget_to_int "${BUDGET}")" || true
+if [[ -z "${TOTAL_EVAL_BUDGET}" ]]; then
+  echo "[ERROR] Unknown BUDGET=${BUDGET}. Examples: 10k, 50k, 100k, 150k, 200k, 50000"
   exit 2
 fi
 
@@ -152,7 +188,7 @@ run_ast () {
   # Create a stable symlink for this experiment's stdout.
   # You can tail: tail -f "$STDOUT_AGG_DIR/${EXP_ID}_seed${SEED}.log"
   : > "$out/stdout.log"
-  ln -sf "$(realpath "$out/stdout.log")" "$STDOUT_AGG_DIR/${EXP_ID}_seed${SEED}.log"
+  ln -sf "$(realpath "$out/stdout.log")" "$STDOUT_AGG_DIR/${EXP_ID}${TAG_SUFFIX}_seed${SEED}.log"
 
   if [[ -t 1 && "${TEE_STDOUT:-1}" == "1" ]]; then
     SMOKE="${SMOKE}" python -m scripts.run_ast2_ucf101 --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
@@ -179,7 +215,7 @@ run_vc () {
   fi
 
   : > "$out/stdout.log"
-  ln -sf "$(realpath "$out/stdout.log")" "$STDOUT_AGG_DIR/${EXP_ID}_seed${SEED}.log"
+  ln -sf "$(realpath "$out/stdout.log")" "$STDOUT_AGG_DIR/${EXP_ID}${TAG_SUFFIX}_seed${SEED}.log"
 
   if [[ -t 1 && "${TEE_STDOUT:-1}" == "1" ]]; then
     SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" 2>&1 | tee "$out/stdout.log"
@@ -222,10 +258,11 @@ run_layout_heuragenix () {
 odir () {
   # usage: odir EXP-B1  -> outputs/EXP-B1[-INSTANCE]/seed${SEED}
   local exp="$1"
+  local exp2="${exp}${TAG_SUFFIX}"
   if [[ "${INSTANCE}" == "base" ]]; then
-    echo "${OUT_PREFIX}/${exp}/seed${SEED}"
+    echo "${OUT_PREFIX}/${exp2}/seed${SEED}"
   else
-    echo "${OUT_PREFIX}/${exp}-${INSTANCE}/seed${SEED}"
+    echo "${OUT_PREFIX}/${exp2}-${INSTANCE}/seed${SEED}"
   fi
 }
 
@@ -233,10 +270,11 @@ layout_outdir () {
   # usage: layout_outdir EXP-B2 chain_skip
   local exp="$1"
   local inst="$2"
+  local exp2="${exp}${TAG_SUFFIX}"
   if [[ "${inst}" == "base" ]]; then
-    echo "${OUT_PREFIX}/${exp}/seed${SEED}"
+    echo "${OUT_PREFIX}/${exp2}/seed${SEED}"
   else
-    echo "${OUT_PREFIX}/${exp}-${inst}/seed${SEED}"
+    echo "${OUT_PREFIX}/${exp2}-${inst}/seed${SEED}"
   fi
 }
 
