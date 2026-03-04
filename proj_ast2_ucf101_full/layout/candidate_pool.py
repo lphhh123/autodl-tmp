@@ -635,6 +635,7 @@ def build_state_summary(*args, **kwargs) -> Dict[str, Any]:
         clusters = kwargs.get("clusters", None)
         regions = kwargs.get("regions", None)
         k_actions = kwargs.get("k_actions", None)
+        virtual_candidates = kwargs.get("virtual_candidates", None)
 
     else:
         # Old-style positional call: first arg is int step
@@ -666,6 +667,9 @@ def build_state_summary(*args, **kwargs) -> Dict[str, Any]:
             candidate_ids = None
             forbidden_ids = None
 
+    if "virtual_candidates" not in locals():
+        virtual_candidates = None
+
     if candidates is None:
         candidates = []
     if eval_out is None:
@@ -692,6 +696,32 @@ def build_state_summary(*args, **kwargs) -> Dict[str, Any]:
             )
         except Exception:
             continue
+
+    # -------------------------
+    # Optional: virtual candidates (macro / direction) injected by caller
+    # Each item must match cand_rows schema: {id,type,signature,d_total,d_comm,d_therm,op,op_args}
+    # -------------------------
+    if virtual_candidates:
+        for vc in virtual_candidates:
+            try:
+                cid = int(vc.get("id", -1))
+                if cid < 0:
+                    continue
+                cand_rows.append(
+                    {
+                        "id": cid,
+                        "type": str(vc.get("type", "virtual")),
+                        "signature": str(vc.get("signature", f"V:{cid}")),
+                        "d_total": float(vc.get("d_total", 0.0)),
+                        "d_comm": float(vc.get("d_comm", 0.0)),
+                        "d_therm": float(vc.get("d_therm", 0.0)),
+                        "lookahead_score": float(vc.get("lookahead_score", 0.0)),
+                        "op": str(vc.get("op", "virtual")),
+                        "op_args": dict(vc.get("op_args", {})),
+                    }
+                )
+            except Exception:
+                continue
 
     # candidate_ids / forbidden_ids defaults
     if candidate_ids is None:

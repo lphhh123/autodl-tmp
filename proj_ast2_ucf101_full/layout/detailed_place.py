@@ -483,8 +483,12 @@ def run_detailed_place(
         "enabled": bool(mpvs_enabled),
         "llm_calls": 0,
         "llm_ok": 0,
+        "llm_selected": 0,
+        "llm_macro_selected": 0,
         "macro_selected": 0,
         "memory_selected": 0,
+        "macro_scored": 0,
+        "mem_scored": 0,
         "plans_scored": 0,
         "verifier_calls_spent": 0,
         "steps_mpvs": 0,
@@ -1273,25 +1277,68 @@ def run_detailed_place(
 
                         llm_cands: List[Any] = []
                         llm_pick_ids: List[int] = []
+                        llm_macro_plans: List[Dict[str, Any]] = []
+                        direction_bias: Optional[str] = None
+                        # Virtual candidates (LLM can pick these IDs to propose macro/direction)
+                        # Macro IDs
+                        V_MACRO = {
+                            900001: "therm",
+                            900002: "comm",
+                            900003: "escape",
+                            900004: "cluster",
+                        }
+                        # Direction IDs (optional, used as a "bias" tag in verifier scoring)
+                        V_DIR = {
+                            900101: "bias_comm",
+                            900102: "bias_therm",
+                        }
+                        virtual_candidates = []
+                        for vid, name in V_MACRO.items():
+                            virtual_candidates.append(
+                                {
+                                    "id": int(vid),
+                                    "type": "macro",
+                                    "signature": f"V:macro:{name}",
+                                    "d_total": 0.0,
+                                    "d_comm": 0.0,
+                                    "d_therm": 0.0,
+                                    "op": "macro",
+                                    "op_args": {"macro_name": name},
+                                }
+                            )
+                        for vid, name in V_DIR.items():
+                            virtual_candidates.append(
+                                {
+                                    "id": int(vid),
+                                    "type": "direction",
+                                    "signature": f"V:dir:{name}",
+                                    "d_total": 0.0,
+                                    "d_comm": 0.0,
+                                    "d_therm": 0.0,
+                                    "op": "direction",
+                                    "op_args": {"direction": name},
+                                }
+                            )
                         if use_llm_now:
                             ss = build_state_summary(
-                                step,
-                                T,
-                                eval_out,
-                                traffic_sym,
-                                assign,
-                                site_to_region,
-                                chip_tdp,
-                                clusters,
-                                regions,
-                                candidate_pool,
-                                candidate_ids,
-                                forbidden_ids,
-                                max(1, k_llm),
+                                step=int(step),
+                                T=float(T),
+                                eval_out=eval_out,
+                                traffic_sym=traffic_sym,
+                                assign=assign,
+                                site_to_region=site_to_region,
+                                chip_tdp=chip_tdp,
+                                clusters=clusters,
+                                regions=regions,
+                                candidates=candidate_pool,
+                                candidate_ids=candidate_ids,
+                                forbidden_ids=forbidden_ids,
+                                k_actions=max(1, k_llm),
+                                virtual_candidates=virtual_candidates,
                             )
                             try:
                                 llm_pick_ids = llm_provider.propose_pick(ss, max(1, k_llm)) or []
-                                llm_pick_ids = [int(pid) for pid in llm_pick_ids if int(pid) in cand_map and int(pid) not in forbidden_set]
+                                llm_pick_ids = [int(pid) for pid in llm_pick_ids if int(pid) not in forbidden_set]
                             except Exception:
                                 llm_pick_ids = []
                             if usage_fp is not None:
@@ -1303,6 +1350,7 @@ def run_detailed_place(
                                     "step": int(step),
                                     "k": int(max(1, k_llm)),
                                     "picked": [int(x) for x in llm_pick_ids],
+                                    "picked_virtual": [int(x) for x in llm_pick_ids if int(x) >= 900000],
                                     "ok": 1 if llm_pick_ids else 0,
                                     "usage": usage,
                                 }
@@ -1311,7 +1359,14 @@ def run_detailed_place(
                                 if llm_pick_ids:
                                     mpvs_stats["llm_ok"] += 1
                             for pid in llm_pick_ids:
-                                cc = cand_map.get(int(pid))
+                                pid = int(pid)
+                                if pid in V_MACRO:
+                                    llm_macro_plans.append({"kind": "macro", "name": str(V_MACRO[pid]), "src": "llm_macro"})
+                                    continue
+                                if pid in V_DIR:
+                                    direction_bias = str(V_DIR[pid])
+                                    continue
+                                cc = cand_map.get(pid)
                                 if cc is not None:
                                     llm_cands.append(cc)
 
@@ -1329,42 +1384,69 @@ def run_detailed_place(
                         macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
                         macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
 
+                        # --- plan groups (with src tags) ---
+                        heur_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"heuristic"} for c in heur_cands]
+                        llm_atomic_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"llm_atomic"} for c in llm_cands]
+                        macro_plans = [{"kind":"macro","name":str(mn),"src":"macro"} for mn in macro_names]
+                        # llm_macro_plans already built above when use_llm_now
+                        if "llm_macro_plans" not in locals():
+                            llm_macro_plans = []
+
+                        # memory only enabled when stagnation large
                         mem_plans = []
-                        if mpvs_mem:
-                            mem_plans.append(mpvs_mem[0]["plan"])
+                        mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 15))
+                        if mem_enabled and mpvs_mem and (stagn >= mem_stagn_th):
+                            # top-1 memory plan; force src=mem
+                            mp = dict(mpvs_mem[0]["plan"])
+                            mp["src"] = "mem"
+                            mem_plans.append(mp)
 
-                        plans: List[Dict[str, Any]] = []
+                        # --- quota config ---
+                        quota_cfg = _cfg_get(prop_cfg, "quota", {}) or {}
+                        q_heur = int(quota_cfg.get("heur", k_heur))
+                        q_llm_atomic = int(quota_cfg.get("llm_atomic", 2))
+                        q_llm_macro = int(quota_cfg.get("llm_macro", 2))
+                        q_macro = int(quota_cfg.get("macro", 2))
+                        q_mem = int(quota_cfg.get("mem", 1))
+
+                        heur_plans = heur_plans[:max(0, q_heur)]
+                        llm_atomic_plans = llm_atomic_plans[:max(0, q_llm_atomic)]
+                        llm_macro_plans = llm_macro_plans[:max(0, q_llm_macro)]
+                        macro_plans = macro_plans[:max(0, q_macro)]
+                        mem_plans = mem_plans[:max(0, q_mem)]
+
+                        # --- interleave plans: ensure each source appears at least once when available ---
+                        def _interleave(groups):
+                            out = []
+                            # first pass: one per group
+                            for g in groups:
+                                if g:
+                                    out.append(g.pop(0))
+                            # round-robin
+                            while any(groups):
+                                for g in groups:
+                                    if g:
+                                        out.append(g.pop(0))
+                            return out
+
+                        plans = _interleave([mem_plans, llm_macro_plans, macro_plans, llm_atomic_plans, heur_plans])
+                        # de-dup by stable key
                         seen_plan = set()
-
-                        def _plan_key(pl: Dict[str, Any]) -> str:
-                            if pl.get("kind") == "atomic":
-                                return f"A:{int(pl.get('id',-1))}"
-                            if pl.get("kind") == "macro":
-                                return f"M:{str(pl.get('name',''))}"
-                            return stable_hash(pl)
-
-                        def _add_plan(pl: Dict[str, Any]):
-                            k = _plan_key(pl)
+                        uniq = []
+                        for pl in plans:
+                            k = f"A:{int(pl.get('id',-1))}" if pl.get("kind")=="atomic" else f"M:{pl.get('src','')}:{pl.get('name','')}"
                             if k in seen_plan:
-                                return
+                                continue
                             seen_plan.add(k)
-                            plans.append(pl)
-
-                        for c in heur_cands:
-                            _add_plan({"kind": "atomic", "id": int(c.id), "cand": c})
-                        for c in llm_cands:
-                            _add_plan({"kind": "atomic", "id": int(c.id), "cand": c, "src": "llm"})
-                        for mn in macro_names:
-                            _add_plan({"kind": "macro", "name": str(mn)})
-                        for pl in mem_plans:
-                            _add_plan(pl)
+                            uniq.append(pl)
+                        plans = uniq
 
                         ab_cfg = _cfg_get(mpvs_cfg, "ablation", {}) or {}
                         disable_verifier = bool(_cfg_get(ab_cfg, "no_verifier", False))
                         disable_macro = bool(_cfg_get(ab_cfg, "no_macro", False))
                         disable_llm = bool(_cfg_get(ab_cfg, "no_llm", False))
                         if disable_llm:
-                            plans = [p for p in plans if not (p.get("src") == "llm")]
+                            plans = [p for p in plans if not str(p.get("src", "")).startswith("llm")]
                         if disable_macro:
                             plans = [p for p in plans if p.get("kind") != "macro"]
 
@@ -1383,8 +1465,22 @@ def run_detailed_place(
                         ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
                         max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
                         early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
+                        tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
                         if len(plans) > max_plans:
                             plans = plans[:max_plans]
+
+                        # early-stop gating: must cover enough sources first
+                        min_cover = int(_cfg_get(ver_cfg, "min_cover_groups", 3))
+                        cover = set()
+                        def _src_prio(s: str) -> int:
+                            # larger is better
+                            return {"mem": 5, "llm_macro": 4, "macro": 3, "llm_atomic": 2, "heuristic": 1}.get(str(s), 0)
+
+                        def _plan_prio(pl: Dict[str, Any]) -> float:
+                            p = float(_src_prio(pl.get("src", "")))
+                            if direction_bias and pl.get("src") in {"llm_atomic", "llm_macro"}:
+                                p += 0.25
+                            return p
 
                         best_plan = None
                         best_v = None
@@ -1403,13 +1499,23 @@ def run_detailed_place(
                             else:
                                 res = _verify_plan(pl, assign, eval_out)
                                 v = float(res.get("verified_best_total", 1e30))
-                            if best_v is None or v < best_v:
+                            if best_v is None or v < best_v - 1e-12:
                                 best_v = v
                                 best_plan = pl
                                 best_res = res
+                            else:
+                                if abs(v - float(best_v)) <= tie_eps:
+                                    if _plan_prio(pl) > _plan_prio(best_plan):
+                                        best_v = v
+                                        best_plan = pl
+                                        best_res = res
                             mpvs_stats["plans_scored"] += 1
-                            if (best_v is not None) and (best_v <= float(cur_total) - early_margin):
-                                # strong improvement already found; stop scoring more plans to save budget
+                            cover.add(str(pl.get("src","")))
+                            if pl.get("src") == "macro":
+                                mpvs_stats["macro_scored"] += 1
+                            if pl.get("src") == "mem":
+                                mpvs_stats["mem_scored"] += 1
+                            if (best_v is not None) and (len(cover) >= min_cover) and (best_v <= float(cur_total) - early_margin):
                                 break
 
                         if best_plan is None or best_res is None:
@@ -1476,7 +1582,12 @@ def run_detailed_place(
                                 if mem_enabled and (delta_v < 0.0):
                                     mpvs_mem.append(
                                         {
-                                            "plan": {"kind": best_plan.get("kind"), "name": best_plan.get("name",""), "id": int(best_plan.get("id",-1)), "src": best_plan.get("src","")},
+                                            "plan": {
+                                                "kind": best_plan.get("kind"),
+                                                "name": best_plan.get("name",""),
+                                                "id": int(best_plan.get("id",-1)),
+                                                "src": "mem",
+                                            },
                                             "expire": int(step + mem_ttl),
                                             "score": float(vbest),
                                         }
@@ -1495,10 +1606,16 @@ def run_detailed_place(
                             calls1 = int(getattr(evaluator, "evaluator_calls", 0))
                             mpvs_stats["verifier_calls_spent"] += max(0, calls1 - calls0)
                             mpvs_stats["steps_mpvs"] += 1
-                            if best_plan.get("kind") == "macro" and accept:
-                                mpvs_stats["macro_selected"] += 1
-                            if best_plan.get("src") == "mem" and accept:
-                                mpvs_stats["memory_selected"] += 1
+                            if accept:
+                                src_sel = str(best_plan.get("src", ""))
+                                if src_sel == "llm_macro":
+                                    mpvs_stats["llm_macro_selected"] += 1
+                                if src_sel == "llm_atomic":
+                                    mpvs_stats["llm_selected"] += 1
+                                if src_sel == "macro":
+                                    mpvs_stats["macro_selected"] += 1
+                                if src_sel == "mem":
+                                    mpvs_stats["memory_selected"] += 1
 
                             row = {
                                 "iter": int(step),
