@@ -465,12 +465,28 @@ def build_dataloader(cfg):
 def build_val_loader(cfg) -> DataLoader:
     ds = UCF101Dataset(cfg, split="val")
     batch_size = int(getattr(cfg.data, "batch_size", cfg.train.batch_size))
-    return DataLoader(
-        ds,
+    base_seed = int(getattr(cfg.training, "seed", getattr(cfg.train, "seed", 0)) or 0)
+
+    generator = torch.Generator()
+    generator.manual_seed(base_seed)
+    worker_init = partial(_seed_worker, base_seed=base_seed)
+
+    pin_memory = bool(getattr(cfg.data, "pin_memory", True))
+    persistent_workers = bool(getattr(cfg.data, "persistent_workers", True)) and int(cfg.data.num_workers) > 0
+    prefetch_factor = int(getattr(cfg.data, "prefetch_factor", 2))
+
+    val_kwargs = dict(
         batch_size=batch_size,
         shuffle=False,
         num_workers=cfg.data.num_workers,
+        worker_init_fn=worker_init,
+        generator=generator,
+        pin_memory=pin_memory,
     )
+    if int(cfg.data.num_workers) > 0:
+        val_kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
+
+    return DataLoader(ds, **val_kwargs)
 
 
 def validate_one_epoch(model: torch.nn.Module, val_loader: DataLoader, device: torch.device, amp: bool,
