@@ -80,6 +80,9 @@ detailed_place:
       macro_verify_mode: lite
       lite_macro_steps: 1
       lite_refine_sa_calls: 0
+      enable_when_stagnation_ge: 12
+      macro_precheck_every_n_steps: 10
+      macro_precheck_stagnation_ge: 20
       pool_override:
         raw_target_size: 24
         raw_target_max: 30
@@ -89,6 +92,7 @@ detailed_place:
     accept:
       enabled: true
       use_temperature: true
+      forbid_none_when_stagnation_ge: 8
     memory:
       enabled: true
       ttl_steps: 8
