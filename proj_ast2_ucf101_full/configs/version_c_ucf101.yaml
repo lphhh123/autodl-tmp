@@ -1,4 +1,11 @@
 _base_: ./ast2_ucf101.yaml
+training:
+  hw_term_ratio_cap: 0.1
+  hw_loss_norm_enabled: true
+  hw_loss_norm_ema_alpha: 0.98
+  hw_loss_norm_min_denom: 1e-3
+  hw_loss_norm_clip: 10.0
+
 train:
   mode: version_c
   # v5.4 contract: keep aligned with stable_hw.accuracy_guard.controller.epsilon_drop

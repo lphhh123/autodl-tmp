@@ -1318,6 +1318,14 @@ def train_version_c(
         stable_hw_state["run_signature"] = signature
         stable_hw_state["out_dir"] = str(out_dir)
         stable_hw_state["stable_hw_enabled"] = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+
+        hw_ratio_cap = float(getattr(cfg.training, "hw_term_ratio_cap", 0.1) or 0.1)
+        hw_norm_enabled = bool(getattr(cfg.training, "hw_loss_norm_enabled", True))
+        hw_norm_alpha = float(getattr(cfg.training, "hw_loss_norm_ema_alpha", 0.98) or 0.98)
+        hw_norm_min_denom = float(getattr(cfg.training, "hw_loss_norm_min_denom", 1e-3) or 1e-3)
+        hw_norm_clip = float(getattr(cfg.training, "hw_loss_norm_clip", 10.0) or 10.0)
+        if "hw_mag_ema" not in stable_hw_state:
+            stable_hw_state["hw_mag_ema"] = 1.0
         if stable_hw_cfg is None:
             locked_cfg = {}
             no_drift_cfg = {}
@@ -2091,10 +2099,58 @@ def train_version_c(
                                 )
                         # ---- NaN-safe HW term (avoid 0*NaN propagation) ----
                         hw_nonfinite = not torch.isfinite(L_hw).all()
-                        if twostage or float(lambda_hw_eff) <= 0.0:
-                            hw_term = torch.zeros_like(L_hw)
+
+                        acc_part_t = L_task + float(lambda_ast_eff) * info["L_AST"]
+
+                        # ---- normalize L_hw to reduce scale mismatch / spikes ----
+                        L_hw_clean = torch.nan_to_num(L_hw, nan=0.0, posinf=0.0, neginf=0.0)
+
+                        hw_mag = 0.0
+                        hw_mag_ema = float(stable_hw_state.get("hw_mag_ema", 1.0) or 1.0)
+                        if hw_norm_enabled:
+                            try:
+                                hw_mag = float(L_hw_clean.detach().abs().mean().item())
+                                hw_mag_ema = float(hw_norm_alpha) * float(hw_mag_ema) + (1.0 - float(hw_norm_alpha)) * float(hw_mag)
+                                hw_mag_ema = max(float(hw_mag_ema), float(hw_norm_min_denom))
+                                stable_hw_state["hw_mag_ema"] = float(hw_mag_ema)
+                            except Exception:
+                                hw_mag = 0.0
+                                hw_mag_ema = max(float(hw_mag_ema), float(hw_norm_min_denom))
+                                stable_hw_state["hw_mag_ema"] = float(hw_mag_ema)
+
+                        if hw_norm_enabled:
+                            L_hw_normed = L_hw_clean / float(hw_mag_ema)
+                            if hw_norm_clip > 0:
+                                L_hw_normed = L_hw_normed.clamp(min=-float(hw_norm_clip), max=float(hw_norm_clip))
                         else:
-                            hw_term = float(lambda_hw_eff) * torch.nan_to_num(L_hw, nan=0.0, posinf=0.0, neginf=0.0)
+                            L_hw_normed = L_hw_clean
+
+                        if twostage or float(lambda_hw_eff) <= 0.0:
+                            hw_term = torch.zeros_like(L_hw_normed)
+                            hw_scale = 1.0
+                            hw_ratio = 0.0
+                        else:
+                            hw_term_raw = float(lambda_hw_eff) * L_hw_normed
+
+                            # ratio cap: |hw_term| <= hw_ratio_cap * |acc_part|
+                            denom = (acc_part_t.detach().abs() + 1.0e-6)
+                            hw_ratio = float((hw_term_raw.detach().abs() / denom).clamp(min=0.0, max=1.0e6).item())
+                            hw_scale = 1.0
+                            if hw_ratio_cap > 0.0 and hw_ratio > hw_ratio_cap:
+                                hw_scale = float(hw_ratio_cap / max(1e-9, hw_ratio))
+                                hw_term_raw = hw_term_raw * hw_scale
+                            hw_term = hw_term_raw
+
+                        # keep for logging/audit
+                        if isinstance(hw_stats, dict):
+                            hw_stats["hw_mag"] = float(hw_mag)
+                            hw_stats["hw_mag_ema"] = float(hw_mag_ema)
+                            hw_stats["hw_norm_enabled"] = bool(hw_norm_enabled)
+                            hw_stats["hw_norm_clip"] = float(hw_norm_clip)
+                            hw_stats["hw_ratio"] = float(hw_ratio)
+                            hw_stats["hw_ratio_cap"] = float(hw_ratio_cap)
+                            hw_stats["hw_ratio_scale"] = float(hw_scale)
+
                         # If HW loss went non-finite, skip this step entirely (keeps model/alpha stable).
                         if hw_nonfinite:
                             run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
@@ -2102,7 +2158,7 @@ def train_version_c(
                             optimizer_model.zero_grad(set_to_none=True)
                             optimizer_alpha.zero_grad(set_to_none=True)
                             continue
-                        loss = L_task + float(lambda_ast_eff) * info["L_AST"] + hw_term
+                        loss = acc_part_t + hw_term
                         # ---- v5.4 audit: capture the exact loss components used ----
                         try:
                             ast_loss_val = info["L_AST"]
