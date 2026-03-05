@@ -22,15 +22,15 @@ detailed_place:
       quota:
         heur: 10
         llm_atomic: 1
-        llm_macro: 1
+        llm_macro: 0
         macro: 2
         mem: 1
     macros:
       enabled: true
       base: ["therm", "comm"]
       extra_on_stagnation: ["escape", "cluster"]
-      enable_base_when_stagnation_ge: 5
-      enable_extra_when_stagnation_ge: 25
+      enable_base_when_stagnation_ge: 15
+      enable_extra_when_stagnation_ge: 35
       max_macros: 3
       n_steps: 3
     explore:
@@ -50,7 +50,7 @@ detailed_place:
       tie_eps: 0.002
       tie_explore_when_stagnation_ge: 10
       direction_bias_beta: 0.02
-      full_verify_topk: 1
+      full_verify_topk: 2
       fast_macro_steps: 1
       safe_enabled: true
       safe_eps_early: 0.0005
@@ -60,7 +60,7 @@ detailed_place:
       nonheuristic_improve_margin_early: 0.0002
       nonheuristic_improve_margin_late: 0.0001
       nonheuristic_improve_randw_scale: 2.0
-      full_verify_always_include_sources: ["heuristic", "mem", "llm_macro", "macro"]
+      full_verify_always_include_sources: ["heuristic"]
       macro_gain_gate_enabled: true
       macro_gain_margin_early: 0.001
       macro_gain_margin_late: 0.0002
@@ -79,7 +79,7 @@ detailed_place:
       randw_max_verify_eval_calls_per_step: 120
       macro_verify_mode: lite
       lite_macro_steps: 1
-      lite_refine_sa_calls: 2
+      lite_refine_sa_calls: 0
       pool_override:
         raw_target_size: 24
         raw_target_max: 30
@@ -93,7 +93,7 @@ detailed_place:
       enabled: true
       ttl_steps: 8
       max_size: 32
-      enable_when_stagnation_ge: 8
+      enable_when_stagnation_ge: 12
 
   lookahead:
     enabled: false
