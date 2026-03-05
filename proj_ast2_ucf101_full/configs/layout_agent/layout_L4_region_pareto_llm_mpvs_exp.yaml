@@ -67,6 +67,8 @@ detailed_place:
       macro_gain_switch_stagnation: 20
       macro_gain_randw_scale: 1.5
       macro_cost_lambda: 2e-7
+      macro_min_gain: 0.0008
+      macro_min_gain_randw: 0.0004
 
       randw_switch_stagnation: 20
       randw_early_horizon_cap: 2
