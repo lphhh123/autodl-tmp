@@ -1740,25 +1740,49 @@ def train_version_c(
                 allow_discrete = allow_discrete_updates
                 update_alpha = base_update_alpha and allow_discrete
 
+                # ---- HW stabilize window: prevent discrete updates / alpha step right after HW enables ----
                 hw_stabilize_epochs = int(getattr(cfg.training, "hw_stabilize_epochs", 2) or 2)
                 hw_enabled_now = (not twostage) and (float(lambda_hw_eff) > 0.0)
-                if hw_enabled_now and ("hw_first_outer" not in stable_hw_state):
+
+                # record first outer when HW becomes active
+                if hw_enabled_now and stable_hw_state.get("hw_first_outer", None) is None:
                     stable_hw_state["hw_first_outer"] = int(outer)
-                first_hw_outer = int(stable_hw_state.get("hw_first_outer", 10**9))
-                if hw_enabled_now and int(outer) < first_hw_outer + hw_stabilize_epochs:
+
+                hw_first_outer = stable_hw_state.get("hw_first_outer", None)
+                in_hw_stabilize = (
+                    hw_enabled_now
+                    and hw_first_outer is not None
+                    and int(outer) < int(hw_first_outer) + int(hw_stabilize_epochs)
+                )
+
+                if in_hw_stabilize:
+                    # disable discrete updates and alpha step; reuse cached mapping/layout only
+                    if allow_discrete_updates or update_alpha:
+                        logger.warning(
+                            "[HWGuard] stabilize window active (outer=%s first=%s len=%s): disable discrete updates + alpha",
+                            int(outer),
+                            int(hw_first_outer),
+                            int(hw_stabilize_epochs),
+                        )
                     allow_discrete_updates = False
                     allow_discrete = False
                     update_alpha = False
                     stable_hw_state["allow_discrete_updates"] = False
                     stable_hw_state["freeze_schedule"] = True
                     stable_hw_state["guard_mode"] = "RECOVERY"
-                    logger.warning("[HWGuard] stabilize window active: outer=%s (disable discrete+alpha)", int(outer))
+                    stable_hw_state["hw_stabilizing"] = True
+                else:
+                    stable_hw_state["hw_stabilizing"] = False
 
                 mapping_updated = False
                 layout_updated = False
 
                 need_update_mapping = ((outer % map_every) == 0) or (cache["mapping"] is None)
                 need_update_layout = ((outer % lay_every) == 0) or (cache["layout"] is None)
+
+                if not allow_discrete_updates:
+                    need_update_mapping = False
+                    need_update_layout = False
 
                 if stable_hw_enabled:
                     if stable_hw_state.get("lambda_hw_effective", 0.0) <= 0.0:
