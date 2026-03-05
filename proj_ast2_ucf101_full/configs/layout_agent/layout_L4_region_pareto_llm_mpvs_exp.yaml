@@ -94,6 +94,8 @@ detailed_place:
       ttl_steps: 8
       max_size: 32
       enable_when_stagnation_ge: 12
+      propose_every_n_steps: 10
+      verify_every_n_steps: 10
 
   lookahead:
     enabled: false
