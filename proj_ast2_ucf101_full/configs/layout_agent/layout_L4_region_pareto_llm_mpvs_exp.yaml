@@ -89,6 +89,26 @@ detailed_place:
         final_size: 10
         diversity_enabled: false
         coverage_min_per_bucket: 0
+    trigger:
+      enabled: true
+      window: 30
+      stagn_ref: 20
+      repeat_ratio_high: 0.55
+      calls_per_iter_high: 180
+      macro:
+        enable_when_stagnation_ge: 20
+        min_interval_steps: 10
+        credit_max: 3
+        credit_add: 1
+        credit_cost: 3
+        cooldown_fail: 10
+      verifier:
+        enable_when_stagnation_ge: 12
+        min_interval_steps: 10
+        credit_max: 2
+        credit_add: 1
+        credit_cost: 2
+        cooldown_fail: 6
     accept:
       enabled: true
       use_temperature: true
