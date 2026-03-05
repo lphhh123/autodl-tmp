@@ -1483,12 +1483,14 @@ def run_detailed_place(
                                 # keep best-first
                                 mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
                             if mem_enabled and mpvs_mem and (stagn >= mem_stagn_th):
-                                # top-1 memory plan; force src=mem, carry mem_score for cheap scoring
+                                # top-1 memory plan (atomic replay only)
                                 topm = mpvs_mem[0]
                                 mp = dict(topm.get("plan", {}) or {})
-                                mp["src"] = "mem"
-                                mp["mem_score"] = float(topm.get("score", 1e30))
-                                mem_plans.append(mp)
+                                if str(mp.get("kind", "")) == "atomic" and (mp.get("action") is not None):
+                                    mp["src"] = "mem"
+                                    # keep historical score for diagnostics; verifier-mode will NOT trust it as cheap score
+                                    mp["mem_score"] = float(topm.get("score", 1e30))
+                                    mem_plans.append(mp)
 
                             # --- quota config ---
                             quota_cfg = _cfg_get(prop_cfg, "quota", {}) or {}
@@ -1573,7 +1575,7 @@ def run_detailed_place(
                             safe_eps_late = float(_cfg_get(ver_cfg, "safe_eps_late", 0.002))
                             safe_eps_switch_stagnation = int(_cfg_get(ver_cfg, "safe_eps_switch_stagnation", 15))
                             full_verify_always_include_sources = set(
-                                str(x) for x in (_cfg_get(ver_cfg, "full_verify_always_include_sources", ["heuristic", "macro", "llm_macro", "mem"]) or [])
+                                str(x) for x in (_cfg_get(ver_cfg, "full_verify_always_include_sources", ["heuristic"]) or [])
                             )
                             if len(plans) > max_plans:
                                 plans = plans[:max_plans]
@@ -1655,20 +1657,83 @@ def run_detailed_place(
 
                             def _cheap_score(pl: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
                                 try:
-                                    # memory plan can carry a historical score to avoid extra evals
-                                    if str(pl.get("src", "")) == "mem" and pl.get("mem_score") is not None:
-                                        return float(pl.get("mem_score")), {"mode": "mem_score"}
+                                    src = str(pl.get("src", ""))
+                                    # memory plan can carry a historical score; verifier-mode MUST NOT trust it for competition
+                                    if src == "mem" and pl.get("mem_score") is not None:
+                                        if disable_verifier:
+                                            return float(pl.get("mem_score")), {"mode": "mem_score"}
+                                        return 1e30, {"mode": "mem_score_disabled"}
+                                    # macro cheap score: use fast-precheck total if available; otherwise neutral
                                     if pl.get("kind") == "macro":
+                                        if pl.get("_macro_fast_total") is not None:
+                                            return float(pl.get("_macro_fast_total")), {"mode": "macro_fast"}
                                         return float(eval_out.get("total_scalar", 0.0)), {"mode": "macro_neutral"}
                                     cand = pl.get("cand", None)
                                     if cand is not None:
                                         return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
                                     if pl.get("action") is not None:
-                                        # we intentionally do NOT eval here; only eval if selected
-                                        return float(eval_out.get("total_scalar", 0.0)), {"mode": "atomic_action_neutral"}
+                                        # action-only plan (memory replay) must be verified before competing in verifier-mode
+                                        if disable_verifier:
+                                            return float(eval_out.get("total_scalar", 0.0)), {"mode": "atomic_action_neutral"}
+                                        return 1e30, {"mode": "atomic_action_needs_verify"}
                                     return 1e30, {"mode": "atomic_missing"}
                                 except Exception:
                                     return 1e30, {"mode": "error"}
+
+                            # --- macro fast precheck: prevent macro/llm_macro from consuming verify budget unless it can beat heuristic ---
+                            try:
+                                macro_gate_enabled = bool(_cfg_get(ver_cfg, "macro_gain_gate_enabled", True))
+                                if macro_gate_enabled and (not disable_macro) and int(fast_macro_steps) > 0:
+                                    # best heuristic cheap baseline (lower is better)
+                                    best_heur_est = None
+                                    for _pl in plans:
+                                        if str(_pl.get("src", "")) != "heuristic" or _pl.get("kind") != "atomic":
+                                            continue
+                                        _cand = _pl.get("cand", None)
+                                        if _cand is None:
+                                            continue
+                                        _v = float(getattr(_cand, "est", {}).get("total_new", 1e30))
+                                        if best_heur_est is None or _v < best_heur_est:
+                                            best_heur_est = _v
+                                    if best_heur_est is None:
+                                        best_heur_est = float(eval_out.get("total_scalar", 0.0))
+
+                                    gain_sw = int(_cfg_get(ver_cfg, "macro_gain_switch_stagnation", 20))
+                                    gain_early = float(_cfg_get(ver_cfg, "macro_gain_margin_early", 0.001))
+                                    gain_late = float(_cfg_get(ver_cfg, "macro_gain_margin_late", 0.0002))
+                                    req = gain_early if int(stagn) < gain_sw else gain_late
+                                    if instance_tag == "randw":
+                                        req *= float(_cfg_get(ver_cfg, "macro_gain_randw_scale", 1.5))
+
+                                    kept_plans = []
+                                    for _pl in plans:
+                                        if _pl.get("kind") == "macro" and str(_pl.get("src", "")) in {"macro", "llm_macro"}:
+                                            try:
+                                                nm = str(_pl.get("name", "macro"))
+                                                n_steps_macro = int(_cfg_get(macro_cfg, "n_steps", 3))
+                                                n_fast = max(1, min(int(n_steps_macro), int(fast_macro_steps)))
+                                                b_assign, b_eval, b_total, acts, _cur = _exec_macro(
+                                                    nm, assign.copy(), dict(eval_out), n_steps=n_fast
+                                                )
+                                                _pl["_macro_fast_total"] = float(b_total)
+                                                _pl["_macro_fast_res"] = {
+                                                    "verified_best_total": float(b_total),
+                                                    "best_assign": b_assign,
+                                                    "best_eval": b_eval,
+                                                    "actions": acts,
+                                                }
+                                                # Require macro to beat heuristic by req already at fast-proxy stage
+                                                if float(b_total) > float(best_heur_est) - float(req):
+                                                    mpvs_stats["macro_precheck_blocked"] = int(mpvs_stats.get("macro_precheck_blocked", 0)) + 1
+                                                    continue
+                                                mpvs_stats["macro_precheck_allowed"] = int(mpvs_stats.get("macro_precheck_allowed", 0)) + 1
+                                            except Exception:
+                                                mpvs_stats["macro_precheck_failed"] = int(mpvs_stats.get("macro_precheck_failed", 0)) + 1
+                                                continue
+                                        kept_plans.append(_pl)
+                                    plans = kept_plans
+                            except Exception:
+                                pass
 
                             scored: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
                             for pl in plans:
@@ -1714,6 +1779,21 @@ def run_detailed_place(
                             except Exception:
                                 pass
 
+                            # ensure memory replay plan (action-only) is verifiable (1 eval call) when present
+                            try:
+                                best_mem = None
+                                for _, pl, _ in sorted_scored:
+                                    if str(pl.get("src", "")) == "mem" and pl.get("kind") == "atomic" and pl.get("action") is not None:
+                                        best_mem = pl
+                                        break
+                                if best_mem is not None:
+                                    pk = _plan_key(best_mem)
+                                    if pk not in full_verify_keys:
+                                        full_verify_list.append(best_mem)
+                                        full_verify_keys.add(pk)
+                            except Exception:
+                                pass
+
                             # cap number of full-verify plans
                             if len(full_verify_list) > max_full_verify:
                                 full_verify_list = full_verify_list[:max_full_verify]
@@ -1721,7 +1801,7 @@ def run_detailed_place(
 
                             for cheap, pl, cmeta in sorted_scored:
                                 pk = _plan_key(pl)
-                                do_full_verify = disable_verifier or (pk in full_verify_keys)
+                                do_full_verify = disable_verifier or (pk in full_verify_keys) or (pl.get("kind") == "atomic" and pl.get("cand", None) is not None)
                                 if do_full_verify:
                                     calls_b = int(getattr(evaluator, "evaluator_calls", 0))
                                     if disable_verifier:
@@ -1738,22 +1818,34 @@ def run_detailed_place(
                                                 res = {"verified_best_total": float(cur_total), "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": []}
                                     else:
                                         # verifier-enabled:
-                                        # - atomic plans reuse cand.est and should NOT do expensive rollout/refine
+                                        # - atomic cand plans reuse cand.est and are effectively "free" (no evaluator calls)
+                                        # - action-only plans (memory replay) require 1 eval to compete, so only verify when selected for full-verify
                                         if pl.get("kind") == "atomic":
                                             cand = pl.get("cand", None)
                                             if cand is not None:
-                                                res = _atomic_res_from_cand(cand, assign) if pk in full_verify_keys else None
+                                                res = _atomic_res_from_cand(cand, assign)
                                             elif pl.get("action") is not None:
-                                                # only eval if selected later
-                                                res = None
+                                                res = _atomic_res_from_action(pl.get("action"), assign, eval_out) if (pk in full_verify_keys) else None
                                             else:
                                                 res = None
                                         else:
-                                            # macro/memory macro: may verify, but cap per-step budget
+                                            # macro: verify only when allowed & within per-step budget; reuse fast precheck result when it matches lite settings
                                             if int(getattr(evaluator, "evaluator_calls", 0)) - calls0 >= max_verify_calls_step:
                                                 res = None
                                             else:
-                                                res = _verify_plan(pl, assign, eval_out, stagn)
+                                                if pl.get("kind") == "macro" and pl.get("_macro_fast_res") is not None:
+                                                    try:
+                                                        macro_mode = str(_cfg_get(ver_cfg, "macro_verify_mode", "lite")).lower()
+                                                        lite_steps = int(_cfg_get(ver_cfg, "lite_macro_steps", 1))
+                                                        lite_refine = int(_cfg_get(ver_cfg, "lite_refine_sa_calls", 0))
+                                                        if macro_mode == "lite" and lite_steps <= int(fast_macro_steps) and int(lite_refine) <= 0:
+                                                            res = pl.get("_macro_fast_res")
+                                                        else:
+                                                            res = _verify_plan(pl, assign, eval_out, stagn)
+                                                    except Exception:
+                                                        res = _verify_plan(pl, assign, eval_out, stagn)
+                                                else:
+                                                    res = _verify_plan(pl, assign, eval_out, stagn)
                                     calls_a = int(getattr(evaluator, "evaluator_calls", 0))
                                     calls_spent = max(0, calls_a - calls_b)
                                     if res is None:
@@ -1787,6 +1879,14 @@ def run_detailed_place(
                                     v_raw = float(cheap)
                                     v_eff = float(cheap)
                                     calls_spent = 0
+                                    # IMPORTANT (budget-fair): under verifier-mode, do NOT let unverified non-heuristic
+                                    # macro/mem/action plans compete with neutral/stale cheap scores.
+                                    # Atomic cand plans are OK (cand.est is produced by evaluator already).
+                                    if (not disable_verifier):
+                                        if not (pl.get("kind") == "atomic" and pl.get("cand", None) is not None):
+                                            if str(pl.get("src", "")) != "heuristic":
+                                                v_raw = 1e30
+                                                v_eff = 1e30
 
                                 per_plan.append(
                                     {
@@ -1996,7 +2096,7 @@ def run_detailed_place(
                                     if sig:
                                         tabu_signatures.append(sig)
                                         try:
-                                            inverse_signatures.append(inverse_signature(sig))
+                                            inverse_signatures.append(inverse_signature(act, assign_before))
                                         except Exception:
                                             pass
                                     try:
@@ -2080,40 +2180,44 @@ def run_detailed_place(
                                     added = False
 
                                 if mem_enabled and (delta_v < 0.0):
+                                    # Store ONLY atomic improvements. Macro memories are not replayable and can induce loops / wasted verify.
                                     mem_plan = {
-                                        "kind": best_plan.get("kind"),
-                                        "name": best_plan.get("name",""),
-                                        "id": int(best_plan.get("id",-1)),
+                                        "kind": "atomic",
+                                        "name": "",
+                                        "id": -1,     # prevent collision with current atomic candidates
                                         "src": "mem",
                                     }
-                                    # For atomic, store executable action (candidate_id is optional; replay should not depend on it)
+                                    stored_ok = False
                                     try:
                                         if best_plan.get("kind") == "atomic":
-                                            acts = best_res.get("actions", []) or []
+                                            acts = (best_res or {}).get("actions", []) or []
                                             if acts:
                                                 a0 = copy.deepcopy(acts[0])
-                                                # make replay robust
+                                                # make replay robust (do not depend on candidate_id/signature)
                                                 a0.pop("candidate_id", None)
                                                 a0.pop("signature", None)
                                                 a0.pop("_src", None)
                                                 mem_plan["action"] = a0
+                                                stored_ok = True
                                     except Exception:
-                                        pass
-                                    mpvs_mem.append(
-                                        {
-                                            "plan": mem_plan,
-                                            "expire": int(step + mem_ttl),
-                                            "score": float(vbest),
-                                        }
-                                    )
-                                    # keep memory bounded (max_size)
-                                    try:
-                                        mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
-                                        if len(mpvs_mem) > mem_max:
-                                            mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
-                                            mpvs_mem[:] = mpvs_mem[:mem_max]
-                                    except Exception:
-                                        pass
+                                        stored_ok = False
+
+                                    if stored_ok:
+                                        mpvs_mem.append(
+                                            {
+                                                "plan": mem_plan,
+                                                "expire": int(step + mem_ttl),
+                                                "score": float(vbest),
+                                            }
+                                        )
+                                        # keep memory bounded (max_size)
+                                        try:
+                                            mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
+                                            if len(mpvs_mem) > mem_max:
+                                                mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
+                                                mpvs_mem[:] = mpvs_mem[:mem_max]
+                                        except Exception:
+                                            pass
                             else:
                                 added = False
 
