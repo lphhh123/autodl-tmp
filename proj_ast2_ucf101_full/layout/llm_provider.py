@@ -58,6 +58,8 @@ class VolcArkProvider(LLMProvider):
         if self.api_key.lower().startswith("bearer "):
             self.api_key = self.api_key[7:].strip()
         self.last_usage = None
+        self.disabled = False
+        self.disabled_reason = ""
 
     @classmethod
     def from_config_file(cls, path: str, timeout_sec: int = 90, max_retry: int = 1):
@@ -225,6 +227,9 @@ class VolcArkProvider(LLMProvider):
 
     def propose_pick(self, state_summary: Dict, k: int) -> List[int]:
         url = f"{self.endpoint}/chat/completions"
+        if self.disabled:
+            self.last_usage = {"ok": False, "skipped": True, "reason": f"disabled:{self.disabled_reason}"}
+            return []
         if not self.endpoint or not self.api_key or not self.model:
             self.last_usage = {
                 "ok": False,
@@ -292,6 +297,12 @@ class VolcArkProvider(LLMProvider):
                         "retryable": retryable,
                     }
                     last_error = Exception(f"HTTP {resp.status_code}:{error_code}")
+                    if resp.status_code in (401, 403):
+                        self.disabled = True
+                        self.disabled_reason = f"http_{resp.status_code}"
+                        self.last_usage["skipped"] = True
+                        self.last_usage["reason"] = f"disabled:{self.disabled_reason}"
+                        break
                     if fatal:
                         break
                     continue
