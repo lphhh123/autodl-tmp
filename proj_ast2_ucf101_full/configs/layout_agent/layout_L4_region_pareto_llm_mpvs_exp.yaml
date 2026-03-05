@@ -16,12 +16,13 @@ detailed_place:
     cache_size: 12000
     proposer:
       k_heur: 8
-      k_llm: 4
-      llm_every_n_steps: 5
+      k_llm: 2
+      llm_every_n_steps: 10
+      llm_allow_direction_bias: false
       quota:
         heur: 6
-        llm_atomic: 2
-        llm_macro: 2
+        llm_atomic: 0
+        llm_macro: 1
         macro: 2
         mem: 1
     macros:
@@ -55,7 +56,11 @@ detailed_place:
       safe_eps_early: 0.0005
       safe_eps_late: 0.002
       safe_eps_switch_stagnation: 15
-      full_verify_always_include_sources: ["heuristic"]
+      nonheuristic_require_improve: true
+      nonheuristic_improve_margin_early: 0.0002
+      nonheuristic_improve_margin_late: 0.0001
+      nonheuristic_improve_randw_scale: 2.0
+      full_verify_always_include_sources: ["heuristic", "mem", "llm_macro", "macro"]
       macro_gain_gate_enabled: true
       macro_gain_margin_early: 0.001
       macro_gain_margin_late: 0.0002
@@ -68,8 +73,8 @@ detailed_place:
       randw_early_mc_cap: 1
       randw_early_refine_cap: 8
       randw_early_macro_steps_cap: 2
-      max_full_verify: 2
-      randw_max_full_verify: 1
+      max_full_verify: 3
+      randw_max_full_verify: 2
       max_verify_eval_calls_per_step: 180
       randw_max_verify_eval_calls_per_step: 120
       macro_verify_mode: lite
