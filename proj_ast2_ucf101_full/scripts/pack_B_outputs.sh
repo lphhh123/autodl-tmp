@@ -16,6 +16,9 @@ PACK_EXPS="${PACK_EXPS:-$DEFAULT_PACK_EXPS}"
 # Whether to include legacy B0/B0* (default off)
 PACK_INCLUDE_B0="${PACK_INCLUDE_B0:-0}"
 
+# Default: do NOT pack huge trace.csv (keeps tgz small for sharing)
+PACK_TRACE_CSV="${PACK_TRACE_CSV:-0}"
+
 # 0) layout_input
 tar -czf _pack_B/layout_input_P3A3.tgz \
   --ignore-failed-read \
@@ -51,12 +54,22 @@ for exp in "${exp_dirs[@]}"; do
 
     if [[ "$exp_name" == "EXP-B0" || "$exp_name" == "EXP-B0-random" ]]; then
       out="_pack_B/${exp_name}_${seed_name}_FULL.tgz"
-      tar -czf "$out" \
-        --ignore-failed-read \
-        --exclude="**/heuragenix_internal/data/**" \
-        --exclude="**/__heuragenix_work/**" \
-        "$seed" \
-        2>/dev/null || true
+      if [[ "${PACK_TRACE_CSV}" != "1" ]]; then
+        tar -czf "$out" \
+          --ignore-failed-read \
+          --exclude="**/heuragenix_internal/data/**" \
+          --exclude="**/__heuragenix_work/**" \
+          --exclude="**/trace.csv" \
+          "$seed" \
+          2>/dev/null || true
+      else
+        tar -czf "$out" \
+          --ignore-failed-read \
+          --exclude="**/heuragenix_internal/data/**" \
+          --exclude="**/__heuragenix_work/**" \
+          "$seed" \
+          2>/dev/null || true
+      fi
       echo "[PACK] $out"
       continue
     fi
@@ -72,28 +85,51 @@ for exp in "${exp_dirs[@]}"; do
     if [ -n "$latest_run_dir" ] && [ -d "$latest_run_dir" ]; then
       run_id=$(basename "$latest_run_dir")
       out="_pack_B/${exp_name}_${seed_name}_${run_id}.tgz"
-      tar -czf "$out" \
-        --ignore-failed-read \
-        --exclude="**/heuragenix_internal/data/**" \
-        --exclude="**/recordings.jsonl" \
-        --exclude="**/trace_events.jsonl" \
-        --exclude="**/candidate_pool_debug.json" \
-        --exclude="**/*.npy" --exclude="**/*.npz" \
-        --exclude="**/*.pt" --exclude="**/*.pth" --exclude="**/*.ckpt" \
-        --exclude="**/__pycache__/**" \
-        "$seed/$run_id" \
-        2>/dev/null || true
+      if [[ "${PACK_TRACE_CSV}" != "1" ]]; then
+        tar -czf "$out" \
+          --ignore-failed-read \
+          --exclude="**/heuragenix_internal/data/**" \
+          --exclude="**/recordings.jsonl" \
+          --exclude="**/trace_events.jsonl" \
+          --exclude="**/candidate_pool_debug.json" \
+          --exclude="**/trace.csv" \
+          --exclude="**/*.npy" --exclude="**/*.npz" \
+          --exclude="**/*.pt" --exclude="**/*.pth" --exclude="**/*.ckpt" \
+          --exclude="**/__pycache__/**" \
+          "$seed/$run_id" \
+          2>/dev/null || true
+      else
+        tar -czf "$out" \
+          --ignore-failed-read \
+          --exclude="**/heuragenix_internal/data/**" \
+          --exclude="**/recordings.jsonl" \
+          --exclude="**/trace_events.jsonl" \
+          --exclude="**/candidate_pool_debug.json" \
+          --exclude="**/*.npy" --exclude="**/*.npz" \
+          --exclude="**/*.pt" --exclude="**/*.pth" --exclude="**/*.ckpt" \
+          --exclude="**/__pycache__/**" \
+          "$seed/$run_id" \
+          2>/dev/null || true
+      fi
       echo "[PACK] $out"
     else
       out="_pack_B/${exp_name}_${seed_name}_NO_RUNID.tgz"
+      seed_files=(
+        "$seed/report.json"
+        "$seed/layout_best.json"
+        "$seed/llm_usage.jsonl"
+        "$seed/manifest.json"
+        "$seed/effective_config_snapshot.yaml"
+        "$seed/budget.json"
+        "$seed/trace_meta.json"
+      )
+      if [[ "${PACK_TRACE_CSV}" == "1" ]]; then
+        seed_files+=("$seed/trace.csv")
+      fi
+
       tar -czf "$out" \
         --ignore-failed-read \
-        "$seed/trace.csv" \
-        "$seed/report.json" \
-        "$seed/layout_best.json" \
-        "$seed/llm_usage.jsonl" \
-        "$seed/manifest.json" \
-        "$seed/effective_config_snapshot.yaml" \
+        "${seed_files[@]}" \
         2>/dev/null || true
       echo "[PACK] $out (no run_id dir found; packed minimal seed files)"
     fi
