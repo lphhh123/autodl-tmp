@@ -767,6 +767,17 @@ def run_layout_agent(
         eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
         trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
 
+        mpvs_stats = None
+        try:
+            meta_p = out_dir / "trace_meta.json"
+            if meta_p.exists():
+                with meta_p.open("r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if isinstance(meta, dict) and meta.get("mpvs") is not None:
+                    mpvs_stats = meta.get("mpvs")
+        except Exception:
+            mpvs_stats = None
+
         trace_min = {}
         for k in (
             "best_total", "best_comm", "best_therm",
@@ -816,6 +827,7 @@ def run_layout_agent(
                 "fatal_seen": bool(llm_stats.get("fatal_seen", False)),
                 "llm_used_sum": int(llm_used_sum),
             },
+            "mpvs_stats": mpvs_stats,
             **trace_metrics,
         }
         with (out_dir / "report.json").open("w", encoding="utf-8") as f:
