@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 rm -rf _pack_B
 mkdir -p _pack_B
 
+# New B output root (post-migration). Can override if needed.
+B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
+
 # Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
 DEFAULT_PACK_EXPS="EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B3"
 PACK_EXPS="${PACK_EXPS:-$DEFAULT_PACK_EXPS}"
@@ -23,7 +26,7 @@ tar -czf _pack_B/layout_input_P3A3.tgz \
 # 1) pack latest run per selected EXP-B* prefixes per seed
 exp_dirs=()
 for prefix in ${PACK_EXPS}; do
-  for d in outputs/${prefix}*; do
+  for d in ${B_OUT_ROOT}/${prefix}*; do
     [ -d "$d" ] || continue
     exp_dirs+=("$d")
   done
