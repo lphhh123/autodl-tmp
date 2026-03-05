@@ -1348,6 +1348,7 @@ def run_detailed_place(
                             llm_pick_ids: List[int] = []
                             llm_macro_plans: List[Dict[str, Any]] = []
                             direction_bias: Optional[str] = None
+                            allow_dir_bias = bool(_cfg_get(prop_cfg, "llm_allow_direction_bias", False))
                             # Virtual candidates (LLM can pick these IDs to propose macro/direction)
                             # Macro IDs
                             V_MACRO = {
@@ -1433,7 +1434,10 @@ def run_detailed_place(
                                         llm_macro_plans.append({"kind": "macro", "name": str(V_MACRO[pid]), "src": "llm_macro"})
                                         continue
                                     if pid in V_DIR:
-                                        direction_bias = str(V_DIR[pid])
+                                        if allow_dir_bias:
+                                            direction_bias = str(V_DIR[pid])
+                                        else:
+                                            mpvs_stats["llm_dir_ignored"] = int(mpvs_stats.get("llm_dir_ignored", 0)) + 1
                                         continue
                                     cc = cand_map.get(pid)
                                     if cc is not None:
@@ -1738,8 +1742,14 @@ def run_detailed_place(
                                     calls_a = int(getattr(evaluator, "evaluator_calls", 0))
                                     calls_spent = max(0, calls_a - calls_b)
                                     if res is None:
-                                        v_raw = float(cheap)
-                                        v_eff = float(cheap)
+                                        # IMPORTANT: do NOT allow non-heuristic plans to compete with cheap scores.
+                                        # Otherwise stale mem_score / macro_neutral will dominate and cause flat/repeat regressions.
+                                        if str(pl.get("src", "")) != "heuristic":
+                                            v_raw = 1e30
+                                            v_eff = 1e30
+                                        else:
+                                            v_raw = float(cheap)
+                                            v_eff = float(cheap)
                                         calls_spent = 0
                                     else:
                                         v_raw = float(res.get("verified_best_total", 1e30))
@@ -1810,13 +1820,24 @@ def run_detailed_place(
                                 pass
 
                             if safe_enabled and best_plan is not None and best_heur_entry is not None:
-                                safe_eps = safe_eps_early if int(stagn) < safe_eps_switch_stagnation else safe_eps_late
-                                if str(best_plan.get("src", "")) != "heuristic" and float(best_v_raw if best_v_raw is not None else 1e30) > float(best_heur_entry["v_raw"]) + float(safe_eps):
-                                    best_plan = best_heur_entry["plan"]
-                                    best_res = best_heur_entry["res"]
-                                    best_v = float(best_heur_entry["v_eff"])
-                                    best_v_raw = float(best_heur_entry["v_raw"])
-                                    best_ent = best_heur_entry
+                                # For non-heuristic, require it to BEAT heuristic by a margin (no more "slightly worse is ok").
+                                req_improve = bool(_cfg_get(ver_cfg, "nonheuristic_require_improve", True))
+                                m_early = float(_cfg_get(ver_cfg, "nonheuristic_improve_margin_early", safe_eps_early))
+                                m_late = float(_cfg_get(ver_cfg, "nonheuristic_improve_margin_late", safe_eps_late * 0.5))
+                                safe_eps = m_early if int(stagn) < safe_eps_switch_stagnation else m_late
+                                if instance_tag == "randw":
+                                    safe_eps *= float(_cfg_get(ver_cfg, "nonheuristic_improve_randw_scale", 2.0))
+
+                                if str(best_plan.get("src", "")) != "heuristic":
+                                    bh = float(best_heur_entry["v_raw"])
+                                    bv = float(best_v_raw if best_v_raw is not None else 1e30)
+                                    # If not verified (bv will be INF) or not strictly better than heuristic, fallback
+                                    if (bv >= 1e29) or (req_improve and (bv > bh - safe_eps)):
+                                        best_plan = best_heur_entry["plan"]
+                                        best_res = best_heur_entry["res"]
+                                        best_v = float(best_heur_entry["v_eff"])
+                                        best_v_raw = float(best_heur_entry["v_raw"])
+                                        best_ent = best_heur_entry
 
                             macro_gate_enabled = bool(_cfg_get(ver_cfg, "macro_gain_gate_enabled", True))
                             if macro_gate_enabled and best_plan is not None and best_heur_entry is not None and best_ent is not None:
@@ -1877,6 +1898,10 @@ def run_detailed_place(
                                         accept = True
                                     else:
                                         accept = (py_rng.random() < math.exp(-delta_v / Tacc))
+
+                                # Hard no-regret for non-heuristic: never accept a worsening move
+                                if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
+                                    accept = False
 
                                 chosen_actions = best_res.get("actions", []) or []
                                 op_args_obj = {

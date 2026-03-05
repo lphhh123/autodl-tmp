@@ -6,7 +6,5 @@ detailed_place:
         mem: 0
     memory:
       enabled: false
-    verifier:
-      full_verify_always_include_sources: ["heuristic"]
     ablation:
       no_mem: true
