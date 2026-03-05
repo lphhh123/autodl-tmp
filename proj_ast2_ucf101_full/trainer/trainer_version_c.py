@@ -2287,6 +2287,12 @@ def train_version_c(
                         )
                         optimizer_model.zero_grad(set_to_none=True)
                         optimizer_alpha.zero_grad(set_to_none=True)
+                        # IMPORTANT: unscale_ was called; must call scaler.update() before continuing
+                        # to reset GradScaler per-optimizer state and (if inf detected) reduce the scale.
+                        try:
+                            scaler.update()
+                        except Exception:
+                            pass
                         continue
 
                     if grad_clip_norm > 0.0:
