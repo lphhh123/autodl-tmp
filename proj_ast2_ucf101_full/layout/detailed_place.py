@@ -517,6 +517,8 @@ def run_detailed_place(
         "trig_ver_fired": 0,
         "trig_ver_fail": 0,
         "trig_ver_success": 0,
+        "macro_precheck_fail_min_gain": 0,
+        "macro_precheck_pass_min_gain": 0,
     }
 
     # Providers: always have heuristic; LLM optional
@@ -1871,6 +1873,24 @@ def run_detailed_place(
                                                 if float(b_total) > float(best_heur_est) - float(req):
                                                     mpvs_stats["macro_precheck_blocked"] = int(mpvs_stats.get("macro_precheck_blocked", 0)) + 1
                                                     continue
+                                                # strict admission: macro must improve current objective to be considered
+                                                min_gain = float(_cfg_get(ver_cfg, "macro_min_gain", 0.0008))
+                                                if instance_tag == "randw":
+                                                    min_gain = float(_cfg_get(ver_cfg, "macro_min_gain_randw", 0.0004))
+
+                                                cur_total = float(eval_out.get("total_scalar", 0.0))
+                                                if float(b_total) > float(cur_total) - float(min_gain):
+                                                    mpvs_stats["macro_precheck_fail_min_gain"] = int(mpvs_stats.get("macro_precheck_fail_min_gain", 0)) + 1
+                                                    try:
+                                                        if trig_enabled:
+                                                            mac_t = _cfg_get((_cfg_get(mpvs_cfg, "trigger", {}) or {}), "macro", {}) or {}
+                                                            mac_cd_fail = int(_cfg_get(mac_t, "cooldown_fail", 10))
+                                                            mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), mac_cd_fail)
+                                                    except Exception:
+                                                        pass
+                                                    continue
+
+                                                mpvs_stats["macro_precheck_pass_min_gain"] = int(mpvs_stats.get("macro_precheck_pass_min_gain", 0)) + 1
                                                 mpvs_stats["macro_precheck_allowed"] = int(mpvs_stats.get("macro_precheck_allowed", 0)) + 1
                                             except Exception:
                                                 mpvs_stats["macro_precheck_failed"] = int(mpvs_stats.get("macro_precheck_failed", 0)) + 1
@@ -2525,6 +2545,9 @@ def run_detailed_place(
                                                 "trig_calls_avg": float(trig_calls_avg),
                                                 "trig_allow_macro": int(trig_allow_macro),
                                                 "trig_allow_verifier": int(trig_allow_verifier),
+                                                "macro_min_gain": float(_cfg_get(ver_cfg, "macro_min_gain", 0.0008)),
+                                                "macro_precheck_fail_min_gain": int(mpvs_stats.get("macro_precheck_fail_min_gain", 0)),
+                                                "macro_precheck_pass_min_gain": int(mpvs_stats.get("macro_precheck_pass_min_gain", 0)),
                                                 "horizon": int(_cfg_get(ver_cfg,"horizon",3)),
                                                 "mc": int(_cfg_get(ver_cfg,"mc",2)),
                                                 "refine_sa_calls": int(_cfg_get(ver_cfg,"refine_sa_calls",20)),
