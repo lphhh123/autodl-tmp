@@ -1559,6 +1559,8 @@ def run_detailed_place(
                             plans = norm_plans
 
                             ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
+                            ver_enable_stagn = int(_cfg_get(ver_cfg, "enable_when_stagnation_ge", 0))
+                            disable_verifier_step = bool(disable_verifier) or (int(stagn) < int(ver_enable_stagn))
                             max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
                             early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
                             tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
@@ -1663,7 +1665,7 @@ def run_detailed_place(
                                     src = str(pl.get("src", ""))
                                     # memory: verifier-mode must NOT trust historical mem_score for competition
                                     if src == "mem" and pl.get("mem_score") is not None:
-                                        if disable_verifier:
+                                        if disable_verifier_step:
                                             return float(pl.get("mem_score")), {"mode": "mem_score"}
                                         return 1e30, {"mode": "mem_score_disabled"}
                                     # macro: keep neutral cheap (but unverified non-heuristic will be fail-closed later)
@@ -1674,7 +1676,7 @@ def run_detailed_place(
                                         return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
                                     if pl.get("action") is not None:
                                         # action-only plans (memory replay) must be verified before competing in verifier-mode
-                                        if disable_verifier:
+                                        if disable_verifier_step:
                                             return float(eval_out.get("total_scalar", 0.0)), {"mode": "atomic_action_neutral"}
                                         return 1e30, {"mode": "atomic_action_needs_verify"}
                                     return 1e30, {"mode": "atomic_missing"}
@@ -1684,7 +1686,12 @@ def run_detailed_place(
                             # --- macro fast precheck: prevent macro/llm_macro from consuming verify budget unless it can beat heuristic ---
                             try:
                                 macro_gate_enabled = bool(_cfg_get(ver_cfg, "macro_gain_gate_enabled", True))
-                                if macro_gate_enabled and (not disable_macro) and int(fast_macro_steps) > 0:
+                                macro_precheck_every = int(_cfg_get(ver_cfg, "macro_precheck_every_n_steps", 10))
+                                macro_precheck_stagn = int(_cfg_get(ver_cfg, "macro_precheck_stagnation_ge", 20))
+                                do_macro_precheck = (int(stagn) >= int(macro_precheck_stagn)) and (
+                                    macro_precheck_every <= 1 or (int(step) % int(macro_precheck_every) == 0)
+                                )
+                                if macro_gate_enabled and (not disable_macro) and int(fast_macro_steps) > 0 and do_macro_precheck:
                                     # best heuristic cheap baseline (lower is better)
                                     best_heur_est = None
                                     for _pl in plans:
@@ -1782,7 +1789,7 @@ def run_detailed_place(
 
                             # ensure memory replay is verifiable, but only sparsely to avoid fixed eval-call tax
                             try:
-                                if (not disable_verifier) and mem_plans:
+                                if (not disable_verifier_step) and mem_plans:
                                     mem_verify_every = int(_cfg_get(mem_cfg, "verify_every_n_steps", 10))
                                     if mem_verify_every <= 1 or (int(step) % int(mem_verify_every) == 0):
                                         best_mem = None
@@ -1805,10 +1812,10 @@ def run_detailed_place(
 
                             for cheap, pl, cmeta in sorted_scored:
                                 pk = _plan_key(pl)
-                                do_full_verify = disable_verifier or (pk in full_verify_keys) or (pl.get("kind") == "atomic" and pl.get("cand", None) is not None)
+                                do_full_verify = disable_verifier_step or (pk in full_verify_keys) or (pl.get("kind") == "atomic" and pl.get("cand", None) is not None)
                                 if do_full_verify:
                                     calls_b = int(getattr(evaluator, "evaluator_calls", 0))
-                                    if disable_verifier:
+                                    if disable_verifier_step:
                                         if pl.get("kind") == "macro":
                                             b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
                                             res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
@@ -1886,7 +1893,7 @@ def run_detailed_place(
                                     # IMPORTANT (budget-fair): under verifier-mode, do NOT let unverified non-heuristic
                                     # macro/mem/action plans compete with neutral/stale cheap scores.
                                     # Atomic cand plans are OK (cand.est is produced by evaluator already).
-                                    if (not disable_verifier):
+                                    if (not disable_verifier_step):
                                         if not (pl.get("kind") == "atomic" and pl.get("cand", None) is not None):
                                             if str(pl.get("src", "")) != "heuristic":
                                                 v_raw = 1e30
@@ -2111,6 +2118,17 @@ def run_detailed_place(
                                         pass
 
                             blocked, blk_meta = _mpvs_action_blocked(chosen_actions, assign_before_mpvs, vbest)
+                            # treat "none" as blocked under stagnation (avoid wasting eval-call budget)
+                            try:
+                                none_block_stagn = int(_cfg_get(_cfg_get(mpvs_cfg, "accept", {}) or {}, "forbid_none_when_stagnation_ge", 8))
+                                if (not blocked) and int(stagn) >= int(none_block_stagn):
+                                    if chosen_actions and str(chosen_actions[0].get("op","")) == "none":
+                                        blocked = True
+                                        blk_meta = dict(blk_meta or {})
+                                        blk_meta["none"] = 1
+                                        mpvs_stats["blocked_none"] = int(mpvs_stats.get("blocked_none", 0)) + 1
+                            except Exception:
+                                pass
                             if blocked:
                                 mpvs_stats["blocked_any"] = int(mpvs_stats.get("blocked_any", 0)) + 1
                                 if str(best_plan.get("src", "")) == "heuristic":
@@ -2332,12 +2350,17 @@ def run_detailed_place(
                                             "mpvs": {
                                                 "n_plans": int(len(plans)),
                                                 "best_kind": str(best_plan.get("kind")),
+                                                "best_src": str(best_plan.get("src","")) if isinstance(best_plan, dict) else None,
                                                 "macro": str(best_plan.get("name","")),
                                                 "verified_best_total": float(vbest),
                                                 "delta_v": float(delta_v),
                                                 "horizon": int(_cfg_get(ver_cfg,"horizon",3)),
                                                 "mc": int(_cfg_get(ver_cfg,"mc",2)),
                                                 "refine_sa_calls": int(_cfg_get(ver_cfg,"refine_sa_calls",20)),
+                                                "blocked": int(blocked) if isinstance(blocked, bool) else None,
+                                                "blocked_meta": blk_meta if isinstance(blk_meta, dict) else None,
+                                                "force_reject": int(force_reject) if isinstance(force_reject, bool) else None,
+                                                "fallback_reason": fallback_reason if "fallback_reason" in locals() else None,
                                                 "use_llm_now": int(use_llm_now),
                                                 "llm_pick_ids": llm_pick_ids[:8],
                                             }

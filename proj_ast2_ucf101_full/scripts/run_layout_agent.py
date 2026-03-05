@@ -767,6 +767,16 @@ def run_layout_agent(
         eps_flat = float(detailed_cfg.get("eps_flat", 1e-4))
         trace_metrics = compute_trace_metrics_from_csv(trace_path, metrics_window, eps_flat)
 
+        try:
+            if isinstance(result, dict):
+                policy_meta = result.get("policy_meta", None)
+            else:
+                policy_meta = getattr(result, "policy_meta", None)
+            if isinstance(policy_meta, dict):
+                (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
         mpvs_stats = None
         try:
             meta_p = out_dir / "trace_meta.json"
