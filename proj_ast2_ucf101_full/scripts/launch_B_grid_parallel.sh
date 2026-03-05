@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export LC_ALL=C
+export LANG=C
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -49,6 +52,20 @@ echo "[B-grid] SEEDS_MAIN=${SEEDS_MAIN}"
 echo "[B-grid] SEEDS_ABL=${SEEDS_ABL}"
 echo "[B-grid] EXPS_MAIN=${EXPS_MAIN}"
 echo "[B-grid] EXPS_ABL=${EXPS_ABL} (RUN_ABLATIONS=${RUN_ABLATIONS})"
+
+# ------------------------------------------------------------
+# Optional clean to avoid historical accumulation in outputs/B
+#   KEEP_B_OUTPUTS=1 -> skip cleaning
+# ------------------------------------------------------------
+KEEP_B_OUTPUTS="${KEEP_B_OUTPUTS:-0}"
+CLEAN_NEW_B="${CLEAN_NEW_B:-1}"
+PURGE_LEGACY_B="${PURGE_LEGACY_B:-0}"   # keep conservative for grid; suite can purge legacy
+if [[ "${KEEP_B_OUTPUTS}" != "1" && -f scripts/clean_B_outputs.sh ]]; then
+  echo "[B-grid] cleaning outputs/B (CLEAN_NEW_B=${CLEAN_NEW_B} PURGE_LEGACY_B=${PURGE_LEGACY_B})"
+  PURGE_LEGACY="${PURGE_LEGACY_B}" CLEAN_NEW="${CLEAN_NEW_B}" bash scripts/clean_B_outputs.sh
+else
+  echo "[B-grid] KEEP_B_OUTPUTS=1 or clean script missing -> skip cleaning"
+fi
 
 # ------------------------------------------------------------
 # Preflight: generate layout inputs once to avoid parallel race
@@ -137,3 +154,22 @@ echo "[B-grid] launching with xargs -P ${MAX_JOBS} ..."
 cat "${tmp_cmds}" | xargs -P "${MAX_JOBS}" -I{} bash -lc "{}"
 
 echo "[B-grid] done."
+
+# ------------------------------------------------------------
+# Auto-pack after grid (default ON)
+#   PACK_AFTER=0 -> skip packing
+#   PACK_TRACE_CSV=1 -> include trace.csv (default 0 excludes)
+# ------------------------------------------------------------
+PACK_AFTER="${PACK_AFTER:-1}"
+if [[ "${PACK_AFTER}" == "1" && -f scripts/pack_B_outputs.sh ]]; then
+  echo "[B-grid] packing results ... (PACK_TRACE_CSV=${PACK_TRACE_CSV:-0})"
+  PACK_TRACE_CSV="${PACK_TRACE_CSV:-0}" bash scripts/pack_B_outputs.sh || true
+else
+  echo "[B-grid] PACK_AFTER=0 or pack script missing -> skip packing"
+fi
+
+# Quick sanity checks (best-effort)
+echo "[B-grid] report.json count under outputs/B:"
+find outputs/B -name report.json 2>/dev/null | wc -l || true
+echo "[B-grid] scan for common errors under outputs/B (best-effort):"
+grep -R "Traceback\|ERROR\|Exception\|RateLimit\|429" -n outputs/B 2>/dev/null || true
