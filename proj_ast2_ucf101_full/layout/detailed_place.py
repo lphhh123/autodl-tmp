@@ -468,6 +468,14 @@ def run_detailed_place(
 
     mpvs_mem: List[Dict[str, Any]] = []  # success memory entries: {"plan":..., "expire":int, "score":float}
     mpvs_explore_left = 0
+    # --- MPVS trigger controller state (BATC v0.5) ---
+    mpvs_trigger_state = {
+        "recent_sigs": [],   # recent assignment signatures (post-step)
+        "recent_calls": [],  # recent eval-calls spent per step
+        "credit": {"macro": 0.0, "verifier": 0.0},
+        "cooldown": {"macro": 0, "verifier": 0},
+        "last_fire": {"macro": -10000000, "verifier": -10000000},
+    }
 
     total_eval_budget = int(get_nested(cfg, "budget.total_eval_budget", 0) or 0)
 
@@ -496,6 +504,19 @@ def run_detailed_place(
         "pareto_added": 0,
         "macro_gate_blocked": 0,
         "macro_gate_allowed": 0,
+        # --- BATC trigger stats ---
+        "trig_enabled": 0,
+        "trig_steps": 0,
+        "trig_repeat_ratio_sum": 0.0,
+        "trig_calls_avg_sum": 0.0,
+        "trig_macro_allowed": 0,
+        "trig_macro_fired": 0,
+        "trig_macro_fail": 0,
+        "trig_macro_success": 0,
+        "trig_ver_allowed": 0,
+        "trig_ver_fired": 0,
+        "trig_ver_fail": 0,
+        "trig_ver_success": 0,
     }
 
     # Providers: always have heuristic; LLM optional
@@ -1192,6 +1213,14 @@ def run_detailed_place(
 
                 for step in range(steps):
                     last_step = int(step)
+                    # --- BATC trace defaults (always defined) ---
+                    mpvs_calls0 = None
+                    trig_enabled = False
+                    trig_repeat_ratio = 0.0
+                    trig_calls_avg = 0.0
+                    trig_distress = 0.0
+                    trig_allow_macro = False
+                    trig_allow_verifier = False
                     if trace_events_path is not None:
                         assert_cfg_sealed_or_violate(
                             cfg=cfg,
@@ -1287,6 +1316,7 @@ def run_detailed_place(
                     # ==========================
                     if mpvs_enabled:
                         calls0 = int(getattr(evaluator, "evaluator_calls", 0))
+                        mpvs_calls0 = int(calls0)
                         prev_total0 = float(eval_out.get("total_scalar", 0.0))
                         prev_comm0 = float(eval_out.get("comm_norm", 0.0))
                         prev_therm0 = float(eval_out.get("therm_norm", 0.0))
@@ -1561,6 +1591,113 @@ def run_detailed_place(
                             ver_cfg = _cfg_get(mpvs_cfg, "verifier", {}) or {}
                             ver_enable_stagn = int(_cfg_get(ver_cfg, "enable_when_stagnation_ge", 0))
                             disable_verifier_step = bool(disable_verifier) or (int(stagn) < int(ver_enable_stagn))
+                            # =========================================================
+                            # BATC v0.5: Budget-Aware Trigger Controller (macro/verifier)
+                            # =========================================================
+                            trig_cfg = _cfg_get(mpvs_cfg, "trigger", {}) or {}
+                            trig_enabled = bool(_cfg_get(trig_cfg, "enabled", False))
+                            if trig_enabled:
+                                mpvs_stats["trig_enabled"] = 1
+                                mpvs_stats["trig_steps"] = int(mpvs_stats.get("trig_steps", 0)) + 1
+
+                                W = int(_cfg_get(trig_cfg, "window", 30))
+                                W = max(10, min(W, 200))
+
+                                # recent signature diversity -> repeat ratio
+                                sigs = (mpvs_trigger_state.get("recent_sigs", []) or [])[-W:]
+                                if len(sigs) >= 2:
+                                    uniq = len(set(sigs))
+                                    trig_repeat_ratio = max(0.0, 1.0 - float(uniq) / float(len(sigs)))
+                                else:
+                                    trig_repeat_ratio = 0.0
+
+                                # recent calls/iter (from previous steps)
+                                calls_hist = (mpvs_trigger_state.get("recent_calls", []) or [])[-W:]
+                                trig_calls_avg = float(sum(calls_hist)) / float(len(calls_hist)) if calls_hist else 0.0
+
+                                mpvs_stats["trig_repeat_ratio_sum"] = float(mpvs_stats.get("trig_repeat_ratio_sum", 0.0)) + float(trig_repeat_ratio)
+                                mpvs_stats["trig_calls_avg_sum"] = float(mpvs_stats.get("trig_calls_avg_sum", 0.0)) + float(trig_calls_avg)
+
+                                repeat_high = float(_cfg_get(trig_cfg, "repeat_ratio_high", 0.55))
+                                calls_high = float(_cfg_get(trig_cfg, "calls_per_iter_high", 180.0))
+
+                                # decay cooldowns
+                                try:
+                                    for k in ("macro", "verifier"):
+                                        cd = int((mpvs_trigger_state.get("cooldown", {}) or {}).get(k, 0))
+                                        if cd > 0:
+                                            mpvs_trigger_state["cooldown"][k] = cd - 1
+                                except Exception:
+                                    pass
+
+                                # replenish credits
+                                mac_t = _cfg_get(trig_cfg, "macro", {}) or {}
+                                ver_t = _cfg_get(trig_cfg, "verifier", {}) or {}
+
+                                mac_add = float(_cfg_get(mac_t, "credit_add", 1.0))
+                                mac_max = float(_cfg_get(mac_t, "credit_max", 3.0))
+                                ver_add = float(_cfg_get(ver_t, "credit_add", 1.0))
+                                ver_max = float(_cfg_get(ver_t, "credit_max", 2.0))
+
+                                mpvs_trigger_state["credit"]["macro"] = min(mac_max, float(mpvs_trigger_state["credit"].get("macro", 0.0)) + mac_add)
+                                mpvs_trigger_state["credit"]["verifier"] = min(ver_max, float(mpvs_trigger_state["credit"].get("verifier", 0.0)) + ver_add)
+
+                                # distress (simple, stable): stagn + repeat
+                                stag_ref = float(_cfg_get(trig_cfg, "stagn_ref", 20.0))
+                                stag_ref = max(1.0, stag_ref)
+                                rr_ref = max(1e-6, repeat_high)
+                                trig_distress = max(float(stagn) / stag_ref, float(trig_repeat_ratio) / rr_ref)
+                                trig_distress = max(0.0, min(1.0, trig_distress))
+
+                                # allow macro?
+                                mac_minint = int(_cfg_get(mac_t, "min_interval_steps", 10))
+                                mac_cost = float(_cfg_get(mac_t, "credit_cost", 3.0))
+                                mac_cd_fail = int(_cfg_get(mac_t, "cooldown_fail", 10))
+                                mac_stagn_ge = int(_cfg_get(mac_t, "enable_when_stagnation_ge", int(_cfg_get(ver_cfg, "macro_precheck_stagnation_ge", 20))))
+
+                                last_mac = int((mpvs_trigger_state.get("last_fire", {}) or {}).get("macro", -10000000))
+                                cd_mac = int((mpvs_trigger_state.get("cooldown", {}) or {}).get("macro", 0))
+                                cred_mac = float((mpvs_trigger_state.get("credit", {}) or {}).get("macro", 0.0))
+
+                                trig_allow_macro = (not disable_macro) and (int(stagn) >= mac_stagn_ge) and (
+                                    (float(trig_repeat_ratio) >= repeat_high) or (int(stagn) >= mac_stagn_ge + 5)
+                                ) and (int(step) - last_mac >= mac_minint) and (cd_mac <= 0) and (cred_mac >= mac_cost) and (
+                                    (trig_calls_avg <= calls_high) or (int(stagn) >= mac_stagn_ge + 20) or (trig_calls_avg <= 0.0)
+                                )
+
+                                if trig_allow_macro:
+                                    mpvs_stats["trig_macro_allowed"] = int(mpvs_stats.get("trig_macro_allowed", 0)) + 1
+                                    mpvs_stats["trig_macro_fired"] = int(mpvs_stats.get("trig_macro_fired", 0)) + 1
+                                    mpvs_trigger_state["credit"]["macro"] = max(0.0, cred_mac - mac_cost)
+                                    mpvs_trigger_state["last_fire"]["macro"] = int(step)
+                                else:
+                                    # fail-closed: macro does not enter this step's candidate set
+                                    plans = [p for p in plans if p.get("kind") != "macro"]
+
+                                # allow verifier?
+                                ver_minint = int(_cfg_get(ver_t, "min_interval_steps", 10))
+                                ver_cost = float(_cfg_get(ver_t, "credit_cost", 2.0))
+                                ver_cd_fail = int(_cfg_get(ver_t, "cooldown_fail", 6))
+                                ver_stagn_ge = int(_cfg_get(ver_t, "enable_when_stagnation_ge", ver_enable_stagn))
+
+                                last_ver = int((mpvs_trigger_state.get("last_fire", {}) or {}).get("verifier", -10000000))
+                                cd_ver = int((mpvs_trigger_state.get("cooldown", {}) or {}).get("verifier", 0))
+                                cred_ver = float((mpvs_trigger_state.get("credit", {}) or {}).get("verifier", 0.0))
+
+                                trig_allow_verifier = (not disable_verifier_step) and (int(stagn) >= ver_stagn_ge) and (
+                                    (float(trig_repeat_ratio) >= repeat_high) or (int(stagn) >= ver_stagn_ge + 8)
+                                ) and (int(step) - last_ver >= ver_minint) and (cd_ver <= 0) and (cred_ver >= ver_cost) and (
+                                    (trig_calls_avg <= calls_high) or (int(stagn) >= ver_stagn_ge + 20) or (trig_calls_avg <= 0.0)
+                                )
+
+                                if trig_allow_verifier:
+                                    mpvs_stats["trig_ver_allowed"] = int(mpvs_stats.get("trig_ver_allowed", 0)) + 1
+                                    mpvs_stats["trig_ver_fired"] = int(mpvs_stats.get("trig_ver_fired", 0)) + 1
+                                    mpvs_trigger_state["credit"]["verifier"] = max(0.0, cred_ver - ver_cost)
+                                    mpvs_trigger_state["last_fire"]["verifier"] = int(step)
+                                else:
+                                    # verifier disabled this step (prevents fixed tax)
+                                    disable_verifier_step = True
                             max_plans = int(_cfg_get(ver_cfg, "max_plans", 12))
                             early_margin = float(_cfg_get(ver_cfg, "early_stop_margin", 0.01))
                             tie_eps = float(_cfg_get(ver_cfg, "tie_eps", 0.002))
@@ -2035,6 +2172,34 @@ def run_detailed_place(
                             # From here, best_res is guaranteed dict
                             vbest = float(best_res.get("verified_best_total", cur_total))
                             delta_v = vbest - cur_total
+                            # --- BATC cooldown feedback (lightweight) ---
+                            try:
+                                if trig_enabled:
+                                    mac_t = _cfg_get((_cfg_get(mpvs_cfg, "trigger", {}) or {}), "macro", {}) or {}
+                                    ver_t = _cfg_get((_cfg_get(mpvs_cfg, "trigger", {}) or {}), "verifier", {}) or {}
+                                    mac_cd_fail = int(_cfg_get(mac_t, "cooldown_fail", 10))
+                                    ver_cd_fail = int(_cfg_get(ver_t, "cooldown_fail", 6))
+
+                                    # improvement means delta_v < 0 (lower is better)
+                                    improved = (float(delta_v) < -1e-12)
+
+                                    if trig_allow_macro:
+                                        if str(best_plan.get("kind","")) == "macro" and improved:
+                                            mpvs_stats["trig_macro_success"] = int(mpvs_stats.get("trig_macro_success", 0)) + 1
+                                            mpvs_trigger_state["cooldown"]["macro"] = 0
+                                        else:
+                                            mpvs_stats["trig_macro_fail"] = int(mpvs_stats.get("trig_macro_fail", 0)) + 1
+                                            mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), mac_cd_fail)
+
+                                    if trig_allow_verifier:
+                                        if improved:
+                                            mpvs_stats["trig_ver_success"] = int(mpvs_stats.get("trig_ver_success", 0)) + 1
+                                            mpvs_trigger_state["cooldown"]["verifier"] = 0
+                                        else:
+                                            mpvs_stats["trig_ver_fail"] = int(mpvs_stats.get("trig_ver_fail", 0)) + 1
+                                            mpvs_trigger_state["cooldown"]["verifier"] = max(int(mpvs_trigger_state["cooldown"].get("verifier", 0)), ver_cd_fail)
+                            except Exception:
+                                pass
 
                             acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
                             use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
@@ -2354,6 +2519,12 @@ def run_detailed_place(
                                                 "macro": str(best_plan.get("name","")),
                                                 "verified_best_total": float(vbest),
                                                 "delta_v": float(delta_v),
+                                                "trig_enabled": int(trig_enabled),
+                                                "trig_distress": float(trig_distress),
+                                                "trig_repeat_ratio": float(trig_repeat_ratio),
+                                                "trig_calls_avg": float(trig_calls_avg),
+                                                "trig_allow_macro": int(trig_allow_macro),
+                                                "trig_allow_verifier": int(trig_allow_verifier),
                                                 "horizon": int(_cfg_get(ver_cfg,"horizon",3)),
                                                 "mc": int(_cfg_get(ver_cfg,"mc",2)),
                                                 "refine_sa_calls": int(_cfg_get(ver_cfg,"refine_sa_calls",20)),
@@ -2882,6 +3053,28 @@ def run_detailed_place(
                     T = max(T, sa_min_T)
         
                     assign_signature = signature_for_assign(assign)
+                    # --- BATC window update (post-step) ---
+                    try:
+                        if mpvs_enabled:
+                            trig_cfg = _cfg_get(mpvs_cfg, "trigger", {}) or {}
+                            if bool(_cfg_get(trig_cfg, "enabled", False)):
+                                W = int(_cfg_get(trig_cfg, "window", 30))
+                                W = max(10, min(W, 200))
+                                # keep a slightly longer buffer than W for stability
+                                Wmax = int(max(50, min(400, W * 4)))
+
+                                mpvs_trigger_state["recent_sigs"].append(str(assign_signature))
+                                if len(mpvs_trigger_state["recent_sigs"]) > Wmax:
+                                    mpvs_trigger_state["recent_sigs"] = mpvs_trigger_state["recent_sigs"][-Wmax:]
+
+                                if mpvs_calls0 is not None:
+                                    used_now = int(getattr(evaluator, "evaluator_calls", 0))
+                                    calls_used_step = max(0, int(used_now) - int(mpvs_calls0))
+                                    mpvs_trigger_state["recent_calls"].append(int(calls_used_step))
+                                    if len(mpvs_trigger_state["recent_calls"]) > Wmax:
+                                        mpvs_trigger_state["recent_calls"] = mpvs_trigger_state["recent_calls"][-Wmax:]
+                    except Exception:
+                        pass
                     op_args_obj = action
                     op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
                     op_signature = stable_hash(
