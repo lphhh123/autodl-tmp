@@ -1896,241 +1896,268 @@ def run_detailed_place(
                                     else:
                                         best_res = {"verified_best_total": float(cur_total), "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": []}
 
+                            force_reject = False
                             if best_plan is None or best_res is None:
-                                pass
-                            else:
-                                vbest = float(best_res.get("verified_best_total", cur_total))
-                                delta_v = vbest - cur_total
+                                mpvs_stats["no_plan_or_res"] = int(mpvs_stats.get("no_plan_or_res", 0)) + 1
 
-                                acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
-                                use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
-                                enabled_acc = bool(_cfg_get(acc_cfg, "enabled", True))
-                                Tacc = max(sa_min_T, float(T) if use_temp else 1.0)
-
-                                accept = True
-                                if enabled_acc:
-                                    if delta_v <= 0.0:
-                                        accept = True
-                                    else:
-                                        accept = (py_rng.random() < math.exp(-delta_v / Tacc))
-
-                                # Hard no-regret for non-heuristic: never accept a worsening move
-                                if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
-                                    accept = False
-
-                                chosen_actions = best_res.get("actions", []) or []
-                                assign_before_mpvs = assign.copy()
-
-                                # --- MPVS anti-loop integration (tabu/inverse/cooldown) ---
-                                def _mpvs_action_blocked(actions, assign_before, vbest_val):
-                                    # compute aspiration: allow tabu if it beats global best by aspiration_delta
-                                    try:
-                                        aspiration = float(vbest_val) < float(best_total_seen) - float(aspiration_delta)
-                                    except Exception:
-                                        aspiration = False
-                                    if aspiration:
-                                        return (False, {"aspiration": 1, "tabu": 0, "inverse": 0, "cooldown": 0})
-                                    tabu_hit = 0
-                                    inverse_hit = 0
-                                    cooldown_hit = 0
-                                    for act in (actions or []):
-                                        a = act
-                                        if "signature" not in a or not a.get("signature"):
-                                            try:
-                                                a["signature"] = _signature_for_action(a, assign_before)
-                                            except Exception:
-                                                a["signature"] = ""
-                                        sig = str(a.get("signature", ""))
-                                        if sig and (sig in tabu_signatures):
-                                            tabu_hit = 1
-                                        if sig and (sig in inverse_signatures):
-                                            inverse_hit = 1
-                                        # per-slot cooldown
-                                        try:
-                                            for slot in _touched_slots(a):
-                                                if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
-                                                    cooldown_hit = 1
-                                                    break
-                                        except Exception:
-                                            pass
-                                        if cooldown_hit:
-                                            break
-                                    blocked = bool(tabu_hit or inverse_hit or cooldown_hit)
-                                    return (blocked, {"aspiration": 0, "tabu": tabu_hit, "inverse": inverse_hit, "cooldown": cooldown_hit})
-
-                                def _mpvs_update_anti_loop_state(actions, assign_before):
-                                    for act in (actions or []):
-                                        if "signature" not in act or not act.get("signature"):
-                                            try:
-                                                act["signature"] = _signature_for_action(act, assign_before)
-                                            except Exception:
-                                                act["signature"] = ""
-                                        sig = str(act.get("signature", ""))
-                                        if sig:
-                                            tabu_signatures.append(sig)
-                                            try:
-                                                inverse_signatures.append(inverse_signature(sig))
-                                            except Exception:
-                                                pass
-                                        try:
-                                            for slot in _touched_slots(act):
-                                                last_move_step_per_slot[int(slot)] = int(step)
-                                                last_site_per_slot[int(slot)] = int(assign[int(slot)])
-                                        except Exception:
-                                            pass
-
-                                blocked, blk_meta = _mpvs_action_blocked(chosen_actions, assign_before_mpvs, vbest)
-                                if blocked and str(best_plan.get("src", "")) != "heuristic":
-                                    mpvs_stats["blocked_nonheuristic"] = int(mpvs_stats.get("blocked_nonheuristic", 0)) + 1
-                                    mpvs_stats["blocked_tabu"] = int(mpvs_stats.get("blocked_tabu", 0)) + int(blk_meta.get("tabu", 0))
-                                    mpvs_stats["blocked_inverse"] = int(mpvs_stats.get("blocked_inverse", 0)) + int(blk_meta.get("inverse", 0))
-                                    mpvs_stats["blocked_cooldown"] = int(mpvs_stats.get("blocked_cooldown", 0)) + int(blk_meta.get("cooldown", 0))
-                                    # fallback to best heuristic entry (prevents MPVS-caused oscillation)
-                                    if best_heur_entry is not None:
-                                        best_plan = best_heur_entry["plan"]
-                                        best_res = best_heur_entry["res"]
-                                        best_v = float(best_heur_entry["v_eff"])
-                                        best_v_raw = float(best_heur_entry["v_raw"])
-                                        best_ent = best_heur_entry
-                                        chosen_actions = best_res.get("actions", []) or []
-                                        vbest = float(best_res.get("verified_best_total", cur_total))
-
-                                delta_v = vbest - cur_total
-                                if enabled_acc:
-                                    if delta_v <= 0.0:
-                                        accept = True
-                                    else:
-                                        accept = (py_rng.random() < math.exp(-delta_v / Tacc))
+                                # Prefer fallback to heuristic-best (guaranteed safe path)
+                                if best_heur_entry is not None and best_heur_entry.get("res") is not None:
+                                    best_plan = best_heur_entry["plan"]
+                                    best_res = best_heur_entry["res"]
+                                    best_v = float(best_heur_entry.get("v_eff", cur_total))
+                                    best_v_raw = float(best_heur_entry.get("v_raw", cur_total))
+                                    best_ent = best_heur_entry
                                 else:
+                                    # Hard fallback: no-op (do not move), and do not accept
+                                    best_plan = {"src": "none", "kind": "none", "name": "", "id": -1}
+                                    best_res = {
+                                        "verified_best_total": float(cur_total),
+                                        "best_assign": assign.copy(),
+                                        "best_eval": dict(eval_out),
+                                        "actions": [],
+                                    }
+                                    best_v = float(cur_total)
+                                    best_v_raw = float(cur_total)
+                                    best_ent = None
+                                    force_reject = True
+
+                            # From here, best_res is guaranteed dict
+                            vbest = float(best_res.get("verified_best_total", cur_total))
+                            delta_v = vbest - cur_total
+
+                            acc_cfg = _cfg_get(mpvs_cfg, "accept", {}) or {}
+                            use_temp = bool(_cfg_get(acc_cfg, "use_temperature", True))
+                            enabled_acc = bool(_cfg_get(acc_cfg, "enabled", True))
+                            Tacc = max(sa_min_T, float(T) if use_temp else 1.0)
+
+                            accept = True
+                            if enabled_acc:
+                                if delta_v <= 0.0:
                                     accept = True
-                                if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
-                                    accept = False
-
-                                op_args_obj = {
-                                    "op": "macro" if best_plan.get("kind") == "macro" else str((chosen_actions[0] if chosen_actions else {}).get("op","none")),
-                                    "mpvs_kind": str(best_plan.get("kind")),
-                                    "macro_name": str(best_plan.get("name","")) if best_plan.get("kind")=="macro" else "",
-                                    "sub_ops": [str(a.get("op","")) for a in chosen_actions[:6]],
-                                    "n_sub": int(len(chosen_actions)),
-                                    "verified_best_total": float(vbest),
-                                    "src": str(best_plan.get("src","heuristic")),
-                                }
-                                if best_plan.get("kind") == "macro":
-                                    op_for_trace = "macro"
                                 else:
-                                    op_for_trace = str((chosen_actions[0] if chosen_actions else {}).get("op", "none"))
+                                    accept = (py_rng.random() < math.exp(-delta_v / Tacc))
 
-                                if accept:
-                                    assign = np.asarray(best_res.get("best_assign", assign), dtype=int).copy()
-                                    eval_out = dict(best_res.get("best_eval", eval_out))
+                            # Hard no-regret for non-heuristic: never accept a worsening move
+                            if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
+                                accept = False
+
+                            # Force reject if we had to synthesize no-op fallback
+                            if force_reject:
+                                accept = False
+
+                            chosen_actions = best_res.get("actions", []) or []
+                            assign_before_mpvs = assign.copy()
+
+                            # --- MPVS anti-loop integration (tabu/inverse/cooldown) ---
+                            def _mpvs_action_blocked(actions, assign_before, vbest_val):
+                                # compute aspiration: allow tabu if it beats global best by aspiration_delta
+                                try:
+                                    aspiration = float(vbest_val) < float(best_total_seen) - float(aspiration_delta)
+                                except Exception:
+                                    aspiration = False
+                                if aspiration:
+                                    return (False, {"aspiration": 1, "tabu": 0, "inverse": 0, "cooldown": 0})
+                                tabu_hit = 0
+                                inverse_hit = 0
+                                cooldown_hit = 0
+                                for act in (actions or []):
+                                    a = act
+                                    if "signature" not in a or not a.get("signature"):
+                                        try:
+                                            a["signature"] = _signature_for_action(a, assign_before)
+                                        except Exception:
+                                            a["signature"] = ""
+                                    sig = str(a.get("signature", ""))
+                                    if sig and (sig in tabu_signatures):
+                                        tabu_hit = 1
+                                    if sig and (sig in inverse_signatures):
+                                        inverse_hit = 1
+                                    # per-slot cooldown
                                     try:
-                                        _mpvs_update_anti_loop_state(chosen_actions, assign_before_mpvs)
+                                        for slot in _touched_slots(a):
+                                            if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
+                                                cooldown_hit = 1
+                                                break
                                     except Exception:
                                         pass
-                                    prev_total = float(eval_out.get("total_scalar", prev_total))
-                                    prev_comm = float(eval_out.get("comm_norm", prev_comm))
-                                    prev_therm = float(eval_out.get("therm_norm", prev_therm))
-                                    accepted_steps += 1
-                                    if prev_total < best_total_seen:
-                                        best_total_seen = prev_total
-                                        last_best_step = int(step)
-                                    # IMPORTANT: MPVS must contribute to pareto, otherwise run_layout_agent selection stays at init
-                                    try:
-                                        added = pareto.add(
-                                            eval_out["comm_norm"],
-                                            eval_out["therm_norm"],
-                                            {
-                                                "assign": assign.copy(),
-                                                "total_scalar": float(eval_out["total_scalar"]),
-                                                "stage": stage_label,
-                                                "iter": int(step + 1),
-                                                "seed": int(seed_id),
-                                            },
-                                        )
-                                        if added:
-                                            mpvs_stats["pareto_added"] += 1
-                                    except Exception:
-                                        added = False
+                                    if cooldown_hit:
+                                        break
+                                blocked = bool(tabu_hit or inverse_hit or cooldown_hit)
+                                return (blocked, {"aspiration": 0, "tabu": tabu_hit, "inverse": inverse_hit, "cooldown": cooldown_hit})
 
-                                    if mem_enabled and (delta_v < 0.0):
-                                        mem_plan = {
-                                            "kind": best_plan.get("kind"),
-                                            "name": best_plan.get("name",""),
-                                            "id": int(best_plan.get("id",-1)),
-                                            "src": "mem",
-                                        }
-                                        # For atomic, store executable action (candidate_id is optional; replay should not depend on it)
+                            def _mpvs_update_anti_loop_state(actions, assign_before):
+                                for act in (actions or []):
+                                    if "signature" not in act or not act.get("signature"):
                                         try:
-                                            if best_plan.get("kind") == "atomic":
-                                                acts = best_res.get("actions", []) or []
-                                                if acts:
-                                                    a0 = copy.deepcopy(acts[0])
-                                                    # make replay robust
-                                                    a0.pop("candidate_id", None)
-                                                    a0.pop("signature", None)
-                                                    a0.pop("_src", None)
-                                                    mem_plan["action"] = a0
+                                            act["signature"] = _signature_for_action(act, assign_before)
+                                        except Exception:
+                                            act["signature"] = ""
+                                    sig = str(act.get("signature", ""))
+                                    if sig:
+                                        tabu_signatures.append(sig)
+                                        try:
+                                            inverse_signatures.append(inverse_signature(sig))
                                         except Exception:
                                             pass
-                                        mpvs_mem.append(
-                                            {
-                                                "plan": mem_plan,
-                                                "expire": int(step + mem_ttl),
-                                                "score": float(vbest),
-                                            }
-                                        )
-                                        # keep memory bounded (max_size)
-                                        try:
-                                            mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
-                                            if len(mpvs_mem) > mem_max:
-                                                mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
-                                                mpvs_mem[:] = mpvs_mem[:mem_max]
-                                        except Exception:
-                                            pass
+                                    try:
+                                        for slot in _touched_slots(act):
+                                            last_move_step_per_slot[int(slot)] = int(step)
+                                            last_site_per_slot[int(slot)] = int(assign[int(slot)])
+                                    except Exception:
+                                        pass
+
+                            blocked, blk_meta = _mpvs_action_blocked(chosen_actions, assign_before_mpvs, vbest)
+                            if blocked and str(best_plan.get("src", "")) != "heuristic":
+                                mpvs_stats["blocked_nonheuristic"] = int(mpvs_stats.get("blocked_nonheuristic", 0)) + 1
+                                mpvs_stats["blocked_tabu"] = int(mpvs_stats.get("blocked_tabu", 0)) + int(blk_meta.get("tabu", 0))
+                                mpvs_stats["blocked_inverse"] = int(mpvs_stats.get("blocked_inverse", 0)) + int(blk_meta.get("inverse", 0))
+                                mpvs_stats["blocked_cooldown"] = int(mpvs_stats.get("blocked_cooldown", 0)) + int(blk_meta.get("cooldown", 0))
+                                # fallback to best heuristic entry (prevents MPVS-caused oscillation)
+                                if best_heur_entry is not None and best_heur_entry.get("res") is not None:
+                                    best_plan = best_heur_entry["plan"]
+                                    best_res = best_heur_entry["res"]
+                                    best_v = float(best_heur_entry["v_eff"])
+                                    best_v_raw = float(best_heur_entry["v_raw"])
+                                    best_ent = best_heur_entry
+                                    chosen_actions = (best_res or {}).get("actions", []) or []
+                                    vbest = float(best_res.get("verified_best_total", cur_total))
+
+                            delta_v = vbest - cur_total
+                            if enabled_acc:
+                                if delta_v <= 0.0:
+                                    accept = True
                                 else:
+                                    accept = (py_rng.random() < math.exp(-delta_v / Tacc))
+                            else:
+                                accept = True
+                            if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
+                                accept = False
+
+                            op_args_obj = {
+                                "op": "macro" if best_plan.get("kind") == "macro" else str((chosen_actions[0] if chosen_actions else {}).get("op","none")),
+                                "mpvs_kind": str(best_plan.get("kind")),
+                                "macro_name": str(best_plan.get("name","")) if best_plan.get("kind")=="macro" else "",
+                                "sub_ops": [str(a.get("op","")) for a in chosen_actions[:6]],
+                                "n_sub": int(len(chosen_actions)),
+                                "verified_best_total": float(vbest),
+                                "src": str(best_plan.get("src","heuristic")),
+                            }
+                            if best_plan.get("kind") == "macro":
+                                op_for_trace = "macro"
+                            else:
+                                op_for_trace = str((chosen_actions[0] if chosen_actions else {}).get("op", "none"))
+
+                            if accept:
+                                assign = np.asarray(best_res.get("best_assign", assign), dtype=int).copy()
+                                eval_out = dict(best_res.get("best_eval", eval_out))
+                                try:
+                                    _mpvs_update_anti_loop_state(chosen_actions, assign_before_mpvs)
+                                except Exception:
+                                    pass
+                                prev_total = float(eval_out.get("total_scalar", prev_total))
+                                prev_comm = float(eval_out.get("comm_norm", prev_comm))
+                                prev_therm = float(eval_out.get("therm_norm", prev_therm))
+                                accepted_steps += 1
+                                if prev_total < best_total_seen:
+                                    best_total_seen = prev_total
+                                    last_best_step = int(step)
+                                # IMPORTANT: MPVS must contribute to pareto, otherwise run_layout_agent selection stays at init
+                                try:
+                                    added = pareto.add(
+                                        eval_out["comm_norm"],
+                                        eval_out["therm_norm"],
+                                        {
+                                            "assign": assign.copy(),
+                                            "total_scalar": float(eval_out["total_scalar"]),
+                                            "stage": stage_label,
+                                            "iter": int(step + 1),
+                                            "seed": int(seed_id),
+                                        },
+                                    )
+                                    if added:
+                                        mpvs_stats["pareto_added"] += 1
+                                except Exception:
                                     added = False
 
-                                T = max(sa_min_T, float(T) * float(alpha))
+                                if mem_enabled and (delta_v < 0.0):
+                                    mem_plan = {
+                                        "kind": best_plan.get("kind"),
+                                        "name": best_plan.get("name",""),
+                                        "id": int(best_plan.get("id",-1)),
+                                        "src": "mem",
+                                    }
+                                    # For atomic, store executable action (candidate_id is optional; replay should not depend on it)
+                                    try:
+                                        if best_plan.get("kind") == "atomic":
+                                            acts = best_res.get("actions", []) or []
+                                            if acts:
+                                                a0 = copy.deepcopy(acts[0])
+                                                # make replay robust
+                                                a0.pop("candidate_id", None)
+                                                a0.pop("signature", None)
+                                                a0.pop("_src", None)
+                                                mem_plan["action"] = a0
+                                    except Exception:
+                                        pass
+                                    mpvs_mem.append(
+                                        {
+                                            "plan": mem_plan,
+                                            "expire": int(step + mem_ttl),
+                                            "score": float(vbest),
+                                        }
+                                    )
+                                    # keep memory bounded (max_size)
+                                    try:
+                                        mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
+                                        if len(mpvs_mem) > mem_max:
+                                            mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
+                                            mpvs_mem[:] = mpvs_mem[:mem_max]
+                                    except Exception:
+                                        pass
+                            else:
+                                added = False
 
-                                assign_sig = signature_for_assign(assign)
-                                op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
-                                wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
-                                h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
-                                m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
-                                cache_saved_eval_calls_cum = h1
-                                calls1 = int(getattr(evaluator, "evaluator_calls", 0))
-                                mpvs_stats["verifier_calls_spent"] += max(0, calls1 - calls0)
-                                mpvs_stats["steps_mpvs"] += 1
-                                if accept:
-                                    src_sel = str(best_plan.get("src", ""))
-                                    if src_sel == "llm_macro":
-                                        mpvs_stats["llm_macro_selected"] += 1
-                                    if src_sel == "llm_atomic":
-                                        mpvs_stats["llm_selected"] += 1
-                                    if src_sel == "macro":
-                                        mpvs_stats["macro_selected"] += 1
-                                    if src_sel == "mem":
-                                        mpvs_stats["memory_selected"] += 1
+                            T = max(sa_min_T, float(T) * float(alpha))
 
-                                row = {
-                                    "iter": int(step),
-                                    "stage": stage_label,
-                                    "op": op_for_trace,
-                                    "op_args_json": op_args_json,
-                                    "accepted": 1 if accept else 0,
-                                    "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
-                                    "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
-                                    "therm_norm": float(eval_out.get("therm_norm", prev_therm0)),
-                                    "pareto_added": 1 if (accept and added) else 0,
-                                    "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
-                                    "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
-                                    "seed_id": int(seed_id),
-                                    "time_ms": int((time.perf_counter() - step_start) * 1000),
-                                    "signature": assign_sig,
-                                    "d_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
-                                    "d_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
-                                    "d_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
-                                    "delta_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
+                            assign_sig = signature_for_assign(assign)
+                            op_args_json = json.dumps(op_args_obj, ensure_ascii=False)
+                            wall_time_ms = int((time.perf_counter() - wall_start) * 1000)
+                            h1 = int(mpvs_cache.hits) if mpvs_cache is not None else 0
+                            m1 = int(mpvs_cache.misses) if mpvs_cache is not None else 0
+                            cache_saved_eval_calls_cum = h1
+                            calls1 = int(getattr(evaluator, "evaluator_calls", 0))
+                            mpvs_stats["verifier_calls_spent"] += max(0, calls1 - calls0)
+                            mpvs_stats["steps_mpvs"] += 1
+                            if accept:
+                                src_sel = str(best_plan.get("src", ""))
+                                if src_sel == "llm_macro":
+                                    mpvs_stats["llm_macro_selected"] += 1
+                                if src_sel == "llm_atomic":
+                                    mpvs_stats["llm_selected"] += 1
+                                if src_sel == "macro":
+                                    mpvs_stats["macro_selected"] += 1
+                                if src_sel == "mem":
+                                    mpvs_stats["memory_selected"] += 1
+
+                            row = {
+                                "iter": int(step),
+                                "stage": stage_label,
+                                "op": op_for_trace,
+                                "op_args_json": op_args_json,
+                                "accepted": 1 if accept else 0,
+                                "total_scalar": float(eval_out.get("total_scalar", prev_total0)),
+                                "comm_norm": float(eval_out.get("comm_norm", prev_comm0)),
+                                "therm_norm": float(eval_out.get("therm_norm", prev_therm0)),
+                                "pareto_added": 1 if (accept and added) else 0,
+                                "duplicate_penalty": float(eval_out.get("penalty", {}).get("duplicate", 0.0)),
+                                "boundary_penalty": float(eval_out.get("penalty", {}).get("boundary", 0.0)),
+                                "seed_id": int(seed_id),
+                                "time_ms": int((time.perf_counter() - step_start) * 1000),
+                                "signature": assign_sig,
+                                "d_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
+                                "d_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
+                                "d_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
+                                "delta_total": float(eval_out.get("total_scalar", prev_total0)) - float(prev_total0),
                                     "delta_comm": float(eval_out.get("comm_norm", prev_comm0)) - float(prev_comm0),
                                     "delta_therm": float(eval_out.get("therm_norm", prev_therm0)) - float(prev_therm0),
                                     "tabu_hit": 0,
@@ -2172,12 +2199,12 @@ def run_detailed_place(
                                         ensure_ascii=False,
                                     ),
                                 }
-                                writer.writerow(row)
-                                if do_explore:
-                                    mpvs_explore_left -= 1
-                                else:
-                                    mpvs_explore_left = 0
-                                continue
+                            writer.writerow(row)
+                            if do_explore:
+                                mpvs_explore_left -= 1
+                            else:
+                                mpvs_explore_left = 0
+                            continue
 
                     if force_explore_for_llm:
                         strong_types = {"kick", "cluster_move", "therm_swap", "relocate_free"}
