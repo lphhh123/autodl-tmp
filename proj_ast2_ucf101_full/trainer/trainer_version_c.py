@@ -1324,6 +1324,7 @@ def train_version_c(
         hw_norm_alpha = float(getattr(cfg.training, "hw_loss_norm_ema_alpha", 0.98) or 0.98)
         hw_norm_min_denom = float(getattr(cfg.training, "hw_loss_norm_min_denom", 1e-3) or 1e-3)
         hw_norm_clip = float(getattr(cfg.training, "hw_loss_norm_clip", 10.0) or 10.0)
+        hw_kill_epochs = int(getattr(cfg.training, "hw_kill_epochs_on_nan", 3) or 3)
         if "hw_mag_ema" not in stable_hw_state:
             stable_hw_state["hw_mag_ema"] = 1.0
         if stable_hw_cfg is None:
@@ -1628,6 +1629,14 @@ def train_version_c(
                 # stable_hw enabled: MUST use lambda_hw_effective written by schedule+guard
                 # stable_hw disabled: fallback to legacy cfg.hw.lambda_hw (for ablations/baselines)
                 if stable_hw_enabled:
+                    kill_rem = int(stable_hw_state.get("hw_kill_remaining", 0) or 0)
+                    if kill_rem > 0:
+                        stable_hw_state["hw_kill_remaining"] = kill_rem - 1
+                        stable_hw_state["lambda_hw_effective"] = 0.0
+                        stable_hw_state["allow_discrete_updates"] = False
+                        stable_hw_state["freeze_schedule"] = True
+                        stable_hw_state["guard_mode"] = "RECOVERY"
+                        logger.warning("[HWKill] active: force lambda_hw_eff=0 (remaining=%s)", kill_rem)
                     lambda_hw_eff = float(stable_hw_state.get("lambda_hw_effective", 0.0))
                 else:
                     lambda_hw_eff = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
@@ -1817,6 +1826,10 @@ def train_version_c(
                     step_iter = enumerate(loader)
                 else:
                     step_iter = ((i, _next_batch()) for i in range(inner_steps_ast))
+
+                # Ensure training mode (eval_acc1 sets model.eval(); must switch back)
+                model.train()
+                chiplet_slots.train()
 
                 for step, batch in step_iter:
                     x = batch["video"].to(device)
@@ -2205,13 +2218,45 @@ def train_version_c(
                         continue
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer_model)
+                    bad_grad = False
+                    for p in model.parameters():
+                        if p.grad is not None and (not torch.isfinite(p.grad).all()):
+                            bad_grad = True
+                            break
+
+                    if (not twostage) and update_alpha and (float(lambda_hw_eff) > 0.0) and _optimizer_has_any_grad(optimizer_alpha):
+                        scaler.unscale_(optimizer_alpha)
+                        for p in chiplet_slots.parameters():
+                            if p.grad is not None and (not torch.isfinite(p.grad).all()):
+                                bad_grad = True
+                                break
+
+                    if bad_grad:
+                        run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
+                        stable_hw_state["hw_kill_remaining"] = max(
+                            int(stable_hw_state.get("hw_kill_remaining", 0) or 0),
+                            hw_kill_epochs,
+                        )
+                        _warn_throttled(
+                            "nan_grad",
+                            step,
+                            "[HWKill] non-finite grads (outer=%s step=%s); skip step and kill HW for %s outers.",
+                            outer,
+                            step,
+                            hw_kill_epochs,
+                            every_steps=nan_guard_warn_every_steps,
+                            first_n=3,
+                        )
+                        optimizer_model.zero_grad(set_to_none=True)
+                        optimizer_alpha.zero_grad(set_to_none=True)
+                        continue
+
                     if grad_clip_norm > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                     scaler.step(optimizer_model)
                     if (not twostage) and update_alpha and (float(lambda_hw_eff) > 0.0):
                         # Only attempt alpha step when HW term is actually enabled (lambda_hw_eff>0).
                         if _optimizer_has_any_grad(optimizer_alpha):
-                            scaler.unscale_(optimizer_alpha)
                             if grad_clip_norm > 0.0:
                                 torch.nn.utils.clip_grad_norm_(chiplet_slots.parameters(), grad_clip_norm)
                             scaler.step(optimizer_alpha)
@@ -2230,6 +2275,10 @@ def train_version_c(
                             step,
                             every_steps=nan_guard_warn_every_steps,
                             first_n=3,
+                        )
+                        stable_hw_state["hw_kill_remaining"] = max(
+                            int(stable_hw_state.get("hw_kill_remaining", 0) or 0),
+                            hw_kill_epochs,
                         )
                     if ema_model is not None:
                         try:
