@@ -84,12 +84,22 @@ fi
 
 # ---- OUTPUT PREFIX --------------------------------------------------------
 # SMOKE=1 -> outputs/SMOKE/... (so it won't overwrite formal runs)
-OUT_PREFIX="outputs"
+OUT_PREFIX_BASE="outputs"
 if [[ "${SMOKE}" == "1" ]]; then
-  OUT_PREFIX="outputs/SMOKE"
-  mkdir -p "${OUT_PREFIX}"
-  echo "[SMOKE] enabled: output prefix -> ${OUT_PREFIX}"
+  OUT_PREFIX_BASE="outputs/SMOKE"
+  mkdir -p "${OUT_PREFIX_BASE}"
+  echo "[SMOKE] enabled: output prefix base -> ${OUT_PREFIX_BASE}"
 fi
+
+# Route Innovation-B outputs into a dedicated folder to avoid mixing with historical runs.
+#   B runs   -> outputs/B/...
+#   B smoke  -> outputs/SMOKE/B/...
+# Everything else stays under outputs/... (or outputs/SMOKE/... for smoke)
+OUT_PREFIX="${OUT_PREFIX_BASE}"
+if [[ "${EXP_ID}" == EXP-B* ]]; then
+  OUT_PREFIX="${OUT_PREFIX_BASE}/B"
+fi
+mkdir -p "${OUT_PREFIX}"
 
 # ---- AUTO RESUME / FRESH RUN ---------------------------------------------
 # By default we DO NOT auto-resume.
@@ -112,6 +122,15 @@ fi
 # Defaults to the same LOG_DIR used by launch_A_noabl_* scripts when present.
 STDOUT_AGG_DIR="${STDOUT_AGG_DIR:-${LOG_DIR:-$HOME/runlogs_A}/stdout}"
 mkdir -p "${STDOUT_AGG_DIR}"
+
+# For B runs, if user didn't override STDOUT_AGG_DIR, keep stdout symlinks inside outputs/B/stdout_agg
+if [[ "${EXP_ID}" == EXP-B* ]]; then
+  _default_stdout_dir="${LOG_DIR:-$HOME/runlogs_A}/stdout"
+  if [[ "${STDOUT_AGG_DIR}" == "${_default_stdout_dir}" ]]; then
+    STDOUT_AGG_DIR="${OUT_PREFIX}/stdout_agg"
+    mkdir -p "${STDOUT_AGG_DIR}"
+  fi
+fi
 
 # ---- TF32 (speed) ---------------------------------------------------------
 # For Innovation A we default-enable TF32 to speed up training on Ampere/Ada.
@@ -230,6 +249,27 @@ run_vc () {
 run_layout () {
   local cfg="$1"
   local out="$2"
+  # For B runs we default to "clean out_dir" to avoid historical accumulation.
+  # Can be disabled per run: CLEAN_LAYOUT_OUTDIR=0 ...
+  if [[ "${EXP_ID}" == EXP-B* ]]; then
+    export CLEAN_LAYOUT_OUTDIR="${CLEAN_LAYOUT_OUTDIR:-1}"
+  else
+    export CLEAN_LAYOUT_OUTDIR="${CLEAN_LAYOUT_OUTDIR:-0}"
+  fi
+
+  if [[ "${CLEAN_LAYOUT_OUTDIR}" == "1" ]]; then
+    # ultra-safe: only allow deletion under outputs/B or outputs/SMOKE/B
+    case "$out" in
+      outputs/B/*|outputs/SMOKE/B/*)
+        rm -rf "$out"
+        ;;
+      *)
+        echo "[WARN] CLEAN_LAYOUT_OUTDIR=1 but refusing to delete out_dir outside outputs/B*: $out"
+        ;;
+    esac
+  fi
+  mkdir -p "$out"
+
   ensure_layout_input
   # Avoid OMP threads = 0 crash
   if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi
@@ -245,6 +285,24 @@ run_layout () {
 run_layout_heuragenix () {
   local cfg="$1"
   local out="$2"
+  if [[ "${EXP_ID}" == EXP-B* ]]; then
+    export CLEAN_LAYOUT_OUTDIR="${CLEAN_LAYOUT_OUTDIR:-1}"
+  else
+    export CLEAN_LAYOUT_OUTDIR="${CLEAN_LAYOUT_OUTDIR:-0}"
+  fi
+
+  if [[ "${CLEAN_LAYOUT_OUTDIR}" == "1" ]]; then
+    case "$out" in
+      outputs/B/*|outputs/SMOKE/B/*)
+        rm -rf "$out"
+        ;;
+      *)
+        echo "[WARN] CLEAN_LAYOUT_OUTDIR=1 but refusing to delete out_dir outside outputs/B*: $out"
+        ;;
+    esac
+  fi
+  mkdir -p "$out"
+
   ensure_layout_input
   # Avoid OMP threads = 0 crash
   if [[ "${OMP_NUM_THREADS:-0}" -le 0 ]]; then export OMP_NUM_THREADS=1; fi

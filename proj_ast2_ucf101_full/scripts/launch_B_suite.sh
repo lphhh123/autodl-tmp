@@ -11,6 +11,16 @@ EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomac
 PARALLEL="${PARALLEL:-0}"
 MAX_JOBS="${MAX_JOBS:-8}"
 
+# Default behavior per user request:
+# - purge legacy outputs/EXP-B* once
+# - clean outputs/B before each suite run to avoid historical accumulation
+PURGE_LEGACY_B="${PURGE_LEGACY_B:-1}"
+CLEAN_NEW_B="${CLEAN_NEW_B:-1}"
+
+if [[ -f scripts/clean_B_outputs.sh ]]; then
+  PURGE_LEGACY="${PURGE_LEGACY_B}" CLEAN_NEW="${CLEAN_NEW_B}" bash scripts/clean_B_outputs.sh
+fi
+
 if [[ "${PARALLEL}" == "1" ]]; then
   tmp_cmds="$(mktemp -t bsuite_cmds.XXXXXX)"
   cleanup() { rm -f "${tmp_cmds}"; }
