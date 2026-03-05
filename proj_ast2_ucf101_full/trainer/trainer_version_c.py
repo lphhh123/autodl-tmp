@@ -1740,6 +1740,20 @@ def train_version_c(
                 allow_discrete = allow_discrete_updates
                 update_alpha = base_update_alpha and allow_discrete
 
+                hw_stabilize_epochs = int(getattr(cfg.training, "hw_stabilize_epochs", 2) or 2)
+                hw_enabled_now = (not twostage) and (float(lambda_hw_eff) > 0.0)
+                if hw_enabled_now and ("hw_first_outer" not in stable_hw_state):
+                    stable_hw_state["hw_first_outer"] = int(outer)
+                first_hw_outer = int(stable_hw_state.get("hw_first_outer", 10**9))
+                if hw_enabled_now and int(outer) < first_hw_outer + hw_stabilize_epochs:
+                    allow_discrete_updates = False
+                    allow_discrete = False
+                    update_alpha = False
+                    stable_hw_state["allow_discrete_updates"] = False
+                    stable_hw_state["freeze_schedule"] = True
+                    stable_hw_state["guard_mode"] = "RECOVERY"
+                    logger.warning("[HWGuard] stabilize window active: outer=%s (disable discrete+alpha)", int(outer))
+
                 mapping_updated = False
                 layout_updated = False
 

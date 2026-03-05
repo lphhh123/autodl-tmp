@@ -25,6 +25,7 @@ training:
   hw_loss_norm_ema_alpha: 0.98
   hw_loss_norm_min_denom: 1e-3
   hw_loss_norm_clip: 10.0
+  hw_stabilize_epochs: 2
   hw_kill_epochs_on_nan: 3
   outer_epochs: 50
   inner_steps_ast: -1
