@@ -1003,6 +1003,11 @@ def run_detailed_place(
                         act = copy.deepcopy(getattr(cand, "action", {}) or {})
                         act.setdefault("candidate_id", int(getattr(cand, "id", -1)))
                         act.setdefault("type", str(getattr(cand, "type", "")))
+                        if "signature" not in act or not act.get("signature"):
+                            try:
+                                act["signature"] = _signature_for_action(act, cur)
+                            except Exception:
+                                pass
                         executed.append(act)
 
                         _apply_action_inplace_simple(cur, act)
@@ -1613,6 +1618,11 @@ def run_detailed_place(
                                 act = copy.deepcopy(getattr(cand_obj, "action", {}) or {})
                                 act.setdefault("candidate_id", int(getattr(cand_obj, "id", -1)))
                                 act.setdefault("type", str(getattr(cand_obj, "type", "")))
+                                if "signature" not in act or not act.get("signature"):
+                                    try:
+                                        act["signature"] = _signature_for_action(act, assign0)
+                                    except Exception:
+                                        pass
                                 new_assign = assign0.copy()
                                 _apply_action_inplace_simple(new_assign, act)
                                 est = dict(getattr(cand_obj, "est", {}) or {})
@@ -1628,6 +1638,11 @@ def run_detailed_place(
                                 # used for memory-replay atomic plan; must evaluate once (cannot reuse cand.est)
                                 act = copy.deepcopy(action_obj or {})
                                 act.setdefault("type", str(act.get("type", "")))
+                                if "signature" not in act or not act.get("signature"):
+                                    try:
+                                        act["signature"] = _signature_for_action(act, assign0)
+                                    except Exception:
+                                        pass
                                 new_assign = assign0.copy()
                                 _apply_action_inplace_simple(new_assign, act)
                                 new_eval = _evaluate_assign_cached(new_assign)
@@ -1904,6 +1919,93 @@ def run_detailed_place(
                                     accept = False
 
                                 chosen_actions = best_res.get("actions", []) or []
+                                assign_before_mpvs = assign.copy()
+
+                                # --- MPVS anti-loop integration (tabu/inverse/cooldown) ---
+                                def _mpvs_action_blocked(actions, assign_before, vbest_val):
+                                    # compute aspiration: allow tabu if it beats global best by aspiration_delta
+                                    try:
+                                        aspiration = float(vbest_val) < float(best_total_seen) - float(aspiration_delta)
+                                    except Exception:
+                                        aspiration = False
+                                    if aspiration:
+                                        return (False, {"aspiration": 1, "tabu": 0, "inverse": 0, "cooldown": 0})
+                                    tabu_hit = 0
+                                    inverse_hit = 0
+                                    cooldown_hit = 0
+                                    for act in (actions or []):
+                                        a = act
+                                        if "signature" not in a or not a.get("signature"):
+                                            try:
+                                                a["signature"] = _signature_for_action(a, assign_before)
+                                            except Exception:
+                                                a["signature"] = ""
+                                        sig = str(a.get("signature", ""))
+                                        if sig and (sig in tabu_signatures):
+                                            tabu_hit = 1
+                                        if sig and (sig in inverse_signatures):
+                                            inverse_hit = 1
+                                        # per-slot cooldown
+                                        try:
+                                            for slot in _touched_slots(a):
+                                                if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
+                                                    cooldown_hit = 1
+                                                    break
+                                        except Exception:
+                                            pass
+                                        if cooldown_hit:
+                                            break
+                                    blocked = bool(tabu_hit or inverse_hit or cooldown_hit)
+                                    return (blocked, {"aspiration": 0, "tabu": tabu_hit, "inverse": inverse_hit, "cooldown": cooldown_hit})
+
+                                def _mpvs_update_anti_loop_state(actions, assign_before):
+                                    for act in (actions or []):
+                                        if "signature" not in act or not act.get("signature"):
+                                            try:
+                                                act["signature"] = _signature_for_action(act, assign_before)
+                                            except Exception:
+                                                act["signature"] = ""
+                                        sig = str(act.get("signature", ""))
+                                        if sig:
+                                            tabu_signatures.append(sig)
+                                            try:
+                                                inverse_signatures.append(inverse_signature(sig))
+                                            except Exception:
+                                                pass
+                                        try:
+                                            for slot in _touched_slots(act):
+                                                last_move_step_per_slot[int(slot)] = int(step)
+                                                last_site_per_slot[int(slot)] = int(assign[int(slot)])
+                                        except Exception:
+                                            pass
+
+                                blocked, blk_meta = _mpvs_action_blocked(chosen_actions, assign_before_mpvs, vbest)
+                                if blocked and str(best_plan.get("src", "")) != "heuristic":
+                                    mpvs_stats["blocked_nonheuristic"] = int(mpvs_stats.get("blocked_nonheuristic", 0)) + 1
+                                    mpvs_stats["blocked_tabu"] = int(mpvs_stats.get("blocked_tabu", 0)) + int(blk_meta.get("tabu", 0))
+                                    mpvs_stats["blocked_inverse"] = int(mpvs_stats.get("blocked_inverse", 0)) + int(blk_meta.get("inverse", 0))
+                                    mpvs_stats["blocked_cooldown"] = int(mpvs_stats.get("blocked_cooldown", 0)) + int(blk_meta.get("cooldown", 0))
+                                    # fallback to best heuristic entry (prevents MPVS-caused oscillation)
+                                    if best_heur_entry is not None:
+                                        best_plan = best_heur_entry["plan"]
+                                        best_res = best_heur_entry["res"]
+                                        best_v = float(best_heur_entry["v_eff"])
+                                        best_v_raw = float(best_heur_entry["v_raw"])
+                                        best_ent = best_heur_entry
+                                        chosen_actions = best_res.get("actions", []) or []
+                                        vbest = float(best_res.get("verified_best_total", cur_total))
+
+                                delta_v = vbest - cur_total
+                                if enabled_acc:
+                                    if delta_v <= 0.0:
+                                        accept = True
+                                    else:
+                                        accept = (py_rng.random() < math.exp(-delta_v / Tacc))
+                                else:
+                                    accept = True
+                                if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
+                                    accept = False
+
                                 op_args_obj = {
                                     "op": "macro" if best_plan.get("kind") == "macro" else str((chosen_actions[0] if chosen_actions else {}).get("op","none")),
                                     "mpvs_kind": str(best_plan.get("kind")),
@@ -1921,6 +2023,10 @@ def run_detailed_place(
                                 if accept:
                                     assign = np.asarray(best_res.get("best_assign", assign), dtype=int).copy()
                                     eval_out = dict(best_res.get("best_eval", eval_out))
+                                    try:
+                                        _mpvs_update_anti_loop_state(chosen_actions, assign_before_mpvs)
+                                    except Exception:
+                                        pass
                                     prev_total = float(eval_out.get("total_scalar", prev_total))
                                     prev_comm = float(eval_out.get("comm_norm", prev_comm))
                                     prev_therm = float(eval_out.get("therm_norm", prev_therm))
