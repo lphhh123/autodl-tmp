@@ -40,6 +40,27 @@ class MappingSolver:
         proxy: LayerHwProxy,
         alpha: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        def _complexity_ratio(seg: Segment) -> float:
+            """
+            Encode non-token sparsity into the existing tabular-proxy feature `complexity_ratio`.
+
+            IMPORTANT:
+            - Tabular proxy bundles (proxy_ms.pt/...) DO NOT include raw flops/bytes as numeric columns.
+              They *do* include keep_ratio + complexity_ratio.
+            - keep_ratio is reserved for token_keep (sequence length shrink).
+            - head/ch/block pruning must be reflected via complexity_ratio, otherwise HW proxy won't "see" it.
+            """
+            kf = getattr(seg, "keep_factors", None) or {}
+            head_keep = float(kf.get("head_keep", 1.0))
+            ch_keep = float(kf.get("ch_keep", 1.0))
+            block_keep = float(kf.get("block_keep", 1.0))
+            kind = str(getattr(seg, "kind", "other"))
+            if kind == "attn":
+                return float(head_keep * block_keep)
+            if kind == "mlp":
+                return float(ch_keep * block_keep)
+            return float(block_keep)
+
         layers_cfg = []
         S = eff_specs["peak_flops"].shape[0]
         kind_to_type = {"patch_embed": 0, "attn": 1, "mlp": 2}
@@ -82,6 +103,7 @@ class MappingSolver:
                     "precision": seg.precision,
                     "layer_kind": getattr(seg, "kind", "other"),
                     "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
+                    "complexity_ratio": _complexity_ratio(seg),
                 }
                 per_dev_lat = []
                 per_dev_mem = []
@@ -137,6 +159,7 @@ class MappingSolver:
                         "precision": seg.precision,
                         "layer_kind": getattr(seg, "kind", "other"),
                         "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
+                        "complexity_ratio": _complexity_ratio(seg),
                         "device_cfg": device_cfg,
                     }
                 )
@@ -155,6 +178,18 @@ class MappingSolver:
         alpha: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Differentiable cost matrix (eff_specs stay as tensors)."""
+        def _complexity_ratio(seg: Segment) -> float:
+            kf = getattr(seg, "keep_factors", None) or {}
+            head_keep = float(kf.get("head_keep", 1.0))
+            ch_keep = float(kf.get("ch_keep", 1.0))
+            block_keep = float(kf.get("block_keep", 1.0))
+            kind = str(getattr(seg, "kind", "other"))
+            if kind == "attn":
+                return float(head_keep * block_keep)
+            if kind == "mlp":
+                return float(ch_keep * block_keep)
+            return float(block_keep)
+
         layers_cfg = []
         S = int(eff_specs["peak_flops"].shape[0])
         kind_to_type = {"patch_embed": 0, "attn": 1, "mlp": 2}
@@ -214,6 +249,7 @@ class MappingSolver:
                     "precision": float(seg.precision),
                     "layer_kind": getattr(seg, "kind", "other"),
                     "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
+                    "complexity_ratio": _complexity_ratio(seg),
                 }
                 per_dev_lat = []
                 per_dev_mem = []
@@ -269,6 +305,7 @@ class MappingSolver:
                         "precision": float(seg.precision),
                         "layer_kind": getattr(seg, "kind", "other"),
                         "keep_ratio": float((seg.keep_factors or {}).get("token_keep", 1.0)),
+                        "complexity_ratio": _complexity_ratio(seg),
                         "device_cfg": device_cfg,
                     }
                 )

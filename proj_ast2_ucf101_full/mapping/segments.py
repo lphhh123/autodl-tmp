@@ -73,6 +73,19 @@ def _extract_keep_factors(model_info: Optional[Dict[str, torch.Tensor]], depth: 
             "block_keep": [1.0] * depth,
         }
 
+    # Accept passing the *full* forward info dict from the model (trainer stores it as run_state["last_model_info"]).
+    # Typical structure: {"L_AST":..., "model_info":{token_keep,...}, "gates":{...}}
+    # For segment builders we only need the keep signals; unwrap when appropriate.
+    if isinstance(model_info, dict):
+        has_direct_keep = (
+            ("keep_factors" in model_info)
+            or ("token_mask" in model_info)
+            or ("head_weights" in model_info)
+            or ("token_keep" in model_info)
+        )
+        if (not has_direct_keep) and ("model_info" in model_info) and isinstance(model_info.get("model_info"), dict):
+            model_info = model_info["model_info"]
+
     # v5.4+: allow passing precomputed keep_factors (fast path, avoids storing big masks)
     # model_info["keep_factors"] may contain scalars or lists.
     if "keep_factors" in model_info and model_info["keep_factors"] is not None:
@@ -92,12 +105,44 @@ def _extract_keep_factors(model_info: Optional[Dict[str, torch.Tensor]], depth: 
                 return [float(x[0])] * n
             return [default] * n
 
-        token_keep = float(kf.get("token_keep", 1.0))
+        token_keep = _as_list(kf.get("token_keep", 1.0), depth, 1.0)
         head_keep = _as_list(kf.get("head_keep", 1.0), depth, 1.0)
         ch_keep = _as_list(kf.get("ch_keep", 1.0), depth, 1.0)
         block_keep = _as_list(kf.get("block_keep", 1.0), depth, 1.0)
         return {
-            "token_keep": [token_keep] * depth,
+            "token_keep": token_keep,
+            "head_keep": head_keep,
+            "ch_keep": ch_keep,
+            "block_keep": block_keep,
+        }
+
+    # Accept a light-weight dict that directly carries scalar keep signals.
+    # This is the common case for info["model_info"] returned by models/video_vit.py.
+    if (
+        ("token_keep" in model_info)
+        or ("head_keep" in model_info)
+        or ("ch_keep" in model_info)
+        or ("block_keep" in model_info)
+    ):
+        def _as_list(x, n: int, default: float = 1.0) -> List[float]:
+            if x is None:
+                return [default] * n
+            if isinstance(x, (int, float)):
+                return [float(x)] * n
+            if isinstance(x, (list, tuple)):
+                if len(x) == 0:
+                    return [default] * n
+                if len(x) == n:
+                    return [float(v) for v in x]
+                return [float(x[0])] * n
+            return [default] * n
+
+        token_keep = _as_list(model_info.get("token_keep", 1.0), depth, 1.0)
+        head_keep = _as_list(model_info.get("head_keep", 1.0), depth, 1.0)
+        ch_keep = _as_list(model_info.get("ch_keep", 1.0), depth, 1.0)
+        block_keep = _as_list(model_info.get("block_keep", 1.0), depth, 1.0)
+        return {
+            "token_keep": token_keep,
             "head_keep": head_keep,
             "ch_keep": ch_keep,
             "block_keep": block_keep,
@@ -276,13 +321,17 @@ def build_coarse_segments(layer_nodes: List[LayerNode], alpha: torch.Tensor, par
     acc_attn_flops = 0.0
     acc_mlp_flops = 0.0
 
-    # --- NEW: accumulate token_keep to provide keep_factors for coarse segs ---
+    # --- NEW: accumulate keep factors to provide keep_factors for coarse segs ---
     acc_token_keep_sum = 0.0
-    acc_token_keep_n = 0
+    acc_head_keep_sum = 0.0
+    acc_ch_keep_sum = 0.0
+    acc_block_keep_sum = 0.0
+    acc_keep_n = 0
 
     def _flush_segment(last_ln: LayerNode):
         nonlocal seg_id, acc_flops, acc_bytes, acc_layers
-        nonlocal acc_attn_flops, acc_mlp_flops, acc_token_keep_sum, acc_token_keep_n
+        nonlocal acc_attn_flops, acc_mlp_flops
+        nonlocal acc_token_keep_sum, acc_head_keep_sum, acc_ch_keep_sum, acc_block_keep_sum, acc_keep_n
 
         if not acc_layers:
             return
@@ -290,9 +339,20 @@ def build_coarse_segments(layer_nodes: List[LayerNode], alpha: torch.Tensor, par
         # decide kind in {"attn","mlp"} to match new proxy vocab
         kind = "attn" if acc_attn_flops >= acc_mlp_flops else "mlp"
 
-        # avg token_keep; fallback 1.0 if missing
-        token_keep = (acc_token_keep_sum / max(1, acc_token_keep_n)) if acc_token_keep_n > 0 else 1.0
-        keep_factors = {"token_keep": float(token_keep)}
+        # avg keep factors; fallback 1.0 if missing
+        if acc_keep_n > 0:
+            token_keep = acc_token_keep_sum / float(acc_keep_n)
+            head_keep = acc_head_keep_sum / float(acc_keep_n)
+            ch_keep = acc_ch_keep_sum / float(acc_keep_n)
+            block_keep = acc_block_keep_sum / float(acc_keep_n)
+        else:
+            token_keep, head_keep, ch_keep, block_keep = 1.0, 1.0, 1.0, 1.0
+        keep_factors = {
+            "token_keep": float(token_keep),
+            "head_keep": float(head_keep),
+            "ch_keep": float(ch_keep),
+            "block_keep": float(block_keep),
+        }
 
         segments.append(
             Segment(
@@ -321,7 +381,10 @@ def build_coarse_segments(layer_nodes: List[LayerNode], alpha: torch.Tensor, par
         acc_attn_flops = 0.0
         acc_mlp_flops = 0.0
         acc_token_keep_sum = 0.0
-        acc_token_keep_n = 0
+        acc_head_keep_sum = 0.0
+        acc_ch_keep_sum = 0.0
+        acc_block_keep_sum = 0.0
+        acc_keep_n = 0
 
     for ln in layer_nodes:
         acc_flops += float(ln.flops)
@@ -332,14 +395,16 @@ def build_coarse_segments(layer_nodes: List[LayerNode], alpha: torch.Tensor, par
         acc_attn_flops += float(getattr(ln, "attn_flops", 0.0))
         acc_mlp_flops += float(getattr(ln, "mlp_flops", 0.0))
 
-        # accumulate token_keep if present
+        # accumulate keep factors if present
         kf = getattr(ln, "keep_factors", None) or {}
-        if "token_keep" in kf:
-            try:
-                acc_token_keep_sum += float(kf["token_keep"])
-                acc_token_keep_n += 1
-            except Exception:
-                pass
+        try:
+            acc_token_keep_sum += float(kf.get("token_keep", 1.0))
+            acc_head_keep_sum += float(kf.get("head_keep", 1.0))
+            acc_ch_keep_sum += float(kf.get("ch_keep", 1.0))
+            acc_block_keep_sum += float(kf.get("block_keep", 1.0))
+            acc_keep_n += 1
+        except Exception:
+            pass
 
         if acc_flops >= F_target:
             _flush_segment(ln)
