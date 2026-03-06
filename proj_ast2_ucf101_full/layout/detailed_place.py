@@ -780,6 +780,8 @@ def run_detailed_place(
 
                     eval_out = _evaluate(layout_state)
                     _sync_eval_calls()
+                    # total eval-call budget (search budget, excluding finalization call)
+                    budget_total_calls = int(getattr(evaluator, "eval_budget_limit", 0) or 0)
                     prev_total = float(eval_out.get("total_scalar", 0.0))
                     prev_comm = float(eval_out.get("comm_norm", 0.0))
                     prev_therm = float(eval_out.get("therm_norm", 0.0))
@@ -1522,6 +1524,10 @@ def run_detailed_place(
                                 mpvs_ctrl.tick(int(step))
                             except Exception:
                                 pass
+                            try:
+                                mpvs_ctrl.on_progress(int(eval_calls_cum), int(budget_total_calls), float(best_total_seen))
+                            except Exception:
+                                pass
                         explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
                         explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
                         explore_stagn = int(_cfg_get(explore_cfg, "when_stagnation_ge", 12))
@@ -1564,6 +1570,8 @@ def run_detailed_place(
                                         distress=float(distress_pre),
                                         repeat_ratio=float(repeat_ratio_pre),
                                         roi=float(roi_llm),
+                                        used_calls=int(eval_calls_cum),
+                                        budget_total=int(budget_total_calls),
                                     )
                                     use_llm_now = bool(ok and sched_ok)
                                     llm_deny_reason = str(rr or "")
@@ -1698,6 +1706,8 @@ def run_detailed_place(
                                     distress=float(distress_pre),
                                     repeat_ratio=float(repeat_ratio_pre),
                                     roi=float(roi_macro),
+                                    used_calls=int(eval_calls_cum),
+                                    budget_total=int(budget_total_calls),
                                 )
                                 allow_macro_src = bool(ok)
                             macro_enabled = bool(macro_enabled and allow_macro_src)
@@ -1736,6 +1746,27 @@ def run_detailed_place(
                             if "llm_macro_plans" not in locals():
                                 llm_macro_plans = []
 
+                            # LLM shadow mode: keep calling LLM for diagnostics, but do NOT let it compete.
+                            try:
+                                llm_shadow = bool(mpvs_ctrl is not None and bool(getattr(mpvs_ctrl, "llm_shadow_mode", False)))
+                            except Exception:
+                                llm_shadow = False
+                            if llm_shadow and (llm_atomic_plans or llm_macro_plans):
+                                mpvs_stats["llm_shadow_plans"] = int(mpvs_stats.get("llm_shadow_plans", 0)) + int(len(llm_atomic_plans) + len(llm_macro_plans))
+                                if mpvs_ctrl is not None:
+                                    for _pl in llm_atomic_plans:
+                                        try:
+                                            _c = _pl.get("cand", None)
+                                            if _c is None:
+                                                continue
+                                            d0 = float((_c.est or {}).get("d_total", 0.0))
+                                            est_gain = float(max(0.0, -d0))
+                                            mpvs_ctrl.llm_shadow_observe(float(est_gain))
+                                        except Exception:
+                                            continue
+                                llm_atomic_plans = []
+                                llm_macro_plans = []
+
                             # MemoryBank v1
                             mem_plans = []
                             mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
@@ -1750,6 +1781,8 @@ def run_detailed_place(
                                     distress=float(distress_pre),
                                     repeat_ratio=float(repeat_ratio_pre),
                                     roi=float(roi_mem),
+                                    used_calls=int(eval_calls_cum),
+                                    budget_total=int(budget_total_calls),
                                 )
                                 allow_mem_src = bool(ok)
                                 if str(rr or "") == "mem_global_cooldown":
@@ -1772,7 +1805,16 @@ def run_detailed_place(
                                         mpvs_stats["mem_queries"] = int(mpvs_stats.get("mem_queries", 0)) + 1
                                         hits = []
                                         try:
-                                            hits = mem_bank.query(assign, site_to_region, step=int(step), topk=max(0, mem_topk))
+                                            bud_prog = float(eval_calls_cum) / float(max(1, int(budget_total_calls))) if int(budget_total_calls) > 0 else 0.0
+                                            hits = mem_bank.query(
+                                                assign,
+                                                site_to_region,
+                                                step=int(step),
+                                                topk=max(0, mem_topk),
+                                                budget_progress=float(bud_prog),
+                                                repeat_ratio=float(repeat_ratio_pre),
+                                                blocked_ratio=0.0,
+                                            )
                                         except Exception:
                                             hits = []
                                         if hits:
@@ -1825,10 +1867,10 @@ def run_detailed_place(
                             # dynamic quota adjustment by MPVS controller (ROI-aware)
                             try:
                                 if mpvs_ctrl is not None:
-                                    q_macro = int(mpvs_ctrl.quota("macro", int(q_macro), roi=float(roi_macro)))
-                                    q_mem = int(mpvs_ctrl.quota("mem", int(q_mem), roi=float(roi_mem)))
-                                    q_llm_atomic = int(mpvs_ctrl.quota("llm", int(q_llm_atomic), roi=float(roi_llm)))
-                                    q_llm_macro = int(mpvs_ctrl.quota("llm", int(q_llm_macro), roi=float(roi_llm)))
+                                    q_mem = int(mpvs_ctrl.quota("mem", int(q_mem), roi=float(roi_mem), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
+                                    q_llm_atomic = int(mpvs_ctrl.quota("llm", int(q_llm_atomic), roi=float(roi_llm), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
+                                    q_llm_macro = int(mpvs_ctrl.quota("llm", int(q_llm_macro), roi=float(roi_llm), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
+                                    q_macro = int(mpvs_ctrl.quota("macro", int(q_macro), roi=float(roi_macro), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
                             except Exception:
                                 pass
 
@@ -2501,7 +2543,17 @@ def run_detailed_place(
                                                     try:
                                                         if ok and src_group == "mem":
                                                             mpvs_ctrl.observe_mem_success(step=int(step))
-                                                        mpvs_ctrl.observe(src_group, step=int(step), success=bool(ok), roi=float(roi_val))
+                                                        mpvs_ctrl.observe(
+                                                            src_group,
+                                                            step=int(step),
+                                                            success=bool(ok),
+                                                            roi=float(roi_val),
+                                                            gain=float(gain0),
+                                                            calls=int(calls_spent),
+                                                            used_calls=int(eval_calls_cum),
+                                                            budget_total=int(budget_total_calls),
+                                                            best_total_seen=float(best_total_seen),
+                                                        )
                                                     except Exception:
                                                         pass
                                             if pk in full_verify_keys and str(pl.get("kind", "")) == "macro":
@@ -2728,6 +2780,22 @@ def run_detailed_place(
                                             min_gain_cur = max(float(min_gain_cur), float(_macro_min_gain_cur()))
                                         if src_best.startswith("llm"):
                                             min_gain_cur = max(float(min_gain_cur), float(_cfg_get(ver_cfg, "llm_min_gain_current", 0.0002)))
+
+                                        # Budget-stage release: controller may relax min_gain_current for macro
+                                        try:
+                                            if mpvs_ctrl is not None:
+                                                comp0 = "llm" if src_best.startswith("llm") else ("mem" if src_best == "mem" else ("macro" if src_best in {"macro", "llm_macro"} else ""))
+                                                if comp0:
+                                                    min_gain_cur = float(
+                                                        mpvs_ctrl.adjust_min_gain_current(
+                                                            comp0,
+                                                            float(min_gain_cur),
+                                                            used_calls=int(eval_calls_cum),
+                                                            budget_total=int(budget_total_calls),
+                                                        )
+                                                    )
+                                        except Exception:
+                                            pass
 
                                         if float(gain_cur) < float(min_gain_cur) - 1e-12:
                                             mpvs_stats["nonheur_current_gate_blocked"] = int(mpvs_stats.get("nonheur_current_gate_blocked", 0)) + 1
@@ -3077,6 +3145,9 @@ def run_detailed_place(
                                                 gain=gain,
                                                 step=int(step),
                                                 origin_src=str(best_plan.get("src", "")),
+                                                budget_progress=float(eval_calls_cum) / float(max(1, int(budget_total_calls))) if int(budget_total_calls) > 0 else 0.0,
+                                                repeat_ratio=float(repeat_ratio_pre),
+                                                blocked_ratio=0.0,
                                             )
                                             if mid is not None:
                                                 mpvs_stats["mem_store"] = int(mpvs_stats.get("mem_store", 0)) + 1
@@ -3131,6 +3202,20 @@ def run_detailed_place(
                                                 mpvs_stats["mem_global_triggered"] = int(mpvs_stats.get("mem_global_triggered", 0)) + 1
                                     except Exception:
                                         pass
+
+                                # Horizon-aware credit: attribute delayed improvements to the winning component.
+                                try:
+                                    if mpvs_ctrl is not None:
+                                        src_grp = "llm" if src_sel.startswith("llm") else str(src_sel)
+                                        if src_grp in {"macro", "mem", "llm"}:
+                                            mpvs_ctrl.register_win(
+                                                src_grp,
+                                                used_calls=int(eval_calls_cum),
+                                                budget_total=int(budget_total_calls),
+                                                best_total_seen=float(best_total_seen),
+                                            )
+                                except Exception:
+                                    pass
 
                             mpvs_stats["mem_global_until"] = int(mpvs_mem_global_until)
 

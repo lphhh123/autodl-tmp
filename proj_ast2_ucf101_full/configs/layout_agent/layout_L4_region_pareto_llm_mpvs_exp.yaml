@@ -28,6 +28,15 @@ detailed_place:
 
     # Unified MPVS controller: gates macro/mem/llm based on ROI + cooldown (budget-aware)
     controller:
+      # v2 controller core params (kept small; most behavior is self-calibrating)
+      ewma_alpha: 0.2
+      ewma_alpha_long: 0.1
+      budget_stage:
+        early_frac: 0.20
+        late_frac: 0.70
+      share:
+        min_samples: 10
+        slack_scale: 0.5
       stagn_norm: 20
       repeat_hi: 0.75
       macro:
@@ -54,6 +63,7 @@ detailed_place:
         quota_boost_roi: 0.0005
       llm:
         enabled: true
+        shadow_mode: true
         enable_when_stagnation_ge: 25
         enable_when_distress_ge: 0.7
         enable_when_repeat_ratio_ge: 0.8
