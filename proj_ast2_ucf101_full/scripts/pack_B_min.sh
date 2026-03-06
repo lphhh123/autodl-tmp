@@ -14,7 +14,10 @@ TAG_RAW="${TAG_RAW:-nnnw}"
 TAG="$(printf "%s" "$TAG_RAW" | LC_ALL=C tr -c 'A-Za-z0-9_.+-' '_' )"
 
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
-PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem EXP-B2-ab-nollm EXP-B3}"
+PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2 \
+EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem EXP-B2-ab-nollm \
+EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate \
+EXP-B3}"
 
 TAIL_N="${TAIL_N:-400}"
 TRACE_TAIL_N="${TRACE_TAIL_N:-300}"
