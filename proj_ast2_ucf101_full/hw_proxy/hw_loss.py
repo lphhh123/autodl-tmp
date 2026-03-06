@@ -207,7 +207,49 @@ def compute_hw_loss(
             else:
                 comm_ms = torch.zeros((), device=device, dtype=torch.float32)
     else:
-        pred = hw_proxy.predict_from_model_info(model_info)
+        # Fallback path: no segments/mapping available.
+        # Make sure pruning keep signals can still affect the proxy estimate.
+        kf = None
+        if isinstance(model_info, dict):
+            if isinstance(model_info.get("keep_factors"), dict):
+                kf = model_info.get("keep_factors")
+            elif isinstance(model_info.get("model_info"), dict):
+                # support passing the full forward info dict
+                kf = model_info.get("model_info")
+            else:
+                kf = model_info
+        kf = kf or {}
+
+        def _mean_keep(x, default: float = 1.0) -> float:
+            if x is None:
+                return float(default)
+            if isinstance(x, (int, float)):
+                return float(x)
+            if isinstance(x, (list, tuple)) and len(x) > 0:
+                try:
+                    return float(np.mean([float(v) for v in x]))
+                except Exception:
+                    return float(default)
+            return float(default)
+
+        token_keep = _mean_keep(kf.get("token_keep", 1.0), 1.0)
+        head_keep = _mean_keep(kf.get("head_keep", 1.0), 1.0)
+        ch_keep = _mean_keep(kf.get("ch_keep", 1.0), 1.0)
+        block_keep = _mean_keep(kf.get("block_keep", 1.0), 1.0)
+
+        # clamp into [0,1] to avoid negative scaling
+        token_keep = float(np.clip(token_keep, 0.0, 1.0))
+        head_keep = float(np.clip(head_keep, 0.0, 1.0))
+        ch_keep = float(np.clip(ch_keep, 0.0, 1.0))
+        block_keep = float(np.clip(block_keep, 0.0, 1.0))
+
+        pred = hw_proxy.predict_from_model_info(
+            model_info,
+            token_keep=token_keep,
+            head_keep=head_keep,
+            ch_keep=ch_keep,
+            block_keep=block_keep,
+        )
         latency_ms = torch.tensor(float(pred.get("latency_ms", 0.0)), device=device)
         mem_mb = torch.tensor(float(pred.get("mem_mb", 0.0)), device=device)
         energy_mj = torch.tensor(float(pred.get("energy_mj", 0.0)), device=device)

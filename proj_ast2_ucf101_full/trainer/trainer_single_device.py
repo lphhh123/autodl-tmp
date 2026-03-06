@@ -1144,6 +1144,16 @@ def train_single_device(
                             layers_cfg = []
                             for seg in segments:
                                 keep = seg.keep_factors or {}
+                                kind = str(getattr(seg, "kind", "other"))
+                                head_keep = float(keep.get("head_keep", 1.0))
+                                ch_keep = float(keep.get("ch_keep", 1.0))
+                                block_keep = float(keep.get("block_keep", 1.0))
+                                if kind == "attn":
+                                    complexity_ratio = head_keep * block_keep
+                                elif kind == "mlp":
+                                    complexity_ratio = ch_keep * block_keep
+                                else:
+                                    complexity_ratio = block_keep
                                 layers_cfg.append(
                                     {
                                         "layer_kind": seg.kind,
@@ -1155,6 +1165,7 @@ def train_single_device(
                                         "seq_len": int(seg.seq_len),
                                         "precision": float(seg.precision),
                                         "keep_ratio": float(keep.get("token_keep", 1.0)),
+                                        "complexity_ratio": float(complexity_ratio),
                                     }
                                 )
                             model_info = dict(model_info)
