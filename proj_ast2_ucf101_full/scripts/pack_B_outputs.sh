@@ -10,8 +10,12 @@ mkdir -p _pack_B
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 
 # Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
-DEFAULT_PACK_EXPS="EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B3"
+DEFAULT_PACK_EXPS="EXP-B1 EXP-B2 \
+EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B2-ab-nomem \
+EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate \
+EXP-B3"
 PACK_EXPS="${PACK_EXPS:-$DEFAULT_PACK_EXPS}"
+echo "[PACK] PACK_EXPS=${PACK_EXPS}"
 
 # Whether to include legacy B0/B0* (default off)
 PACK_INCLUDE_B0="${PACK_INCLUDE_B0:-0}"

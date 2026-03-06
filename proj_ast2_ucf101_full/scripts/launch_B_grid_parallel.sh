@@ -36,6 +36,17 @@ EXPS_MAIN="${EXPS_MAIN:-EXP-B1 EXP-B2 EXP-B3}"
 EXPS_ABL="${EXPS_ABL:-EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem}"
 RUN_ABLATIONS="${RUN_ABLATIONS:-1}"     # set 0 to skip ablations
 
+# Evidence suite for "control necessity" (uncontrolled + controller ablations)
+# Default OFF to avoid exploding runtime. Turn on with:
+#   RUN_CTL_EVIDENCE=1
+RUN_CTL_EVIDENCE="${RUN_CTL_EVIDENCE:-0}"
+EXPS_CTL_EVIDENCE="${EXPS_CTL_EVIDENCE:-EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate}"
+
+if [[ "${RUN_CTL_EVIDENCE}" == "1" ]]; then
+  echo "[B-grid] RUN_CTL_EVIDENCE=1 -> append control-evidence experiments to EXPS_ABL"
+  EXPS_ABL="${EXPS_ABL} ${EXPS_CTL_EVIDENCE}"
+fi
+
 # Thread caps to avoid oversubscription per process
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
@@ -52,6 +63,7 @@ echo "[B-grid] SEEDS_MAIN=${SEEDS_MAIN}"
 echo "[B-grid] SEEDS_ABL=${SEEDS_ABL}"
 echo "[B-grid] EXPS_MAIN=${EXPS_MAIN}"
 echo "[B-grid] EXPS_ABL=${EXPS_ABL} (RUN_ABLATIONS=${RUN_ABLATIONS})"
+echo "[B-grid] RUN_CTL_EVIDENCE=${RUN_CTL_EVIDENCE}"
 
 # ------------------------------------------------------------
 # Optional clean to avoid historical accumulation in outputs/B
