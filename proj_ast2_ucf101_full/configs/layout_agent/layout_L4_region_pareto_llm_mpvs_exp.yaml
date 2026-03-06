@@ -133,6 +133,13 @@ detailed_place:
       nonheuristic_improve_margin_early: 0.0002
       nonheuristic_improve_margin_late: 0.0001
       nonheuristic_improve_randw_scale: 2.0
+
+      # P1: non-heuristic must also beat CURRENT by a minimum gain.
+      nonheuristic_min_gain_current_early: 0.0
+      nonheuristic_min_gain_current_late: 0.0002
+      nonheuristic_min_gain_current_switch_stagnation: 15
+      nonheuristic_min_gain_current_randw_scale: 1.5
+      llm_min_gain_current: 0.0002
       full_verify_always_include_sources: ["heuristic"]
       macro_gain_gate_enabled: true
       macro_gain_margin_early: 0.001
