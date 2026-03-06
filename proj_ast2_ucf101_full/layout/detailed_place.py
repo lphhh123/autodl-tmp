@@ -472,6 +472,9 @@ def run_detailed_place(
     mpvs_trigger_state = {
         "recent_sigs": [],   # recent assignment signatures (post-step)
         "recent_calls": [],  # recent eval-calls spent per step
+        "recent_calls_cheap": [],
+        "recent_repeat": [],
+        "recent_improve": [],
         "credit": {"macro": 0.0, "verifier": 0.0},
         "cooldown": {"macro": 0, "verifier": 0},
         "last_fire": {"macro": -10000000, "verifier": -10000000},
@@ -504,11 +507,23 @@ def run_detailed_place(
         "pareto_added": 0,
         "macro_gate_blocked": 0,
         "macro_gate_allowed": 0,
+        "macro_precheck_failed": 0,
+        "macro_precheck_blocked": 0,
+        "macro_precheck_allowed": 0,
+        "macro_monotone_blocked": 0,
+        "macro_selected_nonimprove": 0,
+        "verifier_candidates_considered": 0,
+        "verifier_changed_choice": 0,
+        "calls_by_src": {},
+        "gain_by_src": {},
         # --- BATC trigger stats ---
         "trig_enabled": 0,
         "trig_steps": 0,
         "trig_repeat_ratio_sum": 0.0,
         "trig_calls_avg_sum": 0.0,
+        "trig_repeat_high_effective": None,
+        "trig_calls_high_effective": None,
+        "trig_calls_baseline": None,
         "trig_macro_allowed": 0,
         "trig_macro_fired": 0,
         "trig_macro_fail": 0,
@@ -596,6 +611,7 @@ def run_detailed_place(
     start_time = time.time()
     wall_start = time.perf_counter()
     eval_calls_cum = 0
+    budget_exhausted = False
     last_step = -1
     best_solution = None
     report = None
@@ -1620,8 +1636,40 @@ def run_detailed_place(
                                 mpvs_stats["trig_repeat_ratio_sum"] = float(mpvs_stats.get("trig_repeat_ratio_sum", 0.0)) + float(trig_repeat_ratio)
                                 mpvs_stats["trig_calls_avg_sum"] = float(mpvs_stats.get("trig_calls_avg_sum", 0.0)) + float(trig_calls_avg)
 
+                                repeat_mode = str(_cfg_get(trig_cfg, "repeat_ratio_high_mode", "fixed")).lower()
                                 repeat_high = float(_cfg_get(trig_cfg, "repeat_ratio_high", 0.55))
+                                if repeat_mode in {"quantile", "q"}:
+                                    q = float(_cfg_get(trig_cfg, "repeat_ratio_high_quantile", 0.80))
+                                    q = max(0.5, min(0.95, q))
+                                    hist_rr = (mpvs_trigger_state.get("recent_repeat", []) or [])[-max(20, W * 3):]
+                                    if len(hist_rr) >= int(_cfg_get(trig_cfg, "repeat_ratio_min_samples", 20)):
+                                        try:
+                                            rr = np.array(hist_rr, dtype=np.float64)
+                                            repeat_high = float(np.quantile(rr, q))
+                                        except Exception:
+                                            pass
+                                    repeat_floor = float(_cfg_get(trig_cfg, "repeat_ratio_high_floor", 0.40))
+                                    repeat_cap = float(_cfg_get(trig_cfg, "repeat_ratio_high_cap", 0.90))
+                                    repeat_high = max(repeat_floor, min(repeat_cap, float(repeat_high)))
+
+                                calls_mode = str(_cfg_get(trig_cfg, "calls_per_iter_high_mode", "fixed")).lower()
                                 calls_high = float(_cfg_get(trig_cfg, "calls_per_iter_high", 180.0))
+                                baseline_calls = None
+                                if calls_mode in {"relative", "rel"}:
+                                    mul = float(_cfg_get(trig_cfg, "calls_per_iter_high_mul", 1.25))
+                                    mul = max(1.05, min(3.0, mul))
+                                    hist_c = (mpvs_trigger_state.get("recent_calls_cheap", []) or [])[-max(20, W * 3):]
+                                    if len(hist_c) >= int(_cfg_get(trig_cfg, "calls_baseline_min_samples", 20)):
+                                        try:
+                                            baseline_calls = float(np.median(np.array(hist_c, dtype=np.float64)))
+                                        except Exception:
+                                            baseline_calls = None
+                                    if baseline_calls is not None and baseline_calls > 0.0:
+                                        calls_high = float(baseline_calls) * float(mul)
+
+                                mpvs_stats["trig_repeat_high_effective"] = float(repeat_high)
+                                mpvs_stats["trig_calls_high_effective"] = float(calls_high)
+                                mpvs_stats["trig_calls_baseline"] = float(baseline_calls) if baseline_calls is not None else None
 
                                 # decay cooldowns
                                 try:
@@ -1822,6 +1870,29 @@ def run_detailed_place(
                                 except Exception:
                                     return 1e30, {"mode": "error"}
 
+                            def _macro_min_gain_cur() -> float:
+                                base = float(_cfg_get(ver_cfg, "macro_min_gain", 0.0))
+                                if instance_tag == "randw":
+                                    base = float(_cfg_get(ver_cfg, "macro_min_gain_randw", base))
+                                mode = str(_cfg_get(ver_cfg, "macro_min_gain_mode", "fixed")).lower()
+                                if mode in {"dynamic", "auto"}:
+                                    win = int(_cfg_get(ver_cfg, "macro_min_gain_dynamic_window", 200))
+                                    q = float(_cfg_get(ver_cfg, "macro_min_gain_dynamic_quantile", 0.30))
+                                    q = max(0.05, min(0.95, q))
+                                    scale = float(_cfg_get(ver_cfg, "macro_min_gain_dynamic_scale", 1.0))
+                                    floor = float(_cfg_get(ver_cfg, "macro_min_gain_dynamic_floor", 0.0))
+                                    cap = float(_cfg_get(ver_cfg, "macro_min_gain_dynamic_cap", 0.02))
+                                    hist = (mpvs_trigger_state.get("recent_improve", []) or [])[-max(0, win):]
+                                    if len(hist) >= int(_cfg_get(ver_cfg, "macro_min_gain_dynamic_min_samples", 10)):
+                                        try:
+                                            arr = np.array(hist, dtype=np.float64)
+                                            dyn = float(np.quantile(arr, q)) * float(scale)
+                                            dyn = max(floor, min(cap, dyn))
+                                            base = max(base, dyn)
+                                        except Exception:
+                                            pass
+                                return max(0.0, float(base))
+
                             # --- macro fast precheck: prevent macro/llm_macro from consuming verify budget unless it can beat heuristic ---
                             try:
                                 macro_gate_enabled = bool(_cfg_get(ver_cfg, "macro_gain_gate_enabled", True))
@@ -1859,9 +1930,17 @@ def run_detailed_place(
                                                 nm = str(_pl.get("name", "macro"))
                                                 n_steps_macro = int(_cfg_get(macro_cfg, "n_steps", 3))
                                                 n_fast = max(1, min(int(n_steps_macro), int(fast_macro_steps)))
+                                                _c0 = int(getattr(evaluator, "evaluator_calls", 0))
                                                 b_assign, b_eval, b_total, acts, _cur = _exec_macro(
                                                     nm, assign.copy(), dict(eval_out), n_steps=n_fast
                                                 )
+                                                _c1 = int(getattr(evaluator, "evaluator_calls", 0))
+                                                _spent = max(0, int(_c1) - int(_c0))
+                                                try:
+                                                    cb = mpvs_stats.setdefault("calls_by_src", {})
+                                                    cb["macro_precheck"] = int(cb.get("macro_precheck", 0)) + int(_spent)
+                                                except Exception:
+                                                    pass
                                                 _pl["_macro_fast_total"] = float(b_total)
                                                 _pl["_macro_fast_res"] = {
                                                     "verified_best_total": float(b_total),
@@ -1874,18 +1953,16 @@ def run_detailed_place(
                                                     mpvs_stats["macro_precheck_blocked"] = int(mpvs_stats.get("macro_precheck_blocked", 0)) + 1
                                                     continue
                                                 # strict admission: macro must improve current objective to be considered
-                                                min_gain = float(_cfg_get(ver_cfg, "macro_min_gain", 0.0008))
-                                                if instance_tag == "randw":
-                                                    min_gain = float(_cfg_get(ver_cfg, "macro_min_gain_randw", 0.0004))
+                                                min_gain = float(_macro_min_gain_cur())
 
                                                 cur_total = float(eval_out.get("total_scalar", 0.0))
                                                 if float(b_total) > float(cur_total) - float(min_gain):
                                                     mpvs_stats["macro_precheck_fail_min_gain"] = int(mpvs_stats.get("macro_precheck_fail_min_gain", 0)) + 1
                                                     try:
-                                                        if trig_enabled:
-                                                            mac_t = _cfg_get((_cfg_get(mpvs_cfg, "trigger", {}) or {}), "macro", {}) or {}
-                                                            mac_cd_fail = int(_cfg_get(mac_t, "cooldown_fail", 10))
-                                                            mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), mac_cd_fail)
+                                                        cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail", 10))
+                                                        if instance_tag == "randw":
+                                                            cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail_randw", cd))
+                                                        mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), cd)
                                                     except Exception:
                                                         pass
                                                     continue
@@ -1911,6 +1988,13 @@ def run_detailed_place(
 
                             def _plan_key(pl: Dict[str, Any]) -> str:
                                 return f"A:{int(pl.get('id', -1))}" if pl.get("kind") == "atomic" else f"M:{pl.get('src', '')}:{pl.get('name', '')}"
+
+                            best_pk_cheap = None
+                            try:
+                                if sorted_scored:
+                                    best_pk_cheap = _plan_key(sorted_scored[0][1])
+                            except Exception:
+                                best_pk_cheap = None
 
                             for _, pl, _ in sorted_scored[: max(0, full_verify_topk)]:
                                 pk = _plan_key(pl)
@@ -1966,6 +2050,9 @@ def run_detailed_place(
                             if len(full_verify_list) > max_full_verify:
                                 full_verify_list = full_verify_list[:max_full_verify]
                                 full_verify_keys = set(_plan_key(p) for p in full_verify_list)
+
+                            if not disable_verifier_step:
+                                mpvs_stats["verifier_candidates_considered"] = int(mpvs_stats.get("verifier_candidates_considered", 0)) + int(len(full_verify_keys))
 
                             for cheap, pl, cmeta in sorted_scored:
                                 pk = _plan_key(pl)
@@ -2068,6 +2155,17 @@ def run_detailed_place(
                                     }
                                 )
                                 mpvs_stats["plans_scored"] += 1
+                                try:
+                                    if int(calls_spent) > 0:
+                                        cb = mpvs_stats.setdefault("calls_by_src", {})
+                                        _src = str(pl.get("src", "unknown"))
+                                        cb[_src] = int(cb.get(_src, 0)) + int(calls_spent)
+                                        if float(v_raw) < 1e29:
+                                            gb = mpvs_stats.setdefault("gain_by_src", {})
+                                            gain = max(0.0, float(cur_total) - float(v_raw))
+                                            gb[_src] = float(gb.get(_src, 0.0)) + float(gain)
+                                except Exception:
+                                    pass
                                 cover.add(str(pl.get("src", "")))
                                 if pl.get("src") == "macro":
                                     mpvs_stats["macro_scored"] += 1
@@ -2151,6 +2249,13 @@ def run_detailed_place(
                                     else:
                                         mpvs_stats["macro_gate_allowed"] = int(mpvs_stats.get("macro_gate_allowed", 0)) + 1
 
+                            if (not disable_verifier_step) and best_pk_cheap is not None and best_plan is not None:
+                                try:
+                                    if _plan_key(best_plan) != str(best_pk_cheap):
+                                        mpvs_stats["verifier_changed_choice"] = int(mpvs_stats.get("verifier_changed_choice", 0)) + 1
+                                except Exception:
+                                    pass
+
                             if best_plan is not None and best_res is None:
                                 if best_plan.get("kind") == "macro":
                                     b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(best_plan.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
@@ -2192,6 +2297,21 @@ def run_detailed_place(
                             # From here, best_res is guaranteed dict
                             vbest = float(best_res.get("verified_best_total", cur_total))
                             delta_v = vbest - cur_total
+                            try:
+                                src_best = str((best_plan or {}).get("src", ""))
+                                if src_best in {"macro", "llm_macro"} and best_heur_entry is not None and bool(_cfg_get(ver_cfg, "macro_monotone_enabled", True)):
+                                    acc_min_gain = float(_cfg_get(ver_cfg, "macro_accept_min_gain", float(_macro_min_gain_cur())))
+                                    if acc_min_gain > 0.0 and float(delta_v) > -float(acc_min_gain):
+                                        mpvs_stats["macro_monotone_blocked"] = int(mpvs_stats.get("macro_monotone_blocked", 0)) + 1
+                                        best_plan = best_heur_entry["plan"]
+                                        best_res = best_heur_entry["res"]
+                                        best_v = float(best_heur_entry.get("v_eff", cur_total))
+                                        best_v_raw = float(best_heur_entry.get("v_raw", cur_total))
+                                        best_ent = best_heur_entry
+                                        vbest = float((best_res or {}).get("verified_best_total", cur_total))
+                                        delta_v = float(vbest) - float(cur_total)
+                            except Exception:
+                                pass
                             # --- BATC cooldown feedback (lightweight) ---
                             try:
                                 if trig_enabled:
@@ -2406,6 +2526,22 @@ def run_detailed_place(
                                 if prev_total < best_total_seen:
                                     best_total_seen = prev_total
                                     last_best_step = int(step)
+                                try:
+                                    if str((best_plan or {}).get("src", "")) in {"macro", "llm_macro"} and float(delta_v) >= -1e-12:
+                                        mpvs_stats["macro_selected_nonimprove"] = int(mpvs_stats.get("macro_selected_nonimprove", 0)) + 1
+                                except Exception:
+                                    pass
+                                try:
+                                    if float(delta_v) < -1e-12:
+                                        trig_cfg2 = _cfg_get(mpvs_cfg, "trigger", {}) or {}
+                                        W2 = int(_cfg_get(trig_cfg2, "window", 30))
+                                        W2 = max(10, min(W2, 200))
+                                        Wmax2 = int(max(50, min(400, W2 * 4)))
+                                        mpvs_trigger_state["recent_improve"].append(float(-float(delta_v)))
+                                        if len(mpvs_trigger_state["recent_improve"]) > Wmax2:
+                                            mpvs_trigger_state["recent_improve"] = mpvs_trigger_state["recent_improve"][-Wmax2:]
+                                except Exception:
+                                    pass
                                 # IMPORTANT: MPVS must contribute to pareto, otherwise run_layout_agent selection stays at init
                                 try:
                                     added = pareto.add(
@@ -3096,6 +3232,14 @@ def run_detailed_place(
                                     mpvs_trigger_state["recent_calls"].append(int(calls_used_step))
                                     if len(mpvs_trigger_state["recent_calls"]) > Wmax:
                                         mpvs_trigger_state["recent_calls"] = mpvs_trigger_state["recent_calls"][-Wmax:]
+                                    if (not bool(trig_allow_macro)) and (not bool(trig_allow_verifier)):
+                                        mpvs_trigger_state["recent_calls_cheap"].append(int(calls_used_step))
+                                        if len(mpvs_trigger_state["recent_calls_cheap"]) > Wmax:
+                                            mpvs_trigger_state["recent_calls_cheap"] = mpvs_trigger_state["recent_calls_cheap"][-Wmax:]
+                                if bool(trig_enabled):
+                                    mpvs_trigger_state["recent_repeat"].append(float(trig_repeat_ratio))
+                                    if len(mpvs_trigger_state["recent_repeat"]) > Wmax:
+                                        mpvs_trigger_state["recent_repeat"] = mpvs_trigger_state["recent_repeat"][-Wmax:]
                     except Exception:
                         pass
                     op_args_obj = action
@@ -3337,6 +3481,11 @@ def run_detailed_place(
                         json.dumps(report, indent=2, ensure_ascii=False),
                         encoding="utf-8",
                     )
+    except Exception as e:
+        if e.__class__.__name__ == "_BudgetExceeded":
+            budget_exhausted = True
+        else:
+            raise
     finally:
         if usage_fp:
             usage_fp.close()
@@ -3352,6 +3501,7 @@ def run_detailed_place(
         "steps": int(steps),
         "steps_planned": int(planned_steps),
         "steps_executed": int(last_step + 1) if last_step >= 0 else 0,
+        "budget_exhausted": bool(budget_exhausted),
         "lookahead": {"enabled": bool(lookahead_enabled), "k": int(lookahead_k), "r": int(lookahead_r), "mc": int(lookahead_mc), "alpha": float(lookahead_alpha)},
         "objective": {"hash": objective_hash, "cfg": evaluator.objective_cfg_dict()},
         "policy_switch": {

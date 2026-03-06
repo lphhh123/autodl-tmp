@@ -67,8 +67,25 @@ detailed_place:
       macro_gain_switch_stagnation: 20
       macro_gain_randw_scale: 1.5
       macro_cost_lambda: 2e-7
-      macro_min_gain: 0.0008
-      macro_min_gain_randw: 0.0004
+
+      # -------- P1: strict macro admission + macro-monotone safety --------
+      # Macro must improve current total by at least min_gain, otherwise it is NOT allowed to compete.
+      # Use dynamic mode to auto-adapt to instance difficulty (quantile over recent improvements).
+      macro_min_gain_mode: dynamic   # fixed | dynamic
+      macro_min_gain: 0.001
+      macro_min_gain_randw: 0.0005
+      macro_min_gain_dynamic_window: 200
+      macro_min_gain_dynamic_quantile: 0.30
+      macro_min_gain_dynamic_scale: 1.0
+      macro_min_gain_dynamic_floor: 0.0002
+      macro_min_gain_dynamic_cap: 0.01
+      macro_min_gain_dynamic_min_samples: 10
+      macro_precheck_cooldown_fail: 10
+      macro_precheck_cooldown_fail_randw: 6
+
+      # Macro-monotone: even if selected, macro must provide >= macro_accept_min_gain improvement.
+      macro_monotone_enabled: true
+      macro_accept_min_gain: 0.0008
 
       randw_switch_stagnation: 20
       randw_early_horizon_cap: 2
@@ -95,8 +112,18 @@ detailed_place:
       enabled: true
       window: 30
       stagn_ref: 20
-      repeat_ratio_high: 0.55
-      calls_per_iter_high: 180
+      # -------- P4: relative thresholds (avoid instance hard-coding) --------
+      repeat_ratio_high_mode: quantile   # fixed | quantile
+      repeat_ratio_high: 0.55            # used when mode=fixed
+      repeat_ratio_high_quantile: 0.80
+      repeat_ratio_min_samples: 20
+      repeat_ratio_high_floor: 0.40
+      repeat_ratio_high_cap: 0.90
+
+      calls_per_iter_high_mode: relative # fixed | relative
+      calls_per_iter_high: 180           # used when mode=fixed
+      calls_per_iter_high_mul: 1.25      # baseline(cheap) * mul
+      calls_baseline_min_samples: 20
       macro:
         enable_when_stagnation_ge: 20
         min_interval_steps: 10
