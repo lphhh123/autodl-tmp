@@ -361,9 +361,22 @@ def run_detailed_place(
     if dp_cfg is None:
         dp_cfg = cfg
     # ---- deterministic seeds ----
+    # P2: split RNG streams so non-main branches don't perturb the main search trajectory.
     base_seed = int(_cfg_get(cfg, "seed", 0)) + int(seed_id)
-    rng = np.random.default_rng(base_seed)
-    py_rng = random.Random(base_seed)
+    rng_main = np.random.default_rng(base_seed + 0)
+    rng_macro = np.random.default_rng(base_seed + 1_000_003)
+    rng_mem = np.random.default_rng(base_seed + 2_000_003)
+    rng_llm = np.random.default_rng(base_seed + 3_000_003)
+    rng_verify = np.random.default_rng(base_seed + 4_000_003)
+    py_rng_main = random.Random(base_seed + 0)
+    py_rng_macro = random.Random(base_seed + 1_000_003)
+    py_rng_mem = random.Random(base_seed + 2_000_003)
+    py_rng_llm = random.Random(base_seed + 3_000_003)
+    py_rng_verify = random.Random(base_seed + 4_000_003)
+
+    # Legacy aliases for main path.
+    rng = rng_main
+    py_rng = py_rng_main
 
     # ---- llm logging safety ----
     raw_text: str = ""
@@ -562,6 +575,8 @@ def run_detailed_place(
         "macro_precheck_blocked": 0,
         "macro_precheck_allowed": 0,
         "macro_monotone_blocked": 0,
+        "nonheur_current_gate_blocked": 0,
+        "nonheur_current_gate_blocked_by_src": {},
         "macro_selected_nonimprove": 0,
         "verifier_candidates_considered": 0,
         "verifier_changed_choice": 0,
@@ -628,7 +643,7 @@ def run_detailed_place(
                 w_therm=float(getattr(evaluator, "scalar_w", {}).get("w_therm", 0.0)),
             )
             mpvs_obj_params = obj
-            macro_engine = MacroEngine(macro_cfg=macro_cfg0 if isinstance(macro_cfg0, dict) else {}, obj=obj, rng=rng)
+            macro_engine = MacroEngine(macro_cfg=macro_cfg0 if isinstance(macro_cfg0, dict) else {}, obj=obj, rng=rng_macro)
         except Exception:
             macro_engine = None
             mpvs_obj_params = None
@@ -1056,7 +1071,7 @@ def run_detailed_place(
                     cand_list = sorted(cand_list, key=lambda c: float(getattr(c, "est", {}).get(score_key, 0.0)))
                     return cand_list[0] if cand_list else None
 
-                def _build_small_pool(cur_assign: np.ndarray, cur_eval: Dict[str, Any]) -> List[Any]:
+                def _build_small_pool(cur_assign: np.ndarray, cur_eval: Dict[str, Any], rng_local) -> List[Any]:
                     rem = int(_budget_remaining())
                     dp_cfg_use = dp_cfg_ver
                     if rem < 2500:
@@ -1076,7 +1091,7 @@ def run_detailed_place(
                         cluster_to_region,
                         chip_tdp,
                         dp_cfg_use,
-                        rng,
+                        rng_local,
                         debug_out_path=None,
                     )
                     _sync_eval_calls()
@@ -1115,6 +1130,7 @@ def run_detailed_place(
                     assign0: np.ndarray,
                     eval0: Dict[str, Any],
                     n_steps: int = 3,
+                    rng_local=None,
                 ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray]:
                     # Stronger macro engine: delta-based candidates + top-k verification.
                     if macro_engine is None:
@@ -1134,6 +1150,9 @@ def run_detailed_place(
 
                     # Attach signatures for consistency
                     executed: List[Dict[str, Any]] = []
+
+                    if rng_local is None:
+                        rng_local = rng_verify
                     cur_tmp = assign0.copy()
                     for act in acts:
                         act2 = copy.deepcopy(act)
@@ -1161,12 +1180,16 @@ def run_detailed_place(
                     eval_start: Dict[str, Any],
                     n_calls: int,
                     T_ref: float,
+                    py_rng_local=None,
                 ) -> Tuple[np.ndarray, Dict[str, Any], float]:
                     cur = assign_start.copy()
                     cur_eval = dict(eval_start)
                     best_total = float(cur_eval.get("total_scalar", 0.0))
                     best_assign = cur.copy()
                     best_eval = dict(cur_eval)
+
+                    if py_rng_local is None:
+                        py_rng_local = py_rng_verify
 
                     Tloc = max(sa_min_T, float(T_ref))
                     for _ in range(max(0, int(n_calls))):
@@ -1180,13 +1203,13 @@ def run_detailed_place(
                             sites_xy,
                             chip_tdp,
                             cluster_to_region,
-                            py_rng,
+                            py_rng_local,
                         )
                         trial = cur.copy()
                         _apply_action_inplace_simple(trial, act)
                         trial_eval = _evaluate_assign_cached(trial)
                         dt = float(trial_eval.get("total_scalar", 0.0)) - float(cur_eval.get("total_scalar", 0.0))
-                        accept = (dt <= 0.0) or (py_rng.random() < math.exp(-dt / max(sa_min_T, Tloc)))
+                        accept = (dt <= 0.0) or (py_rng_local.random() < math.exp(-dt / max(sa_min_T, Tloc)))
                         if accept:
                             cur = trial
                             cur_eval = trial_eval
@@ -1266,6 +1289,7 @@ def run_detailed_place(
                                 cur,
                                 cur_eval,
                                 n_steps=n_steps_macro,
+                                rng_local=rng_macro,
                             )
                             actions_exec.extend(acts)
                             cur = cur_after
@@ -1287,12 +1311,12 @@ def run_detailed_place(
                                 best_eval = dict(cur_eval)
 
                         for _t in range(max(0, horizon - 1)):
-                            pool = _build_small_pool(cur, cur_eval)
+                            pool = _build_small_pool(cur, cur_eval, rng_local=rng_verify)
                             if not pool:
                                 break
                             pool_sorted = sorted(pool, key=lambda c: float(getattr(c, "est", {}).get("d_total", 0.0)))
                             topm = pool_sorted[: max(1, min(len(pool_sorted), greedy_topm))]
-                            chosen = topm[_rng_randint(rng, 0, len(topm))] if len(topm) > 1 else topm[0]
+                            chosen = topm[_rng_randint(rng_verify, 0, len(topm))] if len(topm) > 1 else topm[0]
                             act2 = copy.deepcopy(getattr(chosen, "action", {}) or {})
                             act2.setdefault("candidate_id", int(getattr(chosen, "id", -1)))
                             act2.setdefault("type", str(getattr(chosen, "type", "")))
@@ -1306,7 +1330,7 @@ def run_detailed_place(
                                 best_eval = dict(cur_eval)
 
                         T_ref = max(sa_min_T, 0.2 * float(T))
-                        r_assign, r_eval, r_total = _refine_sa(best_assign, best_eval, refine_calls, T_ref=T_ref)
+                        r_assign, r_eval, r_total = _refine_sa(best_assign, best_eval, refine_calls, T_ref=T_ref, py_rng_local=py_rng_verify)
                         if r_total < best_total:
                             best_total, best_assign, best_eval = r_total, r_assign, r_eval
 
@@ -2232,7 +2256,7 @@ def run_detailed_place(
                                                 n_fast = max(1, min(int(n_steps_macro), int(fast_macro_steps)))
                                                 _c0 = int(getattr(evaluator, "evaluator_calls", 0))
                                                 b_assign, b_eval, b_total, acts, _cur = _exec_macro(
-                                                    nm, assign.copy(), dict(eval_out), n_steps=n_fast
+                                                    nm, assign.copy(), dict(eval_out), n_steps=n_fast, rng_local=rng_macro
                                                 )
                                                 _c1 = int(getattr(evaluator, "evaluator_calls", 0))
                                                 _spent = max(0, int(_c1) - int(_c0))
@@ -2419,7 +2443,9 @@ def run_detailed_place(
                                                     full_steps = int(_cfg_get(ver_cfg, "full_macro_steps", int(_cfg_get(macro_cfg, "n_steps", 3))))
                                                     nrun = int(full_steps) if (pk in full_verify_keys) else int(lite_steps)
                                                     nrun = max(1, nrun)
-                                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=nrun)
+                                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(
+                                                        str(pl.get("name", "macro")), assign, eval_out, n_steps=nrun, rng_local=rng_macro
+                                                    )
                                                     res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
                                                 else:
                                                     res = None
@@ -2639,7 +2665,13 @@ def run_detailed_place(
 
                             if best_plan is not None and best_res is None:
                                 if best_plan.get("kind") == "macro":
-                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(best_plan.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
+                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(
+                                        str(best_plan.get("name", "macro")),
+                                        assign,
+                                        eval_out,
+                                        n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)),
+                                        rng_local=rng_macro,
+                                    )
                                     best_res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
                                 else:
                                     cand = best_plan.get("cand", None)
@@ -2676,6 +2708,41 @@ def run_detailed_place(
                                     force_reject = True
 
                             # From here, best_res is guaranteed dict
+                            try:
+                                if best_plan is not None and best_res is not None and best_heur_entry is not None and best_heur_entry.get("res") is not None:
+                                    src_best = str((best_plan or {}).get("src", ""))
+                                    if src_best and src_best != "heuristic":
+                                        v_non = float(best_res.get("verified_best_total", 1e30))
+                                        gain_cur = float(cur_total) - float(v_non)
+
+                                        sw = int(_cfg_get(ver_cfg, "nonheuristic_min_gain_current_switch_stagnation", safe_eps_switch_stagnation))
+                                        g_early = float(_cfg_get(ver_cfg, "nonheuristic_min_gain_current_early", 0.0))
+                                        g_late = float(_cfg_get(ver_cfg, "nonheuristic_min_gain_current_late", 0.0002))
+                                        min_gain_cur = g_early if int(stagn) < int(sw) else g_late
+                                        if instance_tag == "randw":
+                                            min_gain_cur *= float(_cfg_get(ver_cfg, "nonheuristic_min_gain_current_randw_scale", 1.5))
+
+                                        if src_best == "mem":
+                                            min_gain_cur = max(float(min_gain_cur), float(_cfg_get(mem_cfg, "min_gain_use", 0.0002)))
+                                        if src_best in {"macro", "llm_macro"}:
+                                            min_gain_cur = max(float(min_gain_cur), float(_macro_min_gain_cur()))
+                                        if src_best.startswith("llm"):
+                                            min_gain_cur = max(float(min_gain_cur), float(_cfg_get(ver_cfg, "llm_min_gain_current", 0.0002)))
+
+                                        if float(gain_cur) < float(min_gain_cur) - 1e-12:
+                                            mpvs_stats["nonheur_current_gate_blocked"] = int(mpvs_stats.get("nonheur_current_gate_blocked", 0)) + 1
+                                            d = mpvs_stats.get("nonheur_current_gate_blocked_by_src", {}) or {}
+                                            d[src_best] = int(d.get(src_best, 0)) + 1
+                                            mpvs_stats["nonheur_current_gate_blocked_by_src"] = d
+
+                                            best_plan = best_heur_entry["plan"]
+                                            best_res = best_heur_entry["res"]
+                                            best_v = float(best_heur_entry.get("v_eff", cur_total))
+                                            best_v_raw = float(best_heur_entry.get("v_raw", cur_total))
+                                            best_ent = best_heur_entry
+                            except Exception:
+                                pass
+
                             vbest = float(best_res.get("verified_best_total", cur_total))
                             delta_v = vbest - cur_total
                             try:
