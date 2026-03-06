@@ -177,3 +177,66 @@ def estimate_action_delta(
     dcn, dtn, dt = estimate_delta_norm_and_total(dLc, dLt, obj)
     return {"d_comm_norm": float(dcn), "d_therm_norm": float(dtn), "d_total": float(dt)}
 
+
+def estimate_action_seq_delta(
+    assign: np.ndarray,
+    action_seq: list[Dict[str, Any]],
+    sites_xy_mm: np.ndarray,
+    traffic_sym: np.ndarray,
+    chip_tdp_w: np.ndarray,
+    obj: ObjectiveParams,
+) -> Dict[str, float]:
+    """Estimate delta for a short action sequence without evaluator calls.
+
+    Supports sequences of permutation-safe swap/relocate actions.
+    For unsupported ops, returns supported=0 and neutral deltas.
+
+    Intended as a 0-call prefilter for MemoryBank replays.
+    """
+
+    cur = np.asarray(assign, dtype=int).copy()
+    d_total = 0.0
+    d_comm = 0.0
+    d_therm = 0.0
+    supported = True
+
+    for act in (action_seq or []):
+        op = str((act or {}).get("op", ""))
+        if op not in {"swap", "relocate"}:
+            supported = False
+            break
+
+        est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, obj)
+        d_total += float(est.get("d_total", 0.0))
+        d_comm += float(est.get("d_comm_norm", 0.0))
+        d_therm += float(est.get("d_therm_norm", 0.0))
+
+        # apply locally so next delta uses updated assign
+        try:
+            if op == "swap":
+                i = int(act.get("i", -1))
+                j = int(act.get("j", -1))
+                if 0 <= i < cur.shape[0] and 0 <= j < cur.shape[0] and i != j:
+                    cur[i], cur[j] = int(cur[j]), int(cur[i])
+            else:
+                i = int(act.get("i", -1))
+                to_site = int(act.get("site_id", -1))
+                if 0 <= i < cur.shape[0] and to_site >= 0:
+                    occ = np.where(cur == to_site)[0]
+                    j = int(occ[0]) if occ.size > 0 else -1
+                    if j >= 0 and j != i:
+                        cur[i], cur[j] = int(cur[j]), int(cur[i])
+                    else:
+                        cur[i] = int(to_site)
+        except Exception:
+            supported = False
+            break
+
+    if not supported:
+        return {"supported": 0.0, "d_total": 0.0, "d_comm_norm": 0.0, "d_therm_norm": 0.0}
+    return {
+        "supported": 1.0,
+        "d_total": float(d_total),
+        "d_comm_norm": float(d_comm),
+        "d_therm_norm": float(d_therm),
+    }
