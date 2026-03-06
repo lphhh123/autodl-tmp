@@ -111,6 +111,7 @@ detailed_place:
         coverage_min_per_bucket: 0
     trigger:
       enabled: true
+      baseline_warmup_steps: 40
       window: 30
       stagn_ref: 20
       # -------- P4: relative thresholds (avoid instance hard-coding) --------
@@ -125,9 +126,12 @@ detailed_place:
       calls_per_iter_high: 180           # used when mode=fixed
       calls_per_iter_high_mul: 1.25      # baseline(cheap) * mul
       calls_baseline_min_samples: 20
+      calls_gate_enabled: true
       macro:
         enable_when_stagnation_ge: 20
         min_interval_steps: 10
+        distress_mode: and
+        stagnation_extra: 5
         credit_max: 3
         credit_add: 1
         credit_cost: 3

@@ -1671,6 +1671,11 @@ def run_detailed_place(
                                 mpvs_stats["trig_calls_high_effective"] = float(calls_high)
                                 mpvs_stats["trig_calls_baseline"] = float(baseline_calls) if baseline_calls is not None else None
 
+                                # Baseline warmup: force both macro/verifier OFF for the first N MPVS steps
+                                # so that recent_calls_cheap can be populated and relative calls gate becomes effective.
+                                baseline_warmup = int(_cfg_get(trig_cfg, "baseline_warmup_steps", 40))
+                                force_baseline = bool(baseline_warmup > 0 and int(step) < int(baseline_warmup))
+
                                 # decay cooldowns
                                 try:
                                     for k in ("macro", "verifier"):
@@ -1709,10 +1714,16 @@ def run_detailed_place(
                                 cd_mac = int((mpvs_trigger_state.get("cooldown", {}) or {}).get("macro", 0))
                                 cred_mac = float((mpvs_trigger_state.get("credit", {}) or {}).get("macro", 0.0))
 
-                                trig_allow_macro = (not disable_macro) and (int(stagn) >= mac_stagn_ge) and (
-                                    (float(trig_repeat_ratio) >= repeat_high) or (int(stagn) >= mac_stagn_ge + 5)
-                                ) and (int(step) - last_mac >= mac_minint) and (cd_mac <= 0) and (cred_mac >= mac_cost) and (
-                                    (trig_calls_avg <= calls_high) or (int(stagn) >= mac_stagn_ge + 20) or (trig_calls_avg <= 0.0)
+                                mac_mode = str(_cfg_get(mac_t, "distress_mode", "and")).lower()
+                                mac_extra = int(_cfg_get(mac_t, "stagnation_extra", 5))
+                                cond_rep = float(trig_repeat_ratio) >= float(repeat_high)
+                                cond_st2 = int(stagn) >= int(mac_stagn_ge + mac_extra)
+                                distress_ok = (cond_rep and cond_st2) if mac_mode in {"and", "strict"} else (cond_rep or cond_st2)
+                                # Calls gate: avoid fixed-tax under eval-call budget
+                                calls_gate = bool(_cfg_get(trig_cfg, "calls_gate_enabled", True))
+                                calls_ok = (float(trig_calls_avg) <= float(calls_high)) if calls_gate else True
+                                trig_allow_macro = (not disable_macro) and (int(stagn) >= mac_stagn_ge) and distress_ok and calls_ok and (
+                                    (int(step) - last_mac >= mac_minint) and (cd_mac <= 0) and (cred_mac >= mac_cost)
                                 )
 
                                 if trig_allow_macro:
@@ -1739,6 +1750,11 @@ def run_detailed_place(
                                 ) and (int(step) - last_ver >= ver_minint) and (cd_ver <= 0) and (cred_ver >= ver_cost) and (
                                     (trig_calls_avg <= calls_high) or (int(stagn) >= ver_stagn_ge + 20) or (trig_calls_avg <= 0.0)
                                 )
+
+                                if force_baseline:
+                                    trig_allow_macro = False
+                                    trig_allow_verifier = False
+                                    mpvs_stats["trig_baseline_warmup_steps"] = int(mpvs_stats.get("trig_baseline_warmup_steps", 0)) + 1
 
                                 if trig_allow_verifier:
                                     mpvs_stats["trig_ver_allowed"] = int(mpvs_stats.get("trig_ver_allowed", 0)) + 1
@@ -2739,6 +2755,41 @@ def run_detailed_place(
                                         ensure_ascii=False,
                                     ),
                                 }
+                            # --- BATC window update (MPVS step) ---
+                            try:
+                                if mpvs_enabled:
+                                    trig_cfg2 = _cfg_get(mpvs_cfg, "trigger", {}) or {}
+                                    if bool(_cfg_get(trig_cfg2, "enabled", False)):
+                                        W2 = int(_cfg_get(trig_cfg2, "window", 30))
+                                        W2 = max(10, min(W2, 200))
+                                        Wmax2 = int(max(50, min(400, W2 * 4)))
+
+                                        # signature history
+                                        mpvs_trigger_state["recent_sigs"].append(str(assign_sig))
+                                        if len(mpvs_trigger_state["recent_sigs"]) > Wmax2:
+                                            mpvs_trigger_state["recent_sigs"] = mpvs_trigger_state["recent_sigs"][-Wmax2:]
+
+                                        # calls used in THIS MPVS step
+                                        if mpvs_calls0 is not None:
+                                            used_now = int(getattr(evaluator, "evaluator_calls", 0))
+                                            calls_used_step = max(0, int(used_now) - int(mpvs_calls0))
+                                            mpvs_trigger_state["recent_calls"].append(int(calls_used_step))
+                                            if len(mpvs_trigger_state["recent_calls"]) > Wmax2:
+                                                mpvs_trigger_state["recent_calls"] = mpvs_trigger_state["recent_calls"][-Wmax2:]
+
+                                            # baseline(cheap) calls when BOTH macro+verifier are disabled
+                                            if (not bool(trig_allow_macro)) and (not bool(trig_allow_verifier)):
+                                                mpvs_trigger_state["recent_calls_cheap"].append(int(calls_used_step))
+                                                if len(mpvs_trigger_state["recent_calls_cheap"]) > Wmax2:
+                                                    mpvs_trigger_state["recent_calls_cheap"] = mpvs_trigger_state["recent_calls_cheap"][-Wmax2:]
+
+                                        # repeat ratio history for quantile thresholding
+                                        mpvs_trigger_state["recent_repeat"].append(float(trig_repeat_ratio))
+                                        if len(mpvs_trigger_state["recent_repeat"]) > Wmax2:
+                                            mpvs_trigger_state["recent_repeat"] = mpvs_trigger_state["recent_repeat"][-Wmax2:]
+                            except Exception:
+                                pass
+
                             writer.writerow(row)
                             if do_explore:
                                 mpvs_explore_left -= 1
