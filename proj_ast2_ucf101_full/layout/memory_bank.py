@@ -1,4 +1,4 @@
-"""Structured memory bank (v1) for MPVS.
+"""Structured memory bank (v2-lite) for MPVS.
 
 MemoryBank v1 stores:
   - a coarse condition key (region ids at hot slots)
@@ -6,8 +6,11 @@ MemoryBank v1 stores:
   - success/fail, cooldown, expiry
   - EWMA gain-per-call proxy (ROI)
 
-Retrieval uses similarity *and* ROI to rank entries.
-Admission requires a cheap verify (1 eval call) before competing.
+Retrieval uses similarity *and* ROI to rank entries, plus light context tags:
+  - budget_bucket (coarse budget progress bucket)
+  - health_bucket (coarse search-health bucket)
+
+This is intentionally "v2-lite": it improves robustness without heavy tuning.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import math
 import numpy as np
 
 
@@ -62,6 +66,9 @@ class MemoryEntry:
     ewma_calls: float = 0.0
     ewma_roi: float = 0.0
     origin_src: str = ""
+    # light context tags
+    budget_bucket: int = 0
+    health_bucket: int = 0
 
 
 class MemoryBank:
@@ -91,8 +98,40 @@ class MemoryBank:
         self._next_id = 1
         self.hot_slots: List[int] = []
 
+        # context for scoring (set per step by caller)
+        self._ctx_budget_bucket: int = 0
+        self._ctx_health_bucket: int = 0
+
     def init_hot_slots(self, traffic_sym: np.ndarray, chip_tdp: Optional[np.ndarray]) -> None:
         self.hot_slots = _hot_slots(traffic_sym, chip_tdp, self.hot_slots_k)
+
+
+    @staticmethod
+    def _bucket_budget(progress: float) -> int:
+        p = float(progress)
+        if p <= 0.0:
+            return 0
+        return int(max(0, min(4, math.floor(p * 5.0))))
+
+    @staticmethod
+    def _bucket_health(repeat_ratio: float, blocked_ratio: float) -> int:
+        # 0: healthy, 1: warning, 2: distressed
+        rr = float(repeat_ratio)
+        br = float(blocked_ratio)
+        if rr >= 0.75 or br >= 0.50:
+            return 2
+        if rr >= 0.55 or br >= 0.30:
+            return 1
+        return 0
+
+    def set_context(self, budget_progress: float, repeat_ratio: float = 0.0, blocked_ratio: float = 0.0) -> None:
+        """Set coarse context tags for subsequent add/query scoring."""
+        try:
+            self._ctx_budget_bucket = int(self._bucket_budget(float(budget_progress)))
+            self._ctx_health_bucket = int(self._bucket_health(float(repeat_ratio), float(blocked_ratio)))
+        except Exception:
+            self._ctx_budget_bucket = 0
+            self._ctx_health_bucket = 0
 
     def tick(self, step: int) -> None:
         step = int(step)
@@ -123,6 +162,9 @@ class MemoryBank:
         gain: float,
         step: int,
         origin_src: str = "",
+        budget_progress: float = 0.0,
+        repeat_ratio: float = 0.0,
+        blocked_ratio: float = 0.0,
     ) -> Optional[int]:
         step = int(step)
         if not actions:
@@ -145,6 +187,8 @@ class MemoryBank:
             last_used=int(step),
             last_added=int(step),
             origin_src=str(origin_src or ""),
+            budget_bucket=int(self._bucket_budget(float(budget_progress))),
+            health_bucket=int(self._bucket_health(float(repeat_ratio), float(blocked_ratio))),
         )
         self._update_roi(e, gain=float(gain), calls=1)
         self.entries.append(e)
@@ -169,10 +213,21 @@ class MemoryBank:
                 e.cooldown_until = max(int(e.cooldown_until), step + int(self.fail_cooldown))
             return
 
-    def query(self, assign: np.ndarray, site_to_region: np.ndarray, step: int, topk: int = 4) -> List[Tuple[MemoryEntry, float]]:
+    def query(
+        self,
+        assign: np.ndarray,
+        site_to_region: np.ndarray,
+        step: int,
+        topk: int = 4,
+        budget_progress: Optional[float] = None,
+        repeat_ratio: float = 0.0,
+        blocked_ratio: float = 0.0,
+    ) -> List[Tuple[MemoryEntry, float]]:
         step = int(step)
         if not self.entries:
             return []
+        if budget_progress is not None:
+            self.set_context(float(budget_progress), float(repeat_ratio), float(blocked_ratio))
         key_cur = build_key(assign, site_to_region, self.hot_slots)
         scored: List[Tuple[float, MemoryEntry]] = []
         for e in self.entries:
@@ -185,7 +240,9 @@ class MemoryBank:
                 continue
             age = max(0, step - int(e.last_added))
             fail_rate = float(e.fail) / float(max(1, e.succ + e.fail))
-            score = float(sim) * (float(e.ewma_roi) + 1e-6) - 0.05 * fail_rate - float(self.age_penalty) * float(age)
+            bb = 1.0 + (0.15 if int(e.budget_bucket) == int(self._ctx_budget_bucket) else 0.0)
+            hb = 1.0 + (0.10 if int(e.health_bucket) == int(self._ctx_health_bucket) else 0.0)
+            score = float(sim) * (float(e.ewma_roi) + 1e-6) * float(bb) * float(hb) - 0.05 * fail_rate - float(self.age_penalty) * float(age)
             scored.append((score, e))
         scored.sort(key=lambda x: float(x[0]), reverse=True)
         out: List[Tuple[MemoryEntry, float]] = []

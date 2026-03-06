@@ -462,6 +462,13 @@ def run_layout_agent(
                 "w_penalty": float(cfg.objective.scalar_weights.w_penalty),
             },
         )
+        # Expose budget info to detailed_place for budget-stage-aware MPVS.
+        # search_eval_budget = total_eval_budget - 1 (the last call is reserved for finalize).
+        try:
+            evaluator.eval_budget_limit = int(search_eval_budget or 0)
+            evaluator.total_eval_budget = int(total_eval_budget or 0)
+        except Exception:
+            pass
         class _BudgetExceeded(RuntimeError):
             pass
 
