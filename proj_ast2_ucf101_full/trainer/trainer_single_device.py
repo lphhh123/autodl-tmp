@@ -59,6 +59,28 @@ from utils.stable_hw import (
 )
 
 
+
+def _resolve_amp_settings(cfg, device_type: str, logger=None):
+    train_cfg = getattr(cfg, "train", cfg)
+    amp_enabled = bool(getattr(train_cfg, "amp", False))
+    amp_dtype_str = str(getattr(train_cfg, "amp_dtype", "fp16") or "fp16").lower()
+    if amp_dtype_str in ("bf16", "bfloat16"):
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.float16
+    if amp_enabled and device_type == "cuda" and amp_dtype == torch.bfloat16:
+        bf16_ok = True
+        try:
+            if hasattr(torch.cuda, "is_bf16_supported"):
+                bf16_ok = bool(torch.cuda.is_bf16_supported())
+        except Exception:
+            bf16_ok = False
+        if not bf16_ok:
+            if logger is not None:
+                logger.warning("[AMP] bf16 requested but not supported; falling back to fp16.")
+            amp_dtype = torch.float16
+    use_scaler = bool(amp_enabled and (amp_dtype == torch.float16))
+    return amp_enabled, amp_dtype, use_scaler, amp_dtype_str
 def _ast_interp(a: float, b: float, t: float, curve: str = "linear") -> float:
     t = float(max(0.0, min(1.0, t)))
     curve = str(curve or "linear").lower()
@@ -689,7 +711,10 @@ def train_single_device(
     lr = _as_float(cfg.train.lr, "cfg.train.lr")
     weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler(enabled=cfg.train.amp)
+    amp_enabled, amp_dtype, use_scaler, amp_dtype_str = _resolve_amp_settings(cfg, device_type, logger=logger)
+    scaler = GradScaler(enabled=use_scaler)
+    logger.info("[AMP] enabled=%s amp_dtype=%s autocast_dtype=%s scaler=%s",
+                bool(amp_enabled), str(amp_dtype_str), str(amp_dtype).replace("torch.", ""), bool(use_scaler))
     ema_cfg = getattr(cfg.train, "ema", None)
     ema_enabled = bool(getattr(ema_cfg, "enabled", False))
     ema_decay = float(getattr(ema_cfg, "decay", 0.9999) or 0.9999)
@@ -1094,7 +1119,7 @@ def train_single_device(
                     y_a = y
                     y_b = y[perm]
                 optimizer.zero_grad(set_to_none=True)
-                with autocast(device_type, enabled=cfg.train.amp):
+                with autocast(device_type, enabled=amp_enabled, dtype=amp_dtype):
                     if model_type == "video_audio":
                         if audio is None:
                             audio = batch["audio"].to(device)
