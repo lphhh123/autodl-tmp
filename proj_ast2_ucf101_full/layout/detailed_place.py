@@ -481,6 +481,9 @@ def run_detailed_place(
         mpvs_cache = EvalCache(max_size=int(_cfg_get(mpvs_cfg, "cache_size", 12000)))
 
     mpvs_mem: List[Dict[str, Any]] = []  # legacy memory; kept for backward compatibility
+    # Memory global gate (suppress harmful memory streaks under eval-call budgets)
+    mpvs_mem_global_until = 0
+    mpvs_mem_hist: List[int] = []  # 1=success, 0=fail for selected mem steps
     mem_bank: Optional[MemoryBank] = None
     if mpvs_enabled:
         try:
@@ -580,6 +583,9 @@ def run_detailed_place(
         "mem_verify_fail": 0,
         "mem_prefilter_drop": 0,
         "mem_global_blocked": 0,
+        "mem_global_triggered": 0,
+        "mem_global_until": 0,
+        "mem_global_fail_rate": 0.0,
         "llm_allowed": 0,
         "llm_denied": 0,
         "llm_deny_reason": {},
@@ -1709,6 +1715,8 @@ def run_detailed_place(
                             # MemoryBank v1
                             mem_plans = []
                             mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
+                            mem_gate_cfg = _cfg_get(mem_cfg, "global_gate", {}) or {}
+                            mem_gate_enabled = bool(_cfg_get(mem_gate_cfg, "enabled", False))
                             allow_mem_src = True
                             if mpvs_ctrl is not None:
                                 ok, rr = mpvs_ctrl.allow(
@@ -1722,6 +1730,10 @@ def run_detailed_place(
                                 allow_mem_src = bool(ok)
                                 if str(rr or "") == "mem_global_cooldown":
                                     mpvs_stats["mem_global_blocked"] = int(mpvs_stats.get("mem_global_blocked", 0)) + 1
+
+                            if mem_gate_enabled and int(step) < int(mpvs_mem_global_until):
+                                mpvs_stats["mem_global_blocked"] = int(mpvs_stats.get("mem_global_blocked", 0)) + 1
+                                allow_mem_src = False
 
                             if mem_enabled and mem_bank is not None and allow_mem_src:
                                 try:
@@ -2371,24 +2383,23 @@ def run_detailed_place(
                                 pk = _plan_key(pl)
                                 src_pl = str(pl.get("src", ""))
                                 cand = pl.get("cand", None)
-                                do_verify = bool(disable_verifier_step) or (pk in lite_verify_keys) or (
-                                    str(pl.get("kind")) == "atomic" and cand is not None and src_pl == "heuristic"
-                                )
+                                if disable_verifier_step:
+                                    # no_verifier: do NOT run evaluator-based verification over candidate list.
+                                    # Only allow "atomic cand" (0-call, uses cand.est) to be treated as verified.
+                                    do_verify = (str(pl.get("kind")) == "atomic" and cand is not None)
+                                else:
+                                    do_verify = (pk in lite_verify_keys) or (
+                                        str(pl.get("kind")) == "atomic" and cand is not None and src_pl == "heuristic"
+                                    )
                                 if do_verify:
                                     calls_b = int(getattr(evaluator, "evaluator_calls", 0))
                                     if disable_verifier_step:
-                                        if pl.get("kind") == "macro":
-                                            b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
-                                            res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
+                                        # no_verifier: we should not verify macro/mem by evaluator here.
+                                        # atomic cand uses cand.est and is safe (0-call).
+                                        if cand is not None:
+                                            res = _atomic_res_from_cand(cand, assign)
                                         else:
-                                            if cand is not None:
-                                                res = _atomic_res_from_cand(cand, assign)
-                                            elif pl.get("action_seq") is not None:
-                                                res = _atomic_res_from_action_seq(pl.get("action_seq"), assign, eval_out)
-                                            elif pl.get("action") is not None:
-                                                res = _atomic_res_from_action(pl.get("action"), assign, eval_out)
-                                            else:
-                                                res = {"verified_best_total": float(cur_total), "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": []}
+                                            res = None
                                     else:
                                         if pl.get("kind") == "atomic":
                                             if cand is not None:
@@ -3030,6 +3041,31 @@ def run_detailed_place(
                                     mpvs_stats["macro_selected"] += 1
                                 if src_sel == "mem":
                                     mpvs_stats["memory_selected"] += 1
+                                    # Update mem global gate based on realized gain (selected mem only).
+                                    try:
+                                        mem_gate_cfg = _cfg_get(mem_cfg, "global_gate", {}) or {}
+                                        mem_gate_enabled = bool(_cfg_get(mem_gate_cfg, "enabled", False))
+                                        if mem_gate_enabled:
+                                            window = int(_cfg_get(mem_gate_cfg, "window", 40))
+                                            window = max(10, min(200, window))
+                                            fail_rate_hi = float(_cfg_get(mem_gate_cfg, "fail_rate_hi", 0.75))
+                                            cooldown_steps = int(_cfg_get(mem_gate_cfg, "cooldown_steps", 30))
+                                            min_gain_use = float(_cfg_get(mem_gate_cfg, "min_gain_use", 0.0002))
+
+                                            gain0 = float(cur_total) - float(vbest)
+                                            ok = bool(gain0 >= float(min_gain_use))
+                                            mpvs_mem_hist.append(1 if ok else 0)
+                                            if len(mpvs_mem_hist) > window:
+                                                mpvs_mem_hist[:] = mpvs_mem_hist[-window:]
+                                            fail_rate = 1.0 - float(sum(mpvs_mem_hist)) / float(max(1, len(mpvs_mem_hist)))
+                                            mpvs_stats["mem_global_fail_rate"] = float(fail_rate)
+                                            if fail_rate >= float(fail_rate_hi):
+                                                mpvs_mem_global_until = max(int(mpvs_mem_global_until), int(step) + int(cooldown_steps))
+                                                mpvs_stats["mem_global_triggered"] = int(mpvs_stats.get("mem_global_triggered", 0)) + 1
+                                    except Exception:
+                                        pass
+
+                            mpvs_stats["mem_global_until"] = int(mpvs_mem_global_until)
 
                             # --- BATC window update (MPVS post-step, before continue) ---
                             try:

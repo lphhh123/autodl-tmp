@@ -1,0 +1,30 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+
+detailed_place:
+  mpvs:
+    trigger:
+      enabled: false
+    verifier:
+      safe_enabled: false
+      nonheuristic_require_improve: false
+      macro_gain_gate_enabled: false
+      macro_min_gain_mode: fixed
+      macro_min_gain: 0.0
+      macro_monotone_enabled: false
+      macro_accept_min_gain: 0.0
+    proposer:
+      llm_every_n_steps: 5
+      quota:
+        heur: 10
+        llm_atomic: 1
+        llm_macro: 1
+        macro: 3
+        mem: 3
+    memory:
+      enable_when_stagnation_ge: 0
+      propose_every_n_steps: 1
+      verify_every_n_steps: 1
+      ttl_steps: 60
+      max_size: 128
+      global_gate:
+        enabled: false

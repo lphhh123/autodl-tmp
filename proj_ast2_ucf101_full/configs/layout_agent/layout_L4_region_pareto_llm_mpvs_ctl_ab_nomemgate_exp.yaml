@@ -1,0 +1,7 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+
+detailed_place:
+  mpvs:
+    memory:
+      global_gate:
+        enabled: false

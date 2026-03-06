@@ -395,6 +395,11 @@ case "$EXP_ID" in
   EXP-B1)        run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml                             EXP-B1 ;;
   EXP-B1-weak)   run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml                        EXP-B1-weak ;;
   EXP-B2)        run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_exp.yaml                EXP-B2 ;;
+  # --- Evidence suite: uncontrolled vs controlled, and controller ablations ---
+  EXP-B2-uncontrolled)                 run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_uncontrolled_exp.yaml                 EXP-B2-uncontrolled ;;
+  EXP-B2-ctl-ab-notrigger)             run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ctl_ab_notrigger_exp.yaml             EXP-B2-ctl-ab-notrigger ;;
+  EXP-B2-ctl-ab-nomacrostrict)         run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ctl_ab_nomacrostrict_exp.yaml         EXP-B2-ctl-ab-nomacrostrict ;;
+  EXP-B2-ctl-ab-nomemgate)             run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ctl_ab_nomemgate_exp.yaml             EXP-B2-ctl-ab-nomemgate ;;
   # --- MPVS component-isolation variants (for paper ablations / sanity) ---
   EXP-B2-mpvs-only)            run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_mpvs_only_exp.yaml            EXP-B2-mpvs-only ;;
   EXP-B2-memonly)              run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_memonly_exp.yaml              EXP-B2-memonly ;;
