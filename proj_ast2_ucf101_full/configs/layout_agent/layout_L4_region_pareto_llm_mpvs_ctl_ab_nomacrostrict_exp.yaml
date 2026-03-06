@@ -1,0 +1,10 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+
+detailed_place:
+  mpvs:
+    verifier:
+      macro_gain_gate_enabled: false
+      macro_min_gain_mode: fixed
+      macro_min_gain: 0.0
+      macro_monotone_enabled: false
+      macro_accept_min_gain: 0.0
