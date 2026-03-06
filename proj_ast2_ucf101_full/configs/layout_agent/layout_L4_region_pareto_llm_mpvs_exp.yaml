@@ -100,8 +100,9 @@ detailed_place:
       lite_macro_steps: 1
       lite_refine_sa_calls: 0
       enable_when_stagnation_ge: 12
-      macro_precheck_every_n_steps: 10
-      macro_precheck_stagnation_ge: 20
+      # Make precheck actually active on difficult instances (cluster4 often stagnates <20).
+      macro_precheck_every_n_steps: 1
+      macro_precheck_stagnation_ge: 15
       pool_override:
         raw_target_size: 24
         raw_target_max: 30

@@ -1897,8 +1897,9 @@ def run_detailed_place(
                             try:
                                 macro_gate_enabled = bool(_cfg_get(ver_cfg, "macro_gain_gate_enabled", True))
                                 macro_precheck_every = int(_cfg_get(ver_cfg, "macro_precheck_every_n_steps", 10))
-                                macro_precheck_stagn = int(_cfg_get(ver_cfg, "macro_precheck_stagnation_ge", 20))
-                                do_macro_precheck = (int(stagn) >= int(macro_precheck_stagn)) and (
+                                macro_enable_stagn = int(_cfg_get(macro_cfg, "enable_base_when_stagnation_ge", 0))
+                                macro_precheck_stagn = int(_cfg_get(ver_cfg, "macro_precheck_stagnation_ge", macro_enable_stagn))
+                                do_macro_precheck = bool(trig_allow_macro) and (int(stagn) >= int(macro_precheck_stagn)) and (
                                     macro_precheck_every <= 1 or (int(step) % int(macro_precheck_every) == 0)
                                 )
                                 if macro_gate_enabled and (not disable_macro) and int(fast_macro_steps) > 0 and do_macro_precheck:
@@ -2299,6 +2300,15 @@ def run_detailed_place(
                             delta_v = vbest - cur_total
                             try:
                                 src_best = str((best_plan or {}).get("src", ""))
+                                if best_heur_entry is None:
+                                    try:
+                                        for _ent in per_plan:
+                                            _pl = _ent.get("plan", {})
+                                            if isinstance(_pl, dict) and str(_pl.get("src", "")) == "heuristic":
+                                                if best_heur_entry is None or float(_ent.get("v_eff", 1e30)) < float(best_heur_entry.get("v_eff", 1e30)):
+                                                    best_heur_entry = _ent
+                                    except Exception:
+                                        pass
                                 if src_best in {"macro", "llm_macro"} and best_heur_entry is not None and bool(_cfg_get(ver_cfg, "macro_monotone_enabled", True)):
                                     acc_min_gain = float(_cfg_get(ver_cfg, "macro_accept_min_gain", float(_macro_min_gain_cur())))
                                     if acc_min_gain > 0.0 and float(delta_v) > -float(acc_min_gain):
@@ -2623,6 +2633,37 @@ def run_detailed_place(
                                     mpvs_stats["macro_selected"] += 1
                                 if src_sel == "mem":
                                     mpvs_stats["memory_selected"] += 1
+
+                            # --- BATC window update (MPVS post-step, before continue) ---
+                            try:
+                                if mpvs_enabled:
+                                    trig_cfg2 = _cfg_get(mpvs_cfg, "trigger", {}) or {}
+                                    if bool(_cfg_get(trig_cfg2, "enabled", False)):
+                                        W2 = int(_cfg_get(trig_cfg2, "window", 30))
+                                        W2 = max(10, min(W2, 200))
+                                        Wmax2 = int(max(50, min(400, W2 * 4)))
+
+                                        mpvs_trigger_state["recent_sigs"].append(str(assign_sig))
+                                        if len(mpvs_trigger_state["recent_sigs"]) > Wmax2:
+                                            mpvs_trigger_state["recent_sigs"] = mpvs_trigger_state["recent_sigs"][-Wmax2:]
+
+                                        if mpvs_calls0 is not None:
+                                            used_now = int(getattr(evaluator, "evaluator_calls", 0))
+                                            calls_used_step = max(0, int(used_now) - int(mpvs_calls0))
+                                            mpvs_trigger_state["recent_calls"].append(int(calls_used_step))
+                                            if len(mpvs_trigger_state["recent_calls"]) > Wmax2:
+                                                mpvs_trigger_state["recent_calls"] = mpvs_trigger_state["recent_calls"][-Wmax2:]
+
+                                            if (not bool(trig_allow_macro)) and (not bool(trig_allow_verifier)):
+                                                mpvs_trigger_state["recent_calls_cheap"].append(int(calls_used_step))
+                                                if len(mpvs_trigger_state["recent_calls_cheap"]) > Wmax2:
+                                                    mpvs_trigger_state["recent_calls_cheap"] = mpvs_trigger_state["recent_calls_cheap"][-Wmax2:]
+
+                                        mpvs_trigger_state["recent_repeat"].append(float(trig_repeat_ratio))
+                                        if len(mpvs_trigger_state["recent_repeat"]) > Wmax2:
+                                            mpvs_trigger_state["recent_repeat"] = mpvs_trigger_state["recent_repeat"][-Wmax2:]
+                            except Exception:
+                                pass
 
                             row = {
                                 "iter": int(step),
