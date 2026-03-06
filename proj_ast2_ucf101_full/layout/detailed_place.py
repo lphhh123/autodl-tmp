@@ -39,6 +39,8 @@ from layout.candidate_pool import (
 from layout.policy_switch import EvalCache, PolicySwitchController
 from layout.delta_eval import ObjectiveParams
 from layout.macro_engine import MacroEngine
+from layout.verifier_engine import ROITracker, compute_gain
+from layout.memory_bank import MemoryBank
 from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config_utils import get_nested
@@ -396,6 +398,15 @@ def run_detailed_place(
     inverse_tenure = int(_cfg_get(anti_cfg, "inverse_tenure", 6))
     per_slot_cooldown = int(_cfg_get(anti_cfg, "per_slot_cooldown", 6))
     aspiration_delta = float(_cfg_get(anti_cfg, "aspiration_delta", 1e-4))
+    # Search health (soft-block + relax to avoid op=none under heavy blocking)
+    soft_block_enabled = bool(_cfg_get(anti_cfg, "soft_block_enabled", True))
+    soft_block_min_gain = float(_cfg_get(anti_cfg, "soft_block_min_gain", 0.001))
+    soft_block_randw_scale = float(_cfg_get(anti_cfg, "soft_block_randw_scale", 1.5))
+    relax_enabled = bool(_cfg_get(anti_cfg, "relax_enabled", True))
+    relax_stagnation_ge = int(_cfg_get(anti_cfg, "relax_stagnation_ge", 15))
+    relax_max_level = int(_cfg_get(anti_cfg, "relax_max_level", 3))
+    relax_only_if_improving = bool(_cfg_get(anti_cfg, "relax_only_if_improving", True))
+    relax_min_gain = float(_cfg_get(anti_cfg, "relax_min_gain", soft_block_min_gain))
 
     # ---- planner config ----
     planner_cfg = _cfg_get(dp_cfg, "planner", {"type": "heuristic"}) or {"type": "heuristic"}
@@ -468,7 +479,32 @@ def run_detailed_place(
         # independent cache for verifier evaluations (do NOT depend on policy_switch)
         mpvs_cache = EvalCache(max_size=int(_cfg_get(mpvs_cfg, "cache_size", 12000)))
 
-    mpvs_mem: List[Dict[str, Any]] = []  # success memory entries: {"plan":..., "expire":int, "score":float}
+    mpvs_mem: List[Dict[str, Any]] = []  # legacy memory; kept for backward compatibility
+    mem_bank: Optional[MemoryBank] = None
+    if mpvs_enabled:
+        try:
+            mem_cfg0 = _cfg_get(mpvs_cfg, "memory", {}) or {}
+            mem_bank = MemoryBank(
+                max_size=int(_cfg_get(mem_cfg0, "max_size", 64)),
+                ttl_steps=int(_cfg_get(mem_cfg0, "ttl_steps", 120)),
+                max_action_len=int(_cfg_get(mem_cfg0, "max_action_len", 3)),
+                hot_slots_k=int(_cfg_get(mem_cfg0, "hot_slots_k", 12)),
+                ewma_alpha=float(_cfg_get(mem_cfg0, "roi_ewma_alpha", 0.2)),
+                min_similarity=float(_cfg_get(mem_cfg0, "min_similarity", 0.4)),
+                fail_cooldown=int(_cfg_get(mem_cfg0, "cooldown_fail", 20)),
+                max_fail=int(_cfg_get(mem_cfg0, "max_fail", 6)),
+                age_penalty=float(_cfg_get(mem_cfg0, "age_penalty", 0.001)),
+            )
+            try:
+                mem_bank.init_hot_slots(traffic_sym, chip_tdp)
+            except Exception:
+                pass
+        except Exception:
+            mem_bank = None
+
+    roi_tracker: Optional[ROITracker] = ROITracker(
+        alpha=float(_cfg_get(_cfg_get(mpvs_cfg, "verifier", {}) or {}, "roi_ewma_alpha", 0.2))
+    ) if mpvs_enabled else None
     mpvs_explore_left = 0
     # --- MPVS trigger controller state (BATC v0.5) ---
     mpvs_trigger_state = {
@@ -516,6 +552,22 @@ def run_detailed_place(
         "macro_selected_nonimprove": 0,
         "verifier_candidates_considered": 0,
         "verifier_changed_choice": 0,
+        "verifier_changed_accept": 0,
+        "verifier_lite_verified": 0,
+        "verifier_full_verified": 0,
+        "verifier_lite_calls": 0,
+        "verifier_full_calls": 0,
+        "verifier_roi_sum": 0.0,
+        "verifier_roi_count": 0,
+        "verifier_roi_by_src": {},
+        "verifier_gain_by_src": {},
+        "verifier_calls_by_src": {},
+        "mem_entries": 0,
+        "mem_queries": 0,
+        "mem_hits": 0,
+        "mem_store": 0,
+        "mem_store_skip": 0,
+        "mem_verify_fail": 0,
         "calls_by_src": {},
         "gain_by_src": {},
         # --- BATC trigger stats ---
@@ -1358,6 +1410,11 @@ def run_detailed_place(
                         if disable_mem:
                             mem_enabled = False
                             mpvs_mem[:] = []
+                            try:
+                                if mem_bank is not None:
+                                    mem_bank.entries = []
+                            except Exception:
+                                pass
                         mem_ttl = int(_cfg_get(mem_cfg, "ttl_steps", 8))
                         mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
                         if mem_enabled:
@@ -1544,26 +1601,49 @@ def run_detailed_place(
                             if "llm_macro_plans" not in locals():
                                 llm_macro_plans = []
 
-                            # memory only enabled when stagnation large
+                            # MemoryBank v1
                             mem_plans = []
                             mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
-                            if mem_enabled and mpvs_mem:
-                                # purge expired entries
-                                mpvs_mem[:] = [m for m in mpvs_mem if int(m.get("expire", -1)) >= int(step)]
-                                # keep best-first
-                                mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
-                            if mem_enabled and mpvs_mem and (stagn >= mem_stagn_th):
-                                # sparse proposal to avoid "fixed tax" under eval-call budgets
-                                mem_prop_every = int(_cfg_get(mem_cfg, "propose_every_n_steps", 10))
-                                if mem_prop_every <= 1 or (int(step) % int(mem_prop_every) == 0):
-                                    topm = mpvs_mem[0]
-                                    mp = dict(topm.get("plan", {}) or {})
-                                    # memory plan must be atomic replay with action
-                                    if str(mp.get("kind", "")) == "atomic" and (mp.get("action") is not None):
-                                        mp["src"] = "mem"
-                                        # keep historical score for diagnostics only (verifier-mode will not trust it for competition)
-                                        mp["mem_score"] = float(topm.get("score", 1e30))
-                                        mem_plans.append(mp)
+                            if mem_enabled and mem_bank is not None:
+                                try:
+                                    mem_bank.tick(int(step))
+                                    mpvs_stats["mem_entries"] = int(len(getattr(mem_bank, "entries", []) or []))
+                                except Exception:
+                                    pass
+                                if int(stagn) >= int(mem_stagn_th):
+                                    mem_prop_every = int(_cfg_get(mem_cfg, "propose_every_n_steps", 10))
+                                    if mem_prop_every <= 1 or (int(step) % int(mem_prop_every) == 0):
+                                        mem_topk = int(_cfg_get(mem_cfg, "propose_topk", 6))
+                                        mpvs_stats["mem_queries"] = int(mpvs_stats.get("mem_queries", 0)) + 1
+                                        hits = []
+                                        try:
+                                            hits = mem_bank.query(assign, site_to_region, step=int(step), topk=max(0, mem_topk))
+                                        except Exception:
+                                            hits = []
+                                        if hits:
+                                            mpvs_stats["mem_hits"] = int(mpvs_stats.get("mem_hits", 0)) + 1
+                                        for ent, sc in hits:
+                                            try:
+                                                acts = [copy.deepcopy(a) for a in (ent.actions or [])]
+                                                for a in acts:
+                                                    a.pop("candidate_id", None)
+                                                    a.pop("signature", None)
+                                                    a.pop("_src", None)
+                                                if not acts:
+                                                    continue
+                                                mem_plans.append(
+                                                    {
+                                                        "kind": "atomic",
+                                                        "name": "",
+                                                        "id": -100000 - int(getattr(ent, "mid", -1)),
+                                                        "src": "mem",
+                                                        "action_seq": acts,
+                                                        "mem_id": int(getattr(ent, "mid", -1)),
+                                                        "mem_score": float(sc),
+                                                    }
+                                                )
+                                            except Exception:
+                                                continue
 
                             # --- quota config ---
                             quota_cfg = _cfg_get(prop_cfg, "quota", {}) or {}
@@ -1623,7 +1703,7 @@ def run_detailed_place(
                                         cid = int(pl.get("id", -1))
                                         if cid >= 0:
                                             pl["cand"] = cand_map.get(cid)
-                                    if pl.get("cand") is None and pl.get("action") is None:
+                                    if pl.get("cand") is None and pl.get("action") is None and pl.get("action_seq") is None:
                                         continue
                                 norm_plans.append(pl)
                             plans = norm_plans
@@ -1885,6 +1965,28 @@ def run_detailed_place(
                                     "actions": [act],
                                 }
 
+                            def _atomic_res_from_action_seq(actions: List[Dict[str, Any]], assign0: np.ndarray, eval0: Dict[str, Any]) -> Dict[str, Any]:
+                                # exactly ONE evaluator call at the end (cheap-verify)
+                                acts: List[Dict[str, Any]] = []
+                                new_assign = assign0.copy()
+                                for a0 in (actions or []):
+                                    act = copy.deepcopy(a0 or {})
+                                    act.setdefault("type", str(act.get("type", "")))
+                                    if "signature" not in act or not act.get("signature"):
+                                        try:
+                                            act["signature"] = _signature_for_action(act, new_assign)
+                                        except Exception:
+                                            pass
+                                    _apply_action_inplace_simple(new_assign, act)
+                                    acts.append(act)
+                                new_eval = _evaluate_assign_cached(new_assign)
+                                return {
+                                    "verified_best_total": float(new_eval.get("total_scalar", 1e30)),
+                                    "best_assign": new_assign,
+                                    "best_eval": dict(new_eval),
+                                    "actions": acts,
+                                }
+
                             def _cheap_score(pl: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
                                 try:
                                     src = str(pl.get("src", ""))
@@ -1899,6 +2001,10 @@ def run_detailed_place(
                                     cand = pl.get("cand", None)
                                     if cand is not None:
                                         return float(getattr(cand, "est", {}).get("total_new", 1e30)), {"mode": "atomic_est"}
+                                    if pl.get("action_seq") is not None:
+                                        if disable_verifier_step:
+                                            return float(eval_out.get("total_scalar", 0.0)), {"mode": "atomic_seq_neutral"}
+                                        return 1e30, {"mode": "atomic_seq_needs_verify"}
                                     if pl.get("action") is not None:
                                         # action-only plans (memory replay) must be verified before competing in verifier-mode
                                         if disable_verifier_step:
@@ -2022,24 +2128,43 @@ def run_detailed_place(
                                 scored.append((float(cheap), pl, cmeta))
 
                             sorted_scored = sorted(scored, key=lambda x: float(x[0]))
-                            full_verify_list: List[Dict[str, Any]] = []
+                            # Verifier v1: lite/full stages
+                            lite_verify_keys: set[str] = set()
                             full_verify_keys: set[str] = set()
 
                             def _plan_key(pl: Dict[str, Any]) -> str:
                                 return f"A:{int(pl.get('id', -1))}" if pl.get("kind") == "atomic" else f"M:{pl.get('src', '')}:{pl.get('name', '')}"
 
                             best_pk_cheap = None
+                            best_v_cheap = None
                             try:
                                 if sorted_scored:
                                     best_pk_cheap = _plan_key(sorted_scored[0][1])
+                                    best_v_cheap = float(sorted_scored[0][0])
                             except Exception:
                                 best_pk_cheap = None
+                                best_v_cheap = None
 
-                            for _, pl, _ in sorted_scored[: max(0, full_verify_topk)]:
+                            # --- lite/full config ---
+                            lite_topk = int(_cfg_get(ver_cfg, "lite_topk", 8))
+                            full_topk = int(_cfg_get(ver_cfg, "full_topk", int(full_verify_topk)))
+                            max_lite = int(_cfg_get(ver_cfg, "max_lite_verify", 10))
+                            max_full = int(_cfg_get(ver_cfg, "max_full_verify", max_full_verify))
+
+                            for _, pl, _ in sorted_scored[: max(0, lite_topk)]:
+                                lite_verify_keys.add(_plan_key(pl))
+
+                            nfull = 0
+                            for _, pl, _ in sorted_scored:
+                                if str(pl.get("kind", "")) != "macro":
+                                    continue
                                 pk = _plan_key(pl)
-                                if pk not in full_verify_keys:
-                                    full_verify_list.append(pl)
-                                    full_verify_keys.add(pk)
+                                if pk in full_verify_keys:
+                                    continue
+                                full_verify_keys.add(pk)
+                                nfull += 1
+                                if nfull >= max(0, full_topk):
+                                    break
 
                             if full_verify_always_include_sources:
                                 for src in full_verify_always_include_sources:
@@ -2047,10 +2172,7 @@ def run_detailed_place(
                                     if not src_scored:
                                         continue
                                     _, pl, _ = src_scored[0]
-                                    pk = _plan_key(pl)
-                                    if pk not in full_verify_keys:
-                                        full_verify_list.append(pl)
-                                        full_verify_keys.add(pk)
+                                    full_verify_keys.add(_plan_key(pl))
 
                             # ensure heuristic best is always in full-verify set (so safe fallback has a usable res)
                             try:
@@ -2060,10 +2182,7 @@ def run_detailed_place(
                                         best_heur = pl
                                         break
                                 if best_heur is not None:
-                                    pk = _plan_key(best_heur)
-                                    if pk not in full_verify_keys:
-                                        full_verify_list.insert(0, best_heur)
-                                        full_verify_keys.add(pk)
+                                    lite_verify_keys.add(_plan_key(best_heur))
                             except Exception:
                                 pass
 
@@ -2074,72 +2193,82 @@ def run_detailed_place(
                                     if mem_verify_every <= 1 or (int(step) % int(mem_verify_every) == 0):
                                         best_mem = None
                                         for _, pl, _ in sorted_scored:
-                                            if str(pl.get("src", "")) == "mem" and pl.get("kind") == "atomic" and pl.get("action") is not None:
+                                            if str(pl.get("src", "")) == "mem" and pl.get("kind") == "atomic" and (pl.get("action_seq") is not None or pl.get("action") is not None):
                                                 best_mem = pl
                                                 break
                                         if best_mem is not None:
-                                            pk = _plan_key(best_mem)
-                                            if pk not in full_verify_keys:
-                                                full_verify_list.append(best_mem)
-                                                full_verify_keys.add(pk)
+                                            lite_verify_keys.add(_plan_key(best_mem))
                             except Exception:
                                 pass
 
-                            # cap number of full-verify plans
-                            if len(full_verify_list) > max_full_verify:
-                                full_verify_list = full_verify_list[:max_full_verify]
-                                full_verify_keys = set(_plan_key(p) for p in full_verify_list)
+                            # cap number of lite/full plans
+                            if len(lite_verify_keys) > max(0, max_lite):
+                                capped = set()
+                                for _, pl, _ in sorted_scored:
+                                    pk = _plan_key(pl)
+                                    if pk in lite_verify_keys:
+                                        capped.add(pk)
+                                        if len(capped) >= max(0, max_lite):
+                                            break
+                                lite_verify_keys = capped
+                            if len(full_verify_keys) > max(0, max_full):
+                                cappedf = set()
+                                for _, pl, _ in sorted_scored:
+                                    pk = _plan_key(pl)
+                                    if pk in full_verify_keys:
+                                        cappedf.add(pk)
+                                        if len(cappedf) >= max(0, max_full):
+                                            break
+                                full_verify_keys = cappedf
 
                             if not disable_verifier_step:
-                                mpvs_stats["verifier_candidates_considered"] = int(mpvs_stats.get("verifier_candidates_considered", 0)) + int(len(full_verify_keys))
+                                mpvs_stats["verifier_candidates_considered"] = int(mpvs_stats.get("verifier_candidates_considered", 0)) + int(len(lite_verify_keys))
 
                             for cheap, pl, cmeta in sorted_scored:
                                 pk = _plan_key(pl)
-                                do_full_verify = disable_verifier_step or (pk in full_verify_keys) or (pl.get("kind") == "atomic" and pl.get("cand", None) is not None)
-                                if do_full_verify:
+                                src_pl = str(pl.get("src", ""))
+                                cand = pl.get("cand", None)
+                                do_verify = bool(disable_verifier_step) or (pk in lite_verify_keys) or (
+                                    str(pl.get("kind")) == "atomic" and cand is not None and src_pl == "heuristic"
+                                )
+                                if do_verify:
                                     calls_b = int(getattr(evaluator, "evaluator_calls", 0))
                                     if disable_verifier_step:
                                         if pl.get("kind") == "macro":
                                             b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=int(_cfg_get(macro_cfg, "n_steps", 3)))
                                             res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
                                         else:
-                                            cand = pl.get("cand", None)
                                             if cand is not None:
                                                 res = _atomic_res_from_cand(cand, assign)
+                                            elif pl.get("action_seq") is not None:
+                                                res = _atomic_res_from_action_seq(pl.get("action_seq"), assign, eval_out)
                                             elif pl.get("action") is not None:
                                                 res = _atomic_res_from_action(pl.get("action"), assign, eval_out)
                                             else:
                                                 res = {"verified_best_total": float(cur_total), "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": []}
                                     else:
-                                        # verifier-enabled:
-                                        # - atomic cand plans reuse cand.est and are effectively "free" (no evaluator calls)
-                                        # - action-only plans (memory replay) require 1 eval to compete, so only verify when selected for full-verify
                                         if pl.get("kind") == "atomic":
-                                            cand = pl.get("cand", None)
                                             if cand is not None:
                                                 res = _atomic_res_from_cand(cand, assign)
+                                            elif pl.get("action_seq") is not None:
+                                                res = _atomic_res_from_action_seq(pl.get("action_seq"), assign, eval_out)
                                             elif pl.get("action") is not None:
-                                                res = _atomic_res_from_action(pl.get("action"), assign, eval_out) if (pk in full_verify_keys) else None
+                                                res = _atomic_res_from_action(pl.get("action"), assign, eval_out)
                                             else:
                                                 res = None
                                         else:
-                                            # macro: verify only when allowed & within per-step budget; reuse fast precheck result when it matches lite settings
                                             if int(getattr(evaluator, "evaluator_calls", 0)) - calls0 >= max_verify_calls_step:
                                                 res = None
                                             else:
-                                                if pl.get("kind") == "macro" and pl.get("_macro_fast_res") is not None:
-                                                    try:
-                                                        macro_mode = str(_cfg_get(ver_cfg, "macro_verify_mode", "lite")).lower()
-                                                        lite_steps = int(_cfg_get(ver_cfg, "lite_macro_steps", 1))
-                                                        lite_refine = int(_cfg_get(ver_cfg, "lite_refine_sa_calls", 0))
-                                                        if macro_mode == "lite" and lite_steps <= int(fast_macro_steps) and int(lite_refine) <= 0:
-                                                            res = pl.get("_macro_fast_res")
-                                                        else:
-                                                            res = _verify_plan(pl, assign, eval_out, stagn)
-                                                    except Exception:
-                                                        res = _verify_plan(pl, assign, eval_out, stagn)
+                                                if pl.get("kind") == "macro":
+                                                    lite_steps = int(_cfg_get(ver_cfg, "lite_macro_steps", 1))
+                                                    full_steps = int(_cfg_get(ver_cfg, "full_macro_steps", int(_cfg_get(macro_cfg, "n_steps", 3))))
+                                                    nrun = int(full_steps) if (pk in full_verify_keys) else int(lite_steps)
+                                                    nrun = max(1, nrun)
+                                                    b_assign, b_eval, b_total, acts, _cur = _exec_macro(str(pl.get("name", "macro")), assign, eval_out, n_steps=nrun)
+                                                    res = {"verified_best_total": float(b_total), "best_assign": b_assign, "best_eval": b_eval, "actions": acts}
                                                 else:
-                                                    res = _verify_plan(pl, assign, eval_out, stagn)
+                                                    res = None
                                     calls_a = int(getattr(evaluator, "evaluator_calls", 0))
                                     calls_spent = max(0, calls_a - calls_b)
                                     if res is None:
@@ -2155,6 +2284,39 @@ def run_detailed_place(
                                     else:
                                         v_raw = float(res.get("verified_best_total", 1e30))
                                         v_eff = v_raw
+
+                                    # ROI accounting + memory feedback
+                                    try:
+                                        if res is not None:
+                                            gain0 = compute_gain(cur_total, float(res.get("verified_best_total", 1e30)))
+                                            if calls_spent > 0:
+                                                mpvs_stats["verifier_calls_by_src"][src_pl] = int(mpvs_stats["verifier_calls_by_src"].get(src_pl, 0)) + int(calls_spent)
+                                                mpvs_stats["verifier_gain_by_src"][src_pl] = float(mpvs_stats["verifier_gain_by_src"].get(src_pl, 0.0)) + float(gain0)
+                                                roi = float(gain0) / float(max(1, int(calls_spent)))
+                                                mpvs_stats["verifier_roi_sum"] = float(mpvs_stats.get("verifier_roi_sum", 0.0)) + float(roi)
+                                                mpvs_stats["verifier_roi_count"] = int(mpvs_stats.get("verifier_roi_count", 0)) + 1
+                                                mpvs_stats["verifier_roi_by_src"][src_pl] = float(mpvs_stats["verifier_roi_by_src"].get(src_pl, 0.0)) + float(roi)
+                                                if roi_tracker is not None:
+                                                    roi_tracker.update(src_pl, gain0, int(calls_spent))
+                                            if pk in full_verify_keys and str(pl.get("kind", "")) == "macro":
+                                                mpvs_stats["verifier_full_verified"] = int(mpvs_stats.get("verifier_full_verified", 0)) + 1
+                                                mpvs_stats["verifier_full_calls"] = int(mpvs_stats.get("verifier_full_calls", 0)) + int(calls_spent)
+                                            else:
+                                                mpvs_stats["verifier_lite_verified"] = int(mpvs_stats.get("verifier_lite_verified", 0)) + 1
+                                                mpvs_stats["verifier_lite_calls"] = int(mpvs_stats.get("verifier_lite_calls", 0)) + int(calls_spent)
+                                    except Exception:
+                                        pass
+
+                                    try:
+                                        if src_pl == "mem" and (mem_bank is not None) and pl.get("mem_id") is not None and res is not None:
+                                            mem_min_gain = float(_cfg_get(mem_cfg, "min_gain_use", 0.0002))
+                                            gain0 = compute_gain(cur_total, float(res.get("verified_best_total", 1e30)))
+                                            ok = bool(gain0 >= mem_min_gain)
+                                            mem_bank.mark_result(int(pl.get("mem_id")), step=int(step), success=ok, gain=float(gain0), calls=max(1, int(calls_spent)))
+                                            if not ok:
+                                                mpvs_stats["mem_verify_fail"] = int(mpvs_stats.get("mem_verify_fail", 0)) + 1
+                                    except Exception:
+                                        pass
                                     try:
                                         if direction_bias == "bias_comm":
                                             best_comm = float(res.get("best_eval", {}).get("comm_norm", 0.0))
@@ -2189,7 +2351,7 @@ def run_detailed_place(
                                         "v_raw": float(v_raw),
                                         "v_eff": float(v_eff),
                                         "cheap_meta": cmeta,
-                                        "full_verified": bool(do_full_verify),
+                                        "full_verified": bool(pk in full_verify_keys),
                                         "calls_spent": int(calls_spent),
                                     }
                                 )
@@ -2401,6 +2563,16 @@ def run_detailed_place(
                                 else:
                                     accept = (py_rng.random() < math.exp(-delta_v / Tacc))
 
+                            # deterministic improving-flag flip vs cheap scoring (avoid SA randomness)
+                            try:
+                                if (best_v_cheap is not None) and (not disable_verifier_step):
+                                    cheap_improve = (float(best_v_cheap) - float(cur_total)) <= 0.0
+                                    ver_improve = float(delta_v) <= 0.0
+                                    if bool(cheap_improve) != bool(ver_improve):
+                                        mpvs_stats["verifier_changed_accept"] = int(mpvs_stats.get("verifier_changed_accept", 0)) + 1
+                            except Exception:
+                                pass
+
                             # Hard no-regret for non-heuristic: never accept a worsening move
                             if str(best_plan.get("src", "")) != "heuristic" and delta_v > 0.0:
                                 accept = False
@@ -2413,14 +2585,24 @@ def run_detailed_place(
                             assign_before_mpvs = assign.copy()
 
                             # --- MPVS anti-loop integration (tabu/inverse/cooldown) ---
-                            def _mpvs_action_blocked(actions, assign_before, vbest_val):
+                            def _mpvs_action_blocked(actions, assign_before, vbest_val, cur_total_val=None, relax_level: int = 0):
                                 # compute aspiration: allow tabu if it beats global best by aspiration_delta
                                 try:
                                     aspiration = float(vbest_val) < float(best_total_seen) - float(aspiration_delta)
                                 except Exception:
                                     aspiration = False
                                 if aspiration:
-                                    return (False, {"aspiration": 1, "tabu": 0, "inverse": 0, "cooldown": 0})
+                                    return (False, {"aspiration": 1, "tabu": 0, "inverse": 0, "cooldown": 0, "soft": 0, "relax": int(relax_level)})
+                                try:
+                                    if soft_block_enabled and (cur_total_val is not None):
+                                        mg = float(soft_block_min_gain)
+                                        if instance_tag == "randw":
+                                            mg *= float(soft_block_randw_scale)
+                                        if float(cur_total_val) - float(vbest_val) >= float(mg):
+                                            mpvs_stats["blocked_soft_override"] = int(mpvs_stats.get("blocked_soft_override", 0)) + 1
+                                            return (False, {"aspiration": 0, "tabu": 0, "inverse": 0, "cooldown": 0, "soft": 1, "relax": int(relax_level)})
+                                except Exception:
+                                    pass
                                 tabu_hit = 0
                                 inverse_hit = 0
                                 cooldown_hit = 0
@@ -2432,22 +2614,24 @@ def run_detailed_place(
                                         except Exception:
                                             a["signature"] = ""
                                     sig = str(a.get("signature", ""))
-                                    if sig and (sig in tabu_signatures):
+                                    rl = int(relax_level)
+                                    if rl < 3 and sig and (sig in tabu_signatures):
                                         tabu_hit = 1
-                                    if sig and (sig in inverse_signatures):
+                                    if rl < 2 and sig and (sig in inverse_signatures):
                                         inverse_hit = 1
-                                    # per-slot cooldown
-                                    try:
-                                        for slot in _touched_slots(a):
-                                            if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
-                                                cooldown_hit = 1
-                                                break
-                                    except Exception:
-                                        pass
+                                    if rl < 1:
+                                        # per-slot cooldown
+                                        try:
+                                            for slot in _touched_slots(a):
+                                                if step - last_move_step_per_slot.get(int(slot), -10**6) < per_slot_cooldown:
+                                                    cooldown_hit = 1
+                                                    break
+                                        except Exception:
+                                            pass
                                     if cooldown_hit:
                                         break
                                 blocked = bool(tabu_hit or inverse_hit or cooldown_hit)
-                                return (blocked, {"aspiration": 0, "tabu": tabu_hit, "inverse": inverse_hit, "cooldown": cooldown_hit})
+                                return (blocked, {"aspiration": 0, "tabu": tabu_hit, "inverse": inverse_hit, "cooldown": cooldown_hit, "soft": 0, "relax": int(relax_level)})
 
                             def _mpvs_update_anti_loop_state(actions, assign_before):
                                 for act in (actions or []):
@@ -2470,7 +2654,7 @@ def run_detailed_place(
                                     except Exception:
                                         pass
 
-                            blocked, blk_meta = _mpvs_action_blocked(chosen_actions, assign_before_mpvs, vbest)
+                            blocked, blk_meta = _mpvs_action_blocked(chosen_actions, assign_before_mpvs, vbest, cur_total_val=cur_total, relax_level=0)
                             # treat "none" as blocked under stagnation (avoid wasting eval-call budget)
                             try:
                                 none_block_stagn = int(_cfg_get(_cfg_get(mpvs_cfg, "accept", {}) or {}, "forbid_none_when_stagnation_ge", 8))
@@ -2513,7 +2697,19 @@ def run_detailed_place(
                                                 continue
                                         acts2 = (res2 or {}).get("actions", []) or []
                                         v2 = float((res2 or {}).get("verified_best_total", cur_total))
-                                        b2, _m2 = _mpvs_action_blocked(acts2, assign_before_mpvs, v2)
+                                        gain2 = float(cur_total) - float(v2)
+                                        relax_levels = [0]
+                                        if relax_enabled and int(stagn) >= int(relax_stagnation_ge):
+                                            if (not relax_only_if_improving) or (gain2 >= float(relax_min_gain)):
+                                                relax_levels = list(range(0, max(0, int(relax_max_level)) + 1))
+                                        b2 = True
+                                        _m2 = None
+                                        used_rl = 0
+                                        for rl in relax_levels:
+                                            b2, _m2 = _mpvs_action_blocked(acts2, assign_before_mpvs, v2, cur_total_val=cur_total, relax_level=int(rl))
+                                            used_rl = int(rl)
+                                            if not b2:
+                                                break
                                         if not b2:
                                             best_plan = pl2
                                             best_res = res2
@@ -2523,6 +2719,9 @@ def run_detailed_place(
                                             chosen_actions = acts2
                                             vbest = float(best_res.get("verified_best_total", cur_total))
                                             mpvs_stats["blocked_replaced"] = int(mpvs_stats.get("blocked_replaced", 0)) + 1
+                                            if used_rl > 0:
+                                                mpvs_stats["blocked_relax_replaced"] = int(mpvs_stats.get("blocked_relax_replaced", 0)) + 1
+                                                mpvs_stats["blocked_relax_level_sum"] = int(mpvs_stats.get("blocked_relax_level_sum", 0)) + int(used_rl)
                                             replaced = True
                                             break
                                 except Exception:
@@ -2608,45 +2807,36 @@ def run_detailed_place(
                                 except Exception:
                                     added = False
 
-                                if mem_enabled and (delta_v < 0.0):
-                                    # Store ONLY atomic improvements. Macro memories are not replayable and can induce loops / wasted verify.
-                                    mem_plan = {
-                                        "kind": "atomic",
-                                        "name": "",
-                                        "id": -1,     # prevent collision with current atomic candidates
-                                        "src": "mem",
-                                    }
-                                    stored_ok = False
+                                if mem_enabled and (delta_v < 0.0) and (mem_bank is not None):
                                     try:
-                                        if best_plan.get("kind") == "atomic":
-                                            acts = (best_res or {}).get("actions", []) or []
-                                            if acts:
-                                                a0 = copy.deepcopy(acts[0])
-                                                # make replay robust (do not depend on candidate_id/signature)
-                                                a0.pop("candidate_id", None)
-                                                a0.pop("signature", None)
-                                                a0.pop("_src", None)
-                                                mem_plan["action"] = a0
-                                                stored_ok = True
+                                        store_min_gain = float(_cfg_get(mem_cfg, "min_gain_store", 0.0005))
+                                        max_len = int(_cfg_get(mem_cfg, "max_action_len", 3))
+                                        acts = (best_res or {}).get("actions", []) or []
+                                        gain = float(-float(delta_v))
+                                        if (gain >= store_min_gain) and acts and (len(acts) <= max(1, max_len)):
+                                            clean = []
+                                            for a0 in acts[: max(1, max_len)]:
+                                                a = copy.deepcopy(a0)
+                                                a.pop("candidate_id", None)
+                                                a.pop("signature", None)
+                                                a.pop("_src", None)
+                                                clean.append(a)
+                                            mid = mem_bank.add(
+                                                assign_before=assign_before_mpvs,
+                                                site_to_region=site_to_region,
+                                                traffic_sym=traffic_sym,
+                                                chip_tdp=chip_tdp,
+                                                actions=clean,
+                                                gain=gain,
+                                                step=int(step),
+                                                origin_src=str(best_plan.get("src", "")),
+                                            )
+                                            if mid is not None:
+                                                mpvs_stats["mem_store"] = int(mpvs_stats.get("mem_store", 0)) + 1
+                                        else:
+                                            mpvs_stats["mem_store_skip"] = int(mpvs_stats.get("mem_store_skip", 0)) + 1
                                     except Exception:
-                                        stored_ok = False
-
-                                    if stored_ok:
-                                        mpvs_mem.append(
-                                            {
-                                                "plan": mem_plan,
-                                                "expire": int(step + mem_ttl),
-                                                "score": float(vbest),
-                                            }
-                                        )
-                                        # keep memory bounded (max_size)
-                                        try:
-                                            mem_max = int(_cfg_get(mem_cfg, "max_size", 32))
-                                            if len(mpvs_mem) > mem_max:
-                                                mpvs_mem.sort(key=lambda m: float(m.get("score", 1e30)))
-                                                mpvs_mem[:] = mpvs_mem[:mem_max]
-                                        except Exception:
-                                            pass
+                                        mpvs_stats["mem_store_skip"] = int(mpvs_stats.get("mem_store_skip", 0)) + 1
                             else:
                                 added = False
 
@@ -3631,6 +3821,18 @@ def run_detailed_place(
         try:
             if macro_engine is not None:
                 mpvs_stats["macro_ops"] = macro_engine.snapshot()
+        except Exception:
+            pass
+        try:
+            if roi_tracker is not None:
+                mpvs_stats["verifier_roi_ewma"] = roi_tracker.snapshot()
+        except Exception:
+            pass
+        try:
+            if mem_bank is not None:
+                mm = int(_cfg_get(_cfg_get(mpvs_cfg, "memory", {}) or {}, "snapshot_max", 50))
+                snap = mem_bank.snapshot()
+                mpvs_stats["mem_bank"] = snap[: max(0, mm)]
         except Exception:
             pass
         policy_meta["mpvs"] = mpvs_stats
