@@ -16,6 +16,8 @@ train:
   # 0 => auto (use LOG_INTERVAL_STEPS / default 200)
   warn_every_steps: 200
   nan_guard_warn_every_steps: 200
+  # Use bf16 autocast on RTX 40xx to reduce fp16 overflow/non-finite grads.
+  amp_dtype: bf16
 stable_hw:
   enabled: true
   # Recovery-only sparsity relaxation. Used by trainer_version_c when StableHW freezes AST schedule.

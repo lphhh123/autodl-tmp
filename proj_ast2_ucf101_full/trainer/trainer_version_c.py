@@ -39,6 +39,42 @@ from utils.stable_hash import stable_hash
 from utils.safe_json import safe_dump, safe_dumps
 
 
+def _resolve_amp_settings(cfg, device_type: str, logger=None):
+    """
+    Resolve AMP settings:
+      - cfg.train.amp: bool
+      - cfg.train.amp_dtype: 'fp16'|'bf16' (default: 'fp16')
+    Behavior:
+      - autocast dtype = bf16 when requested and supported
+      - GradScaler enabled ONLY for fp16 (bf16 => scaler disabled)
+    """
+    train_cfg = getattr(cfg, "train", cfg)
+    amp_enabled = bool(getattr(train_cfg, "amp", False))
+    amp_dtype_str = str(getattr(train_cfg, "amp_dtype", "fp16") or "fp16").lower()
+    if amp_dtype_str in ("bf16", "bfloat16"):
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.float16
+
+    # Safety fallback: if bf16 requested on cuda but not supported, fallback to fp16.
+    if amp_enabled and device_type == "cuda" and amp_dtype == torch.bfloat16:
+        bf16_ok = True
+        try:
+            # torch >= 2.0 usually has this
+            if hasattr(torch.cuda, "is_bf16_supported"):
+                bf16_ok = bool(torch.cuda.is_bf16_supported())
+        except Exception:
+            bf16_ok = False
+        if not bf16_ok:
+            if logger is not None:
+                logger.warning("[AMP] bf16 requested but torch.cuda.is_bf16_supported() is False; falling back to fp16.")
+            amp_dtype = torch.float16
+
+    # GradScaler is only needed for fp16 autocast
+    use_scaler = bool(amp_enabled and (amp_dtype == torch.float16))
+    return amp_enabled, amp_dtype, use_scaler, amp_dtype_str
+
+
 def _optimizer_has_any_grad(opt: torch.optim.Optimizer) -> bool:
     """Return True if any parameter in optimizer has a non-None gradient.
 
@@ -490,7 +526,7 @@ def build_val_loader(cfg) -> DataLoader:
 
 
 def validate_one_epoch(model: torch.nn.Module, val_loader: DataLoader, device: torch.device, amp: bool,
-                       max_batches: int = 0, model_type: str = "video") -> float:
+                       max_batches: int = 0, model_type: str = "video", amp_dtype: torch.dtype | None = None) -> float:
     model.eval()
     total = 0
     correct = 0
@@ -500,7 +536,8 @@ def validate_one_epoch(model: torch.nn.Module, val_loader: DataLoader, device: t
                 break
             x = batch["video"].to(device)
             y = batch["label"].to(device)
-            with autocast(device.type, enabled=amp):
+            _dtype = amp_dtype if amp_dtype is not None else torch.float16
+            with autocast(device.type, enabled=amp, dtype=_dtype):
                 if model_type == "video_audio":
                     logits = model(x, batch["audio"].to(device))
                 else:
@@ -938,6 +975,7 @@ def train_version_c(
     device = get_device(cfg.train.device)
     device_type = device.type
     logger = setup_logger()
+    amp_enabled, amp_dtype, use_scaler, amp_dtype_str = _resolve_amp_settings(cfg, device_type, logger=logger)
     if out_dir is not None:
         expected_out_dir = str(getattr(getattr(cfg, "train", None), "out_dir", "") or "")
         if expected_out_dir and str(out_dir) != expected_out_dir:
@@ -1207,7 +1245,9 @@ def train_version_c(
         # SMOKE vs official output directory routing.
         # ------------------------------------------------------------------
         optimizer = optimizer_model
-        scaler = GradScaler(device_type, enabled=cfg.train.amp)
+        scaler = GradScaler(device_type, enabled=use_scaler)
+        logger.info("[AMP] enabled=%s amp_dtype=%s autocast_dtype=%s scaler=%s",
+                    bool(amp_enabled), str(amp_dtype_str), str(amp_dtype).replace("torch.", ""), bool(use_scaler))
 
         library = ChipletLibrary(cfg.hw.gpu_yaml)
         chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
@@ -1897,7 +1937,7 @@ def train_version_c(
                             pg["lr"] = lr_cur
                     optimizer_model.zero_grad()
                     optimizer_alpha.zero_grad()
-                    with autocast(device_type, enabled=cfg.train.amp):
+                    with autocast(device_type, enabled=amp_enabled, dtype=amp_dtype):
                         if model_type == "video_audio":
                             if audio is None:
                                 audio = batch["audio"]

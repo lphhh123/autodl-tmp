@@ -85,6 +85,8 @@ train:
   weight_decay: 0.05
   warmup_epochs: 5
   amp: true
+  # AMP dtype: fp16 (default) or bf16 (recommended on RTX 40xx to reduce overflow)
+  amp_dtype: fp16
 
 ast:
   use_ast_prune: true
