@@ -33,6 +33,27 @@ detailed_place:
       enable_extra_when_stagnation_ge: 35
       max_macros: 3
       n_steps: 3
+
+      # Stronger macro engine (delta-based proposing + limited verification)
+      engine: delta_v1
+      delta:
+        candidate_k: 30
+        eval_topk_per_step: 2
+        partner_topk: 8
+        empty_site_k: 20
+        hot_slots_k: 12
+        therm_hot_k: 10
+        therm_cold_k: 10
+        monotone: true
+      adapt:
+        enabled: true
+        ewma_alpha: 0.2
+        fail_cooldown: 20
+        success_cooldown: 0
+        success_boost: 0.2
+        fail_penalty: 0.2
+        weight_floor: 0.1
+        weight_cap: 5.0
     explore:
       mode: hybrid
       every_n_steps: 20

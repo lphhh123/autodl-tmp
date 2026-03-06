@@ -37,6 +37,8 @@ from layout.candidate_pool import (
     _signature_for_action,
 )
 from layout.policy_switch import EvalCache, PolicySwitchController
+from layout.delta_eval import ObjectiveParams
+from layout.macro_engine import MacroEngine
 from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config_utils import get_nested
@@ -536,6 +538,24 @@ def run_detailed_place(
         "macro_precheck_pass_min_gain": 0,
     }
 
+    # ----------------------------
+    # MacroEngine (stronger macros, fewer evaluator calls)
+    # ----------------------------
+    macro_engine: Optional[MacroEngine] = None
+    if mpvs_enabled:
+        try:
+            macro_cfg0 = _cfg_get(mpvs_cfg, "macros", {}) or {}
+            obj = ObjectiveParams(
+                sigma_mm=float(getattr(evaluator, "sigma_mm", 1.0)),
+                L_comm_baseline=float(getattr(evaluator, "baseline", {}).get("L_comm_baseline", 1.0)),
+                L_therm_baseline=float(getattr(evaluator, "baseline", {}).get("L_therm_baseline", 1.0)),
+                w_comm=float(getattr(evaluator, "scalar_w", {}).get("w_comm", 0.0)),
+                w_therm=float(getattr(evaluator, "scalar_w", {}).get("w_therm", 0.0)),
+            )
+            macro_engine = MacroEngine(macro_cfg=macro_cfg0 if isinstance(macro_cfg0, dict) else {}, obj=obj, rng=rng)
+        except Exception:
+            macro_engine = None
+
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
     llm_cfg_path = _cfg_get(planner_cfg, "llm_config_file", None)
@@ -1012,53 +1032,45 @@ def run_detailed_place(
                     eval0: Dict[str, Any],
                     n_steps: int = 3,
                 ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray]:
-                    cur = assign0.copy()
-                    cur_eval = dict(eval0)
-                    best_total = float(cur_eval.get("total_scalar", 0.0))
-                    best_assign = cur.copy()
-                    best_eval = dict(cur_eval)
+                    # Stronger macro engine: delta-based candidates + top-k verification.
+                    if macro_engine is None:
+                        return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy()
+
+                    b_assign, b_eval, b_total, acts, cur_after, info = macro_engine.run_macro(
+                        name=str(name),
+                        assign0=assign0,
+                        eval0=eval0,
+                        sites_xy_mm=sites_xy,
+                        traffic_sym=traffic_sym,
+                        chip_tdp_w=(chip_tdp if chip_tdp is not None else np.zeros(int(assign0.shape[0]), dtype=float)),
+                        site_to_region=site_to_region,
+                        evaluate_assign=_evaluate_assign_cached,
+                        n_steps=int(n_steps),
+                    )
+
+                    # Attach signatures for consistency
                     executed: List[Dict[str, Any]] = []
-
-                    for t in range(max(1, int(n_steps))):
-                        pool = _build_small_pool(cur, cur_eval)
-                        if name == "therm":
-                            prefer = ["therm_swap"] if t == 0 else (["relocate_free", "relocate"] if t == 1 else None)
-                            key = "d_therm" if t == 0 else "d_total"
-                        elif name == "comm":
-                            prefer = ["swap"] if t == 0 else None
-                            key = "d_comm" if t == 0 else "d_total"
-                        elif name == "escape":
-                            prefer = ["kick"] if t == 0 else None
-                            key = "d_total"
-                        elif name == "cluster":
-                            prefer = ["cluster_move"] if t == 0 else (["relocate_free", "relocate"] if t == 1 else None)
-                            key = "d_total"
-                        else:
-                            prefer, key = None, "d_total"
-
-                        cand = _pick_best_from_pool(pool, prefer_types=prefer, score_key=key)
-                        if cand is None:
-                            break
-                        act = copy.deepcopy(getattr(cand, "action", {}) or {})
-                        act.setdefault("candidate_id", int(getattr(cand, "id", -1)))
-                        act.setdefault("type", str(getattr(cand, "type", "")))
-                        if "signature" not in act or not act.get("signature"):
+                    cur_tmp = assign0.copy()
+                    for act in acts:
+                        act2 = copy.deepcopy(act)
+                        if "signature" not in act2 or not act2.get("signature"):
                             try:
-                                act["signature"] = _signature_for_action(act, cur)
+                                act2["signature"] = _signature_for_action(act2, cur_tmp)
                             except Exception:
                                 pass
-                        executed.append(act)
+                        executed.append(act2)
+                        try:
+                            _apply_action_inplace_simple(cur_tmp, act2)
+                        except Exception:
+                            pass
 
-                        _apply_action_inplace_simple(cur, act)
-                        cur_eval = _evaluate_assign_cached(cur)
+                    # record macro engine snapshot for diagnosability
+                    try:
+                        mpvs_stats["macro_engine"] = {"last": info, "ops": macro_engine.snapshot()}
+                    except Exception:
+                        pass
 
-                        v = float(cur_eval.get("total_scalar", best_total))
-                        if v < best_total:
-                            best_total = v
-                            best_assign = cur.copy()
-                            best_eval = dict(cur_eval)
-
-                    return best_assign, best_eval, best_total, executed, cur
+                    return np.asarray(b_assign, dtype=int), dict(b_eval), float(b_total), executed, np.asarray(cur_after, dtype=int)
 
                 def _refine_sa(
                     assign_start: np.ndarray,
@@ -1361,6 +1373,11 @@ def run_detailed_place(
                         llm_every = int(_cfg_get(prop_cfg, "llm_every_n_steps", 10))
 
                         stagn = int(step - last_best_step) if "last_best_step" in locals() else int(step)
+                        if macro_engine is not None:
+                            try:
+                                macro_engine.tick()
+                            except Exception:
+                                pass
                         explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
                         explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
                         explore_stagn = int(_cfg_get(explore_cfg, "when_stagnation_ge", 12))
@@ -1513,6 +1530,11 @@ def run_detailed_place(
 
                             macro_max = int(_cfg_get(macro_cfg, "max_macros", 3))
                             macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
+                            if macro_engine is not None and macro_names:
+                                try:
+                                    macro_names = [m for m in macro_engine.rank_macros(list(macro_names)) if macro_engine.available(m)]
+                                except Exception:
+                                    pass
 
                             # --- plan groups (with src tags) ---
                             heur_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"heuristic"} for c in heur_cands]
@@ -3606,6 +3628,11 @@ def run_detailed_place(
         "run_signature": _build_run_signature(dp_cfg),
     }
     if mpvs_enabled:
+        try:
+            if macro_engine is not None:
+                mpvs_stats["macro_ops"] = macro_engine.snapshot()
+        except Exception:
+            pass
         policy_meta["mpvs"] = mpvs_stats
     (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
 
