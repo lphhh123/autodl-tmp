@@ -395,6 +395,12 @@ case "$EXP_ID" in
   EXP-B1)        run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml                             EXP-B1 ;;
   EXP-B1-weak)   run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml                        EXP-B1-weak ;;
   EXP-B2)        run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_exp.yaml                EXP-B2 ;;
+  # --- MPVS component-isolation variants (for paper ablations / sanity) ---
+  EXP-B2-mpvs-only)            run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_mpvs_only_exp.yaml            EXP-B2-mpvs-only ;;
+  EXP-B2-memonly)              run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_memonly_exp.yaml              EXP-B2-memonly ;;
+  EXP-B2-macroonly)            run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_macroonly_exp.yaml            EXP-B2-macroonly ;;
+  EXP-B2-memonly-noverifier)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_memonly_noverifier_exp.yaml   EXP-B2-memonly-noverifier ;;
+  EXP-B2-macroonly-noverifier) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_macroonly_noverifier_exp.yaml EXP-B2-macroonly-noverifier ;;
   EXP-B3)        run_layout_multi run_layout configs/layout_agent/layout_L3_sa_baseline_exp.yaml                            EXP-B3 ;;
   EXP-B2-ab-nollm)      run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_nollm_exp.yaml      EXP-B2-ab-nollm ;;
   EXP-B2-ab-noverifier) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_noverifier_exp.yaml EXP-B2-ab-noverifier ;;

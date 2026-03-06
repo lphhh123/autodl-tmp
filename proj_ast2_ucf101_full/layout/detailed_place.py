@@ -37,10 +37,11 @@ from layout.candidate_pool import (
     _signature_for_action,
 )
 from layout.policy_switch import EvalCache, PolicySwitchController
-from layout.delta_eval import ObjectiveParams
+from layout.delta_eval import ObjectiveParams, estimate_action_seq_delta
 from layout.macro_engine import MacroEngine
 from layout.verifier_engine import ROITracker, compute_gain
 from layout.memory_bank import MemoryBank
+from layout.mpvs_controller import MPVSController
 from utils.trace_schema import TRACE_FIELDS
 from utils.stable_hash import stable_hash
 from utils.config_utils import get_nested
@@ -505,6 +506,15 @@ def run_detailed_place(
     roi_tracker: Optional[ROITracker] = ROITracker(
         alpha=float(_cfg_get(_cfg_get(mpvs_cfg, "verifier", {}) or {}, "roi_ewma_alpha", 0.2))
     ) if mpvs_enabled else None
+
+    # Unified MPVS multi-component controller (macro/mem/llm). Verifier remains MPVS core.
+    mpvs_ctrl: Optional[MPVSController] = None
+    if mpvs_enabled:
+        try:
+            ctrl_cfg0 = _cfg_get(mpvs_cfg, "controller", {}) or {}
+            mpvs_ctrl = MPVSController(cfg=ctrl_cfg0 if isinstance(ctrl_cfg0, dict) else {}, instance_tag="")
+        except Exception:
+            mpvs_ctrl = None
     mpvs_explore_left = 0
     # --- MPVS trigger controller state (BATC v0.5) ---
     mpvs_trigger_state = {
@@ -568,6 +578,12 @@ def run_detailed_place(
         "mem_store": 0,
         "mem_store_skip": 0,
         "mem_verify_fail": 0,
+        "mem_prefilter_drop": 0,
+        "mem_global_blocked": 0,
+        "llm_allowed": 0,
+        "llm_denied": 0,
+        "llm_deny_reason": {},
+        "comp_ctrl": {},
         "calls_by_src": {},
         "gain_by_src": {},
         # --- BATC trigger stats ---
@@ -594,6 +610,7 @@ def run_detailed_place(
     # MacroEngine (stronger macros, fewer evaluator calls)
     # ----------------------------
     macro_engine: Optional[MacroEngine] = None
+    mpvs_obj_params: Optional[ObjectiveParams] = None
     if mpvs_enabled:
         try:
             macro_cfg0 = _cfg_get(mpvs_cfg, "macros", {}) or {}
@@ -604,9 +621,11 @@ def run_detailed_place(
                 w_comm=float(getattr(evaluator, "scalar_w", {}).get("w_comm", 0.0)),
                 w_therm=float(getattr(evaluator, "scalar_w", {}).get("w_therm", 0.0)),
             )
+            mpvs_obj_params = obj
             macro_engine = MacroEngine(macro_cfg=macro_cfg0 if isinstance(macro_cfg0, dict) else {}, obj=obj, rng=rng)
         except Exception:
             macro_engine = None
+            mpvs_obj_params = None
 
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
@@ -678,6 +697,13 @@ def run_detailed_place(
         instance_tag = "cluster4"
     else:
         instance_tag = "chain_skip"
+
+    try:
+        if mpvs_ctrl is not None:
+            mpvs_ctrl.instance_tag = str(instance_tag)
+    except Exception:
+        pass
+
     usage_fp = llm_usage_path.open("a", encoding="utf-8") if llm_usage_path else None
     recordings_fp = recordings_path.open("w", encoding="utf-8") if recordings_path else None
     start_time = time.time()
@@ -1435,6 +1461,37 @@ def run_detailed_place(
                                 macro_engine.tick()
                             except Exception:
                                 pass
+
+                        # MPVS unified multi-component control signals (macro/mem/llm)
+                        repeat_ratio_pre = 0.0
+                        try:
+                            ss0 = (mpvs_trigger_state.get("recent_sigs", []) or [])[-50:]
+                            if ss0:
+                                repeat_ratio_pre = 1.0 - float(len(set(ss0))) / float(max(1, len(ss0)))
+                        except Exception:
+                            repeat_ratio_pre = 0.0
+
+                        ctrl_cfg = _cfg_get(mpvs_cfg, "controller", {}) or {}
+                        stagn_norm = float(_cfg_get(ctrl_cfg, "stagn_norm", 20.0))
+                        rep_hi = float(_cfg_get(ctrl_cfg, "repeat_hi", 0.75))
+                        distress_pre = 0.0
+                        try:
+                            distress_pre = max(distress_pre, float(stagn) / float(max(1.0, stagn_norm)))
+                            if float(repeat_ratio_pre) > float(rep_hi):
+                                distress_pre = max(distress_pre, (float(repeat_ratio_pre) - float(rep_hi)) / float(max(1e-6, 1.0 - float(rep_hi))))
+                            distress_pre = float(min(1.0, max(0.0, distress_pre)))
+                        except Exception:
+                            distress_pre = 0.0
+
+                        roi_macro = float(roi_tracker.roi("macro", 0.0)) if roi_tracker is not None else 0.0
+                        roi_mem = float(roi_tracker.roi("mem", 0.0)) if roi_tracker is not None else 0.0
+                        roi_llm = float(roi_tracker.roi("llm", 0.0)) if roi_tracker is not None else 0.0
+
+                        if mpvs_ctrl is not None:
+                            try:
+                                mpvs_ctrl.tick(int(step))
+                            except Exception:
+                                pass
                         explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
                         explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
                         explore_stagn = int(_cfg_get(explore_cfg, "when_stagnation_ge", 12))
@@ -1464,8 +1521,36 @@ def run_detailed_place(
                             forced_mpvs_policy = ""
 
                         if do_explore:
-                            use_llm_now = (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0) and (int(step) % max(1, llm_every) == 0)
-                            use_llm_now = use_llm_now and do_explore
+                            # LLM proposer is expensive; MPVS controls it strictly.
+                            use_llm_now = False
+                            llm_deny_reason = ""
+                            if (planner_type in ("llm", "mixed")) and (llm_provider is not None) and (not llm_disabled) and (k_llm > 0):
+                                sched_ok = (int(step) % max(1, int(llm_every)) == 0)
+                                if mpvs_ctrl is not None:
+                                    ok, rr = mpvs_ctrl.allow(
+                                        "llm",
+                                        step=int(step),
+                                        stagn=int(stagn),
+                                        distress=float(distress_pre),
+                                        repeat_ratio=float(repeat_ratio_pre),
+                                        roi=float(roi_llm),
+                                    )
+                                    use_llm_now = bool(ok and sched_ok)
+                                    llm_deny_reason = str(rr or "")
+                                    if use_llm_now:
+                                        mpvs_stats["llm_allowed"] = int(mpvs_stats.get("llm_allowed", 0)) + 1
+                                        try:
+                                            mpvs_ctrl.fired("llm", step=int(step))
+                                        except Exception:
+                                            pass
+                                    else:
+                                        mpvs_stats["llm_denied"] = int(mpvs_stats.get("llm_denied", 0)) + 1
+                                        if llm_deny_reason:
+                                            d = mpvs_stats.get("llm_deny_reason", {}) or {}
+                                            d[llm_deny_reason] = int(d.get(llm_deny_reason, 0)) + 1
+                                            mpvs_stats["llm_deny_reason"] = d
+                                else:
+                                    use_llm_now = bool(sched_ok)
 
                             forbidden_set = set(forbidden_ids)
                             cand_sorted = sorted([c for c in candidate_pool if int(c.id) not in forbidden_set], key=lambda c: float(c.est.get("d_total", 0.0)))
@@ -1572,6 +1657,20 @@ def run_detailed_place(
 
                             macro_cfg = _cfg_get(mpvs_cfg, "macros", {}) or {}
                             macro_enabled = bool(_cfg_get(macro_cfg, "enabled", True))
+
+                            # MPVS controller can suppress macro proposing when ROI is persistently low.
+                            allow_macro_src = True
+                            if mpvs_ctrl is not None:
+                                ok, _rr = mpvs_ctrl.allow(
+                                    "macro",
+                                    step=int(step),
+                                    stagn=int(stagn),
+                                    distress=float(distress_pre),
+                                    repeat_ratio=float(repeat_ratio_pre),
+                                    roi=float(roi_macro),
+                                )
+                                allow_macro_src = bool(ok)
+                            macro_enabled = bool(macro_enabled and allow_macro_src)
                             base_macros = list(_cfg_get(macro_cfg, "base", ["therm", "comm"]) or [])
                             extra_macros = list(_cfg_get(macro_cfg, "extra_on_stagnation", ["escape", "cluster"]) or [])
 
@@ -1593,6 +1692,12 @@ def run_detailed_place(
                                 except Exception:
                                     pass
 
+                            try:
+                                if mpvs_ctrl is not None and macro_names:
+                                    mpvs_ctrl.fired("macro", step=int(step))
+                            except Exception:
+                                pass
+
                             # --- plan groups (with src tags) ---
                             heur_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"heuristic"} for c in heur_cands]
                             llm_atomic_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"llm_atomic"} for c in llm_cands]
@@ -1604,7 +1709,21 @@ def run_detailed_place(
                             # MemoryBank v1
                             mem_plans = []
                             mem_stagn_th = int(_cfg_get(mem_cfg, "enable_when_stagnation_ge", 8))
-                            if mem_enabled and mem_bank is not None:
+                            allow_mem_src = True
+                            if mpvs_ctrl is not None:
+                                ok, rr = mpvs_ctrl.allow(
+                                    "mem",
+                                    step=int(step),
+                                    stagn=int(stagn),
+                                    distress=float(distress_pre),
+                                    repeat_ratio=float(repeat_ratio_pre),
+                                    roi=float(roi_mem),
+                                )
+                                allow_mem_src = bool(ok)
+                                if str(rr or "") == "mem_global_cooldown":
+                                    mpvs_stats["mem_global_blocked"] = int(mpvs_stats.get("mem_global_blocked", 0)) + 1
+
+                            if mem_enabled and mem_bank is not None and allow_mem_src:
                                 try:
                                     mem_bank.tick(int(step))
                                     mpvs_stats["mem_entries"] = int(len(getattr(mem_bank, "entries", []) or []))
@@ -1631,6 +1750,20 @@ def run_detailed_place(
                                                     a.pop("_src", None)
                                                 if not acts:
                                                     continue
+
+                                                # 0-call analytic prefilter (only for swap/relocate sequences)
+                                                mem_pref_en = bool(_cfg_get(mem_cfg, "prefilter_enabled", True))
+                                                mem_pref_min_gain = float(_cfg_get(mem_cfg, "prefilter_min_gain", 0.0001))
+                                                if mem_pref_en and (mpvs_obj_params is not None):
+                                                    try:
+                                                        chip_w = chip_tdp if chip_tdp is not None else np.zeros(int(assign.shape[0]), dtype=float)
+                                                        est = estimate_action_seq_delta(assign, acts, sites_xy, traffic_sym, chip_w, mpvs_obj_params)
+                                                        if float(est.get("supported", 0.0)) > 0.0:
+                                                            if float(est.get("d_total", 0.0)) > -float(mem_pref_min_gain):
+                                                                mpvs_stats["mem_prefilter_drop"] = int(mpvs_stats.get("mem_prefilter_drop", 0)) + 1
+                                                                continue
+                                                    except Exception:
+                                                        pass
                                                 mem_plans.append(
                                                     {
                                                         "kind": "atomic",
@@ -1652,6 +1785,16 @@ def run_detailed_place(
                             q_llm_macro = int(quota_cfg.get("llm_macro", 2))
                             q_macro = int(quota_cfg.get("macro", 2))
                             q_mem = int(quota_cfg.get("mem", 1))
+
+                            # dynamic quota adjustment by MPVS controller (ROI-aware)
+                            try:
+                                if mpvs_ctrl is not None:
+                                    q_macro = int(mpvs_ctrl.quota("macro", int(q_macro), roi=float(roi_macro)))
+                                    q_mem = int(mpvs_ctrl.quota("mem", int(q_mem), roi=float(roi_mem)))
+                                    q_llm_atomic = int(mpvs_ctrl.quota("llm", int(q_llm_atomic), roi=float(roi_llm)))
+                                    q_llm_macro = int(mpvs_ctrl.quota("llm", int(q_llm_macro), roi=float(roi_llm)))
+                            except Exception:
+                                pass
 
                             heur_plans = heur_plans[:max(0, q_heur)]
                             llm_atomic_plans = llm_atomic_plans[:max(0, q_llm_atomic)]
@@ -2296,8 +2439,34 @@ def run_detailed_place(
                                                 mpvs_stats["verifier_roi_sum"] = float(mpvs_stats.get("verifier_roi_sum", 0.0)) + float(roi)
                                                 mpvs_stats["verifier_roi_count"] = int(mpvs_stats.get("verifier_roi_count", 0)) + 1
                                                 mpvs_stats["verifier_roi_by_src"][src_pl] = float(mpvs_stats["verifier_roi_by_src"].get(src_pl, 0.0)) + float(roi)
+                                                # update ROI both for raw src and its group (llm_* -> llm)
+                                                src_group = "llm" if str(src_pl).startswith("llm") else str(src_pl)
                                                 if roi_tracker is not None:
-                                                    roi_tracker.update(src_pl, gain0, int(calls_spent))
+                                                    roi_tracker.update(str(src_pl), gain0, int(calls_spent))
+                                                    if src_group != str(src_pl):
+                                                        roi_tracker.update(str(src_group), gain0, int(calls_spent))
+
+                                                # MPVS controller feedback (cooldown harmful components)
+                                                if mpvs_ctrl is not None and src_group in {"macro", "mem", "llm"}:
+                                                    roi_val = float(gain0) / float(max(1, int(calls_spent)))
+                                                    ok = False
+                                                    try:
+                                                        if src_group == "macro":
+                                                            ok = bool(float(gain0) >= float(_macro_min_gain_cur()))
+                                                        elif src_group == "mem":
+                                                            mem_min_gain = float(_cfg_get(mem_cfg, "min_gain_use", 0.0002))
+                                                            ok = bool(float(gain0) >= float(mem_min_gain))
+                                                        else:
+                                                            llm_min_gain = float(_cfg_get(_cfg_get(_cfg_get(mpvs_cfg, "controller", {}) or {}, "llm", {}) or {}, "success_min_gain", 0.0002))
+                                                            ok = bool(float(gain0) >= float(llm_min_gain))
+                                                    except Exception:
+                                                        ok = bool(float(gain0) > 0.0)
+                                                    try:
+                                                        if ok and src_group == "mem":
+                                                            mpvs_ctrl.observe_mem_success(step=int(step))
+                                                        mpvs_ctrl.observe(src_group, step=int(step), success=bool(ok), roi=float(roi_val))
+                                                    except Exception:
+                                                        pass
                                             if pk in full_verify_keys and str(pl.get("kind", "")) == "macro":
                                                 mpvs_stats["verifier_full_verified"] = int(mpvs_stats.get("verifier_full_verified", 0)) + 1
                                                 mpvs_stats["verifier_full_calls"] = int(mpvs_stats.get("verifier_full_calls", 0)) + int(calls_spent)
@@ -3833,6 +4002,11 @@ def run_detailed_place(
                 mm = int(_cfg_get(_cfg_get(mpvs_cfg, "memory", {}) or {}, "snapshot_max", 50))
                 snap = mem_bank.snapshot()
                 mpvs_stats["mem_bank"] = snap[: max(0, mm)]
+        except Exception:
+            pass
+        try:
+            if mpvs_ctrl is not None:
+                mpvs_stats["comp_ctrl"] = mpvs_ctrl.snapshot()
         except Exception:
             pass
         policy_meta["mpvs"] = mpvs_stats

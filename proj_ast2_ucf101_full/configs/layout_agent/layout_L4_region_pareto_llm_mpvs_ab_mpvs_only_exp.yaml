@@ -1,0 +1,29 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+
+# MPVS core only: disable all enhancement sources (macro/mem/llm)
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    proposer:
+      k_llm: 0
+      quota:
+        llm_atomic: 0
+        llm_macro: 0
+        macro: 0
+        mem: 0
+    macros:
+      enabled: false
+    memory:
+      enabled: false
+    controller:
+      macro:
+        enabled: false
+      mem:
+        enabled: false
+      llm:
+        enabled: false
+    ablation:
+      no_macro: true
+      no_mem: true
+      no_llm: true

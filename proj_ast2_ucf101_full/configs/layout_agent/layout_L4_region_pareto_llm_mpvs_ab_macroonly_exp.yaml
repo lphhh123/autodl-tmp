@@ -1,0 +1,24 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+
+# Macro-only under MPVS (memory + llm disabled)
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    proposer:
+      k_llm: 0
+      quota:
+        llm_atomic: 0
+        llm_macro: 0
+        macro: 2
+        mem: 0
+    memory:
+      enabled: false
+    controller:
+      mem:
+        enabled: false
+      llm:
+        enabled: false
+    ablation:
+      no_mem: true
+      no_llm: true

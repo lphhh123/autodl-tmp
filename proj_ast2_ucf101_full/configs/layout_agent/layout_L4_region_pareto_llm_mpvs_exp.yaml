@@ -25,6 +25,51 @@ detailed_place:
         llm_macro: 0
         macro: 2
         mem: 1
+
+    # Unified MPVS controller: gates macro/mem/llm based on ROI + cooldown (budget-aware)
+    controller:
+      stagn_norm: 20
+      repeat_hi: 0.75
+      macro:
+        enabled: true
+        enable_when_stagnation_ge: 15
+        min_interval_steps: 5
+        roi_floor: 0.0
+        allow_cold_start: true
+        cooldown_fail: 20
+        max_fail_streak: 3
+        quota_min: 0
+        quota_max: 3
+        quota_boost_roi: 0.001
+      mem:
+        enabled: true
+        enable_when_stagnation_ge: 12
+        min_interval_steps: 5
+        roi_floor: 0.0
+        allow_cold_start: true
+        cooldown_fail: 20
+        max_fail_streak: 3
+        quota_min: 0
+        quota_max: 2
+        quota_boost_roi: 0.0005
+      llm:
+        enabled: true
+        enable_when_stagnation_ge: 25
+        enable_when_distress_ge: 0.7
+        enable_when_repeat_ratio_ge: 0.8
+        min_interval_steps: 80
+        roi_floor: 0.0
+        allow_cold_start: true
+        cooldown_fail: 200
+        max_fail_streak: 1
+        quota_min: 0
+        quota_max: 1
+        success_min_gain: 0.0002
+      mem_global:
+        window: 40
+        fail_rate_hi: 0.75
+        roi_floor: 0.00005
+        cooldown_steps: 30
     macros:
       enabled: true
       base: ["therm", "comm"]
@@ -194,6 +239,10 @@ detailed_place:
       enable_when_stagnation_ge: 12
       propose_every_n_steps: 10
       verify_every_n_steps: 10
+
+      # 0-call prefilter: only verify memory replays that look improving under analytic delta
+      prefilter_enabled: true
+      prefilter_min_gain: 0.0001
 
   lookahead:
     enabled: false
