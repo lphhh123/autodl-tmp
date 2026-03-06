@@ -662,15 +662,36 @@ def run_layout_agent(
             if best_assign is None:
                 best_assign = layout_state.assign.copy()
 
+            # Preserve any detailed_place trace_meta.json that may already exist.
+            policy_meta = {}
+            try:
+                meta_p = out_dir / "trace_meta.json"
+                if meta_p.exists():
+                    with meta_p.open("r", encoding="utf-8") as f:
+                        _m = json.load(f)
+                    if isinstance(_m, dict):
+                        policy_meta.update(_m)
+            except Exception:
+                pass
+            policy_meta["budget_exhausted"] = True
+
             result = SimpleNamespace(
                 assign=np.array(best_assign, dtype=int),
-                policy_meta={"budget_exhausted": True},
+                policy_meta=policy_meta,
             )
         assign_final = result.assign
 
+        # Sync budget flag from detailed_place meta (preferred path: detailed_place stops itself and returns normally).
+        try:
+            pm = getattr(result, "policy_meta", None)
+            if isinstance(pm, dict) and "budget_exhausted" in pm:
+                budget_exhausted = bool(pm.get("budget_exhausted"))
+        except Exception:
+            pass
+
         # Stage6: alt-opt (optional)
         mapping_final = layout_input["mapping"].get("mapping") if "mapping" in layout_input else None
-        if hasattr(cfg, "alt_opt") and cfg.alt_opt.get("enabled", False):
+        if (not budget_exhausted) and hasattr(cfg, "alt_opt") and cfg.alt_opt.get("enabled", False):
             assign_final, mapping_final = run_alt_opt(
                 rounds=int(cfg.alt_opt.get("rounds", 3)),
                 mapping_solver=mapping_solver,
@@ -773,7 +794,18 @@ def run_layout_agent(
             else:
                 policy_meta = getattr(result, "policy_meta", None)
             if isinstance(policy_meta, dict):
-                (out_dir / "trace_meta.json").write_text(json.dumps(policy_meta, indent=2), encoding="utf-8")
+                meta_p = out_dir / "trace_meta.json"
+                merged = {}
+                try:
+                    if meta_p.exists():
+                        with meta_p.open("r", encoding="utf-8") as f:
+                            _m = json.load(f)
+                        if isinstance(_m, dict):
+                            merged.update(_m)
+                except Exception:
+                    pass
+                merged.update(policy_meta)
+                meta_p.write_text(json.dumps(merged, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -866,6 +898,62 @@ def run_layout_agent(
             )
         except Exception as exc:
             raise RuntimeError(f"failed to write budget.json: {exc}") from exc
+
+        # ---- P0: run_summary.json (human-friendly, MIN-pack friendly) ----
+        try:
+            meta = {}
+            meta_p = out_dir / "trace_meta.json"
+            if meta_p.exists():
+                with meta_p.open("r", encoding="utf-8") as f:
+                    _m = json.load(f)
+                if isinstance(_m, dict):
+                    meta = _m
+
+            # optional: git commit (best-effort)
+            git_head = None
+            try:
+                import subprocess
+
+                git_head = (
+                    subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parent.parent))
+                    .decode("utf-8", errors="ignore")
+                    .strip()
+                )
+            except Exception:
+                git_head = None
+
+            mpvs = None
+            try:
+                mpvs = meta.get("mpvs")
+            except Exception:
+                mpvs = None
+
+            run_summary = {
+                "run_id": str(run_id),
+                "selected_total_scalar": float(report.get("selected_total_scalar", 0.0)) if isinstance(report, dict) else None,
+                "budget": {
+                    "budget_exhausted": bool(budget.get("budget_exhausted", False)),
+                    "actual_eval_calls": int(budget.get("actual_eval_calls", 0)),
+                    "primary_limit": budget.get("primary_limit", {}),
+                },
+                "efficiency": {
+                    "calls_per_iter_overall": float(report.get("calls_per_iter_overall", 0.0)) if isinstance(report, dict) else None,
+                    "calls_per_iter_lastN": float(report.get("calls_per_iter_lastN", 0.0)) if isinstance(report, dict) else None,
+                    "steps_per_1k_calls_overall": float(report.get("steps_per_1k_calls_overall", 0.0)) if isinstance(report, dict) else None,
+                    "steps_per_1k_calls_lastN": float(report.get("steps_per_1k_calls_lastN", 0.0)) if isinstance(report, dict) else None,
+                    "improve_steps_per_1k_calls_lastN": float(report.get("improve_steps_per_1k_calls_lastN", 0.0)) if isinstance(report, dict) else None,
+                    "unique_sigs_per_1k_calls_lastN": float(report.get("unique_sigs_per_1k_calls_lastN", 0.0)) if isinstance(report, dict) else None,
+                    "op_none_ratio_lastN": float(report.get("op_none_ratio_lastN", 0.0)) if isinstance(report, dict) else None,
+                },
+                "mpvs": mpvs,
+                "contract": {"seal_digest": str(getattr(getattr(cfg, "contract", None), "seal_digest", "") or "")},
+                "git": {"head": git_head},
+            }
+            (out_dir / "run_summary.json").write_text(
+                json.dumps(run_summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
         ok = True
     except Exception as exc:
         steps_done = int(getattr(evaluator, "evaluator_calls", 0)) if evaluator is not None else 0

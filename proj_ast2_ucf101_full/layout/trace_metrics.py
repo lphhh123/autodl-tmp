@@ -89,6 +89,10 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
     d_comm = [_get_float(r, "delta_comm", "d_comm", default=0.0) for r in rows]
     d_therm = [_get_float(r, "delta_therm", "d_therm", default=0.0) for r in rows]
 
+    # Budget-axis diagnostics (eval-call fairness)
+    eval_calls_cum = [_get_float(r, "eval_calls_cum", default=0.0) for r in rows]
+    ops = [str(r.get("op", "") or "") for r in rows]
+
     start = max(0, len(rows) - window)
     window_indices = list(range(start, len(rows)))
     window_len = len(window_indices)
@@ -180,6 +184,25 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
         best_total_comm = float(comm_vals[arg]) if arg < len(comm_vals) else 0.0
         best_total_therm = float(therm_vals[arg]) if arg < len(therm_vals) else 0.0
 
+    # --- eval-call efficiency metrics ---
+    calls_total = float(eval_calls_cum[-1]) if eval_calls_cum else 0.0
+    calls_lastN = float(eval_calls_cum[-1] - eval_calls_cum[start]) if (eval_calls_cum and start < len(eval_calls_cum)) else 0.0
+    calls_per_iter_overall = float(calls_total) / float(max(1, len(rows)))
+    calls_per_iter_lastN = float(calls_lastN) / float(max(1, window_len))
+
+    steps_per_1k_calls_overall = float(len(rows)) / float(max(1e-9, calls_total / 1000.0)) if calls_total > 0 else 0.0
+    steps_per_1k_calls_lastN = float(window_len) / float(max(1e-9, calls_lastN / 1000.0)) if calls_lastN > 0 else 0.0
+
+    improve_steps_lastN = int(improve_steps)
+    improve_steps_per_1k_calls_lastN = float(improve_steps_lastN) / float(max(1e-9, calls_lastN / 1000.0)) if calls_lastN > 0 else 0.0
+    improve_steps_total = int(sum(1 for i in range(len(rows)) if accepted[i] and d_total[i] < 0))
+    improve_steps_per_1k_calls_overall = float(improve_steps_total) / float(max(1e-9, calls_total / 1000.0)) if calls_total > 0 else 0.0
+
+    uniq_lastN = len(set(signatures[start:])) if signatures else 0
+    uniq_per_1k_calls_lastN = float(uniq_lastN) / float(max(1e-9, calls_lastN / 1000.0)) if calls_lastN > 0 else 0.0
+    none_lastN = sum(1 for op in ops[start:] if op.strip().lower() in {"none", ""})
+    op_none_ratio_lastN = float(none_lastN) / float(max(1, window_len))
+
     return {
         "accept_rate_overall": accept_rate_overall,
         "accept_rate_lastN": accept_rate_lastN,
@@ -207,4 +230,15 @@ def compute_trace_metrics_from_csv(trace_path: Path, window: int, eps_flat: floa
         "best_total_stage": best_total_stage,
         "best_total_comm": float(best_total_comm),
         "best_total_therm": float(best_total_therm),
+
+        # --- eval-call budget axis ---
+        "eval_calls_total": float(calls_total),
+        "calls_per_iter_overall": float(calls_per_iter_overall),
+        "calls_per_iter_lastN": float(calls_per_iter_lastN),
+        "steps_per_1k_calls_overall": float(steps_per_1k_calls_overall),
+        "steps_per_1k_calls_lastN": float(steps_per_1k_calls_lastN),
+        "improve_steps_per_1k_calls_overall": float(improve_steps_per_1k_calls_overall),
+        "improve_steps_per_1k_calls_lastN": float(improve_steps_per_1k_calls_lastN),
+        "unique_sigs_per_1k_calls_lastN": float(uniq_per_1k_calls_lastN),
+        "op_none_ratio_lastN": float(op_none_ratio_lastN),
     }

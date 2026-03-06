@@ -19,6 +19,47 @@ PACK_INCLUDE_B0="${PACK_INCLUDE_B0:-0}"
 # Default: do NOT pack huge trace.csv (keeps tgz small for sharing)
 PACK_TRACE_CSV="${PACK_TRACE_CSV:-0}"
 
+# Prefer packing a budget-full run when available (avoid half-runs after retries).
+_is_budget_full() {
+  local run_dir="$1"
+  [ -f "$run_dir/budget.json" ] || return 1
+  python - <<'PY' "$run_dir/budget.json" >/dev/null 2>&1
+import json, sys
+p = sys.argv[1]
+try:
+    b = json.load(open(p, 'r', encoding='utf-8'))
+except Exception:
+    sys.exit(1)
+try:
+    exhausted = bool(b.get('budget_exhausted', False))
+    actual = int(b.get('actual_eval_calls', -1))
+    lim = int((b.get('primary_limit', {}) or {}).get('limit', -1))
+except Exception:
+    sys.exit(1)
+if exhausted and lim > 0 and actual == lim:
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+_best_run_dir() {
+  local seed_dir="$1"
+  local dirs
+  dirs=$(find "$seed_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{print $2}') || true
+  local d
+  for d in $dirs; do
+    [ -f "$d/manifest.json" ] || continue
+    if _is_budget_full "$d"; then
+      echo "$d"; return 0
+    fi
+  done
+  for d in $dirs; do
+    [ -f "$d/manifest.json" ] || continue
+    echo "$d"; return 0
+  done
+  return 1
+}
+
 # 0) layout_input
 tar -czf _pack_B/layout_input_P3A3.tgz \
   --ignore-failed-read \
@@ -74,14 +115,7 @@ for exp in "${exp_dirs[@]}"; do
       continue
     fi
 
-    latest_run_dir=$(
-      find "$seed" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
-        | sort -nr \
-        | awk '{print $2}' \
-        | while read -r d; do
-            [ -f "$d/manifest.json" ] && { echo "$d"; break; }
-          done
-    )
+    latest_run_dir="$(_best_run_dir "$seed" || true)"
     if [ -n "$latest_run_dir" ] && [ -d "$latest_run_dir" ]; then
       run_id=$(basename "$latest_run_dir")
       out="_pack_B/${exp_name}_${seed_name}_${run_id}.tgz"
