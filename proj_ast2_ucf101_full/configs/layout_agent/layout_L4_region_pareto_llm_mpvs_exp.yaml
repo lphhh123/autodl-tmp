@@ -61,6 +61,13 @@ detailed_place:
       warmup_steps: 30
       max_consecutive_steps: 2
     verifier:
+      # Verifier v1: lite/full + ROI accounting
+      roi_ewma_alpha: 0.2
+      lite_topk: 10
+      max_lite_verify: 12
+      full_topk: 2
+      max_full_verify: 3
+      full_macro_steps: 3
       horizon: 3
       mc: 1
       greedy_topm: 1
@@ -170,8 +177,20 @@ detailed_place:
       forbid_none_when_stagnation_ge: 8
     memory:
       enabled: true
-      ttl_steps: 8
-      max_size: 32
+      # MemoryBank v1 (structured)
+      ttl_steps: 120
+      max_size: 64
+      max_action_len: 3
+      hot_slots_k: 12
+      roi_ewma_alpha: 0.2
+      min_similarity: 0.4
+      cooldown_fail: 20
+      max_fail: 6
+      age_penalty: 0.001
+      propose_topk: 6
+      min_gain_store: 0.0005
+      min_gain_use: 0.0002
+      snapshot_max: 50
       enable_when_stagnation_ge: 12
       propose_every_n_steps: 10
       verify_every_n_steps: 10

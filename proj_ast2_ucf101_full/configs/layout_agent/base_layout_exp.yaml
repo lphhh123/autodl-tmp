@@ -70,6 +70,17 @@ detailed_place:
     inverse_tenure: 6
     per_slot_cooldown: 6
     aspiration_delta: 0.0001
+    # Search health:
+    # - soft_block: allow strongly improving moves to bypass anti-loop blocks
+    # - relax: under heavy stagnation, gradually relax cooldown/inverse/tabu to avoid op=none
+    soft_block_enabled: true
+    soft_block_min_gain: 0.001
+    soft_block_randw_scale: 1.5
+    relax_enabled: true
+    relax_stagnation_ge: 15
+    relax_max_level: 3
+    relax_only_if_improving: true
+    relax_min_gain: 0.001
     max_relocate_per_slot_in_final: 2
     backtrack_window: 10
   planner:
