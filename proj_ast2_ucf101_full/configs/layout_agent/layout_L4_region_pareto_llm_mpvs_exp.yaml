@@ -37,6 +37,14 @@ detailed_place:
       share:
         min_samples: 10
         slack_scale: 0.5
+      cec:
+        enabled: true
+        probe_min_samples: 6
+        trial_max_per_step: 1
+        context:
+          stagn_ratio_edges: [0.75, 1.50]
+          repeat_ratio_edges: [0.55, 0.75]
+          blocked_ratio_edges: [0.15, 0.35]
       stagn_norm: 20
       repeat_hi: 0.75
       macro:

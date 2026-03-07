@@ -45,6 +45,33 @@ class _Ticket:
     start_calls: int
     start_best_total: float
     expire_calls: int
+    ctx_key: str = ""
+    family: str = ""
+    sponsored: bool = False
+
+
+@dataclass
+class _HeurAgg:
+    gain: float = 0.0
+    calls: float = 0.0
+    rate: float = 0.0
+
+
+@dataclass
+class _CtxAgg:
+    probe_n: int = 0
+    probe_pass_heur: int = 0
+    probe_pass_cur: int = 0
+    probe_margin_heur: float = 0.0
+    probe_margin_cur: float = 0.0
+    probe_calls: float = 0.0
+    trial_sponsored: int = 0
+    trial_won: int = 0
+    roi_long: float = 0.0
+    released: int = 0
+    release_hits: int = 0
+    last_trial_step: int = -10**9
+    last_release_step: int = -10**9
 
 
 def _clamp01(x: float) -> float:
@@ -52,19 +79,7 @@ def _clamp01(x: float) -> float:
 
 
 class MPVSController:
-    """Unified multi-component controller.
-
-    Public API:
-      - tick(step)
-      - on_progress(used_calls, budget_total, best_total_seen)
-      - allow(comp, ..., roi, used_calls, budget_total)
-      - quota(comp, base_quota, roi, used_calls, budget_total)
-      - observe(comp, success, gain, calls, used_calls, budget_total, best_total_seen)
-      - register_win(comp, used_calls, budget_total, best_total_seen)
-      - adjust_min_gain_current(comp, default_min_gain, used_calls, budget_total)
-      - llm_shadow_observe(est_gain)
-      - snapshot()
-    """
+    """Unified multi-component controller."""
 
     def __init__(self, cfg: Dict[str, Any], instance_tag: str = "") -> None:
         self.cfg = cfg or {}
@@ -75,27 +90,22 @@ class MPVSController:
             "mem": CompState("mem"),
             "llm": CompState("llm"),
         }
-
-        # rolling usage/gain aggregates (EWMA)
         self.alpha = float(self.cfg.get("ewma_alpha", 0.2))
         self.agg_total = _EwmaAgg()
         self.agg_by_src: Dict[str, _EwmaAgg] = {k: _EwmaAgg() for k in self.states.keys()}
-
-        # delayed credit tickets
         self.tickets: List[_Ticket] = []
         self.alpha_long = float(self.cfg.get("ewma_alpha_long", max(0.05, 0.5 * self.alpha)))
 
-        # budget-stage settings (coarse fractions)
         st = (self.cfg.get("budget_stage") or {}) if isinstance(self.cfg, dict) else {}
         self.early_frac = float(st.get("early_frac", 0.20))
         self.late_frac = float(st.get("late_frac", 0.70))
 
-        # share-aware suppression (slack auto-scales by sample size)
         sh = (self.cfg.get("share") or {}) if isinstance(self.cfg, dict) else {}
         self.share_min_samples = int(sh.get("min_samples", 10))
-        self.share_slack_scale = float(sh.get("slack_scale", 0.5))  # slack = scale/sqrt(n)
+        self.share_slack_scale = float(sh.get("slack_scale", 0.5))
 
-        # mem global fuse
+        self.stagn_norm = float(self.cfg.get("stagn_norm", 20.0))
+
         memg = (self.cfg.get("mem_global") or {}) if isinstance(self.cfg, dict) else {}
         self.mem_window = int(memg.get("window", 40))
         self.mem_fail_rate_hi = float(memg.get("fail_rate_hi", 0.75))
@@ -104,11 +114,29 @@ class MPVSController:
         self.mem_global_until = 0
         self._mem_hist: List[int] = []
 
-        # LLM shadow mode
         llm_cfg = (self._get_cfg("llm") or {})
         self.llm_shadow_mode = bool(llm_cfg.get("shadow_mode", True))
         self.llm_shadow_seen = 0
         self.llm_shadow_good = 0
+
+        cec = (self.cfg.get("cec") or {}) if isinstance(self.cfg, dict) else {}
+        ctx_cfg = (cec.get("context") or {}) if isinstance(cec, dict) else {}
+        self.cec_enabled = bool(cec.get("enabled", True))
+        self.cec_probe_min_samples = int(cec.get("probe_min_samples", 6))
+        self.cec_trial_max_per_step = int(cec.get("trial_max_per_step", 1))
+        self.cec_stagn_ratio_edges = [float(x) for x in (ctx_cfg.get("stagn_ratio_edges", [0.75, 1.50]) or [0.75, 1.50])][:2]
+        self.cec_repeat_ratio_edges = [float(x) for x in (ctx_cfg.get("repeat_ratio_edges", [0.55, 0.75]) or [0.55, 0.75])][:2]
+        self.cec_blocked_ratio_edges = [float(x) for x in (ctx_cfg.get("blocked_ratio_edges", [0.15, 0.35]) or [0.15, 0.35])][:2]
+        if len(self.cec_stagn_ratio_edges) < 2:
+            self.cec_stagn_ratio_edges = [0.75, 1.5]
+        if len(self.cec_repeat_ratio_edges) < 2:
+            self.cec_repeat_ratio_edges = [0.55, 0.75]
+        if len(self.cec_blocked_ratio_edges) < 2:
+            self.cec_blocked_ratio_edges = [0.15, 0.35]
+        self.heur_agg = _HeurAgg()
+        self.ctx_agg: Dict[Tuple[str, str, str], _CtxAgg] = {}
+        self._sponsor_step = -1
+        self._sponsor_count_step = 0
 
     def _get_cfg(self, comp: str) -> Dict[str, Any]:
         c = self.cfg.get(str(comp), {}) if isinstance(self.cfg, dict) else {}
@@ -129,8 +157,37 @@ class MPVSController:
             return "mid"
         return "late"
 
+    def _bucket2(self, x: float, e0: float, e1: float) -> int:
+        if float(x) < float(e0):
+            return 0
+        if float(x) < float(e1):
+            return 1
+        return 2
+
+    def build_context(
+        self,
+        stagn: int,
+        repeat_ratio: float,
+        blocked_ratio: float,
+        used_calls: Optional[int],
+        budget_total: Optional[int],
+    ) -> Dict[str, Any]:
+        prog = self._budget_progress(used_calls, budget_total)
+        stage = self._stage(prog)
+        sr = float(stagn) / float(max(1.0, self.stagn_norm))
+        stg_b = self._bucket2(sr, self.cec_stagn_ratio_edges[0], self.cec_stagn_ratio_edges[1])
+        rep_b = self._bucket2(float(repeat_ratio), self.cec_repeat_ratio_edges[0], self.cec_repeat_ratio_edges[1])
+        blk_b = self._bucket2(float(blocked_ratio), self.cec_blocked_ratio_edges[0], self.cec_blocked_ratio_edges[1])
+        health_b = max(rep_b, blk_b)
+        return {
+            "progress": float(prog),
+            "stage": str(stage),
+            "stagn_bucket": int(stg_b),
+            "health_bucket": int(health_b),
+            "ctx_key": f"{stage}|stg{stg_b}|hlth{health_b}",
+        }
+
     def _share_ratio(self, comp: str) -> Tuple[float, float, float, float, int]:
-        """Return (call_share, gain_share, ratio, slack, n_total)."""
         comp = str(comp)
         tot_c = float(self.agg_total.calls)
         tot_g = float(self.agg_total.gain)
@@ -144,6 +201,90 @@ class MPVSController:
         slack = float(self.share_slack_scale) / math.sqrt(float(max(1, n)))
         return float(call_share), float(gain_share), float(ratio), float(slack), int(n)
 
+    def _ctx_family_key(self, comp: str, ctx_key: str, family: str) -> Tuple[str, str, str]:
+        return (str(comp), str(ctx_key or ""), str(family or ""))
+
+    def _get_ctx_agg(self, comp: str, ctx_key: str, family: str) -> _CtxAgg:
+        key = self._ctx_family_key(comp, ctx_key, family)
+        if key not in self.ctx_agg:
+            self.ctx_agg[key] = _CtxAgg()
+        return self.ctx_agg[key]
+
+    def observe_heuristic(self, gain: float, calls: int) -> None:
+        g = float(max(0.0, gain))
+        c = float(max(1, int(calls)))
+        a = float(self.alpha)
+        self.heur_agg.gain = (1.0 - a) * float(self.heur_agg.gain) + a * g
+        self.heur_agg.calls = (1.0 - a) * float(self.heur_agg.calls) + a * c
+        self.heur_agg.rate = float(self.heur_agg.gain) / float(max(1e-9, self.heur_agg.calls))
+
+    def observe_probe(
+        self,
+        comp: str,
+        family: str,
+        ctx_key: str,
+        margin_heur: float,
+        margin_cur: float,
+        calls: int,
+        pass_heur: bool,
+        pass_cur: bool,
+    ) -> None:
+        a = self._get_ctx_agg(comp, ctx_key, family)
+        ew = float(self.alpha)
+        a.probe_n += 1
+        a.probe_pass_heur += int(bool(pass_heur))
+        a.probe_pass_cur += int(bool(pass_cur))
+        a.probe_margin_heur = (1.0 - ew) * float(a.probe_margin_heur) + ew * float(margin_heur)
+        a.probe_margin_cur = (1.0 - ew) * float(a.probe_margin_cur) + ew * float(margin_cur)
+        a.probe_calls = (1.0 - ew) * float(a.probe_calls) + ew * float(max(1, int(calls)))
+
+    def _probe_utility(self, comp: str, ctx_key: str, family: str) -> float:
+        a = self._get_ctx_agg(comp, ctx_key, family)
+        return float(a.probe_margin_heur) - float(self.heur_agg.rate) * float(a.probe_calls)
+
+    def _probe_slack(self, comp: str, ctx_key: str, family: str) -> float:
+        a = self._get_ctx_agg(comp, ctx_key, family)
+        return float(self.share_slack_scale) / math.sqrt(float(max(1, a.probe_n)))
+
+    def maybe_sponsor_trial(self, comp: str, family: str, ctx: Optional[Dict[str, Any]], step: int) -> Tuple[bool, str, Dict[str, Any]]:
+        c = str(comp)
+        ctx0 = ctx or {}
+        ctx_key = str(ctx0.get("ctx_key", ""))
+        stage = str(ctx0.get("stage", ""))
+        a = self._get_ctx_agg(c, ctx_key, family)
+        utility = float(self._probe_utility(c, ctx_key, family))
+        slack = float(self._probe_slack(c, ctx_key, family))
+        meta = {"utility": utility, "slack": slack, "probe_n": int(a.probe_n)}
+
+        if not bool(self.cec_enabled):
+            return False, "cec_disabled", meta
+        if c != "macro":
+            return False, "not_macro", meta
+        if stage != "late":
+            return False, "not_late", meta
+        if int(a.probe_n) < int(self.cec_probe_min_samples):
+            return False, "probe_samples_low", meta
+        if int(a.probe_pass_heur) <= 0:
+            return False, "probe_no_pass_heur", meta
+        if float(a.probe_margin_heur) <= 0.0:
+            return False, "probe_margin_nonpos", meta
+        if float(utility) <= float(slack):
+            return False, "utility_not_enough", meta
+
+        stp = int(step)
+        if int(self._sponsor_step) != stp:
+            self._sponsor_step = stp
+            self._sponsor_count_step = 0
+        if int(self._sponsor_count_step) >= max(0, int(self.cec_trial_max_per_step)):
+            return False, "step_trial_quota", meta
+        if int(a.last_trial_step) >= stp - 1:
+            return False, "recently_sponsored", meta
+
+        self._sponsor_count_step += 1
+        a.trial_sponsored += 1
+        a.last_trial_step = stp
+        return True, "sponsored", meta
+
     def tick(self, step: int) -> None:
         for st in self.states.values():
             st.allow_last = False
@@ -152,6 +293,8 @@ class MPVSController:
             self._mem_hist = self._mem_hist[-4 * self.mem_window :]
         if self.mem_global_until < 0:
             self.mem_global_until = 0
+        if int(self._sponsor_step) != int(step):
+            self._sponsor_count_step = 0
 
     def on_progress(self, used_calls: int, budget_total: int, best_total_seen: float) -> None:
         used_calls = int(used_calls)
@@ -171,6 +314,15 @@ class MPVSController:
                     al = float(self.alpha_long)
                     roi_long = float(gain_long) / float(span)
                     a.roi_long = (1.0 - al) * float(a.roi_long) + al * float(roi_long)
+            if str(tk.src) == "macro" and str(tk.ctx_key) and str(tk.family):
+                ca = self._get_ctx_agg("macro", str(tk.ctx_key), str(tk.family))
+                al = float(self.alpha_long)
+                roi_long_ctx = float(gain_long) / float(span)
+                ca.roi_long = (1.0 - al) * float(ca.roi_long) + al * float(roi_long_ctx)
+                if bool(tk.sponsored):
+                    if float(ca.roi_long) > 0.0 and float(self._probe_utility("macro", tk.ctx_key, tk.family)) >= 0.0:
+                        ca.released = 1
+                        ca.last_release_step = int(used_calls)
         self.tickets = kept
 
     def allow(
@@ -183,6 +335,8 @@ class MPVSController:
         roi: float,
         used_calls: Optional[int] = None,
         budget_total: Optional[int] = None,
+        ctx: Optional[Dict[str, Any]] = None,
+        family: str = "",
     ) -> Tuple[bool, str]:
         step = int(step)
         comp = str(comp)
@@ -201,18 +355,15 @@ class MPVSController:
             st.allow_last = False
             st.deny_last_reason = "mem_global_cooldown"
             return False, "mem_global_cooldown"
-
         if step < int(st.cooldown_until):
             st.allow_last = False
             st.deny_last_reason = "cooldown"
             return False, "cooldown"
-
         min_interval = int(cfg.get("min_interval_steps", 0))
         if step - int(st.last_fire_step) < max(0, min_interval):
             st.allow_last = False
             st.deny_last_reason = "min_interval"
             return False, "min_interval"
-
         stagn_ge = int(cfg.get("enable_when_stagnation_ge", 0))
         if int(stagn) < int(stagn_ge):
             st.allow_last = False
@@ -234,10 +385,11 @@ class MPVSController:
                 st.deny_last_reason = "budget_early"
                 return False, "budget_early"
 
-        call_share, gain_share, ratio, slack, n = self._share_ratio(comp)
+        rel = self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""}))
+        _, _, ratio, slack, n = self._share_ratio(comp)
         if n >= int(self.share_min_samples):
             if float(ratio) < (1.0 - float(slack)):
-                if not (comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0):
+                if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel)):
                     st.allow_last = False
                     st.deny_last_reason = "share_low"
                     return False, "share_low"
@@ -245,7 +397,7 @@ class MPVSController:
         roi_floor = float(cfg.get("roi_floor", -1.0))
         cold_start_allow = bool(cfg.get("allow_cold_start", True))
         if float(roi) < float(roi_floor) and not (cold_start_allow and int(st.fired) <= 0):
-            if not (comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0):
+            if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel)):
                 st.allow_last = False
                 st.deny_last_reason = "roi_low"
                 return False, "roi_low"
@@ -283,6 +435,8 @@ class MPVSController:
         used_calls: Optional[int] = None,
         budget_total: Optional[int] = None,
         best_total_seen: Optional[float] = None,
+        ctx_key: str = "",
+        family: str = "",
     ) -> None:
         comp = str(comp)
         st = self.states.get(comp)
@@ -329,19 +483,52 @@ class MPVSController:
             except Exception:
                 pass
 
-    def register_win(self, comp: str, used_calls: int, budget_total: int, best_total_seen: float) -> None:
+    def register_win(
+        self,
+        comp: str,
+        used_calls: int,
+        budget_total: int,
+        best_total_seen: float,
+        ctx_key: str = "",
+        family: str = "",
+        sponsored: bool = False,
+    ) -> None:
         comp = str(comp)
         used_calls = int(used_calls)
         budget_total = int(budget_total)
         best_total_seen = float(best_total_seen)
         horizon = max(300, int(0.05 * float(budget_total))) if budget_total > 0 else 300
         self.tickets.append(
-            _Ticket(src=comp, start_calls=used_calls, start_best_total=best_total_seen, expire_calls=used_calls + horizon)
+            _Ticket(
+                src=comp,
+                start_calls=used_calls,
+                start_best_total=best_total_seen,
+                expire_calls=used_calls + horizon,
+                ctx_key=str(ctx_key or ""),
+                family=str(family or ""),
+                sponsored=bool(sponsored),
+            )
         )
+        if comp == "macro" and str(ctx_key or "") and str(family or "") and bool(sponsored):
+            self._get_ctx_agg("macro", str(ctx_key), str(family)).trial_won += 1
 
     def roi_long(self, comp: str) -> float:
         ag = self.agg_by_src.get(str(comp))
         return float(ag.roi_long) if ag is not None else 0.0
+
+    def release_active(self, comp: str, family: str = "", ctx: Optional[Dict[str, Any]] = None) -> bool:
+        if str(comp) != "macro":
+            return False
+        ctx0 = ctx or {}
+        if str(ctx0.get("stage", "")) != "late":
+            return False
+        a = self._get_ctx_agg("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
+        utility = self._probe_utility("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
+        if float(a.roi_long) <= 0.0 and float(utility) <= 0.0:
+            a.released = 0
+        if bool(a.released):
+            a.release_hits += 1
+        return bool(a.released)
 
     def quota(
         self,
@@ -350,6 +537,8 @@ class MPVSController:
         roi: float,
         used_calls: Optional[int] = None,
         budget_total: Optional[int] = None,
+        ctx: Optional[Dict[str, Any]] = None,
+        family: str = "",
     ) -> int:
         comp = str(comp)
         st = self.states.get(comp)
@@ -370,7 +559,7 @@ class MPVSController:
         if comp == "llm" and self.llm_shadow_mode:
             return 0
 
-        call_share, gain_share, ratio, slack, n = self._share_ratio(comp)
+        _, _, ratio, slack, n = self._share_ratio(comp)
         if n >= int(self.share_min_samples):
             if float(ratio) < (1.0 - float(slack)):
                 q = max(qmin, q - 1)
@@ -378,6 +567,8 @@ class MPVSController:
                 q = min(qmax, q + 1)
 
         if comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0:
+            q = min(qmax, q + 1)
+        if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
             q = min(qmax, q + 1)
 
         boost_hi = float(cfg.get("quota_boost_roi", 0.0))
@@ -392,14 +583,21 @@ class MPVSController:
         default_min_gain: float,
         used_calls: Optional[int] = None,
         budget_total: Optional[int] = None,
+        ctx: Optional[Dict[str, Any]] = None,
+        family: str = "",
+        sponsored: bool = False,
     ) -> float:
         comp = str(comp)
         mg = float(default_min_gain)
         prog = self._budget_progress(used_calls, budget_total)
         stage = self._stage(prog)
+        if comp == "macro" and bool(sponsored):
+            return 0.0
+        if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
+            return 0.0
         if comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0:
-            return float(min(mg, 0.0))
-        return float(mg)
+            return float(min(max(0.0, mg), 0.0))
+        return float(max(0.0, mg))
 
     def llm_shadow_observe(self, est_gain: float) -> None:
         self.llm_shadow_seen += 1
@@ -417,7 +615,35 @@ class MPVSController:
             "llm_shadow_seen": int(self.llm_shadow_seen),
             "llm_shadow_good": int(self.llm_shadow_good),
             "roi_long": {k: float(self.roi_long(k)) for k in self.states.keys()},
+            "cec_enabled": int(bool(self.cec_enabled)),
+            "heur_rate_ewma": float(self.heur_agg.rate),
         }
+        cec_ctx: Dict[str, Dict[str, Any]] = {}
+        rel_total = 0
+        probe_total = 0
+        for (comp, ctx_key, family), a in self.ctx_agg.items():
+            probe_total += int(a.probe_n)
+            rel_total += int(a.released)
+            k = f"{comp}|{ctx_key}|{family}"
+            cec_ctx[k] = {
+                "probe_n": int(a.probe_n),
+                "probe_pass_heur": int(a.probe_pass_heur),
+                "probe_pass_cur": int(a.probe_pass_cur),
+                "probe_margin_heur": float(a.probe_margin_heur),
+                "probe_margin_cur": float(a.probe_margin_cur),
+                "probe_calls": float(a.probe_calls),
+                "probe_utility": float(self._probe_utility(comp, ctx_key, family)),
+                "probe_slack": float(self._probe_slack(comp, ctx_key, family)),
+                "trial_sponsored": int(a.trial_sponsored),
+                "trial_won": int(a.trial_won),
+                "roi_long": float(a.roi_long),
+                "released": int(a.released),
+                "release_hits": int(a.release_hits),
+            }
+        out["cec_probe_total"] = int(probe_total)
+        out["cec_release_total"] = int(rel_total)
+        out["cec_ctx"] = cec_ctx
+
         for k, st in self.states.items():
             call_share, gain_share, ratio, slack, n = self._share_ratio(k)
             out[str(k)] = {
