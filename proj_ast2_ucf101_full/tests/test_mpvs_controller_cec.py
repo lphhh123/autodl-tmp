@@ -10,7 +10,11 @@ def _ctrl():
             "stagn_norm": 20,
             "cec": {
                 "enabled": True,
-                "probe_min_samples": 2,
+                "family_blend_tau": 8,
+                "family_min_samples": 6,
+                "local_min_samples": 2,
+                "seed_trials_per_family": 1,
+                "family_cooldown_steps": 0,
                 "trial_max_per_step": 1,
                 "context": {
                     "stagn_ratio_edges": [0.75, 1.5],
@@ -35,38 +39,72 @@ def test_build_context_buckets():
     assert ctx_e["health_bucket"] < ctx_l["health_bucket"]
 
 
-def test_sponsored_trial_rules():
+def test_edge_score_dimless_supports_sponsor_when_positive():
     c = _ctrl()
-    ctx_mid = c.build_context(stagn=20, repeat_ratio=0.8, blocked_ratio=0.4, used_calls=50, budget_total=100)
-    c.observe_probe("macro", "comm", ctx_mid["ctx_key"], 0.5, 0.1, 1, True, False)
-    ok, _, _ = c.maybe_sponsor_trial("macro", "comm", ctx_mid, step=1)
-    assert not ok
-
-    ctx_late = c.build_context(stagn=40, repeat_ratio=0.8, blocked_ratio=0.4, used_calls=90, budget_total=100)
-    c.observe_heuristic(gain=1.0, calls=1000)
-    c.observe_probe("macro", "comm", ctx_late["ctx_key"], 0.0, 0.0, 5, True, False)
-    ok, _, _ = c.maybe_sponsor_trial("macro", "comm", ctx_late, step=2)
-    assert not ok
-
-    c.observe_probe("macro", "comm", ctx_late["ctx_key"], 2.0, 0.1, 1, True, False)
-    c.observe_probe("macro", "comm", ctx_late["ctx_key"], 2.0, 0.1, 1, True, False)
-    ok, _, _ = c.maybe_sponsor_trial("macro", "comm", ctx_late, step=3)
+    ctx_late = c.build_context(stagn=40, repeat_ratio=0.7, blocked_ratio=0.4, used_calls=95, budget_total=100)
+    c.observe_heuristic(gain=10.0, calls=10000)
+    for _ in range(7):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.01, margin_cur=-0.01, calls=1, pass_heur=True, pass_cur=False)
+    ok, reason, meta = c.maybe_sponsor_trial("macro", "comm", ctx_late, step=1)
     assert ok
+    assert reason in {"seed_sponsor", "evidence_sponsor"}
+    assert float(meta["edge_local"]) > 0.0
+    assert float(meta["trial_score"]) > 0.0
 
 
-def test_release_context_local_and_adjust_min_gain():
+def test_seed_sponsor_uses_family_global_when_local_is_sparse():
     c = _ctrl()
-    ctx_late = c.build_context(stagn=40, repeat_ratio=0.8, blocked_ratio=0.4, used_calls=90, budget_total=100)
-    ctx_other = c.build_context(stagn=5, repeat_ratio=0.2, blocked_ratio=0.0, used_calls=90, budget_total=100)
-    for _ in range(3):
-        c.observe_probe("macro", "comm", ctx_late["ctx_key"], 2.0, 0.3, 1, True, True)
+    ctx_mid = c.build_context(stagn=20, repeat_ratio=0.7, blocked_ratio=0.4, used_calls=50, budget_total=100)
+    ctx_late = c.build_context(stagn=40, repeat_ratio=0.7, blocked_ratio=0.4, used_calls=95, budget_total=100)
+    c.observe_heuristic(gain=5.0, calls=5000)
+    for _ in range(6):
+        c.observe_probe("macro", "therm", ctx_mid["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=False)
+    c.observe_probe("macro", "therm", ctx_late["ctx_key"], margin_heur=0.02, margin_cur=-0.01, calls=1, pass_heur=True, pass_cur=False)
+    ok, reason, meta = c.maybe_sponsor_trial("macro", "therm", ctx_late, step=2)
+    assert ok
+    assert reason == "seed_sponsor"
+    assert int(meta["n_local"]) < c.cec_local_min_samples
+    assert float(meta["edge_family"]) > 0.0
+
+
+def test_evidence_sponsor_and_local_weight_growth():
+    c = _ctrl()
+    ctx_late = c.build_context(stagn=35, repeat_ratio=0.6, blocked_ratio=0.3, used_calls=92, budget_total=100)
+    c.observe_heuristic(gain=5.0, calls=5000)
+    for _ in range(8):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.03, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=False)
+    score1 = c._trial_score("macro", ctx_late["ctx_key"], "comm")
+    c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.03, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=False)
+    score2 = c._trial_score("macro", ctx_late["ctx_key"], "comm")
+    ok, reason, meta = c.maybe_sponsor_trial("macro", "comm", ctx_late, step=3)
+    assert ok
+    assert reason == "evidence_sponsor"
+    assert float(score2["lambda_local"]) >= float(score1["lambda_local"])
+    assert float(meta["trial_score"]) > 0.0
+
+
+def test_release_stays_context_local():
+    c = _ctrl()
+    ctx_a = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+    ctx_b = {"stage": "late", "ctx_key": "late|stg1|hlth1"}
+    c.observe_heuristic(gain=1.0, calls=1000)
+    for _ in range(8):
+        c.observe_probe("macro", "comm", ctx_a["ctx_key"], margin_heur=0.03, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=True)
+    c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_a["ctx_key"], family="comm", sponsored=True)
+    c.on_progress(used_calls=500, budget_total=1000, best_total_seen=0.0)
+    assert c.release_active("macro", family="comm", ctx=ctx_a)
+    assert not c.release_active("macro", family="comm", ctx=ctx_b)
+
+
+def test_adjust_min_gain_current_rules():
+    c = _ctrl()
+    ctx_late = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+    c.observe_heuristic(gain=1.0, calls=1000)
+    for _ in range(8):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.03, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=True)
     c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_late["ctx_key"], family="comm", sponsored=True)
     c.on_progress(used_calls=500, budget_total=1000, best_total_seen=0.0)
 
-    assert c.release_active("macro", family="comm", ctx=ctx_late)
-    assert not c.release_active("macro", family="escape", ctx=ctx_late)
-    assert not c.release_active("macro", family="comm", ctx=ctx_other)
-
     assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="comm", sponsored=True) == 0.0
     assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="comm", sponsored=False) == 0.0
-    assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_other, family="comm", sponsored=False) >= 0.0
+    assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="other", sponsored=False) >= 0.0
