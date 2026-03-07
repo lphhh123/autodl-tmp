@@ -632,8 +632,14 @@ def run_detailed_place(
         "macro_trial_won": 0,
         "macro_release_activated": 0,
         "macro_release_hit": 0,
+        "macro_trial_seed": 0,
+        "macro_trial_evidence": 0,
+        "macro_trial_sponsor_reason": {},
+        "macro_trial_score_sum": 0.0,
+        "macro_trial_score_max": 0.0,
         "heuristic_rate_ewma": 0.0,
     }
+    prev_release_total = 0
 
     # ----------------------------
     # MacroEngine (stronger macros, fewer evaluator calls)
@@ -2399,7 +2405,20 @@ def run_detailed_place(
                                                     _pl["_cec_ctx_key"] = str(step_ctx.get("ctx_key", ""))
                                                     _pl["_cec_family"] = str(nm)
                                                     _pl["_cec_trial_reason"] = str(reason or "")
+                                                    _pl["_cec_trial_kind"] = str(reason or "")
+                                                    _pl["_cec_trial_score"] = float((_meta or {}).get("trial_score", 0.0))
+                                                    _pl["_cec_trial_edge_local"] = float((_meta or {}).get("edge_local", 0.0))
+                                                    _pl["_cec_trial_edge_family"] = float((_meta or {}).get("edge_family", 0.0))
+                                                    _pl["_cec_trial_lambda"] = float((_meta or {}).get("lambda_local", 0.0))
                                                     mpvs_stats["macro_trial_sponsored"] = int(mpvs_stats.get("macro_trial_sponsored", 0)) + 1
+                                                    mpvs_stats["macro_trial_score_sum"] = float(mpvs_stats.get("macro_trial_score_sum", 0.0)) + float((_meta or {}).get("trial_score", 0.0))
+                                                    mpvs_stats["macro_trial_score_max"] = max(float(mpvs_stats.get("macro_trial_score_max", 0.0)), float((_meta or {}).get("trial_score", 0.0)))
+                                                    if str(reason) == "seed_sponsor":
+                                                        mpvs_stats["macro_trial_seed"] = int(mpvs_stats.get("macro_trial_seed", 0)) + 1
+                                                    if str(reason) == "evidence_sponsor":
+                                                        mpvs_stats["macro_trial_evidence"] = int(mpvs_stats.get("macro_trial_evidence", 0)) + 1
+                                                    _rs = mpvs_stats.setdefault("macro_trial_sponsor_reason", {})
+                                                    _rs[str(reason or "")] = int(_rs.get(str(reason or ""), 0)) + 1
                                                 else:
                                                     mpvs_stats["macro_precheck_pass_min_gain"] = int(mpvs_stats.get("macro_precheck_pass_min_gain", 0)) + 1
                                                 mpvs_stats["macro_precheck_allowed"] = int(mpvs_stats.get("macro_precheck_allowed", 0)) + 1
@@ -3309,6 +3328,15 @@ def run_detailed_place(
                                     pass
 
                             mpvs_stats["mem_global_until"] = int(mpvs_mem_global_until)
+                            try:
+                                if mpvs_ctrl is not None:
+                                    _snap_step = mpvs_ctrl.snapshot()
+                                    _release_now = int(_snap_step.get("cec_release_total", 0))
+                                    if _release_now > int(prev_release_total):
+                                        mpvs_stats["macro_release_activated"] = int(mpvs_stats.get("macro_release_activated", 0)) + int(_release_now - int(prev_release_total))
+                                    prev_release_total = int(_release_now)
+                            except Exception:
+                                pass
 
                             # --- BATC window update (MPVS post-step, before continue) ---
                             try:
@@ -4288,7 +4316,6 @@ def run_detailed_place(
                 snap_ctrl = mpvs_ctrl.snapshot()
                 mpvs_stats["comp_ctrl"] = snap_ctrl
                 mpvs_stats["heuristic_rate_ewma"] = float(snap_ctrl.get("heur_rate_ewma", mpvs_stats.get("heuristic_rate_ewma", 0.0)))
-                mpvs_stats["macro_release_activated"] = int(snap_ctrl.get("cec_release_total", 0))
         except Exception:
             pass
         policy_meta["mpvs"] = mpvs_stats

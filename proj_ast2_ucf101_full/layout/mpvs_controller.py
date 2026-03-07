@@ -72,6 +72,22 @@ class _CtxAgg:
     release_hits: int = 0
     last_trial_step: int = -10**9
     last_release_step: int = -10**9
+    last_trial_kind: str = ""
+
+
+@dataclass
+class _FamAgg:
+    probe_n: int = 0
+    probe_pass_heur: int = 0
+    probe_pass_cur: int = 0
+    probe_margin_heur: float = 0.0
+    probe_margin_cur: float = 0.0
+    probe_calls: float = 0.0
+    trial_seed_used: int = 0
+    trial_sponsored: int = 0
+    trial_won: int = 0
+    roi_long: float = 0.0
+    last_trial_step: int = -10**9
 
 
 def _clamp01(x: float) -> float:
@@ -122,7 +138,11 @@ class MPVSController:
         cec = (self.cfg.get("cec") or {}) if isinstance(self.cfg, dict) else {}
         ctx_cfg = (cec.get("context") or {}) if isinstance(cec, dict) else {}
         self.cec_enabled = bool(cec.get("enabled", True))
-        self.cec_probe_min_samples = int(cec.get("probe_min_samples", 6))
+        self.cec_family_blend_tau = float(cec.get("family_blend_tau", 8))
+        self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
+        self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
+        self.cec_seed_trials_per_family = int(cec.get("seed_trials_per_family", 1))
+        self.cec_family_cooldown_steps = int(cec.get("family_cooldown_steps", 25))
         self.cec_trial_max_per_step = int(cec.get("trial_max_per_step", 1))
         self.cec_stagn_ratio_edges = [float(x) for x in (ctx_cfg.get("stagn_ratio_edges", [0.75, 1.50]) or [0.75, 1.50])][:2]
         self.cec_repeat_ratio_edges = [float(x) for x in (ctx_cfg.get("repeat_ratio_edges", [0.55, 0.75]) or [0.55, 0.75])][:2]
@@ -135,6 +155,7 @@ class MPVSController:
             self.cec_blocked_ratio_edges = [0.15, 0.35]
         self.heur_agg = _HeurAgg()
         self.ctx_agg: Dict[Tuple[str, str, str], _CtxAgg] = {}
+        self.family_agg: Dict[Tuple[str, str], _FamAgg] = {}
         self._sponsor_step = -1
         self._sponsor_count_step = 0
 
@@ -210,6 +231,15 @@ class MPVSController:
             self.ctx_agg[key] = _CtxAgg()
         return self.ctx_agg[key]
 
+    def _family_key(self, comp: str, family: str) -> Tuple[str, str]:
+        return (str(comp), str(family or ""))
+
+    def _get_family_agg(self, comp: str, family: str) -> _FamAgg:
+        key = self._family_key(comp, family)
+        if key not in self.family_agg:
+            self.family_agg[key] = _FamAgg()
+        return self.family_agg[key]
+
     def observe_heuristic(self, gain: float, calls: int) -> None:
         g = float(max(0.0, gain))
         c = float(max(1, int(calls)))
@@ -230,21 +260,54 @@ class MPVSController:
         pass_cur: bool,
     ) -> None:
         a = self._get_ctx_agg(comp, ctx_key, family)
+        af = self._get_family_agg(comp, family)
         ew = float(self.alpha)
-        a.probe_n += 1
-        a.probe_pass_heur += int(bool(pass_heur))
-        a.probe_pass_cur += int(bool(pass_cur))
-        a.probe_margin_heur = (1.0 - ew) * float(a.probe_margin_heur) + ew * float(margin_heur)
-        a.probe_margin_cur = (1.0 - ew) * float(a.probe_margin_cur) + ew * float(margin_cur)
-        a.probe_calls = (1.0 - ew) * float(a.probe_calls) + ew * float(max(1, int(calls)))
+        for ag in (a, af):
+            ag.probe_n += 1
+            ag.probe_pass_heur += int(bool(pass_heur))
+            ag.probe_pass_cur += int(bool(pass_cur))
+            ag.probe_margin_heur = (1.0 - ew) * float(ag.probe_margin_heur) + ew * float(margin_heur)
+            ag.probe_margin_cur = (1.0 - ew) * float(ag.probe_margin_cur) + ew * float(margin_cur)
+            ag.probe_calls = (1.0 - ew) * float(ag.probe_calls) + ew * float(max(1, int(calls)))
+
+    def _probe_utility_from(self, margin_heur: float, calls: float) -> float:
+        return float(margin_heur) - float(self.heur_agg.rate) * float(calls)
+
+    def _probe_edge_from(self, margin_heur: float, calls: float) -> float:
+        utility = self._probe_utility_from(float(margin_heur), float(calls))
+        denom = max(1e-12, abs(float(margin_heur)) + float(self.heur_agg.rate) * float(calls) + 1e-12)
+        return float(utility) / float(denom)
 
     def _probe_utility(self, comp: str, ctx_key: str, family: str) -> float:
         a = self._get_ctx_agg(comp, ctx_key, family)
-        return float(a.probe_margin_heur) - float(self.heur_agg.rate) * float(a.probe_calls)
+        return self._probe_utility_from(float(a.probe_margin_heur), float(a.probe_calls))
 
-    def _probe_slack(self, comp: str, ctx_key: str, family: str) -> float:
+    def _probe_edge_ctx(self, comp: str, ctx_key: str, family: str) -> float:
         a = self._get_ctx_agg(comp, ctx_key, family)
-        return float(self.share_slack_scale) / math.sqrt(float(max(1, a.probe_n)))
+        return self._probe_edge_from(float(a.probe_margin_heur), float(a.probe_calls))
+
+    def _probe_edge_family(self, comp: str, family: str) -> float:
+        a = self._get_family_agg(comp, family)
+        return self._probe_edge_from(float(a.probe_margin_heur), float(a.probe_calls))
+
+    def _trial_score(self, comp: str, ctx_key: str, family: str) -> Dict[str, Any]:
+        a_local = self._get_ctx_agg(comp, ctx_key, family)
+        a_fam = self._get_family_agg(comp, family)
+        n_local = int(a_local.probe_n)
+        n_family = int(a_fam.probe_n)
+        edge_local = float(self._probe_edge_ctx(comp, ctx_key, family))
+        edge_family = float(self._probe_edge_family(comp, family))
+        tau = max(1e-9, float(self.cec_family_blend_tau))
+        lambda_local = float(n_local) / float(float(n_local) + tau)
+        trial_score = float(lambda_local) * edge_local + (1.0 - float(lambda_local)) * edge_family
+        return {
+            "edge_local": float(edge_local),
+            "edge_family": float(edge_family),
+            "trial_score": float(trial_score),
+            "lambda_local": float(lambda_local),
+            "n_local": int(n_local),
+            "n_family": int(n_family),
+        }
 
     def maybe_sponsor_trial(self, comp: str, family: str, ctx: Optional[Dict[str, Any]], step: int) -> Tuple[bool, str, Dict[str, Any]]:
         c = str(comp)
@@ -252,9 +315,9 @@ class MPVSController:
         ctx_key = str(ctx0.get("ctx_key", ""))
         stage = str(ctx0.get("stage", ""))
         a = self._get_ctx_agg(c, ctx_key, family)
-        utility = float(self._probe_utility(c, ctx_key, family))
-        slack = float(self._probe_slack(c, ctx_key, family))
-        meta = {"utility": utility, "slack": slack, "probe_n": int(a.probe_n)}
+        af = self._get_family_agg(c, family)
+        score_meta = self._trial_score(c, ctx_key, family)
+        meta = dict(score_meta)
 
         if not bool(self.cec_enabled):
             return False, "cec_disabled", meta
@@ -262,14 +325,8 @@ class MPVSController:
             return False, "not_macro", meta
         if stage != "late":
             return False, "not_late", meta
-        if int(a.probe_n) < int(self.cec_probe_min_samples):
-            return False, "probe_samples_low", meta
-        if int(a.probe_pass_heur) <= 0:
-            return False, "probe_no_pass_heur", meta
-        if float(a.probe_margin_heur) <= 0.0:
-            return False, "probe_margin_nonpos", meta
-        if float(utility) <= float(slack):
-            return False, "utility_not_enough", meta
+        if int(a.probe_pass_heur) <= 0 and int(af.probe_pass_heur) <= 0:
+            return False, "no_pass_heur", meta
 
         stp = int(step)
         if int(self._sponsor_step) != stp:
@@ -277,13 +334,35 @@ class MPVSController:
             self._sponsor_count_step = 0
         if int(self._sponsor_count_step) >= max(0, int(self.cec_trial_max_per_step)):
             return False, "step_trial_quota", meta
-        if int(a.last_trial_step) >= stp - 1:
-            return False, "recently_sponsored", meta
+        if int(af.last_trial_step) > stp - max(0, int(self.cec_family_cooldown_steps)):
+            return False, "family_cooldown", meta
+
+        reason = ""
+        trial_score = float(score_meta.get("trial_score", 0.0))
+        edge_family = float(score_meta.get("edge_family", 0.0))
+        n_local = int(score_meta.get("n_local", 0))
+        n_family = int(score_meta.get("n_family", 0))
+
+        if n_family >= int(self.cec_family_min_samples) and n_local >= int(self.cec_local_min_samples) and trial_score > 0.0:
+            reason = "evidence_sponsor"
+        elif n_family >= int(self.cec_family_min_samples) and edge_family > 0.0 and int(a.probe_pass_heur) > 0:
+            if int(af.trial_seed_used) >= max(0, int(self.cec_seed_trials_per_family)):
+                return False, "seed_budget_exhausted", meta
+            reason = "seed_sponsor"
+        else:
+            if n_family < int(self.cec_family_min_samples):
+                return False, "family_samples_low", meta
+            return False, "trial_score_nonpos", meta
 
         self._sponsor_count_step += 1
         a.trial_sponsored += 1
         a.last_trial_step = stp
-        return True, "sponsored", meta
+        a.last_trial_kind = str(reason)
+        af.trial_sponsored += 1
+        af.last_trial_step = stp
+        if reason == "seed_sponsor":
+            af.trial_seed_used += 1
+        return True, reason, meta
 
     def tick(self, step: int) -> None:
         for st in self.states.values():
@@ -316,11 +395,14 @@ class MPVSController:
                     a.roi_long = (1.0 - al) * float(a.roi_long) + al * float(roi_long)
             if str(tk.src) == "macro" and str(tk.ctx_key) and str(tk.family):
                 ca = self._get_ctx_agg("macro", str(tk.ctx_key), str(tk.family))
+                fa = self._get_family_agg("macro", str(tk.family))
                 al = float(self.alpha_long)
                 roi_long_ctx = float(gain_long) / float(span)
                 ca.roi_long = (1.0 - al) * float(ca.roi_long) + al * float(roi_long_ctx)
+                fa.roi_long = (1.0 - al) * float(fa.roi_long) + al * float(roi_long_ctx)
                 if bool(tk.sponsored):
-                    if float(ca.roi_long) > 0.0 and float(self._probe_utility("macro", tk.ctx_key, tk.family)) >= 0.0:
+                    ts = self._trial_score("macro", str(tk.ctx_key), str(tk.family))
+                    if float(ca.roi_long) > 0.0 and (float(ts.get("trial_score", 0.0)) > 0.0 or float(ts.get("edge_local", 0.0)) >= 0.0):
                         ca.released = 1
                         ca.last_release_step = int(used_calls)
         self.tickets = kept
@@ -511,6 +593,7 @@ class MPVSController:
         )
         if comp == "macro" and str(ctx_key or "") and str(family or "") and bool(sponsored):
             self._get_ctx_agg("macro", str(ctx_key), str(family)).trial_won += 1
+            self._get_family_agg("macro", str(family)).trial_won += 1
 
     def roi_long(self, comp: str) -> float:
         ag = self.agg_by_src.get(str(comp))
@@ -523,8 +606,13 @@ class MPVSController:
         if str(ctx0.get("stage", "")) != "late":
             return False
         a = self._get_ctx_agg("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
-        utility = self._probe_utility("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
-        if float(a.roi_long) <= 0.0 and float(utility) <= 0.0:
+        ts = self._trial_score("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
+        cond_release = int(a.trial_won) > 0 and float(a.roi_long) > 0.0 and (
+            float(ts.get("edge_local", 0.0)) >= 0.0 or float(ts.get("trial_score", 0.0)) > 0.0
+        )
+        if cond_release:
+            a.released = 1
+        if float(a.roi_long) <= 0.0 and float(ts.get("trial_score", 0.0)) <= 0.0:
             a.released = 0
         if bool(a.released):
             a.release_hits += 1
@@ -595,8 +683,6 @@ class MPVSController:
             return 0.0
         if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
             return 0.0
-        if comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0:
-            return float(min(max(0.0, mg), 0.0))
         return float(max(0.0, mg))
 
     def llm_shadow_observe(self, est_gain: float) -> None:
@@ -616,12 +702,16 @@ class MPVSController:
             "llm_shadow_good": int(self.llm_shadow_good),
             "roi_long": {k: float(self.roi_long(k)) for k in self.states.keys()},
             "cec_enabled": int(bool(self.cec_enabled)),
+            "cec_v2_enabled": int(bool(self.cec_enabled)),
             "heur_rate_ewma": float(self.heur_agg.rate),
         }
         cec_ctx: Dict[str, Dict[str, Any]] = {}
+        cec_family: Dict[str, Dict[str, Any]] = {}
         rel_total = 0
         probe_total = 0
+        seed_total = 0
         for (comp, ctx_key, family), a in self.ctx_agg.items():
+            ts = self._trial_score(comp, ctx_key, family)
             probe_total += int(a.probe_n)
             rel_total += int(a.released)
             k = f"{comp}|{ctx_key}|{family}"
@@ -633,16 +723,40 @@ class MPVSController:
                 "probe_margin_cur": float(a.probe_margin_cur),
                 "probe_calls": float(a.probe_calls),
                 "probe_utility": float(self._probe_utility(comp, ctx_key, family)),
-                "probe_slack": float(self._probe_slack(comp, ctx_key, family)),
+                "probe_edge_local": float(ts.get("edge_local", 0.0)),
+                "probe_edge_family": float(ts.get("edge_family", 0.0)),
+                "trial_score": float(ts.get("trial_score", 0.0)),
+                "lambda_local": float(ts.get("lambda_local", 0.0)),
                 "trial_sponsored": int(a.trial_sponsored),
                 "trial_won": int(a.trial_won),
                 "roi_long": float(a.roi_long),
                 "released": int(a.released),
                 "release_hits": int(a.release_hits),
+                "last_trial_kind": str(getattr(a, "last_trial_kind", "") or ""),
+            }
+        for (comp, family), af in self.family_agg.items():
+            seed_total += int(af.trial_seed_used)
+            k = f"{comp}|{family}"
+            cec_family[k] = {
+                "probe_n": int(af.probe_n),
+                "probe_pass_heur": int(af.probe_pass_heur),
+                "probe_pass_cur": int(af.probe_pass_cur),
+                "probe_margin_heur": float(af.probe_margin_heur),
+                "probe_margin_cur": float(af.probe_margin_cur),
+                "probe_calls": float(af.probe_calls),
+                "probe_edge": float(self._probe_edge_family(comp, family)),
+                "trial_seed_used": int(af.trial_seed_used),
+                "trial_sponsored": int(af.trial_sponsored),
+                "trial_won": int(af.trial_won),
+                "roi_long": float(af.roi_long),
+                "last_trial_step": int(af.last_trial_step),
             }
         out["cec_probe_total"] = int(probe_total)
         out["cec_release_total"] = int(rel_total)
+        out["cec_family_total"] = int(len(self.family_agg))
+        out["cec_seed_total"] = int(seed_total)
         out["cec_ctx"] = cec_ctx
+        out["cec_family"] = cec_family
 
         for k, st in self.states.items():
             call_share, gain_share, ratio, slack, n = self._share_ratio(k)

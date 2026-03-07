@@ -39,7 +39,11 @@ detailed_place:
         slack_scale: 0.5
       cec:
         enabled: true
-        probe_min_samples: 6
+        family_blend_tau: 8
+        family_min_samples: 6
+        local_min_samples: 2
+        seed_trials_per_family: 1
+        family_cooldown_steps: 25
         trial_max_per_step: 1
         context:
           stagn_ratio_edges: [0.75, 1.50]
