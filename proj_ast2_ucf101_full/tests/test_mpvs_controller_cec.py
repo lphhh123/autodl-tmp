@@ -162,3 +162,40 @@ def test_stage_family_prior_uses_mid_late_more_than_global_in_late():
     ts = c._trial_score("macro", ctx_late["ctx_key"], "comm")
     assert float(ts.get("edge_family", 0.0)) > float(ts.get("edge_family_global", -1.0))
     assert str(ts.get("prior_src", "")) in {"midlate", "midlate+global"}
+
+
+def test_candidate_any_and_get_active_families_enable_source_level_use():
+    c = _ctrl()
+    ctx_late = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+    c.observe_heuristic(gain=1.0, calls=1000)
+
+    # Build a little probe history.
+    for _ in range(6):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=True)
+        c.observe_probe("macro", "therm", ctx_late["ctx_key"], margin_heur=0.01, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=True)
+
+    # Sponsored win -> candidate(comm)
+    c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_late["ctx_key"], family="comm", sponsored=True)
+
+    # Simulate a released family for ordering check.
+    a_th = c._get_ctx_agg("macro", ctx_late["ctx_key"], "therm")
+    a_th.released = 1
+    a_th.last_release_step = 200
+
+    fams = c.get_active_families(ctx_key=ctx_late["ctx_key"], stage="late")
+    assert fams[0] == "therm"
+    assert "comm" in fams
+
+    # Source-level candidate_any should be true even before choosing a concrete macro family.
+    assert c.candidate_any("macro", ctx=ctx_late)
+
+    # get_active_families/candidate_any should record hits for auditability.
+    snap = c.snapshot()
+    cec_ctx = snap.get("cec_ctx", {})
+    cand_hits = 0
+    rel_hits = 0
+    for v in cec_ctx.values():
+        cand_hits += int((v or {}).get("candidate_hits", 0))
+        rel_hits += int((v or {}).get("release_hits", 0))
+    assert cand_hits >= 1
+    assert rel_hits >= 1

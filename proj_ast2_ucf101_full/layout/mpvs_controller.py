@@ -460,6 +460,80 @@ class MPVSController:
         a.candidate_hits += 1
         return True
 
+    def get_active_families(self, ctx_key: str, stage: str = "", count_hits: bool = True) -> List[str]:
+        """Return macro families that are currently active (released or candidate) in this ctx.
+
+        This is intentionally ctx-local (ctx_key + family). It is used to:
+          - prioritize macro proposing (try active families first)
+          - enable source-level gating when family is not yet chosen
+
+        Notes:
+          - Only meaningful in late stage; early/mid return [].
+          - When count_hits=True, this method increments per-family hits so trace can show it was used.
+        """
+        ctx_key = str(ctx_key or "")
+        stage = str(stage or "")
+        if not ctx_key:
+            return []
+        if stage and stage != "late":
+            return []
+
+        items: List[Tuple[int, int, int, int, str]] = []
+        for (comp, ck, fam), a in self.ctx_agg.items():
+            if str(comp) != "macro":
+                continue
+            if str(ck) != ctx_key:
+                continue
+            fam = str(fam or "")
+            if not fam:
+                continue
+            rel = int(getattr(a, "released", 0)) == 1
+            cand = bool(self.cec_candidate_release) and int(getattr(a, "candidate", 0)) == 1
+            if not (rel or cand):
+                continue
+            if bool(count_hits):
+                if rel:
+                    a.release_hits += 1
+                if cand:
+                    a.candidate_hits += 1
+            items.append(
+                (
+                    1 if rel else 0,
+                    1 if cand else 0,
+                    int(getattr(a, "last_release_step", -10**9)),
+                    int(getattr(a, "last_candidate_step", -10**9)),
+                    fam,
+                )
+            )
+
+        # Priority: released > candidate, then most recent.
+        items.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
+        out: List[str] = []
+        seen = set()
+        for _, __, ___, ____, fam in items:
+            if fam in seen:
+                continue
+            seen.add(fam)
+            out.append(fam)
+        return out
+
+    def candidate_any(self, comp: str, ctx: Optional[Dict[str, Any]] = None) -> bool:
+        """Source-level check: any active (released/candidate) macro family exists in this ctx.
+
+        allow()/quota() are called before choosing a concrete macro family, so family-specific
+        candidate_active(...) cannot trigger when family=="".
+        """
+        if str(comp) != "macro":
+            return False
+        ctx0 = ctx or {}
+        if str(ctx0.get("stage", "")) != "late":
+            return False
+        ctx_key = str(ctx0.get("ctx_key", "") or "")
+        if not ctx_key:
+            return False
+        fams = self.get_active_families(ctx_key=ctx_key, stage="late", count_hits=True)
+        return bool(fams)
+
     def maybe_sponsor_trial(self, comp: str, family: str, ctx: Optional[Dict[str, Any]], step: int) -> Tuple[bool, str, Dict[str, Any]]:
         c = str(comp)
         ctx0 = ctx or {}
@@ -641,10 +715,14 @@ class MPVSController:
 
         rel = self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""}))
         cand = self.candidate_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""}))
+        # v2.1: source-level candidate check (family not yet selected -> family=="")
+        cand_any = False
+        if comp == "macro" and not str(family or ""):
+            cand_any = self.candidate_any("macro", ctx=(ctx or {"stage": stage, "ctx_key": ""}))
         _, _, ratio, slack, n = self._share_ratio(comp)
         if n >= int(self.share_min_samples):
             if float(ratio) < (1.0 - float(slack)):
-                if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or cand)):
+                if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or cand or cand_any)):
                     st.allow_last = False
                     st.deny_last_reason = "share_low"
                     return False, "share_low"
@@ -652,7 +730,7 @@ class MPVSController:
         roi_floor = float(cfg.get("roi_floor", -1.0))
         cold_start_allow = bool(cfg.get("allow_cold_start", True))
         if float(roi) < float(roi_floor) and not (cold_start_allow and int(st.fired) <= 0):
-            if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or cand)):
+            if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or cand or cand_any)):
                 st.allow_last = False
                 st.deny_last_reason = "roi_low"
                 return False, "roi_low"
@@ -833,10 +911,16 @@ class MPVSController:
 
         if comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0:
             q = min(qmax, q + 1)
-        if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
-            q = min(qmax, q + 1)
-        if comp == "macro" and self.candidate_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
-            q = min(qmax, q + 1)
+
+        # v2.1: if family is unknown at quota-time (family==""), use a ctx-level active check.
+        if comp == "macro" and not str(family or ""):
+            if self.candidate_any("macro", ctx=(ctx or {"stage": stage, "ctx_key": ""})):
+                q = min(qmax, q + 1)
+        else:
+            if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
+                q = min(qmax, q + 1)
+            if comp == "macro" and self.candidate_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
+                q = min(qmax, q + 1)
 
         boost_hi = float(cfg.get("quota_boost_roi", 0.0))
         if float(boost_hi) > 0.0 and float(roi) >= float(boost_hi):
