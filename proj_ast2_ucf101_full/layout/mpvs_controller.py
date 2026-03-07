@@ -73,6 +73,8 @@ class _CtxAgg:
     last_trial_step: int = -10**9
     last_release_step: int = -10**9
     last_trial_kind: str = ""
+    # v2.1 audit: why did we promote to released?
+    last_release_reason: str = ""
     # v2.1: candidate soft-release state.
     # Activated immediately after a sponsored macro win, to enable a tiny amount of continued
     # sponsored trials before horizon credit is realized (avoids "first win but no release" deadlock).
@@ -624,7 +626,7 @@ class MPVSController:
                 kept.append(tk)
                 continue
             span = max(1, used_calls - int(tk.start_calls))
-            gain_long = float(max(0.0, float(tk.start_best_total) - cur_best))
+            gain_long = float(tk.start_best_total) - float(cur_best)
             if gain_long > 0.0:
                 a = self.agg_by_src.get(str(tk.src))
                 if a is not None:
@@ -639,18 +641,45 @@ class MPVSController:
                 ca.roi_long = (1.0 - al) * float(ca.roi_long) + al * float(roi_long_ctx)
                 fa.roi_long = (1.0 - al) * float(fa.roi_long) + al * float(roi_long_ctx)
                 if bool(tk.sponsored):
-                    ts = self._trial_score("macro", str(tk.ctx_key), str(tk.family))
-                    if float(ca.roi_long) > 0.0 and (float(ts.get("trial_score", 0.0)) > 0.0 or float(ts.get("edge_local", 0.0)) >= 0.0):
-                        ca.released = 1
-                        ca.last_release_step = int(used_calls)
-                        # Upgrade: candidate -> released
-                        if bool(self.cec_candidate_release):
-                            ca.candidate = 0
-                    else:
-                        # Candidate is a short-lived bridge until horizon credit realizes.
-                        # If horizon expires and we still don't qualify for release, revoke candidate.
-                        if bool(self.cec_candidate_release) and int(getattr(ca, "candidate", 0)) == 1:
-                            ca.candidate = 0
+                    # Only promote in late stage; keep release strictly ctx-local.
+                    _stage = str(tk.ctx_key or "").split("|", 1)[0] if str(tk.ctx_key or "") else ""
+                    if _stage == "late":
+                        ts = self._trial_score("macro", str(tk.ctx_key), str(tk.family))
+
+                        # v2.1: REALIZED-credit-first release rule.
+                        # If the realized long gain is positive, we should allow promotion even if
+                        # ex-ante probe scores are negative (opportunity cost can make trial_score<0).
+                        release_ok = False
+                        reason = ""
+
+                        if (
+                            float(gain_long) > 0.0
+                            and int(getattr(ca, "trial_won", 0)) > 0
+                            and int(getattr(ca, "probe_pass_heur", 0)) > 0
+                        ):
+                            release_ok = True
+                            reason = "gain_long_pos"
+
+                        # Fallback: keep previous score-gated rule (more conservative).
+                        if not release_ok:
+                            if float(ca.roi_long) > 0.0 and (
+                                float(ts.get("trial_score", 0.0)) > 0.0 or float(ts.get("edge_local", 0.0)) >= 0.0
+                            ):
+                                release_ok = True
+                                reason = "score_gate"
+
+                        if release_ok:
+                            ca.released = 1
+                            ca.last_release_step = int(used_calls)
+                            ca.last_release_reason = str(reason)
+                            # Upgrade: candidate -> released
+                            if bool(self.cec_candidate_release):
+                                ca.candidate = 0
+                        else:
+                            # Candidate is a short-lived bridge until horizon credit realizes.
+                            # If horizon expires and we still don't qualify for release, revoke candidate.
+                            if bool(self.cec_candidate_release) and int(getattr(ca, "candidate", 0)) == 1:
+                                ca.candidate = 0
         self.tickets = kept
 
     def allow(
@@ -1003,6 +1032,7 @@ class MPVSController:
                 "last_candidate_step": int(getattr(a, "last_candidate_step", -10**9)),
                 "release_hits": int(a.release_hits),
                 "last_trial_kind": str(getattr(a, "last_trial_kind", "") or ""),
+                "last_release_reason": str(getattr(a, "last_release_reason", "") or ""),
                 "prior_src": str(ts.get("prior_src", "") or ""),
             }
         for (comp, family), af in self.family_agg.items():
@@ -1025,6 +1055,8 @@ class MPVSController:
         out["cec_probe_total"] = int(probe_total)
         out["cec_release_total"] = int(rel_total)
         out["cec_candidate_total"] = int(cand_total)
+        # v2.1: audit the active rule
+        out["cec_release_rule"] = "gain_long_pos_or_score_gate"
         out["cec_family_total"] = int(len(self.family_agg))
         out["cec_seed_total"] = int(seed_total)
         out["cec_ctx"] = cec_ctx

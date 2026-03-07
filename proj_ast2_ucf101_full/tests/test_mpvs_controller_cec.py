@@ -145,6 +145,25 @@ def test_candidate_expires_if_no_long_roi_at_horizon():
     assert not c.release_active("macro", family="comm", ctx=ctx_late)
 
 
+def test_release_promotes_on_positive_gain_long_even_if_score_negative():
+    c = _ctrl()
+    ctx_late = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+
+    # Make heur_rate very large so edge/trial_score can be negative even with positive margin_heur.
+    c.observe_heuristic(gain=10.0, calls=1)
+    for _ in range(6):
+        # pass_heur is tracked explicitly; margin_heur is small but positive.
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=False)
+
+    # Sponsored win activates candidate immediately.
+    c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_late["ctx_key"], family="comm", sponsored=True)
+    assert c.candidate_active("macro", family="comm", ctx=ctx_late)
+
+    # Horizon expires with improved best_total_seen => gain_long > 0
+    c.on_progress(used_calls=500, budget_total=1000, best_total_seen=9.0)
+    assert c.release_active("macro", family="comm", ctx=ctx_late)
+
+
 def test_stage_family_prior_uses_mid_late_more_than_global_in_late():
     c = _ctrl()
     c.observe_heuristic(gain=5.0, calls=5000)
