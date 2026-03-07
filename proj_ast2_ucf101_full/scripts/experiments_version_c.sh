@@ -360,8 +360,18 @@ case "$EXP_ID" in
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
     run_ast configs/ast2_ucf101_dense_A1.yaml "$(odir EXP-A1)"
     ;;
+  # A1' (aligned): Dense baseline under Version-C trainer (avoid pipeline confounds).
+  # Output -> outputs[/SMOKE]/NEW_A1/seed{SEED}
+  EXP-A1p)
+    run_vc configs/vc_phase3_denseonly_ucf101_A_aligned.yaml "${OUT_PREFIX}/NEW_A1/seed${SEED}"
+    ;;
   # A2: Token-only (HW off, Window off, Token on)
   EXP-A2) run_ast configs/ast2_ucf101_ast_only_A2.yaml           "$(odir EXP-A2)" ;;
+  # A2' (aligned): Token-pruning-only baseline under Version-C trainer.
+  # Output -> outputs[/SMOKE]/NEW_B1/seed{SEED}
+  EXP-A2p)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_aligned.yaml "${OUT_PREFIX}/NEW_B1/seed${SEED}"
+    ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
   EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101_A_main.yaml  "$(odir EXP-A5_twostage)" ;;

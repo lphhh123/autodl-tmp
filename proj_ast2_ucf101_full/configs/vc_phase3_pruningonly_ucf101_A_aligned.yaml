@@ -1,0 +1,33 @@
+# NEW-A2 (aligned): Token-pruning-only baseline under the SAME Version-C trainer as A4/A5.
+# Goal: compare A4 (full, StableHW+HW+discrete) vs pruning-only without trainer/path differences.
+#
+# Differences vs A4:
+#   - StableHW disabled (so lambda_hw_eff falls back to cfg.hw.lambda_hw, which stays 0.0)
+#   - Discrete updates throttled to "init once" (huge every_epochs)
+#   - alpha/layout inner steps disabled
+#
+# Keep everything else (data pipeline, AMP bf16, AST schedule warmup=15, etc.) identical to A4.
+# Output directory is set by scripts/experiments_version_c.sh to: outputs[/SMOKE]/NEW_B1/seed{seed}
+
+_base_: configs/vc_phase3_full_ucf101_A_main.yaml
+
+stable_hw:
+  enabled: false
+  force_disable_ok: true
+  # Even with StableHW disabled, Version-C trainer uses these periods.
+  # Set very large periods so mapping/layout are computed once to populate cache, then reused.
+  discrete_isolation:
+    mapping_update_every_epochs: 1000000000
+    layout_update_every_epochs:  1000000000
+
+training:
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+
+loss:
+  # Keep HW loss OFF in pruning-only baseline.
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0
+
