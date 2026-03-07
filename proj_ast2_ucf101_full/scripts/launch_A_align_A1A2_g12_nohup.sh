@@ -75,6 +75,11 @@ launch_chain_bg() {
   local logfile="$LOG_DIR/${name}.log"
   local pidfile="$LOG_DIR/pids/${name}.pid"
 
+  if [[ ${#exps[@]} -eq 0 ]]; then
+    echo "[SKIP] ${name}: empty queue"
+    return 0
+  fi
+
   # If already running, skip
   if [[ -f "$pidfile" ]]; then
     local oldpid
@@ -85,68 +90,51 @@ launch_chain_bg() {
     fi
   fi
 
-  # Build sequential chain on one GPU (with optional skip-done)
-  local chain=""
-  for exp in "${exps[@]}"; do
-    chain+="echo \"==== \$(date '+%F %T') START ${exp} seed${SEED} GPU=${gpu} ====\"; "
-    if [[ "$SKIP_DONE" == "1" ]]; then
-      chain+="python - <<'PY'\n"
-      chain+="import os\n"
-      chain+="project=r'''${PROJECT_DIR}'''\n"
-      chain+="seed=${SEED}\n"
-      chain+="exp=r'''${exp}'''\n"
-      chain+="smoke = os.environ.get('SMOKE','0')\n"
-      chain+="out_base = 'outputs/SMOKE' if smoke == '1' else 'outputs'\n"
-      chain+="def seed_outdir(exp):\n"
-      chain+="  if exp=='EXP-A1p': return f\"{project}/{out_base}/NEW_A1/seed{seed}\"\n"
-      chain+="  if exp=='EXP-A2p': return f\"{project}/{out_base}/NEW_B1/seed{seed}\"\n"
-      chain+="  return f\"{project}/{out_base}/{exp}/seed{seed}\"\n"
-      chain+="d=seed_outdir(exp)\n"
-      chain+="done = os.path.isfile(os.path.join(d,'metrics.json')) or os.path.isfile(os.path.join(d,'metrics','metrics.json'))\n"
-      chain+="print('[SKIP_DONE]' if done else '[RUN]', exp, 'out=', d)\n"
-      chain+="exit(0 if done else 1)\n"
-      chain+="PY\n"
-      chain+="if [[ \$? -eq 0 ]]; then echo \"[SKIP] ${exp} already has metrics\"; "
-      chain+="else CUDA_VISIBLE_DEVICES=${gpu} bash scripts/experiments_version_c.sh ${exp} ${SEED}; fi; "
-    else
-      chain+="CUDA_VISIBLE_DEVICES=${gpu} bash scripts/experiments_version_c.sh ${exp} ${SEED}; "
-    fi
-    chain+="echo \"==== \$(date '+%F %T') END   ${exp} seed${SEED} GPU=${gpu} ====\"; "
-  done
-
   echo "[LAUNCH] ${name} on GPU ${gpu}"
   echo "         log -> ${logfile}"
 
-  setsid bash -lc "
+  (
     set -euo pipefail
-    cd '$PROJECT_DIR'
+    cd "$PROJECT_DIR"
 
-    if [[ -f '$ENV_ACTIVATE' ]]; then
+    if [[ -f "$ENV_ACTIVATE" ]]; then
       set +u
-      source '$ENV_ACTIVATE'
+      source "$ENV_ACTIVATE"
       set -u
       conda-unpack >/dev/null 2>&1 || true
     fi
     export PYTHONPATH=.
     export PYTHONUNBUFFERED=1
 
-    mkdir -p '$LOG_DIR'
-    exec >> '$logfile' 2>&1
+    mkdir -p "$LOG_DIR"
+    exec >> "$logfile" 2>&1
 
-    echo \"==== \$(date '+%F %T') JOB ${name} BEGIN (GPU=${gpu}) ====\"
-    echo \"[INFO] PROJECT_DIR=$PROJECT_DIR\"
-    echo \"[INFO] LOG_DIR=$LOG_DIR\"
-    echo \"[INFO] ENV_ACTIVATE=$ENV_ACTIVATE\"
-    echo \"[INFO] CUDA_VISIBLE_DEVICES=${gpu}\"
-    echo \"[INFO] SKIP_DONE=$SKIP_DONE\"
-    echo \"[INFO] SMOKE=${SMOKE} OUT_PREFIX_BASE=${OUT_PREFIX_BASE}\"
+    echo "==== $(date '+%F %T') JOB ${name} BEGIN (GPU=${gpu}) ===="
+    echo "[INFO] PROJECT_DIR=$PROJECT_DIR"
+    echo "[INFO] LOG_DIR=$LOG_DIR"
+    echo "[INFO] ENV_ACTIVATE=$ENV_ACTIVATE"
+    echo "[INFO] CUDA_VISIBLE_DEVICES=${gpu}"
+    echo "[INFO] SKIP_DONE=$SKIP_DONE"
+    echo "[INFO] SMOKE=${SMOKE} OUT_PREFIX_BASE=${OUT_PREFIX_BASE}"
     which python || true
-    python -c \"import sys; print('[INFO] sys.executable=', sys.executable)\" || true
+    python -c "import sys; print('[INFO] sys.executable=', sys.executable)" || true
 
-    ${chain}
+    for exp in "${exps[@]}"; do
+      echo "==== $(date '+%F %T') START ${exp} seed${SEED} GPU=${gpu} ===="
+      if [[ "$SKIP_DONE" == "1" ]]; then
+        d="$(seed_outdir "$exp")"
+        if [[ -f "$d/metrics.json" || -f "$d/metrics/metrics.json" ]]; then
+          echo "[SKIP] ${exp} already has metrics -> $d"
+          echo "==== $(date '+%F %T') END   ${exp} seed${SEED} GPU=${gpu} ===="
+          continue
+        fi
+      fi
+      CUDA_VISIBLE_DEVICES="${gpu}" bash scripts/experiments_version_c.sh "${exp}" "${SEED}"
+      echo "==== $(date '+%F %T') END   ${exp} seed${SEED} GPU=${gpu} ===="
+    done
 
-    echo \"==== \$(date '+%F %T') JOB ${name} END (GPU=${gpu}) ====\"
-  " < /dev/null &
+    echo "==== $(date '+%F %T') JOB ${name} END (GPU=${gpu}) ===="
+  ) </dev/null &
 
   echo $! > "$pidfile"
   echo "         pid -> $(cat "$pidfile")"
