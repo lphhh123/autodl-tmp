@@ -146,10 +146,6 @@ class MPVSController:
         cec = (self.cfg.get("cec") or {}) if isinstance(self.cfg, dict) else {}
         ctx_cfg = (cec.get("context") or {}) if isinstance(cec, dict) else {}
         self.cec_enabled = bool(cec.get("enabled", True))
-        # Release rule is intentionally configurable for paper baselines.
-        #   gain_long_pos_or_score_gate: default (realized long gain can promote; fallback to score gate)
-        #   score_gate_only: legacy (promote only when score/edge is non-negative)
-        self.cec_release_rule = str(cec.get("release_rule", "gain_long_pos_or_score_gate") or "gain_long_pos_or_score_gate")
         self.cec_family_blend_tau = float(cec.get("family_blend_tau", 8))
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
@@ -655,10 +651,8 @@ class MPVSController:
                         # ex-ante probe scores are negative (opportunity cost can make trial_score<0).
                         release_ok = False
                         reason = ""
-                        rule = str(getattr(self, "cec_release_rule", "gain_long_pos_or_score_gate") or "gain_long_pos_or_score_gate").lower()
-                        use_gain_long = rule not in {"score_gate_only", "score_only", "short_only"}
 
-                        if use_gain_long and (
+                        if (
                             float(gain_long) > 0.0
                             and int(getattr(ca, "trial_won", 0)) > 0
                             and int(getattr(ca, "probe_pass_heur", 0)) > 0
@@ -1062,7 +1056,7 @@ class MPVSController:
         out["cec_release_total"] = int(rel_total)
         out["cec_candidate_total"] = int(cand_total)
         # v2.1: audit the active rule
-        out["cec_release_rule"] = str(getattr(self, "cec_release_rule", "gain_long_pos_or_score_gate") or "gain_long_pos_or_score_gate")
+        out["cec_release_rule"] = "gain_long_pos_or_score_gate"
         out["cec_family_total"] = int(len(self.family_agg))
         out["cec_seed_total"] = int(seed_total)
         out["cec_ctx"] = cec_ctx

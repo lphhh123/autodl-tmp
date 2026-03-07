@@ -31,24 +31,10 @@ WEIGHT_PAIRS="${WEIGHT_PAIRS:-0.2,0.8 0.3,0.7 0.5,0.5}"
 SEEDS_MAIN="${SEEDS_MAIN:-0 1 2 3 4}"   # strong argument
 SEEDS_ABL="${SEEDS_ABL:-0}"             # ablations single seed by default
 
-# Preset suites (optional)
-SUITE="${SUITE:-default}"
-
 # Experiments
-EXPS_MAIN_DEFAULT="EXP-B1 EXP-B2 EXP-B3"
-EXPS_ABL_DEFAULT="EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem"
-RUN_ABLATIONS_DEFAULT="1"
-
-if [[ "${SUITE}" == "cec_paper" ]]; then
-  # Paper suite: MPVS-only vs B1, naive mixed pool, short-score baseline, and full CEC.
-  EXPS_MAIN_DEFAULT="EXP-B1 EXP-B2-mpvs-only EXP-B2p-naive EXP-B2p-shortscore EXP-B2p-cec"
-  EXPS_ABL_DEFAULT=""
-  RUN_ABLATIONS_DEFAULT="0"
-fi
-
-EXPS_MAIN="${EXPS_MAIN:-${EXPS_MAIN_DEFAULT}}"
-EXPS_ABL="${EXPS_ABL:-${EXPS_ABL_DEFAULT}}"
-RUN_ABLATIONS="${RUN_ABLATIONS:-${RUN_ABLATIONS_DEFAULT}}"     # set 0 to skip ablations
+EXPS_MAIN="${EXPS_MAIN:-EXP-B1 EXP-B2 EXP-B3}"
+EXPS_ABL="${EXPS_ABL:-EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem}"
+RUN_ABLATIONS="${RUN_ABLATIONS:-1}"     # set 0 to skip ablations
 
 # Evidence suite for "control necessity" (uncontrolled + controller ablations)
 # Default OFF to avoid exploding runtime. Turn on with:
