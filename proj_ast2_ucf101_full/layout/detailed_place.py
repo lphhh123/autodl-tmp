@@ -693,7 +693,7 @@ def run_detailed_place(
                 w_therm=float(getattr(evaluator, "scalar_w", {}).get("w_therm", 0.0)),
             )
             mpvs_obj_params = obj
-            macro_engine = MacroEngine(macro_cfg=macro_cfg0 if isinstance(macro_cfg0, dict) else {}, obj=obj, rng=rng_macro)
+            macro_engine = MacroEngine(macro_cfg=_cfg_to_dict(macro_cfg0), obj=obj, rng=rng_macro)
         except Exception:
             macro_engine = None
             mpvs_obj_params = None
