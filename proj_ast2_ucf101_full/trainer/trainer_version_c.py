@@ -222,17 +222,31 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         # Prefer a pinned snapshot; fall back to last applied schedule.
         frozen = stable_state.get("ast_sched_frozen") or stable_state.get("ast_sched_last_applied") or {}
         if not isinstance(frozen, dict) or not frozen:
-            # fail-safe: dense behavior
-            ast_cfg = getattr(cfg, "ast", None)
-            token_temperature = float(getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
-            frozen = {
-                "phase": "warmup",
-                "t": 0.0,
-                "force_dense": True,
-                "rho_token": 1.0,
-                "token_temperature": token_temperature,
-                "lambda_ast": 0.0,
-            }
+            # If StableHW requests freezing before we've recorded ast_sched_last_applied
+            # (e.g., entering RECOVERY right after HW enables), do NOT jump back to dense.
+            # Instead, compute the schedule for the *current* virtual epoch and pin it.
+            cand = None
+            try:
+                cand = compute_ast_schedule_effective(cfg, int(v_epoch))
+            except Exception:
+                cand = None
+            if isinstance(cand, dict) and cand:
+                frozen = dict(cand)
+                # Record so subsequent frozen steps stay consistent/auditable.
+                stable_state["ast_sched_last_applied"] = dict(frozen)
+                stable_state["ast_sched_last_epoch"] = int(v_epoch)
+            else:
+                # Last-resort fail-safe: dense behavior
+                ast_cfg = getattr(cfg, "ast", None)
+                token_temperature = float(getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
+                frozen = {
+                    "phase": "warmup",
+                    "t": 0.0,
+                    "force_dense": True,
+                    "rho_token": 1.0,
+                    "token_temperature": token_temperature,
+                    "lambda_ast": 0.0,
+                }
         else:
             frozen = dict(frozen)
 
