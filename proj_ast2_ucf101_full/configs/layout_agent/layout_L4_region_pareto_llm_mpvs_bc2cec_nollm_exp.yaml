@@ -1,0 +1,16 @@
+_base_: layout_L4_region_pareto_llm_mpvs_ab_nollm_exp.yaml
+
+# BC^2-CEC main method:
+# - counterfactual long credit (gain_cf = gain_long - expected_atomic_gain)
+# - expected_atomic_gain computed from per-ctx atomic baseline rate (best heuristic entry rate)
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    controller:
+      cec:
+        enabled: true
+        credit_metric: gain_cf
+        counterfactual_credit: true
+        counterfactual_use_ctx_atomic: true
+        counterfactual_alpha: 0.2

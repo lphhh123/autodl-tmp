@@ -415,6 +415,15 @@ case "$EXP_ID" in
   EXP-B2-ab-nofeas)    run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    EXP-B2-ab-nofeas ;;
   EXP-B2-ab-nodiverse) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml EXP-B2-ab-nodiverse ;;
 
+  # --- New paper baselines/method (B1 & B3 unchanged) ---
+  EXP-B2-std-budgetaware) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml EXP-B2-std-budgetaware ;;
+  EXP-B2-bc2cec)          run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml          EXP-B2-bc2cec ;;
+
+  # --- Headroom probes (no controller) ---
+  EXP-B2-naive-mixed)     run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml     EXP-B2-naive-mixed ;;
+  EXP-B2-naive-macroonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_macroonly_nollm_exp.yaml EXP-B2-naive-macroonly ;;
+  EXP-B2-naive-memonly)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_memonly_nollm_exp.yaml   EXP-B2-naive-memonly ;;
+
   # -------------------------
   # Appendix / Optional (kept but not required for main table)
   # -------------------------

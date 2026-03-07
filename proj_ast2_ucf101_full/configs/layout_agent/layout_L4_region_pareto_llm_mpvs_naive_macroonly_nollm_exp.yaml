@@ -1,0 +1,12 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml
+
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        macro: 3
+        mem: 0
+    memory:
+      enabled: false
+    controller:
+      enabled: false

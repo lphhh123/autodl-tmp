@@ -218,3 +218,55 @@ def test_candidate_any_and_get_active_families_enable_source_level_use():
         rel_hits += int((v or {}).get("release_hits", 0))
     assert cand_hits >= 1
     assert rel_hits >= 1
+
+
+def test_counterfactual_credit_blocks_release_when_atomic_baseline_explains_gain():
+    # Enable counterfactual credit
+    c = MPVSController(
+        cfg={
+            "ewma_alpha": 0.2,
+            "ewma_alpha_long": 0.2,
+            "share": {"slack_scale": 0.5, "min_samples": 1},
+            "budget_stage": {"early_frac": 0.2, "late_frac": 0.7},
+            "stagn_norm": 20,
+            "cec": {
+                "enabled": True,
+                "candidate_release": True,
+                "family_stage_prior": True,
+                "credit_metric": "gain_cf",
+                "counterfactual_credit": True,
+                "counterfactual_use_ctx_atomic": True,
+                "counterfactual_alpha": 0.5,
+                "family_min_samples": 1,
+                "local_min_samples": 1,
+                "seed_trials_per_family": 1,
+                "family_cooldown_steps": 0,
+                "trial_max_per_step": 1,
+                "context": {
+                    "stagn_ratio_edges": [0.75, 1.5],
+                    "repeat_ratio_edges": [0.55, 0.75],
+                    "blocked_ratio_edges": [0.15, 0.35],
+                },
+            },
+            "macro": {"enabled": True, "quota_max": 5},
+        }
+    )
+    ctx_late = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+
+    # Build minimal probe history so probe_pass_heur>0.
+    c.observe_heuristic(gain=1.0, calls=1000)
+    for _ in range(4):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=False)
+
+    # Make atomic baseline rate very large -> expected_atomic_gain dominates.
+    for _ in range(5):
+        c.observe_atomic(ctx_key=ctx_late["ctx_key"], gain=10.0, calls=1)  # ~10 per call
+
+    # Sponsored win activates candidate immediately.
+    c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_late["ctx_key"], family="comm", sponsored=True)
+    assert c.candidate_active("macro", family="comm", ctx=ctx_late)
+
+    # Horizon expires with small absolute improvement (gain_long=1),
+    # but expected_atomic_gain over horizon is huge -> gain_cf < 0 -> should NOT release.
+    c.on_progress(used_calls=500, budget_total=1000, best_total_seen=9.0)
+    assert not c.release_active("macro", family="comm", ctx=ctx_late)

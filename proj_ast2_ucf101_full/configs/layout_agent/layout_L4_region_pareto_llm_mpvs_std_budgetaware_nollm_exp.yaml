@@ -1,0 +1,14 @@
+_base_: layout_L4_region_pareto_llm_mpvs_ab_nollm_exp.yaml
+
+# STD budget-aware baseline:
+# - keep MPVS verifier + short-term budget-stage/share/ROI gating
+# - disable CEC (no sponsor/candidate/release)
+# - disable long-horizon credit (so "delayed ROI" is not used)
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    controller:
+      ewma_alpha_long: 0.0
+      cec:
+        enabled: false
