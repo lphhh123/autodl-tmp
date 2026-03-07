@@ -1773,6 +1773,42 @@ def run_detailed_place(
                                 except Exception:
                                     pass
 
+                            # v2.1: prioritize active macro families (candidate/released) for this ctx_key.
+                            # This avoids candidate being ineffective when allow/quota are called before a family is chosen.
+                            try:
+                                if mpvs_ctrl is not None and macro_enabled:
+                                    _ctx_key = str((step_ctx or {}).get("ctx_key", "") or "")
+                                    _stage = str((step_ctx or {}).get("stage", "") or "")
+                                    active_fams = []
+                                    if _ctx_key:
+                                        active_fams = list(mpvs_ctrl.get_active_families(ctx_key=_ctx_key, stage=_stage) or [])
+                                    if active_fams:
+                                        merged = []
+                                        seen = set()
+                                        for _f in active_fams:
+                                            _f = str(_f or "")
+                                            if not _f or _f in seen:
+                                                continue
+                                            seen.add(_f)
+                                            merged.append(_f)
+                                        for _m in (macro_names or []):
+                                            _m = str(_m or "")
+                                            if not _m or _m in seen:
+                                                continue
+                                            seen.add(_m)
+                                            merged.append(_m)
+                                        macro_names = merged
+
+                                        # Filter availability again in case active_fams introduced new macros.
+                                        if macro_engine is not None and macro_names:
+                                            macro_names = [m for m in list(macro_names) if macro_engine.available(m)]
+                            except Exception:
+                                pass
+
+                            # Enforce cap after priority merge
+                            macro_names = list(macro_names or [])
+                            macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
+
                             try:
                                 if mpvs_ctrl is not None and macro_names:
                                     mpvs_ctrl.fired("macro", step=int(step))
