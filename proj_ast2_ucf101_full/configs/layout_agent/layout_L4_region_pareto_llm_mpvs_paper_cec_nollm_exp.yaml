@@ -1,0 +1,21 @@
+_base_: layout_L4_region_pareto_llm_mpvs_exp.yaml
+
+# Paper main method (CEC) without LLM:
+# - Keep the same atomic candidate pool + macro/memory sources.
+# - Use MPVS verifier + unified controller (CEC enabled).
+# - Disable LLM proposals to avoid API dependency/noise.
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    proposer:
+      k_llm: 0
+      llm_every_n_steps: 1000000
+      quota:
+        llm_atomic: 0
+        llm_macro: 0
+    controller:
+      llm:
+        enabled: false
+    ablation:
+      no_llm: true

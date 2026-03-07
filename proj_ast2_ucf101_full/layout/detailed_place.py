@@ -528,7 +528,17 @@ def run_detailed_place(
     if mpvs_enabled:
         try:
             ctrl_cfg0 = _cfg_get(mpvs_cfg, "controller", {}) or {}
-            mpvs_ctrl = MPVSController(cfg=ctrl_cfg0 if isinstance(ctrl_cfg0, dict) else {}, instance_tag="")
+            # Paper baselines may explicitly disable the controller while keeping MPVS verifier enabled.
+            #   detailed_place.mpvs.controller.enabled: false
+            ctrl_enabled = True
+            try:
+                ctrl_enabled = bool(_cfg_get(ctrl_cfg0, "enabled", True))
+            except Exception:
+                ctrl_enabled = True
+            if ctrl_enabled:
+                mpvs_ctrl = MPVSController(cfg=ctrl_cfg0 if isinstance(ctrl_cfg0, dict) else {}, instance_tag="")
+            else:
+                mpvs_ctrl = None
         except Exception:
             mpvs_ctrl = None
     mpvs_explore_left = 0
@@ -557,6 +567,7 @@ def run_detailed_place(
 
     mpvs_stats = {
         "enabled": bool(mpvs_enabled),
+        "controller_enabled": 1 if (mpvs_ctrl is not None) else 0,
         "llm_calls": 0,
         "llm_ok": 0,
         "llm_selected": 0,

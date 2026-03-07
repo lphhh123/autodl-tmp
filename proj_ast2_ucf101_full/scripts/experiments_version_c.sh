@@ -395,6 +395,10 @@ case "$EXP_ID" in
   EXP-B1)        run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_exp.yaml                             EXP-B1 ;;
   EXP-B1-weak)   run_layout_multi run_layout configs/layout_agent/layout_L0_heuristic_weak_exp.yaml                        EXP-B1-weak ;;
   EXP-B2)        run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_exp.yaml                EXP-B2 ;;
+  # --- Paper suite (CEC as main contribution; LLM disabled for reproducibility) ---
+  EXP-B2p-cec)        run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_paper_cec_nollm_exp.yaml          EXP-B2p-cec ;;
+  EXP-B2p-shortscore) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_paper_shortscore_nollm_exp.yaml    EXP-B2p-shortscore ;;
+  EXP-B2p-naive)      run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_paper_naive_mixed_nollm_exp.yaml   EXP-B2p-naive ;;
   # --- Evidence suite: uncontrolled vs controlled, and controller ablations ---
   EXP-B2-uncontrolled)                 run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_uncontrolled_exp.yaml                 EXP-B2-uncontrolled ;;
   EXP-B2-ctl-ab-notrigger)             run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ctl_ab_notrigger_exp.yaml             EXP-B2-ctl-ab-notrigger ;;
