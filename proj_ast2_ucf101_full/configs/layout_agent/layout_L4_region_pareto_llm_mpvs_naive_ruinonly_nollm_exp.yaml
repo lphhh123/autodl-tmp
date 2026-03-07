@@ -1,0 +1,28 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml
+
+# Headroom probe: ruin-repair macro only (no controller).
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        macro: 3
+        mem: 0
+    memory:
+      enabled: false
+    controller:
+      enabled: false
+    macros:
+      # Always enable and ONLY use ruin-repair macro
+      base: ["ruin_repair"]
+      extra_on_stagnation: []
+      enable_base_when_stagnation_ge: 0
+      enable_extra_when_stagnation_ge: 999999
+      max_macros: 1
+      n_steps: 1
+      ruin_repair:
+        ruin_ratios: [0.10, 0.20, 0.30]
+        candidates_per_ratio: 2
+        eval_topk: 6
+        repair_steps: 6
+        repair_step_topk: 12
+        repair_step_sample_topk: 3

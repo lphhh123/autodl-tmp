@@ -109,6 +109,22 @@ class MacroEngine:
         self.therm_cold_k = int(delta_cfg.get("therm_cold_k", 10))
         self.monotone = bool(delta_cfg.get("monotone", True))
 
+        # New macro families: chain and ruin_repair
+        chain_cfg = (self.cfg.get("chain") or {}) if isinstance(self.cfg, dict) else {}
+        self.chain_len = int(chain_cfg.get("chain_len", 5))
+        self.chain_propose = int(chain_cfg.get("propose_chains", 24))
+        self.chain_eval_topk = int(chain_cfg.get("eval_topk", 6))
+        self.chain_step_topk = int(chain_cfg.get("step_topk", 10))
+        self.chain_step_sample_topk = int(chain_cfg.get("step_sample_topk", 3))
+
+        rr_cfg = (self.cfg.get("ruin_repair") or {}) if isinstance(self.cfg, dict) else {}
+        self.rr_ratios = [float(x) for x in (rr_cfg.get("ruin_ratios", [0.10, 0.20, 0.30]) or [])]
+        self.rr_candidates_per_ratio = int(rr_cfg.get("candidates_per_ratio", 2))
+        self.rr_eval_topk = int(rr_cfg.get("eval_topk", 6))
+        self.rr_repair_steps = int(rr_cfg.get("repair_steps", 6))
+        self.rr_repair_step_topk = int(rr_cfg.get("repair_step_topk", 12))
+        self.rr_repair_step_sample_topk = int(rr_cfg.get("repair_step_sample_topk", 3))
+
     def _stat(self, name: str) -> OpStat:
         if name not in self.stats:
             self.stats[name] = OpStat()
@@ -150,6 +166,255 @@ class MacroEngine:
         used = np.zeros(Ns, dtype=bool)
         used[np.asarray(assign, dtype=int)] = True
         return np.nonzero(~used)[0].astype(int)
+
+    def _apply_act(self, assign: np.ndarray, act: Dict[str, Any]) -> np.ndarray:
+        op = str(act.get("op", "none"))
+        if op == "swap":
+            return _apply_swap(assign, int(act.get("i", 0)), int(act.get("j", 0)))
+        if op == "relocate":
+            return _apply_relocate_perm(assign, int(act.get("i", 0)), int(act.get("site_id", 0)))
+        return assign.copy()
+
+    def _update_stat_end(self, st: OpStat, gain: float, calls: float, info: Dict[str, Any]) -> None:
+        gain = float(max(0.0, gain))
+        calls = float(max(1.0, calls))
+        a = float(self.alpha)
+        st.ewma_gain = (1.0 - a) * float(st.ewma_gain) + a * float(gain)
+        st.ewma_calls = (1.0 - a) * float(st.ewma_calls) + a * float(calls)
+        st.ewma_gain_per_call = float(st.ewma_gain) / float(max(1e-9, st.ewma_calls))
+
+        if gain > 0.0:
+            st.success += 1
+            info["success"] = int(info.get("success", 0)) + 1
+            if self.adapt_enabled:
+                st.cooldown = max(st.cooldown, int(self.success_cooldown))
+                st.weight = min(self.weight_cap, float(st.weight) * (1.0 + self.success_boost))
+        else:
+            st.fail += 1
+            info["fail"] = int(info.get("fail", 0)) + 1
+            if self.adapt_enabled:
+                st.cooldown = max(st.cooldown, int(self.fail_cooldown))
+                st.weight = max(self.weight_floor, float(st.weight) * (1.0 - self.fail_penalty))
+
+    def _propose_chain_primitives(
+        self,
+        assign: np.ndarray,
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+    ) -> List[Dict[str, Any]]:
+        a0 = []
+        try:
+            a0.extend(self.propose_actions("comm", assign, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+        except Exception:
+            pass
+        try:
+            a0.extend(self.propose_actions("therm", assign, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+        except Exception:
+            pass
+        try:
+            a0.extend(self.propose_actions("escape", assign, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+        except Exception:
+            pass
+
+        seen = set()
+        out = []
+        for act in a0:
+            op = str(act.get("op"))
+            if op == "swap":
+                i = int(act.get("i", -1)); j = int(act.get("j", -1))
+                a, b = (i, j) if i <= j else (j, i)
+                key = ("swap", a, b)
+            elif op == "relocate":
+                key = ("relocate", int(act.get("i", -1)), int(act.get("site_id", -1)))
+            else:
+                key = (op,)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(act)
+            if len(out) >= max(20, int(self.cand_k)):
+                break
+        return out
+
+    def _run_chain(
+        self,
+        name: str,
+        assign0: np.ndarray,
+        eval0: Dict[str, Any],
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+        evaluate_assign: Callable[[np.ndarray], Dict[str, Any]],
+        n_steps: int = 3,
+    ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        st = self._stat(name)
+        info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
+        if st.cooldown > 0:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        st.tries += 1
+        info["tries"] = int(info.get("tries", 0)) + 1
+
+        chain_len = max(2, int(self.chain_len), int(n_steps))
+        n_prop = max(4, int(self.chain_propose))
+        k_eval = max(1, min(int(self.chain_eval_topk), n_prop))
+
+        cand_chains: List[Tuple[float, List[Dict[str, Any]], np.ndarray]] = []
+        for _ in range(int(n_prop)):
+            cur = assign0.copy()
+            acts: List[Dict[str, Any]] = []
+            est_sum = 0.0
+            for _t in range(int(chain_len)):
+                pool = self._propose_chain_primitives(cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region)
+                if not pool:
+                    break
+                scored: List[Tuple[float, Dict[str, Any]]] = []
+                for act in pool:
+                    est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                    scored.append((float(est.get("d_total", 0.0)), dict(act)))
+                scored.sort(key=lambda x: float(x[0]))
+                topk = scored[: max(1, min(int(self.chain_step_topk), len(scored)))]
+                samp_n = max(1, min(int(self.chain_step_sample_topk), len(topk)))
+                pick = topk[_rng_randint(self.rng, 0, samp_n)] if samp_n > 1 else topk[0]
+                d0, a0 = float(pick[0]), dict(pick[1])
+                est_sum += d0
+                acts.append(a0)
+                cur = self._apply_act(cur, a0)
+            if acts:
+                cand_chains.append((float(est_sum), acts, cur))
+
+        if not cand_chains:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        cand_chains.sort(key=lambda x: float(x[0]))
+
+        best_total = float(eval0.get("total_scalar", 0.0))
+        best_assign = assign0.copy()
+        best_eval = dict(eval0)
+        best_acts: List[Dict[str, Any]] = []
+        best_final = assign0.copy()
+
+        for _k in range(int(k_eval)):
+            _est, acts, final_assign = cand_chains[_k]
+            eo = evaluate_assign(final_assign)
+            info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+            v = float(eo.get("total_scalar", 1e30))
+            if v < best_total:
+                best_total = float(v)
+                best_assign = final_assign.copy()
+                best_eval = dict(eo)
+                best_acts = [dict(a) for a in acts]
+                best_final = final_assign.copy()
+
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+        calls = float(info.get("eval_calls", 0))
+        info["used_actions"] = int(len(best_acts))
+        self._update_stat_end(st, gain=gain, calls=calls, info=info)
+        return best_assign, best_eval, float(best_total), best_acts, best_final, info
+
+    def _run_ruin_repair(
+        self,
+        name: str,
+        assign0: np.ndarray,
+        eval0: Dict[str, Any],
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+        evaluate_assign: Callable[[np.ndarray], Dict[str, Any]],
+    ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        st = self._stat(name)
+        info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
+        if st.cooldown > 0:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        st.tries += 1
+        info["tries"] = int(info.get("tries", 0)) + 1
+
+        S = int(assign0.shape[0])
+        Ns = int(sites_xy_mm.shape[0])
+        empty0 = self._empty_sites(assign0, Ns)
+
+        ratios = [r for r in self.rr_ratios if r > 0.0]
+        if not ratios:
+            ratios = [0.2]
+
+        candidates: List[Tuple[float, List[Dict[str, Any]], np.ndarray]] = []
+        for r in ratios:
+            n_can = max(1, int(self.rr_candidates_per_ratio))
+            n_ruin = max(1, min(S, int(round(float(r) * float(S)))))
+            for _c in range(int(n_can)):
+                cur = assign0.copy()
+                acts: List[Dict[str, Any]] = []
+                for _t in range(int(n_ruin)):
+                    i = _rng_randint(self.rng, 0, S)
+                    if empty0.size > 0:
+                        sid = int(empty0[_rng_randint(self.rng, 0, empty0.size)])
+                        act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "relocate"}
+                    else:
+                        j = _rng_randint(self.rng, 0, S)
+                        act = {"op": "swap", "i": int(i), "j": int(j), "type": "swap"}
+                    acts.append(dict(act))
+                    cur = self._apply_act(cur, act)
+
+                for _t in range(max(0, int(self.rr_repair_steps))):
+                    pool = self._propose_chain_primitives(cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region)
+                    if not pool:
+                        break
+                    scored: List[Tuple[float, Dict[str, Any]]] = []
+                    for act in pool:
+                        est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                        scored.append((float(est.get("d_total", 0.0)), dict(act)))
+                    scored.sort(key=lambda x: float(x[0]))
+                    topk = scored[: max(1, min(int(self.rr_repair_step_topk), len(scored)))]
+                    samp_n = max(1, min(int(self.rr_repair_step_sample_topk), len(topk)))
+                    pick = topk[_rng_randint(self.rng, 0, samp_n)] if samp_n > 1 else topk[0]
+                    _d0, a0 = float(pick[0]), dict(pick[1])
+                    acts.append(dict(a0))
+                    cur = self._apply_act(cur, a0)
+
+                est0 = float(r) + 1e-6 * float(len(acts))
+                candidates.append((est0, acts, cur))
+
+        if not candidates:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        k_eval = max(1, min(int(self.rr_eval_topk), len(candidates)))
+        try:
+            idxs = list(range(len(candidates)))
+            for i in range(len(idxs) - 1, 0, -1):
+                j = _rng_randint(self.rng, 0, i + 1)
+                idxs[i], idxs[j] = idxs[j], idxs[i]
+            candidates = [candidates[i] for i in idxs]
+        except Exception:
+            pass
+
+        best_total = float(eval0.get("total_scalar", 0.0))
+        best_assign = assign0.copy()
+        best_eval = dict(eval0)
+        best_acts: List[Dict[str, Any]] = []
+        best_final = assign0.copy()
+
+        for _k in range(int(k_eval)):
+            _est, acts, final_assign = candidates[_k]
+            eo = evaluate_assign(final_assign)
+            info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+            v = float(eo.get("total_scalar", 1e30))
+            if v < best_total:
+                best_total = float(v)
+                best_assign = final_assign.copy()
+                best_eval = dict(eo)
+                best_acts = [dict(a) for a in acts]
+                best_final = final_assign.copy()
+
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+        calls = float(info.get("eval_calls", 0))
+        info["used_actions"] = int(len(best_acts))
+        self._update_stat_end(st, gain=gain, calls=calls, info=info)
+        return best_assign, best_eval, float(best_total), best_acts, best_final, info
 
     def _hot_slots_by_traffic(self, traffic_sym: np.ndarray, k: int) -> List[int]:
         s = np.sum(np.asarray(traffic_sym, dtype=np.float64), axis=1)
@@ -279,6 +544,30 @@ class MacroEngine:
         n_steps: int = 3,
         max_eval_per_step: Optional[int] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        if str(name) in {"chain", "macro_chain"}:
+            return self._run_chain(
+                name=str(name),
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy_mm,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp_w,
+                site_to_region=site_to_region,
+                evaluate_assign=evaluate_assign,
+                n_steps=int(n_steps),
+            )
+        if str(name) in {"ruin_repair", "ruin-and-recreate", "ruin"}:
+            return self._run_ruin_repair(
+                name=str(name),
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy_mm,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp_w,
+                site_to_region=site_to_region,
+                evaluate_assign=evaluate_assign,
+            )
+
         st = self._stat(name)
         info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
 
@@ -383,4 +672,3 @@ class MacroEngine:
         st.ewma_gain_per_call = float(st.ewma_gain) / float(max(1e-9, st.ewma_calls))
 
         return best_assign, best_eval, float(best_total), executed, cur.copy(), info
-
