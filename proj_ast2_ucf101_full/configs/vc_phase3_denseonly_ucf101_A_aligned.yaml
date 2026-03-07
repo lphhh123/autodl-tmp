@@ -1,0 +1,44 @@
+# NEW-A1 (aligned): Dense baseline under the SAME Version-C trainer as A4/A5.
+# Goal: remove "pipeline confounds" (single-device trainer vs Version-C trainer).
+#
+# Differences vs A4:
+#   - StableHW disabled (no guard, no HW schedule)
+#   - AST token pruning disabled (always dense)
+#   - Discrete updates (mapping/layout) throttled to "init once" (huge every_epochs)
+#   - alpha/layout inner steps disabled
+#
+# Output directory is set by scripts/experiments_version_c.sh to: outputs[/SMOKE]/NEW_A1/seed{seed}
+
+_base_: configs/vc_phase3_full_ucf101_A_main.yaml
+
+stable_hw:
+  enabled: false
+  # v5.4 contract: allow explicitly disabling StableHW in baselines.
+  force_disable_ok: true
+  # Even if stable_hw.enabled=false, Version-C trainer still reads discrete_isolation.
+  # Set very large periods so mapping/layout are computed once to populate cache, then reused.
+  discrete_isolation:
+    mapping_update_every_epochs: 1000000000
+    layout_update_every_epochs:  1000000000
+
+training:
+  # Disable continuous alpha/layout inner steps for a pure "train-only" baseline.
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+
+model:
+  use_ast_prune: false
+
+ast:
+  use_ast_prune: false
+  rho_token_target: 1.0
+  schedule:
+    enabled: false
+
+loss:
+  lambda_AST: 0.0
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0
+
