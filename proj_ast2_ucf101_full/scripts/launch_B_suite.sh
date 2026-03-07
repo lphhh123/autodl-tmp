@@ -7,16 +7,9 @@ cd "$ROOT"
 BUDGET="${BUDGET:-50k}"
 INSTANCE="${INSTANCE:-all}"
 SEEDS="${SEEDS:-0}"
-SUITE="${SUITE:-default}"
+EXPS="${EXPS:-EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem EXP-B3}"
 PARALLEL="${PARALLEL:-0}"
 MAX_JOBS="${MAX_JOBS:-8}"
-
-EXPS_DEFAULT="EXP-B1 EXP-B2 EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem EXP-B3"
-if [[ "${SUITE}" == "cec_paper" ]]; then
-  # Minimal paper suite: isolate MPVS-only, naive mixed pool, short-score baseline, and full CEC.
-  EXPS_DEFAULT="EXP-B1 EXP-B2-mpvs-only EXP-B2p-naive EXP-B2p-shortscore EXP-B2p-cec"
-fi
-EXPS="${EXPS:-${EXPS_DEFAULT}}"
 
 # Default behavior per user request:
 # - purge legacy outputs/EXP-B* once
