@@ -1,0 +1,21 @@
+_base_: layout_L4_region_pareto_llm_mpvs_uncontrolled_exp.yaml
+
+# Paper naive baseline: mixed action pool (atomic + macro + memory) WITHOUT controller/CEC.
+# This intentionally removes budget-aware gating/credit so we can observe negative effects at low budget
+# and potential benefits at high budget (if they exist).
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    proposer:
+      k_llm: 0
+      llm_every_n_steps: 1000000
+      quota:
+        llm_atomic: 0
+        llm_macro: 0
+        macro: 3
+        mem: 3
+    controller:
+      enabled: false
+    ablation:
+      no_llm: true
