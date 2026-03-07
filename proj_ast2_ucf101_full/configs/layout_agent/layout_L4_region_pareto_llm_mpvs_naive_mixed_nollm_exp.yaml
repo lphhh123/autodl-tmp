@@ -1,0 +1,26 @@
+_base_: layout_L4_region_pareto_llm_mpvs_uncontrolled_exp.yaml
+
+# NAIVE mixed pool (headroom probe):
+# - atomic + macro + mem candidates
+# - controller disabled (no CEC, no budget-aware gating)
+# - LLM disabled
+detailed_place:
+  planner:
+    type: heuristic
+  mpvs:
+    proposer:
+      k_llm: 0
+      llm_every_n_steps: 1000000
+      quota:
+        heur: 10
+        llm_atomic: 0
+        llm_macro: 0
+        macro: 3
+        mem: 3
+    controller:
+      enabled: false
+    ablation:
+      no_llm: true
+    macros:
+      enable_base_when_stagnation_ge: 0
+      enable_extra_when_stagnation_ge: 0

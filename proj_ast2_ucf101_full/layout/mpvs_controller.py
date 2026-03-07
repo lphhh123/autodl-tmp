@@ -48,6 +48,9 @@ class _Ticket:
     ctx_key: str = ""
     family: str = ""
     sponsored: bool = False
+    # BC^2-CEC: counterfactual baseline snapshot at ticket creation
+    start_atomic_rate: float = 0.0
+    expected_atomic_gain: float = 0.0
 
 
 @dataclass
@@ -75,6 +78,10 @@ class _CtxAgg:
     last_trial_kind: str = ""
     # v2.1 audit: why did we promote to released?
     last_release_reason: str = ""
+    # BC^2-CEC audit: realized gains at last horizon maturity (for paper tables)
+    last_gain_long: float = 0.0
+    last_gain_cf: float = 0.0
+    last_atomic_exp_gain: float = 0.0
     # v2.1: candidate soft-release state.
     # Activated immediately after a sponsored macro win, to enable a tiny amount of continued
     # sponsored trials before horizon credit is realized (avoids "first win but no release" deadlock).
@@ -115,10 +122,10 @@ class MPVSController:
             "llm": CompState("llm"),
         }
         self.alpha = float(self.cfg.get("ewma_alpha", 0.2))
+        self.alpha_long = float(self.cfg.get("ewma_alpha_long", max(0.05, 0.5 * self.alpha)))
         self.agg_total = _EwmaAgg()
         self.agg_by_src: Dict[str, _EwmaAgg] = {k: _EwmaAgg() for k in self.states.keys()}
         self.tickets: List[_Ticket] = []
-        self.alpha_long = float(self.cfg.get("ewma_alpha_long", max(0.05, 0.5 * self.alpha)))
 
         st = (self.cfg.get("budget_stage") or {}) if isinstance(self.cfg, dict) else {}
         self.early_frac = float(st.get("early_frac", 0.20))
@@ -146,6 +153,13 @@ class MPVSController:
         cec = (self.cfg.get("cec") or {}) if isinstance(self.cfg, dict) else {}
         ctx_cfg = (cec.get("context") or {}) if isinstance(cec, dict) else {}
         self.cec_enabled = bool(cec.get("enabled", True))
+        # credit_metric:
+        #   - "gain_long": legacy long credit
+        #   - "gain_cf"  : counterfactual long credit (gain_long - expected_atomic_gain)
+        self.cec_credit_metric = str(cec.get("credit_metric", "gain_long") or "gain_long").lower()
+        self.cec_counterfactual_credit = bool(cec.get("counterfactual_credit", False)) or (self.cec_credit_metric in {"gain_cf", "cf", "counterfactual"})
+        self.cec_cf_use_ctx_atomic = bool(cec.get("counterfactual_use_ctx_atomic", True))
+        self.cec_cf_alpha = float(cec.get("counterfactual_alpha", self.alpha))
         self.cec_family_blend_tau = float(cec.get("family_blend_tau", 8))
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
@@ -165,6 +179,7 @@ class MPVSController:
         if len(self.cec_blocked_ratio_edges) < 2:
             self.cec_blocked_ratio_edges = [0.15, 0.35]
         self.heur_agg = _HeurAgg()
+        self.atomic_by_ctx: Dict[str, _HeurAgg] = {}
         self.ctx_agg: Dict[Tuple[str, str, str], _CtxAgg] = {}
         self.family_agg: Dict[Tuple[str, str], _FamAgg] = {}
         self.family_stage_agg: Dict[Tuple[str, str, str], _FamAgg] = {}
@@ -268,6 +283,35 @@ class MPVSController:
         self.heur_agg.gain = (1.0 - a) * float(self.heur_agg.gain) + a * g
         self.heur_agg.calls = (1.0 - a) * float(self.heur_agg.calls) + a * c
         self.heur_agg.rate = float(self.heur_agg.gain) / float(max(1e-9, self.heur_agg.calls))
+
+    def observe_atomic(self, ctx_key: str, gain: float, calls: int) -> None:
+        """BC^2-CEC: track atomic counterfactual baseline rate per ctx_key.
+
+        We use the *best heuristic (atomic)* candidate at this step as the counterfactual
+        "what we could have achieved using only atomic moves".
+        """
+        ctx_key = str(ctx_key or "")
+        if not ctx_key:
+            return
+        g = float(max(0.0, gain))
+        c = float(max(1, int(calls)))
+        ew = float(self.cec_cf_alpha)
+        ag = self.atomic_by_ctx.get(ctx_key)
+        if ag is None:
+            ag = _HeurAgg()
+            self.atomic_by_ctx[ctx_key] = ag
+        ag.gain = (1.0 - ew) * float(ag.gain) + ew * g
+        ag.calls = (1.0 - ew) * float(ag.calls) + ew * c
+        ag.rate = float(ag.gain) / float(max(1e-9, ag.calls))
+
+    def _atomic_rate(self, ctx_key: str = "") -> float:
+        """Return per-ctx atomic baseline if available; else fall back to global heuristic rate."""
+        ctx_key = str(ctx_key or "")
+        if bool(self.cec_cf_use_ctx_atomic) and ctx_key:
+            ag = self.atomic_by_ctx.get(ctx_key)
+            if ag is not None and float(ag.calls) > 0.0:
+                return float(ag.rate)
+        return float(self.heur_agg.rate)
 
     def observe_probe(
         self,
@@ -447,6 +491,8 @@ class MPVSController:
         Candidate is activated immediately after a sponsored macro win, and expires when the
         corresponding horizon ticket matures (promoted to released if long ROI is positive; otherwise revoked).
         """
+        if not bool(self.cec_enabled):
+            return False
         if str(comp) != "macro":
             return False
         ctx0 = ctx or {}
@@ -473,6 +519,8 @@ class MPVSController:
           - Only meaningful in late stage; early/mid return [].
           - When count_hits=True, this method increments per-family hits so trace can show it was used.
         """
+        if not bool(self.cec_enabled):
+            return []
         ctx_key = str(ctx_key or "")
         stage = str(stage or "")
         if not ctx_key:
@@ -627,19 +675,27 @@ class MPVSController:
                 continue
             span = max(1, used_calls - int(tk.start_calls))
             gain_long = float(tk.start_best_total) - float(cur_best)
-            if gain_long > 0.0:
+            # BC^2-CEC: counterfactual net gain
+            gain_cf = float(gain_long) - float(getattr(tk, "expected_atomic_gain", 0.0))
+            credit_gain = float(gain_cf) if bool(self.cec_counterfactual_credit) else float(gain_long)
+
+            if credit_gain > 0.0:
                 a = self.agg_by_src.get(str(tk.src))
                 if a is not None:
                     al = float(self.alpha_long)
-                    roi_long = float(gain_long) / float(span)
+                    roi_long = float(credit_gain) / float(span)
                     a.roi_long = (1.0 - al) * float(a.roi_long) + al * float(roi_long)
             if str(tk.src) == "macro" and str(tk.ctx_key) and str(tk.family):
                 ca = self._get_ctx_agg("macro", str(tk.ctx_key), str(tk.family))
                 fa = self._get_family_agg("macro", str(tk.family))
                 al = float(self.alpha_long)
-                roi_long_ctx = float(gain_long) / float(span)
+                roi_long_ctx = float(credit_gain) / float(span)
                 ca.roi_long = (1.0 - al) * float(ca.roi_long) + al * float(roi_long_ctx)
                 fa.roi_long = (1.0 - al) * float(fa.roi_long) + al * float(roi_long_ctx)
+                # audit
+                ca.last_gain_long = float(gain_long)
+                ca.last_gain_cf = float(gain_cf)
+                ca.last_atomic_exp_gain = float(getattr(tk, "expected_atomic_gain", 0.0))
                 if bool(tk.sponsored):
                     # Only promote in late stage; keep release strictly ctx-local.
                     _stage = str(tk.ctx_key or "").split("|", 1)[0] if str(tk.ctx_key or "") else ""
@@ -653,12 +709,12 @@ class MPVSController:
                         reason = ""
 
                         if (
-                            float(gain_long) > 0.0
+                            float(credit_gain) > 0.0
                             and int(getattr(ca, "trial_won", 0)) > 0
                             and int(getattr(ca, "probe_pass_heur", 0)) > 0
                         ):
                             release_ok = True
-                            reason = "gain_long_pos"
+                            reason = "gain_cf_pos" if bool(self.cec_counterfactual_credit) else "gain_long_pos"
 
                         # Fallback: keep previous score-gated rule (more conservative).
                         if not release_ok:
@@ -860,6 +916,9 @@ class MPVSController:
         budget_total = int(budget_total)
         best_total_seen = float(best_total_seen)
         horizon = max(300, int(0.05 * float(budget_total))) if budget_total > 0 else 300
+        # BC^2-CEC: snapshot atomic baseline at win time to compute expected atomic gain over horizon
+        rate0 = float(self._atomic_rate(str(ctx_key or "")))
+        exp_atomic_gain = float(rate0) * float(horizon)
         self.tickets.append(
             _Ticket(
                 src=comp,
@@ -869,6 +928,8 @@ class MPVSController:
                 ctx_key=str(ctx_key or ""),
                 family=str(family or ""),
                 sponsored=bool(sponsored),
+                start_atomic_rate=float(rate0),
+                expected_atomic_gain=float(exp_atomic_gain),
             )
         )
         if comp == "macro" and str(ctx_key or "") and str(family or "") and bool(sponsored):
@@ -884,6 +945,8 @@ class MPVSController:
         return float(ag.roi_long) if ag is not None else 0.0
 
     def release_active(self, comp: str, family: str = "", ctx: Optional[Dict[str, Any]] = None) -> bool:
+        if not bool(self.cec_enabled):
+            return False
         if str(comp) != "macro":
             return False
         ctx0 = ctx or {}
@@ -998,7 +1061,15 @@ class MPVSController:
             "cec_enabled": int(bool(self.cec_enabled)),
             "cec_v2_enabled": int(bool(self.cec_enabled)),
             "heur_rate_ewma": float(self.heur_agg.rate),
+            "cec_credit_metric": str("gain_cf" if bool(self.cec_counterfactual_credit) else "gain_long"),
         }
+        if bool(self.cec_counterfactual_credit):
+            try:
+                out["atomic_rate_ctx_n"] = int(len(self.atomic_by_ctx))
+                # cap to keep logs bounded
+                out["atomic_rate_by_ctx"] = {k: float(v.rate) for k, v in list(self.atomic_by_ctx.items())[:32]}
+            except Exception:
+                pass
         cec_ctx: Dict[str, Dict[str, Any]] = {}
         cec_family: Dict[str, Dict[str, Any]] = {}
         rel_total = 0
@@ -1026,6 +1097,9 @@ class MPVSController:
                 "trial_sponsored": int(a.trial_sponsored),
                 "trial_won": int(a.trial_won),
                 "roi_long": float(a.roi_long),
+                "last_gain_long": float(getattr(a, "last_gain_long", 0.0)),
+                "last_gain_cf": float(getattr(a, "last_gain_cf", 0.0)),
+                "last_atomic_exp_gain": float(getattr(a, "last_atomic_exp_gain", 0.0)),
                 "released": int(a.released),
                 "candidate": int(getattr(a, "candidate", 0)),
                 "candidate_hits": int(getattr(a, "candidate_hits", 0)),
@@ -1056,7 +1130,7 @@ class MPVSController:
         out["cec_release_total"] = int(rel_total)
         out["cec_candidate_total"] = int(cand_total)
         # v2.1: audit the active rule
-        out["cec_release_rule"] = "gain_long_pos_or_score_gate"
+        out["cec_release_rule"] = "gain_cf_pos_or_score_gate" if bool(self.cec_counterfactual_credit) else "gain_long_pos_or_score_gate"
         out["cec_family_total"] = int(len(self.family_agg))
         out["cec_seed_total"] = int(seed_total)
         out["cec_ctx"] = cec_ctx

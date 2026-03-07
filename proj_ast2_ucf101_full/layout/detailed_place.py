@@ -528,7 +528,17 @@ def run_detailed_place(
     if mpvs_enabled:
         try:
             ctrl_cfg0 = _cfg_get(mpvs_cfg, "controller", {}) or {}
-            mpvs_ctrl = MPVSController(cfg=ctrl_cfg0 if isinstance(ctrl_cfg0, dict) else {}, instance_tag="")
+            # Allow disabling controller while keeping MPVS verifier enabled (for paper baselines).
+            #   detailed_place.mpvs.controller.enabled: false
+            ctrl_enabled = True
+            try:
+                ctrl_enabled = bool(_cfg_get(ctrl_cfg0, "enabled", True))
+            except Exception:
+                ctrl_enabled = True
+            if ctrl_enabled:
+                mpvs_ctrl = MPVSController(cfg=ctrl_cfg0 if isinstance(ctrl_cfg0, dict) else {}, instance_tag="")
+            else:
+                mpvs_ctrl = None
         except Exception:
             mpvs_ctrl = None
     mpvs_explore_left = 0
@@ -557,6 +567,7 @@ def run_detailed_place(
 
     mpvs_stats = {
         "enabled": bool(mpvs_enabled),
+        "controller_enabled": 1 if (mpvs_ctrl is not None) else 0,
         "llm_calls": 0,
         "llm_ok": 0,
         "llm_selected": 0,
@@ -2882,6 +2893,12 @@ def run_detailed_place(
                                     heur_gain = max(0.0, float(cur_total) - float(best_heur_entry.get("v_eff", cur_total)))
                                     heur_calls = max(1, int(best_heur_entry.get("calls_spent", 0)))
                                     mpvs_ctrl.observe_heuristic(float(heur_gain), int(heur_calls))
+                                    # BC^2-CEC: track atomic counterfactual baseline per-context (ctx_key)
+                                    try:
+                                        _ctx_key0 = str((step_ctx or {}).get("ctx_key", "") or "")
+                                        mpvs_ctrl.observe_atomic(ctx_key=_ctx_key0, gain=float(heur_gain), calls=int(heur_calls))
+                                    except Exception:
+                                        pass
                                     mpvs_stats["heuristic_rate_ewma"] = float(mpvs_ctrl.snapshot().get("heur_rate_ewma", 0.0))
                             except Exception:
                                 pass
