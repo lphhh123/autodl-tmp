@@ -625,6 +625,14 @@ def run_detailed_place(
         "trig_ver_success": 0,
         "macro_precheck_fail_min_gain": 0,
         "macro_precheck_pass_min_gain": 0,
+        "macro_probe_seen": 0,
+        "macro_probe_pass_heur": 0,
+        "macro_probe_pass_cur": 0,
+        "macro_trial_sponsored": 0,
+        "macro_trial_won": 0,
+        "macro_release_activated": 0,
+        "macro_release_hit": 0,
+        "heuristic_rate_ewma": 0.0,
     }
 
     # ----------------------------
@@ -1528,6 +1536,26 @@ def run_detailed_place(
                                 mpvs_ctrl.on_progress(int(eval_calls_cum), int(budget_total_calls), float(best_total_seen))
                             except Exception:
                                 pass
+                        blocked_ratio_pre = float(mpvs_stats.get("blocked_heuristic", 0)) / float(max(1, int(mpvs_stats.get("steps_mpvs", 0))))
+                        step_ctx = {
+                            "progress": float(eval_calls_cum) / float(max(1, int(budget_total_calls))) if int(budget_total_calls) > 0 else 0.0,
+                            "stage": "mid",
+                            "stagn_bucket": 0,
+                            "health_bucket": 0,
+                            "ctx_key": "mid|stg0|hlth0",
+                        }
+                        if mpvs_ctrl is not None:
+                            try:
+                                step_ctx = mpvs_ctrl.build_context(
+                                    stagn=int(stagn),
+                                    repeat_ratio=float(repeat_ratio_pre),
+                                    blocked_ratio=float(blocked_ratio_pre),
+                                    used_calls=int(eval_calls_cum),
+                                    budget_total=int(budget_total_calls),
+                                )
+                            except Exception:
+                                pass
+
                         explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
                         explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
                         explore_stagn = int(_cfg_get(explore_cfg, "when_stagnation_ge", 12))
@@ -1572,6 +1600,7 @@ def run_detailed_place(
                                         roi=float(roi_llm),
                                         used_calls=int(eval_calls_cum),
                                         budget_total=int(budget_total_calls),
+                                        ctx=step_ctx,
                                     )
                                     use_llm_now = bool(ok and sched_ok)
                                     llm_deny_reason = str(rr or "")
@@ -1708,6 +1737,7 @@ def run_detailed_place(
                                     roi=float(roi_macro),
                                     used_calls=int(eval_calls_cum),
                                     budget_total=int(budget_total_calls),
+                                    ctx=step_ctx,
                                 )
                                 allow_macro_src = bool(ok)
                             macro_enabled = bool(macro_enabled and allow_macro_src)
@@ -1813,7 +1843,7 @@ def run_detailed_place(
                                                 topk=max(0, mem_topk),
                                                 budget_progress=float(bud_prog),
                                                 repeat_ratio=float(repeat_ratio_pre),
-                                                blocked_ratio=0.0,
+                                                blocked_ratio=float(blocked_ratio_pre),
                                             )
                                         except Exception:
                                             hits = []
@@ -1867,10 +1897,10 @@ def run_detailed_place(
                             # dynamic quota adjustment by MPVS controller (ROI-aware)
                             try:
                                 if mpvs_ctrl is not None:
-                                    q_mem = int(mpvs_ctrl.quota("mem", int(q_mem), roi=float(roi_mem), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
-                                    q_llm_atomic = int(mpvs_ctrl.quota("llm", int(q_llm_atomic), roi=float(roi_llm), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
-                                    q_llm_macro = int(mpvs_ctrl.quota("llm", int(q_llm_macro), roi=float(roi_llm), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
-                                    q_macro = int(mpvs_ctrl.quota("macro", int(q_macro), roi=float(roi_macro), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls)))
+                                    q_mem = int(mpvs_ctrl.quota("mem", int(q_mem), roi=float(roi_mem), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls), ctx=step_ctx))
+                                    q_llm_atomic = int(mpvs_ctrl.quota("llm", int(q_llm_atomic), roi=float(roi_llm), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls), ctx=step_ctx))
+                                    q_llm_macro = int(mpvs_ctrl.quota("llm", int(q_llm_macro), roi=float(roi_llm), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls), ctx=step_ctx))
+                                    q_macro = int(mpvs_ctrl.quota("macro", int(q_macro), roi=float(roi_macro), used_calls=int(eval_calls_cum), budget_total=int(budget_total_calls), ctx=step_ctx, family=""))
                             except Exception:
                                 pass
 
@@ -2314,26 +2344,64 @@ def run_detailed_place(
                                                     "best_eval": b_eval,
                                                     "actions": acts,
                                                 }
+                                                min_gain = float(_macro_min_gain_cur())
+                                                cur_total = float(eval_out.get("total_scalar", 0.0))
+                                                margin_heur = float(best_heur_est) - float(b_total)
+                                                margin_cur = float(cur_total) - float(b_total)
+                                                pass_heur = bool(float(b_total) <= float(best_heur_est) - float(req))
+                                                pass_cur = bool(float(b_total) <= float(cur_total) - float(min_gain))
+                                                if mpvs_ctrl is not None:
+                                                    try:
+                                                        mpvs_ctrl.observe_probe(
+                                                            comp="macro",
+                                                            family=str(nm),
+                                                            ctx_key=str(step_ctx.get("ctx_key", "")),
+                                                            margin_heur=float(margin_heur),
+                                                            margin_cur=float(margin_cur),
+                                                            calls=int(_spent),
+                                                            pass_heur=bool(pass_heur),
+                                                            pass_cur=bool(pass_cur),
+                                                        )
+                                                    except Exception:
+                                                        pass
+                                                mpvs_stats["macro_probe_seen"] = int(mpvs_stats.get("macro_probe_seen", 0)) + 1
+                                                if pass_heur:
+                                                    mpvs_stats["macro_probe_pass_heur"] = int(mpvs_stats.get("macro_probe_pass_heur", 0)) + 1
+                                                if pass_cur:
+                                                    mpvs_stats["macro_probe_pass_cur"] = int(mpvs_stats.get("macro_probe_pass_cur", 0)) + 1
+
                                                 # Require macro to beat heuristic by req already at fast-proxy stage
-                                                if float(b_total) > float(best_heur_est) - float(req):
+                                                if not pass_heur:
                                                     mpvs_stats["macro_precheck_blocked"] = int(mpvs_stats.get("macro_precheck_blocked", 0)) + 1
                                                     continue
                                                 # strict admission: macro must improve current objective to be considered
-                                                min_gain = float(_macro_min_gain_cur())
-
-                                                cur_total = float(eval_out.get("total_scalar", 0.0))
-                                                if float(b_total) > float(cur_total) - float(min_gain):
+                                                if not pass_cur:
                                                     mpvs_stats["macro_precheck_fail_min_gain"] = int(mpvs_stats.get("macro_precheck_fail_min_gain", 0)) + 1
-                                                    try:
-                                                        cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail", 10))
-                                                        if instance_tag == "randw":
-                                                            cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail_randw", cd))
-                                                        mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), cd)
-                                                    except Exception:
-                                                        pass
-                                                    continue
-
-                                                mpvs_stats["macro_precheck_pass_min_gain"] = int(mpvs_stats.get("macro_precheck_pass_min_gain", 0)) + 1
+                                                    sponsored = False
+                                                    reason = ""
+                                                    if mpvs_ctrl is not None:
+                                                        try:
+                                                            sponsored, reason, _meta = mpvs_ctrl.maybe_sponsor_trial(
+                                                                comp="macro", family=str(nm), ctx=step_ctx, step=int(step)
+                                                            )
+                                                        except Exception:
+                                                            sponsored, reason = False, ""
+                                                    if not sponsored:
+                                                        try:
+                                                            cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail", 10))
+                                                            if instance_tag == "randw":
+                                                                cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail_randw", cd))
+                                                            mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), cd)
+                                                        except Exception:
+                                                            pass
+                                                        continue
+                                                    _pl["_cec_trial"] = 1
+                                                    _pl["_cec_ctx_key"] = str(step_ctx.get("ctx_key", ""))
+                                                    _pl["_cec_family"] = str(nm)
+                                                    _pl["_cec_trial_reason"] = str(reason or "")
+                                                    mpvs_stats["macro_trial_sponsored"] = int(mpvs_stats.get("macro_trial_sponsored", 0)) + 1
+                                                else:
+                                                    mpvs_stats["macro_precheck_pass_min_gain"] = int(mpvs_stats.get("macro_precheck_pass_min_gain", 0)) + 1
                                                 mpvs_stats["macro_precheck_allowed"] = int(mpvs_stats.get("macro_precheck_allowed", 0)) + 1
                                             except Exception:
                                                 mpvs_stats["macro_precheck_failed"] = int(mpvs_stats.get("macro_precheck_failed", 0)) + 1
@@ -2553,6 +2621,8 @@ def run_detailed_place(
                                                             used_calls=int(eval_calls_cum),
                                                             budget_total=int(budget_total_calls),
                                                             best_total_seen=float(best_total_seen),
+                                                            ctx_key=str(step_ctx.get("ctx_key", "")),
+                                                            family=str(pl.get("name", "")) if src_group == "macro" else "",
                                                         )
                                                     except Exception:
                                                         pass
@@ -2734,6 +2804,15 @@ def run_detailed_place(
                                     else:
                                         best_res = {"verified_best_total": float(cur_total), "best_assign": assign.copy(), "best_eval": dict(eval_out), "actions": []}
 
+                            try:
+                                if mpvs_ctrl is not None and best_heur_entry is not None and best_heur_entry.get("res") is not None:
+                                    heur_gain = max(0.0, float(cur_total) - float(best_heur_entry.get("v_eff", cur_total)))
+                                    heur_calls = max(1, int(best_heur_entry.get("calls_spent", 0)))
+                                    mpvs_ctrl.observe_heuristic(float(heur_gain), int(heur_calls))
+                                    mpvs_stats["heuristic_rate_ewma"] = float(mpvs_ctrl.snapshot().get("heur_rate_ewma", 0.0))
+                            except Exception:
+                                pass
+
                             force_reject = False
                             if best_plan is None or best_res is None:
                                 mpvs_stats["no_plan_or_res"] = int(mpvs_stats.get("no_plan_or_res", 0)) + 1
@@ -2792,6 +2871,9 @@ def run_detailed_place(
                                                             float(min_gain_cur),
                                                             used_calls=int(eval_calls_cum),
                                                             budget_total=int(budget_total_calls),
+                                                            ctx=step_ctx,
+                                                            family=str((best_plan or {}).get("name", "")),
+                                                            sponsored=bool((best_plan or {}).get("_cec_trial", 0)),
                                                         )
                                                     )
                                         except Exception:
@@ -3147,7 +3229,7 @@ def run_detailed_place(
                                                 origin_src=str(best_plan.get("src", "")),
                                                 budget_progress=float(eval_calls_cum) / float(max(1, int(budget_total_calls))) if int(budget_total_calls) > 0 else 0.0,
                                                 repeat_ratio=float(repeat_ratio_pre),
-                                                blocked_ratio=0.0,
+                                                blocked_ratio=float(blocked_ratio_pre),
                                             )
                                             if mid is not None:
                                                 mpvs_stats["mem_store"] = int(mpvs_stats.get("mem_store", 0)) + 1
@@ -3177,6 +3259,8 @@ def run_detailed_place(
                                     mpvs_stats["llm_selected"] += 1
                                 if src_sel == "macro":
                                     mpvs_stats["macro_selected"] += 1
+                                    if bool((best_plan or {}).get("_cec_trial", 0)):
+                                        mpvs_stats["macro_trial_won"] = int(mpvs_stats.get("macro_trial_won", 0)) + 1
                                 if src_sel == "mem":
                                     mpvs_stats["memory_selected"] += 1
                                     # Update mem global gate based on realized gain (selected mem only).
@@ -3213,7 +3297,14 @@ def run_detailed_place(
                                                 used_calls=int(eval_calls_cum),
                                                 budget_total=int(budget_total_calls),
                                                 best_total_seen=float(best_total_seen),
+                                                ctx_key=str((best_plan or {}).get("_cec_ctx_key", step_ctx.get("ctx_key", ""))),
+                                                family=str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", ""))),
+                                                sponsored=bool((best_plan or {}).get("_cec_trial", 0)),
                                             )
+                                            if src_grp == "macro":
+                                                fam0 = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")) or "")
+                                                if bool(mpvs_ctrl.release_active("macro", family=fam0, ctx=step_ctx)):
+                                                    mpvs_stats["macro_release_hit"] = int(mpvs_stats.get("macro_release_hit", 0)) + 1
                                 except Exception:
                                     pass
 
@@ -4194,7 +4285,10 @@ def run_detailed_place(
             pass
         try:
             if mpvs_ctrl is not None:
-                mpvs_stats["comp_ctrl"] = mpvs_ctrl.snapshot()
+                snap_ctrl = mpvs_ctrl.snapshot()
+                mpvs_stats["comp_ctrl"] = snap_ctrl
+                mpvs_stats["heuristic_rate_ewma"] = float(snap_ctrl.get("heur_rate_ewma", mpvs_stats.get("heuristic_rate_ewma", 0.0)))
+                mpvs_stats["macro_release_activated"] = int(snap_ctrl.get("cec_release_total", 0))
         except Exception:
             pass
         policy_meta["mpvs"] = mpvs_stats
