@@ -641,6 +641,8 @@ def run_detailed_place(
         "macro_candidate_activated": 0,
         "macro_candidate_hit": 0,
         "heuristic_rate_ewma": 0.0,
+        # v2.1 audit: count sponsored macro wins that use pre-apply best_total as ticket baseline.
+        "ticket_baseline_fix_used": 0,
     }
     prev_release_total = 0
     prev_candidate_total = 0
@@ -2213,6 +2215,15 @@ def run_detailed_place(
                             best_res = None
                             best_v_raw = None
                             cur_total = float(eval_out.get("total_scalar", 0.0))
+                            # v2.1 IMPORTANT: keep a stable scalar baseline from *before* winner application.
+                            # Sponsored macro tickets must use this pre-apply baseline to realize long-horizon ROI.
+                            try:
+                                best_total_before_step = float(cur_total)
+                            except Exception:
+                                try:
+                                    best_total_before_step = float(best_total_seen)
+                                except Exception:
+                                    best_total_before_step = None
                             per_plan: List[Dict[str, Any]] = []
 
                             def _eval_dict_from_cand_est(est: Dict[str, Any]) -> Dict[str, Any]:
@@ -3354,14 +3365,28 @@ def run_detailed_place(
                                     if mpvs_ctrl is not None:
                                         src_grp = "llm" if src_sel.startswith("llm") else str(src_sel)
                                         if src_grp in {"macro", "mem", "llm"}:
+                                            _is_sponsored = bool((best_plan or {}).get("_cec_trial", 0))
+                                            _ctx_key_for_ticket = str((best_plan or {}).get("_cec_ctx_key", step_ctx.get("ctx_key", "")))
+                                            _family_for_ticket = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")))
+                                            # default: keep existing behavior
+                                            _ticket_best_total_seen = float(best_total_seen)
+                                            # v2.1 baseline fix: sponsored macro wins use pre-apply baseline only
+                                            if src_grp == "macro" and _is_sponsored and best_total_before_step is not None:
+                                                _ticket_best_total_seen = float(best_total_before_step)
+                                                mpvs_stats["ticket_baseline_fix_used"] = int(mpvs_stats.get("ticket_baseline_fix_used", 0)) + 1
+                                                try:
+                                                    best_plan["_cec_ticket_best_total_before_step"] = float(best_total_before_step)
+                                                    best_plan["_cec_ticket_best_total_seen_passed"] = float(_ticket_best_total_seen)
+                                                except Exception:
+                                                    pass
                                             mpvs_ctrl.register_win(
                                                 src_grp,
                                                 used_calls=int(eval_calls_cum),
                                                 budget_total=int(budget_total_calls),
-                                                best_total_seen=float(best_total_seen),
-                                                ctx_key=str((best_plan or {}).get("_cec_ctx_key", step_ctx.get("ctx_key", ""))),
-                                                family=str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", ""))),
-                                                sponsored=bool((best_plan or {}).get("_cec_trial", 0)),
+                                                best_total_seen=float(_ticket_best_total_seen),
+                                                ctx_key=_ctx_key_for_ticket,
+                                                family=_family_for_ticket,
+                                                sponsored=bool(_is_sponsored),
                                             )
                                             if src_grp == "macro":
                                                 fam0 = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")) or "")
