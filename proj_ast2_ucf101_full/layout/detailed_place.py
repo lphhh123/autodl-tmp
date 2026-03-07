@@ -634,12 +634,17 @@ def run_detailed_place(
         "macro_release_hit": 0,
         "macro_trial_seed": 0,
         "macro_trial_evidence": 0,
+        "macro_trial_candidate": 0,
         "macro_trial_sponsor_reason": {},
         "macro_trial_score_sum": 0.0,
         "macro_trial_score_max": 0.0,
+        "macro_candidate_activated": 0,
+        "macro_candidate_hit": 0,
         "heuristic_rate_ewma": 0.0,
     }
     prev_release_total = 0
+    prev_candidate_total = 0
+    prev_candidate_hits_sum = 0
 
     # ----------------------------
     # MacroEngine (stronger macros, fewer evaluator calls)
@@ -2417,6 +2422,8 @@ def run_detailed_place(
                                                         mpvs_stats["macro_trial_seed"] = int(mpvs_stats.get("macro_trial_seed", 0)) + 1
                                                     if str(reason) == "evidence_sponsor":
                                                         mpvs_stats["macro_trial_evidence"] = int(mpvs_stats.get("macro_trial_evidence", 0)) + 1
+                                                    if str(reason) == "candidate_sponsor":
+                                                        mpvs_stats["macro_trial_candidate"] = int(mpvs_stats.get("macro_trial_candidate", 0)) + 1
                                                     _rs = mpvs_stats.setdefault("macro_trial_sponsor_reason", {})
                                                     _rs[str(reason or "")] = int(_rs.get(str(reason or ""), 0)) + 1
                                                 else:
@@ -3335,6 +3342,27 @@ def run_detailed_place(
                                     if _release_now > int(prev_release_total):
                                         mpvs_stats["macro_release_activated"] = int(mpvs_stats.get("macro_release_activated", 0)) + int(_release_now - int(prev_release_total))
                                     prev_release_total = int(_release_now)
+
+                                    # v2.1 candidate soft-release stats (simple diff to avoid double counting)
+                                    try:
+                                        _cec_ctx = _snap_step.get("cec_ctx", {}) or {}
+                                        _cand_now = int(_snap_step.get("cec_candidate_total", 0))
+                                        if _cand_now > int(prev_candidate_total):
+                                            mpvs_stats["macro_candidate_activated"] = int(mpvs_stats.get("macro_candidate_activated", 0)) + int(_cand_now - int(prev_candidate_total))
+                                        prev_candidate_total = int(_cand_now)
+
+                                        _cand_hits_sum = 0
+                                        if isinstance(_cec_ctx, dict):
+                                            for _v in _cec_ctx.values():
+                                                try:
+                                                    _cand_hits_sum += int((_v or {}).get("candidate_hits", 0))
+                                                except Exception:
+                                                    pass
+                                        if int(_cand_hits_sum) > int(prev_candidate_hits_sum):
+                                            mpvs_stats["macro_candidate_hit"] = int(mpvs_stats.get("macro_candidate_hit", 0)) + int(int(_cand_hits_sum) - int(prev_candidate_hits_sum))
+                                        prev_candidate_hits_sum = int(_cand_hits_sum)
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
 

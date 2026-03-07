@@ -16,6 +16,8 @@ def _ctrl():
                 "seed_trials_per_family": 1,
                 "family_cooldown_steps": 0,
                 "trial_max_per_step": 1,
+                "candidate_release": True,
+                "family_stage_prior": True,
                 "context": {
                     "stagn_ratio_edges": [0.75, 1.5],
                     "repeat_ratio_edges": [0.55, 0.75],
@@ -108,3 +110,55 @@ def test_adjust_min_gain_current_rules():
     assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="comm", sponsored=True) == 0.0
     assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="comm", sponsored=False) == 0.0
     assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="other", sponsored=False) >= 0.0
+
+
+
+def test_candidate_soft_release_enables_min_gain_before_horizon():
+    c = _ctrl()
+    ctx_late = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+    c.observe_heuristic(gain=1.0, calls=1000)
+    for _ in range(6):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=True)
+
+    # Sponsored win activates candidate immediately.
+    c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_late["ctx_key"], family="comm", sponsored=True)
+    assert c.candidate_active("macro", family="comm", ctx=ctx_late)
+    # Candidate should relax strict current buffer to 0.0 (still requires non-negative gain later).
+    assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="comm", sponsored=False) == 0.0
+    # Candidate is ctx+family local
+    assert c.adjust_min_gain_current("macro", 0.001, ctx=ctx_late, family="other", sponsored=False) >= 0.0
+
+
+def test_candidate_expires_if_no_long_roi_at_horizon():
+    c = _ctrl()
+    ctx_late = {"stage": "late", "ctx_key": "late|stg2|hlth2"}
+    c.observe_heuristic(gain=1.0, calls=1000)
+    for _ in range(6):
+        c.observe_probe("macro", "comm", ctx_late["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=True)
+
+    c.register_win("macro", used_calls=100, budget_total=1000, best_total_seen=10.0, ctx_key=ctx_late["ctx_key"], family="comm", sponsored=True)
+    assert c.candidate_active("macro", family="comm", ctx=ctx_late)
+
+    # Horizon expires but best_total_seen doesn't improve => gain_long==0 => release shouldn't happen.
+    c.on_progress(used_calls=500, budget_total=1000, best_total_seen=10.0)
+    assert not c.candidate_active("macro", family="comm", ctx=ctx_late)
+    assert not c.release_active("macro", family="comm", ctx=ctx_late)
+
+
+def test_stage_family_prior_uses_mid_late_more_than_global_in_late():
+    c = _ctrl()
+    c.observe_heuristic(gain=5.0, calls=5000)
+
+    ctx_early = c.build_context(stagn=5, repeat_ratio=0.2, blocked_ratio=0.05, used_calls=10, budget_total=100)
+    ctx_mid = c.build_context(stagn=20, repeat_ratio=0.7, blocked_ratio=0.4, used_calls=50, budget_total=100)
+    ctx_late = c.build_context(stagn=40, repeat_ratio=0.7, blocked_ratio=0.4, used_calls=95, budget_total=100)
+
+    # Early negatives dilute global family, but should not dominate late prior.
+    for _ in range(20):
+        c.observe_probe("macro", "comm", ctx_early["ctx_key"], margin_heur=-0.02, margin_cur=-0.02, calls=1, pass_heur=False, pass_cur=False)
+    for _ in range(6):
+        c.observe_probe("macro", "comm", ctx_mid["ctx_key"], margin_heur=0.02, margin_cur=0.0, calls=1, pass_heur=True, pass_cur=False)
+
+    ts = c._trial_score("macro", ctx_late["ctx_key"], "comm")
+    assert float(ts.get("edge_family", 0.0)) > float(ts.get("edge_family_global", -1.0))
+    assert str(ts.get("prior_src", "")) in {"midlate", "midlate+global"}

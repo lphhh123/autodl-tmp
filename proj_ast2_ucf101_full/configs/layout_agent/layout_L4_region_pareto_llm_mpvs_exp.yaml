@@ -45,6 +45,8 @@ detailed_place:
         seed_trials_per_family: 1
         family_cooldown_steps: 25
         trial_max_per_step: 1
+        candidate_release: true
+        family_stage_prior: true
         context:
           stagn_ratio_edges: [0.75, 1.50]
           repeat_ratio_edges: [0.55, 0.75]
