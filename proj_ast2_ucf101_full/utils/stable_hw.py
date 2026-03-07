@@ -811,6 +811,9 @@ def apply_accuracy_guard(
         st["acc_ref"] = float(curve[idx]) - float(curve_margin)
         st["acc_ref_source"] = str(st.get("acc_ref_source", "baseline_stdout_curve"))
         st["acc_ref_locked"] = True
+        # baseline_stdout_curve provides an epoch-indexed reference (a curve), so acc_ref will legitimately change
+        # across epochs after locking. Mark it dynamic to avoid false-positive "acc_ref changed" invariant warnings.
+        st["acc_ref_dynamic"] = True
         st["acc_ref_epoch"] = int(idx)
         if st.get("acc_ref_locked_epoch") is None:
             st["acc_ref_locked_epoch"] = int(epoch)

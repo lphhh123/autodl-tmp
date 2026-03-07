@@ -1808,9 +1808,15 @@ def train_version_c(
                     allow_discrete = False
                     update_alpha = False
                     stable_hw_state["allow_discrete_updates"] = False
-                    stable_hw_state["freeze_schedule"] = True
-                    stable_hw_state["guard_mode"] = "RECOVERY"
+                    # IMPORTANT (v5.4):
+                    # HW stabilize window is NOT a recovery state.
+                    # It should ONLY pause discrete updates / alpha steps to avoid a spike right after HW enables.
+                    # Do NOT force guard_mode=RECOVERY or freeze_schedule here; otherwise we incorrectly freeze
+                    # the AST pruning schedule and cut lambda_hw_eff to 0 on the next outer (run becomes "locked").
                     stable_hw_state["hw_stabilizing"] = True
+                    stable_hw_state["hw_stabilize_first_outer"] = int(hw_first_outer)
+                    stable_hw_state["hw_stabilize_len"] = int(hw_stabilize_epochs)
+                    stable_hw_state["gating_reason_code"] = "hw_stabilize_window"
                 else:
                     stable_hw_state["hw_stabilizing"] = False
 
