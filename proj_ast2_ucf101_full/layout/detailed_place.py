@@ -74,6 +74,23 @@ def _cfg_get(cfg: Any, key: str, default=None):
         return getattr(cfg, key, default)
 
 
+def _cfg_to_dict(cfg: Any) -> Dict[str, Any]:
+    """Convert dict / OmegaConf(DictConfig) / mapping-like objects into a plain python dict."""
+    if isinstance(cfg, dict):
+        return cfg
+    try:
+        from omegaconf import OmegaConf
+
+        obj = OmegaConf.to_container(cfg, resolve=True)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    try:
+        return dict(cfg)
+    except Exception:
+        return {}
+
+
 def _normalize_planner_type(t: str) -> str:
     t0 = (t or "").strip().lower()
     alias = {
@@ -528,15 +545,16 @@ def run_detailed_place(
     if mpvs_enabled:
         try:
             ctrl_cfg0 = _cfg_get(mpvs_cfg, "controller", {}) or {}
+            ctrl_cfg = _cfg_to_dict(ctrl_cfg0)
             # Allow disabling controller while keeping MPVS verifier enabled (for paper baselines).
             #   detailed_place.mpvs.controller.enabled: false
             ctrl_enabled = True
             try:
-                ctrl_enabled = bool(_cfg_get(ctrl_cfg0, "enabled", True))
+                ctrl_enabled = bool(_cfg_get(ctrl_cfg, "enabled", True))
             except Exception:
                 ctrl_enabled = True
             if ctrl_enabled:
-                mpvs_ctrl = MPVSController(cfg=ctrl_cfg0 if isinstance(ctrl_cfg0, dict) else {}, instance_tag="")
+                mpvs_ctrl = MPVSController(cfg=ctrl_cfg, instance_tag="")
             else:
                 mpvs_ctrl = None
         except Exception:
