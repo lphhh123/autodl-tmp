@@ -321,6 +321,10 @@ class MacroEngine:
             ext_idxs = [int(x) for x in ext_w.keys()]
             if ext_idxs:
                 ww = np.asarray([float(ext_w[j]) for j in ext_idxs], dtype=np.float64)
+                # NOTE:
+                # ext_idxs are global chip indices, while ww is a local weight vector aligned
+                # with ext_idxs (not a global length-S vector). _weighted_centroid() now supports
+                # this aligned form directly.
                 centroid = self._weighted_centroid(pos, ext_idxs, ww)
             else:
                 centroid = np.asarray(pos[np.asarray(block, dtype=int)], dtype=np.float64).mean(axis=0)
@@ -630,12 +634,45 @@ class MacroEngine:
         return [int(x) for x in idx.tolist()]
 
     def _weighted_centroid(self, pos: np.ndarray, idxs: List[int], w: np.ndarray) -> np.ndarray:
+        """
+        Compute weighted centroid for positions selected by `idxs`.
+
+        Supports two conventions for `w`:
+          1) global weight vector: len(w) is larger than max(idxs), and weights are accessed by global idx
+          2) local aligned weight vector: len(w) == len(idxs), where w[k] corresponds to idxs[k]
+
+        The old implementation only supported (1), but block_relocate passes (2),
+        which caused IndexError when a global idx exceeded len(w)-1.
+        """
         if not idxs:
             return pos.mean(axis=0)
-        ww = np.asarray([float(w[int(j)]) for j in idxs], dtype=np.float64)
-        ww = np.maximum(ww, 1e-12)
-        pts = pos[np.asarray(idxs, dtype=int)]
-        c = np.sum(pts * ww[:, None], axis=0) / float(np.sum(ww))
+
+        idx_arr = np.asarray([int(j) for j in idxs], dtype=int)
+        if idx_arr.size == 0:
+            return pos.mean(axis=0)
+
+        pts = pos[idx_arr]
+        w_arr = np.asarray(w, dtype=np.float64).reshape(-1)
+
+        # Case A: local aligned weights (most relevant for block_relocate)
+        if int(w_arr.size) == int(idx_arr.size):
+            ww = w_arr.copy()
+        else:
+            # Case B: global weight vector indexed by idxs
+            valid = (idx_arr >= 0) & (idx_arr < int(w_arr.size))
+            if not np.all(valid):
+                idx_arr = idx_arr[valid]
+                pts = pts[valid]
+            if idx_arr.size == 0:
+                return pos.mean(axis=0)
+            ww = w_arr[idx_arr]
+
+        ww = np.maximum(np.asarray(ww, dtype=np.float64), 1e-12)
+        denom = float(np.sum(ww))
+        if not np.isfinite(denom) or denom <= 0.0:
+            return np.asarray(pts.mean(axis=0), dtype=np.float64)
+
+        c = np.sum(pts * ww[:, None], axis=0) / denom
         return np.asarray(c, dtype=np.float64)
 
     def propose_actions(

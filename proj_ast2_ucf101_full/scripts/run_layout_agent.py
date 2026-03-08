@@ -922,7 +922,11 @@ def run_layout_agent(
                 import subprocess
 
                 git_head = (
-                    subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parent.parent))
+                    subprocess.check_output(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=str(Path(__file__).resolve().parent.parent),
+                        stderr=subprocess.DEVNULL,
+                    )
                     .decode("utf-8", errors="ignore")
                     .strip()
                 )
