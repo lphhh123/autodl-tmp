@@ -374,6 +374,10 @@ case "$EXP_ID" in
     ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
+  # A4 + ACHO (same lambda_hw_max as A4 for fair comparison)
+  EXP-A4-acho) run_vc configs/vc_phase3_full_ucf101_A_acho.yaml "$(odir EXP-A4-acho)" ;;
+  # A4 + ACHO + ROI-Commit
+  EXP-A4-acho-roi) run_vc configs/vc_phase3_full_ucf101_A_acho_roi.yaml "$(odir EXP-A4-acho-roi)" ;;
   EXP-A5) run_vc  configs/vc_phase3_twostage_ucf101_A_main.yaml  "$(odir EXP-A5_twostage)" ;;
   EXP-A6) run_vc  configs/vc_phase3_mapping_only_ucf101_A_main.yaml "$(odir EXP-A6_mappingonly)" ;;
   EXP-A7) run_vc  configs/vc_phase3_layout_only_ucf101_A_main.yaml  "$(odir EXP-A7_layoutonly)" ;;
