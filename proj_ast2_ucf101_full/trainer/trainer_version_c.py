@@ -955,6 +955,101 @@ def _solve_layout_for_cache(
     return {"loss": float(L_layout.item()), "stats": layout_stats, "signature": signature}
 
 
+
+
+#
+# ROI-Commit (v5.4+): discrete mapping/layout safe commit
+#
+def _roi_get_cfg(iso_cfg) -> dict:
+    roi = _get_iso_cfg_value(iso_cfg, "roi_commit", None)
+    if roi is None:
+        return {}
+    if isinstance(roi, dict):
+        return dict(roi)
+    try:
+        return {k: roi[k] for k in roi}
+    except Exception:
+        try:
+            return dict(vars(roi))
+        except Exception:
+            return {}
+
+
+def _roi_rel_improve(old: float, new: float) -> float:
+    denom = max(abs(float(old)), 1e-6)
+    return (float(old) - float(new)) / denom
+
+
+@torch.no_grad()
+def _roi_eval_hw_metric(
+    *,
+    cfg,
+    hw_proxy,
+    mapping_solver,
+    wafer_layout,
+    stable_hw_cfg,
+    stable_hw_state,
+    slot_out: dict,
+    mapping_res: dict,
+    metric_key: str,
+):
+    """Compute a cheap, deterministic HW metric for ROI-Commit.
+
+    Note: mapping/layout do NOT affect the forward accuracy directly; they affect training only via HW loss.
+    Here we evaluate the *proxy hardware metric* under the candidate discrete bundle.
+    """
+    segments = mapping_res.get("segments", []) if isinstance(mapping_res, dict) else []
+    mapping = mapping_res.get("mapping", []) if isinstance(mapping_res, dict) else []
+    if not segments or not mapping:
+        return 0.0, 0.0, {}
+
+    eff_specs = slot_out.get("eff_specs", None)
+    alpha = slot_out.get("alpha", None)
+    if eff_specs is None:
+        return 0.0, 0.0, {}
+
+    # signatures (for cache keys inside compute_hw_loss)
+    mapping_sig = mapping_res.get("mapping_sig") or mapping_res.get("signature")
+    try:
+        segments_sig = stable_hash([getattr(s, "signature", None) or repr(s) for s in (segments or [])])
+    except Exception:
+        segments_sig = None
+
+    layout_pos = wafer_layout.current_pos_continuous()
+    L_hw, hw_stats = compute_hw_loss(
+        cfg=cfg,
+        hw_proxy=hw_proxy,
+        model_info={},
+        stable_hw_cfg=stable_hw_cfg,
+        stable_hw_state=stable_hw_state,
+        segments=segments,
+        mapping=mapping,
+        mapping_sig=str(mapping_sig) if mapping_sig is not None else None,
+        segments_sig=str(segments_sig) if segments_sig is not None else None,
+        eff_specs=eff_specs,
+        layout_positions=layout_pos,
+        mapping_solver=mapping_solver,
+        wafer_layout=wafer_layout,
+        alpha=alpha,
+    )
+    mk = str(metric_key or "proxy_raw_latency_ms")
+    if mk in ("L_hw_total", "hw_total", "L_hw"):
+        metric = float(L_hw.detach().cpu().item())
+    else:
+        metric = float(hw_stats.get(mk, hw_stats.get("proxy_raw_latency_ms", 0.0)))
+    return float(metric), float(L_hw.detach().cpu().item()), hw_stats
+
+
+def _roi_should_commit(
+    *,
+    old_metric: float,
+    new_metric: float,
+    min_rel_improve: float,
+) -> bool:
+    rel = _roi_rel_improve(old_metric, new_metric)
+    return rel >= float(min_rel_improve)
+
+
 def train_version_c(
     cfg,
     out_dir: Optional[str] = None,
@@ -1855,6 +1950,35 @@ def train_version_c(
                         need_update_mapping = False
                         need_update_layout = False
 
+                # ROI-Commit pre-gating: cooldown + accuracy margin gate (optional)
+                roi_cfg = _roi_get_cfg(iso)
+                roi_enabled = bool(_cfg_get(roi_cfg, "enabled", False)) and bool(stable_hw_enabled)
+                if roi_enabled:
+                    cd_until = int(stable_hw_state.get("roi_cooldown_until", -1) or -1)
+                    if cd_until >= 0 and int(outer) < cd_until:
+                        stable_hw_state["roi_cooldown_active"] = True
+                        stable_hw_state["gating_reason_code"] = "roi_cooldown"
+                        allow_discrete_updates = False
+                        allow_discrete = False
+                        update_alpha = False
+                        stable_hw_state["allow_discrete_updates"] = False
+                    else:
+                        stable_hw_state["roi_cooldown_active"] = False
+
+                    margin_last = float(stable_hw_state.get("acc_margin_last", 0.0) or 0.0)
+                    min_margin = float(_cfg_get(roi_cfg, "min_margin", 0.0) or 0.0)
+                    stable_hw_state["roi_margin_last"] = float(margin_last)
+                    stable_hw_state["roi_min_margin"] = float(min_margin)
+
+                    require_hw_active = bool(_cfg_get(roi_cfg, "require_hw_active", True))
+                    if require_hw_active and float(stable_hw_state.get("lambda_hw_effective", 0.0) or 0.0) <= 0.0:
+                        need_update_mapping = need_update_mapping and (cache["mapping"] is None)
+                        need_update_layout = need_update_layout and (cache["layout"] is None)
+                    elif margin_last < min_margin:
+                        stable_hw_state["gating_reason_code"] = "roi_margin_low"
+                        need_update_mapping = False
+                        need_update_layout = False
+
                 if (not allow_discrete_updates) and cache["mapping"] is None:
                     stable_hw_state["discrete_frozen_init_mapping"] = True
 
@@ -1862,7 +1986,12 @@ def train_version_c(
                     assert allow_discrete_updates, (
                         "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
                     )
-                    mapping_res = _solve_mapping_for_cache(
+                    roi_cfg_local = _roi_get_cfg(iso)
+                    roi_enabled_local = bool(_cfg_get(roi_cfg_local, "enabled", False)) and bool(stable_hw_enabled)
+                    old_mapping_res = cache.get("mapping")
+                    old_sig = cache.get("mapping_signature")
+
+                    cand_mapping_res = _solve_mapping_for_cache(
                         model=model,
                         chiplet_slots=chiplet_slots,
                         mapping_solver=mapping_solver,
@@ -1872,9 +2001,64 @@ def train_version_c(
                         hw_cfg=cfg.hw,
                         model_info=run_state.get("last_model_info"),
                     )
-                    cache["mapping"] = mapping_res
-                    cache["mapping_signature"] = mapping_res.get("mapping_sig") or mapping_res.get("signature")
-                    mapping_updated = True
+                    cand_sig = cand_mapping_res.get("mapping_sig") or cand_mapping_res.get("signature")
+
+                    commit = True
+                    roi_reason = "roi_disabled"
+                    if roi_enabled_local and (old_mapping_res is not None):
+                        gm = str(stable_hw_state.get("guard_mode", "")).upper()
+                        if (gm == "OK") and (not bool(stable_hw_state.get("hw_stabilizing", False))):
+                            metric_key = str(_cfg_get(roi_cfg_local, "metric", "proxy_raw_latency_ms") or "proxy_raw_latency_ms")
+                            min_rel = float(_cfg_get(roi_cfg_local, "min_rel_improve", 0.01) or 0.01)
+                            try:
+                                old_metric, _, _ = _roi_eval_hw_metric(
+                                    cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
+                                    stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
+                                    mapping_res=old_mapping_res, metric_key=metric_key,
+                                )
+                                new_metric, _, _ = _roi_eval_hw_metric(
+                                    cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
+                                    stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
+                                    mapping_res=cand_mapping_res, metric_key=metric_key,
+                                )
+                                rel = float(_roi_rel_improve(old_metric, new_metric))
+                                commit = _roi_should_commit(old_metric=old_metric, new_metric=new_metric, min_rel_improve=min_rel)
+                                roi_reason = f"metric={metric_key} old={old_metric:.6g} new={new_metric:.6g} rel={rel:.4f} min_rel={min_rel:.4f}"
+                                stable_hw_state["roi_last_eval"] = {
+                                    "outer": int(outer), "metric": metric_key,
+                                    "old": float(old_metric), "new": float(new_metric),
+                                    "rel_improve": float(rel), "min_rel": float(min_rel),
+                                    "commit": bool(commit),
+                                }
+                            except Exception as exc:
+                                commit = True
+                                roi_reason = f"roi_eval_error:{exc}"
+                        else:
+                            commit = False
+                            roi_reason = f"guard_mode_or_stabilize_blocked:{gm}"
+
+                    if old_mapping_res is None:
+                        commit = True
+                        roi_reason = "cache_init"
+
+                    if commit:
+                        cache["mapping"] = cand_mapping_res
+                        cache["mapping_signature"] = cand_sig
+                        mapping_res = cand_mapping_res
+                        mapping_updated = bool(old_sig is None or (str(cand_sig) != str(old_sig)))
+                        if roi_enabled_local and mapping_updated:
+                            cd = int(_cfg_get(roi_cfg_local, "cooldown_epochs", 2) or 2)
+                            stable_hw_state["roi_cooldown_until"] = int(outer) + int(cd)
+                            stable_hw_state["roi_last_commit_outer"] = int(outer)
+                            stable_hw_state["roi_last_commit_reason"] = str(roi_reason)
+                            logger.info("[ROICommit] mapping COMMIT outer=%s %s", int(outer), str(roi_reason))
+                    else:
+                        mapping_res = old_mapping_res
+                        mapping_updated = False
+                        stable_hw_state["roi_last_reject_outer"] = int(outer)
+                        stable_hw_state["roi_last_reject_reason"] = str(roi_reason)
+                        if roi_enabled_local:
+                            logger.info("[ROICommit] mapping REJECT outer=%s %s", int(outer), str(roi_reason))
                 else:
                     mapping_res = cache["mapping"]
                     mapping_updated = False
@@ -1886,6 +2070,7 @@ def train_version_c(
                     assert allow_discrete_updates, (
                         "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
                     )
+                    old_layout_sig = cache.get("layout_signature")
                     layout_res = _solve_layout_for_cache(
                         chiplet_slots=chiplet_slots,
                         wafer_layout=wafer_layout,
@@ -1894,7 +2079,7 @@ def train_version_c(
                     )
                     cache["layout"] = layout_res
                     cache["layout_signature"] = layout_res.get("signature")
-                    layout_updated = True
+                    layout_updated = bool(old_layout_sig is None or (str(cache["layout_signature"]) != str(old_layout_sig)))
                 else:
                     layout_res = cache["layout"]
                     layout_updated = False
@@ -2416,6 +2601,9 @@ def train_version_c(
                             "est_attn_flops_ratio": float(model_info.get("est_attn_flops_ratio", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "est_token_linear_flops_ratio": float(model_info.get("est_token_linear_flops_ratio", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "lambda_hw": float(lambda_hw_eff),
+                            "acho_lambda": float(stable_hw_state.get("acho_lambda", 0.0)) if stable_hw_enabled else 0.0,
+                            "acho_action": str(stable_hw_state.get("acho_action", "")) if stable_hw_enabled else "",
+                            "roi_cd_until": int(stable_hw_state.get("roi_cooldown_until", -1) or -1) if stable_hw_enabled else -1,
                             "allow_discrete_updates": bool(allow_discrete),
                             "mapping_updated": step_mapping_updated,
                             "layout_updated": step_layout_updated,
