@@ -1671,18 +1671,14 @@ def run_detailed_place(
                             direction_bias: Optional[str] = None
                             allow_dir_bias = bool(_cfg_get(prop_cfg, "llm_allow_direction_bias", False))
                             # Virtual candidates (LLM can pick these IDs to propose macro/direction)
-                            # Macro IDs
+                            # Macro IDs (ONLY keep the 3 families used in mainline).
                             V_MACRO = {
-                                900001: "therm",
-                                900002: "comm",
-                                900003: "escape",
-                                900004: "cluster",
+                                900005: "chain",
+                                900006: "ruin_repair",
+                                900007: "block_relocate",
                             }
-                            # Direction IDs (optional, used as a "bias" tag in verifier scoring)
-                            V_DIR = {
-                                900101: "bias_comm",
-                                900102: "bias_therm",
-                            }
+                            # Direction IDs removed (therm/comm-only biases no longer apply).
+                            V_DIR = {}
                             virtual_candidates = []
                             for vid, name in V_MACRO.items():
                                 virtual_candidates.append(

@@ -13,14 +13,17 @@ detailed_place:
       macro_monotone_enabled: false
       macro_accept_min_gain: 0.0
     proposer:
-      llm_every_n_steps: 5
+      # Uncontrolled probe should still respect "atomic + 3 macros only".
+      k_llm: 0
+      llm_every_n_steps: 1000000
       quota:
         heur: 10
-        llm_atomic: 1
-        llm_macro: 1
+        llm_atomic: 0
+        llm_macro: 0
         macro: 3
-        mem: 3
+        mem: 0
     memory:
+      enabled: false
       enable_when_stagnation_ge: 0
       propose_every_n_steps: 1
       verify_every_n_steps: 1

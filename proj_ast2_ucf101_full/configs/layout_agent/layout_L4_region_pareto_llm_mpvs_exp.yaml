@@ -2,12 +2,9 @@ _base_: base_layout_exp.yaml
 
 detailed_place:
   planner:
-    type: mixed
+    # Only keep atomic ops + 3 macro families. No LLM planning in mainline.
+    type: heuristic
     require_llm: false
-    mixed:
-      every_n_steps: 20
-      k_actions: 4
-    llm_config_file: configs/llm/api_model_ark.json
     queue_enabled: false
     feasibility_check: false
 
@@ -16,15 +13,18 @@ detailed_place:
     cache_size: 12000
     proposer:
       k_heur: 12
-      k_llm: 3
-      llm_every_n_steps: 10
+      # Disable LLM sources entirely (keep only atomic + macros).
+      k_llm: 0
+      llm_every_n_steps: 1000000
       llm_allow_direction_bias: false
       quota:
         heur: 10
-        llm_atomic: 1
+        llm_atomic: 0
         llm_macro: 0
-        macro: 2
-        mem: 1
+        # Keep ONLY 3 macro families (chain/ruin_repair/block_relocate)
+        macro: 3
+        # Disable memory source (keep only atomic + macros)
+        mem: 0
 
     # Unified MPVS controller: gates macro/mem/llm based on ROI + cooldown (budget-aware)
     controller:
@@ -90,7 +90,7 @@ detailed_place:
         quota_max: 4
         quota_boost_roi: 0.001
       mem:
-        enabled: true
+        enabled: false
         enable_when_stagnation_ge: 12
         min_interval_steps: 5
         roi_floor: 0.0
@@ -101,8 +101,8 @@ detailed_place:
         quota_max: 2
         quota_boost_roi: 0.0005
       llm:
-        enabled: true
-        shadow_mode: true
+        enabled: false
+        shadow_mode: false
         enable_when_stagnation_ge: 25
         enable_when_distress_ge: 0.7
         enable_when_repeat_ratio_ge: 0.8
@@ -121,12 +121,14 @@ detailed_place:
         cooldown_steps: 30
     macros:
       enabled: true
-      base: ["therm", "comm"]
-      extra_on_stagnation: ["escape", "cluster"]
-      enable_base_when_stagnation_ge: 15
-      enable_extra_when_stagnation_ge: 35
+      # Keep ONLY these 3 macro families in the mainline universe.
+      base: ["chain", "ruin_repair", "block_relocate"]
+      extra_on_stagnation: []
+      enable_base_when_stagnation_ge: 0
+      enable_extra_when_stagnation_ge: 999999
       max_macros: 3
-      n_steps: 3
+      # chain uses n_steps; ruin/block have their own internal steps.
+      n_steps: 5
 
       # Stronger macro engine (delta-based proposing + limited verification)
       engine: delta_v1
@@ -148,7 +150,15 @@ detailed_place:
         fail_penalty: 0.2
         weight_floor: 0.1
         weight_cap: 5.0
-      # Optional macro family (kept out of the main pool until headroom is verified)
+
+      # --- Macro family configs (explicit for reproducibility) ---
+      chain:
+        chain_len: 5
+        propose_chains: 24
+        eval_topk: 6
+        step_topk: 10
+        step_sample_topk: 3
+
       block_relocate:
         block_size: 3
         seed_topk: 10
@@ -314,7 +324,7 @@ detailed_place:
       use_temperature: true
       forbid_none_when_stagnation_ge: 8
     memory:
-      enabled: true
+      enabled: false
       # MemoryBank v1 (structured)
       ttl_steps: 120
       max_size: 64
