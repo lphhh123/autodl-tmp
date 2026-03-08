@@ -164,6 +164,22 @@ class MPVSController:
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
         self.cec_seed_trials_per_family = int(cec.get("seed_trials_per_family", 1))
+        # v2.3: stage-aware sponsor on-ramp
+        # - sponsor is allowed in mid+late (instead of late-only)
+        # - direct-pass seed is allowed only in late by default
+        sponsor_stages = cec.get("sponsor_stages", ["mid", "late"])
+        if isinstance(sponsor_stages, str):
+            sponsor_stages = [sponsor_stages]
+        self.cec_sponsor_stages = tuple(str(x or "").strip().lower() for x in (sponsor_stages or ["mid", "late"]) if str(x or "").strip())
+
+        direct_pass_stages = cec.get("direct_pass_trial_stages", ["late"])
+        if isinstance(direct_pass_stages, str):
+            direct_pass_stages = [direct_pass_stages]
+        self.cec_direct_pass_trial_stages = tuple(str(x or "").strip().lower() for x in (direct_pass_stages or ["late"]) if str(x or "").strip())
+
+        self.cec_seed_trials_per_family_mid = int(cec.get("seed_trials_per_family_mid", max(1, int(self.cec_seed_trials_per_family))))
+        self.cec_seed_trials_per_family_late = int(cec.get("seed_trials_per_family_late", max(1, int(self.cec_seed_trials_per_family) + 1)))
+        self.cec_direct_pass_seed_trials_per_family = int(cec.get("direct_pass_seed_trials_per_family", 1))
         # v2.2: allow a tiny number of low-sample seed sponsors once a family has shown pass_heur.
         # This is the missing on-ramp for BC^2-CEC: without it, many families never get their first
         # sponsored win, so no ticket / no long credit / no release can ever happen.
@@ -171,6 +187,13 @@ class MPVSController:
         self.cec_seed_min_pass_heur = int(cec.get("seed_min_pass_heur", 1))
         self.cec_family_cooldown_steps = int(cec.get("family_cooldown_steps", 25))
         self.cec_trial_max_per_step = int(cec.get("trial_max_per_step", 1))
+        # v2.3: remaining-budget-aware ticket horizon (for sponsored macro only)
+        self.cec_ticket_horizon_min = int(cec.get("ticket_horizon_min", 300))
+        self.cec_ticket_horizon_frac = float(cec.get("ticket_horizon_frac", 0.03))
+        self.cec_ticket_horizon_mid_remaining_frac = float(cec.get("ticket_horizon_mid_remaining_frac", 0.70))
+        self.cec_ticket_horizon_late_remaining_frac = float(cec.get("ticket_horizon_late_remaining_frac", 0.50))
+        self.cec_ticket_horizon_mid_cap = int(cec.get("ticket_horizon_mid_cap", 8000))
+        self.cec_ticket_horizon_late_cap = int(cec.get("ticket_horizon_late_cap", 4000))
         # v2.1: candidate soft-release + stage-aware family priors
         self.cec_candidate_release = bool(cec.get("candidate_release", True))
         self.cec_family_stage_prior = bool(cec.get("family_stage_prior", True))
@@ -190,6 +213,14 @@ class MPVSController:
         self.family_stage_agg: Dict[Tuple[str, str, str], _FamAgg] = {}
         self._sponsor_step = -1
         self._sponsor_count_step = 0
+
+    def _seed_budget_for_stage(self, stage: str) -> int:
+        st = str(stage or "").strip().lower()
+        if st == "mid":
+            return max(0, int(self.cec_seed_trials_per_family_mid))
+        if st == "late":
+            return max(0, int(self.cec_seed_trials_per_family_late))
+        return max(0, int(self.cec_seed_trials_per_family))
 
     def _family_stage_key(self, comp: str, stage: str, family: str) -> Tuple[str, str, str]:
         return (str(comp), str(stage or ""), str(family or ""))
@@ -593,7 +624,7 @@ class MPVSController:
         c = str(comp)
         ctx0 = ctx or {}
         ctx_key = str(ctx0.get("ctx_key", ""))
-        stage = str(ctx0.get("stage", ""))
+        stage = str(ctx0.get("stage", "")).strip().lower()
         a = self._get_ctx_agg(c, ctx_key, family)
         af = self._get_family_agg(c, family)
         score_meta = self._trial_score(c, ctx_key, family)
@@ -603,8 +634,8 @@ class MPVSController:
             return False, "cec_disabled", meta
         if c != "macro":
             return False, "not_macro", meta
-        if stage != "late":
-            return False, "not_late", meta
+        if stage not in set(self.cec_sponsor_stages):
+            return False, "not_sponsor_stage", meta
         pass_heur_local = int(a.probe_pass_heur)
         pass_heur_family = int(af.probe_pass_heur)
         pass_heur_need = max(1, int(self.cec_seed_min_pass_heur))
@@ -638,6 +669,7 @@ class MPVSController:
         edge_family = float(score_meta.get("edge_family", 0.0))
         n_local = int(score_meta.get("n_local", 0))
         n_family = int(score_meta.get("n_family", 0))
+        seed_budget = int(self._seed_budget_for_stage(stage))
 
         if n_family >= int(self.cec_family_min_samples) and n_local >= int(self.cec_local_min_samples) and trial_score > 0.0:
             reason = "evidence_sponsor"
@@ -649,11 +681,11 @@ class MPVSController:
             and n_family < int(self.cec_family_min_samples)
             and (pass_heur_local >= pass_heur_need or pass_heur_family >= pass_heur_need)
         ):
-            if int(af.trial_seed_used) >= max(0, int(self.cec_seed_trials_per_family)):
+            if int(af.trial_seed_used) >= max(0, seed_budget):
                 return False, "seed_budget_exhausted", meta
             reason = "seed_sponsor_low_sample"
         elif n_family >= int(self.cec_family_min_samples) and edge_family > 0.0 and pass_heur_local > 0:
-            if int(af.trial_seed_used) >= max(0, int(self.cec_seed_trials_per_family)):
+            if int(af.trial_seed_used) >= max(0, seed_budget):
                 return False, "seed_budget_exhausted", meta
             reason = "seed_sponsor"
         else:
@@ -670,6 +702,55 @@ class MPVSController:
         if reason in {"seed_sponsor", "seed_sponsor_low_sample"}:
             af.trial_seed_used += 1
         return True, reason, meta
+
+    def maybe_direct_pass_trial(self, comp: str, family: str, ctx: Optional[Dict[str, Any]], step: int) -> Tuple[bool, str, Dict[str, Any]]:
+        """Allow a tiny number of direct-pass macro trials into BC^2-CEC.
+
+        This closes the current gap where a macro that already passes current gate
+        is selected as a normal macro, but never gets marked as a sponsored trial,
+        so std-budgetaware and bc2cec remain identical.
+        """
+        c = str(comp)
+        ctx0 = ctx or {}
+        ctx_key = str(ctx0.get("ctx_key", ""))
+        stage = str(ctx0.get("stage", "")).strip().lower()
+        a = self._get_ctx_agg(c, ctx_key, family)
+        af = self._get_family_agg(c, family)
+        score_meta = self._trial_score(c, ctx_key, family)
+        meta = dict(score_meta)
+
+        if not bool(self.cec_enabled):
+            return False, "cec_disabled", meta
+        if c != "macro":
+            return False, "not_macro", meta
+        if stage not in set(self.cec_direct_pass_trial_stages):
+            return False, "not_direct_pass_stage", meta
+
+        pass_heur_need = max(1, int(self.cec_seed_min_pass_heur))
+        if int(a.probe_pass_heur) < pass_heur_need and int(af.probe_pass_heur) < pass_heur_need:
+            return False, "no_pass_heur", meta
+
+        stp = int(step)
+        if int(self._sponsor_step) != stp:
+            self._sponsor_step = stp
+            self._sponsor_count_step = 0
+        if int(self._sponsor_count_step) >= max(0, int(self.cec_trial_max_per_step)):
+            return False, "step_trial_quota", meta
+        if int(af.last_trial_step) > stp - max(0, int(self.cec_family_cooldown_steps)):
+            return False, "family_cooldown", meta
+        if int(a.trial_won) > 0:
+            return False, "already_trial_won", meta
+        if int(af.trial_seed_used) >= max(0, int(self.cec_direct_pass_seed_trials_per_family)):
+            return False, "direct_pass_seed_budget_exhausted", meta
+
+        self._sponsor_count_step += 1
+        a.trial_sponsored += 1
+        a.last_trial_step = stp
+        a.last_trial_kind = "direct_pass_seed"
+        af.trial_sponsored += 1
+        af.last_trial_step = stp
+        af.trial_seed_used += 1
+        return True, "direct_pass_seed", meta
 
     def tick(self, step: int) -> None:
         for st in self.states.values():
@@ -934,7 +1015,22 @@ class MPVSController:
         used_calls = int(used_calls)
         budget_total = int(budget_total)
         best_total_seen = float(best_total_seen)
-        horizon = max(300, int(0.05 * float(budget_total))) if budget_total > 0 else 300
+        horizon = max(int(self.cec_ticket_horizon_min), int(0.05 * float(budget_total))) if budget_total > 0 else int(self.cec_ticket_horizon_min)
+
+        # v2.3: remaining-budget-aware horizon for sponsored macro tickets.
+        # We want the first sponsored macro win to mature before the run ends.
+        if comp == "macro" and bool(sponsored) and budget_total > 0:
+            remaining = max(0, int(budget_total) - int(used_calls))
+            stage0 = str(ctx_key or "").split("|", 1)[0] if str(ctx_key or "") else ""
+            base_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_frac) * float(budget_total)))
+            if stage0 == "late":
+                rem_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_late_remaining_frac) * float(remaining)))
+                horizon = min(int(self.cec_ticket_horizon_late_cap), base_h, rem_h)
+            elif stage0 == "mid":
+                rem_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_mid_remaining_frac) * float(remaining)))
+                horizon = min(int(self.cec_ticket_horizon_mid_cap), base_h, rem_h)
+            else:
+                horizon = base_h
         # BC^2-CEC: snapshot atomic baseline at win time to compute expected atomic gain over horizon
         rate0 = float(self._atomic_rate(str(ctx_key or "")))
         exp_atomic_gain = float(rate0) * float(horizon)

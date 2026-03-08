@@ -43,10 +43,21 @@ detailed_place:
         family_min_samples: 1
         local_min_samples: 1
         seed_trials_per_family: 2
+        sponsor_stages: ["mid", "late"]
+        direct_pass_trial_stages: ["late"]
+        seed_trials_per_family_mid: 1
+        seed_trials_per_family_late: 3
+        direct_pass_seed_trials_per_family: 1
         seed_allow_low_sample: true
         seed_min_pass_heur: 1
         family_cooldown_steps: 8
         trial_max_per_step: 2
+        ticket_horizon_min: 300
+        ticket_horizon_frac: 0.03
+        ticket_horizon_mid_remaining_frac: 0.70
+        ticket_horizon_late_remaining_frac: 0.50
+        ticket_horizon_mid_cap: 8000
+        ticket_horizon_late_cap: 4000
         candidate_release: true
         family_stage_prior: true
         context:

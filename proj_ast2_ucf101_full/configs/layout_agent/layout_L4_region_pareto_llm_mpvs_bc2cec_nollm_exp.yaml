@@ -7,7 +7,14 @@ detailed_place:
   planner:
     type: heuristic
   mpvs:
+    proposer:
+      quota:
+        mem: 0
+    memory:
+      enabled: false
     controller:
+      mem:
+        enabled: false
       cec:
         enabled: true
         credit_metric: gain_cf

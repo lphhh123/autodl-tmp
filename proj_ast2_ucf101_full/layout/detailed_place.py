@@ -2529,6 +2529,36 @@ def run_detailed_place(
                                                     _rs[str(reason or "")] = int(_rs.get(str(reason or ""), 0)) + 1
                                                 else:
                                                     mpvs_stats["macro_precheck_pass_min_gain"] = int(mpvs_stats.get("macro_precheck_pass_min_gain", 0)) + 1
+                                                    # v2.3: direct-pass macro seed.
+                                                    # If a macro already passes current gate in late stage, let BC^2-CEC
+                                                    # mark a tiny number of these as sponsored trials, so winning them
+                                                    # can actually differentiate bc2cec from std-budgetaware.
+                                                    _direct = False
+                                                    _dreason = ""
+                                                    _dmeta = {}
+                                                    if mpvs_ctrl is not None:
+                                                        try:
+                                                            _direct, _dreason, _dmeta = mpvs_ctrl.maybe_direct_pass_trial(
+                                                                comp="macro", family=str(nm), ctx=step_ctx, step=int(step)
+                                                            )
+                                                        except Exception:
+                                                            _direct, _dreason, _dmeta = False, "", {}
+                                                    if _direct:
+                                                        _pl["_cec_trial"] = 1
+                                                        _pl["_cec_ctx_key"] = str(step_ctx.get("ctx_key", ""))
+                                                        _pl["_cec_family"] = str(nm)
+                                                        _pl["_cec_trial_reason"] = str(_dreason or "")
+                                                        _pl["_cec_trial_kind"] = str(_dreason or "")
+                                                        _pl["_cec_trial_score"] = float((_dmeta or {}).get("trial_score", 0.0))
+                                                        _pl["_cec_trial_edge_local"] = float((_dmeta or {}).get("edge_local", 0.0))
+                                                        _pl["_cec_trial_edge_family"] = float((_dmeta or {}).get("edge_family", 0.0))
+                                                        _pl["_cec_trial_lambda"] = float((_dmeta or {}).get("lambda_local", 0.0))
+                                                        mpvs_stats["macro_trial_sponsored"] = int(mpvs_stats.get("macro_trial_sponsored", 0)) + 1
+                                                        mpvs_stats["macro_trial_direct_pass_seed"] = int(mpvs_stats.get("macro_trial_direct_pass_seed", 0)) + 1
+                                                        mpvs_stats["macro_trial_score_sum"] = float(mpvs_stats.get("macro_trial_score_sum", 0.0)) + float((_dmeta or {}).get("trial_score", 0.0))
+                                                        mpvs_stats["macro_trial_score_max"] = max(float(mpvs_stats.get("macro_trial_score_max", 0.0)), float((_dmeta or {}).get("trial_score", 0.0)))
+                                                        _rs = mpvs_stats.setdefault("macro_trial_sponsor_reason", {})
+                                                        _rs[str(_dreason or "")] = int(_rs.get(str(_dreason or ""), 0)) + 1
                                                 mpvs_stats["macro_precheck_allowed"] = int(mpvs_stats.get("macro_precheck_allowed", 0)) + 1
                                             except Exception:
                                                 mpvs_stats["macro_precheck_failed"] = int(mpvs_stats.get("macro_precheck_failed", 0)) + 1
