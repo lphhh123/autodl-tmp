@@ -162,6 +162,12 @@ class MPVSController:
         self.cec_counterfactual_credit = bool(cec.get("counterfactual_credit", False)) or (self.cec_credit_metric in {"gain_cf", "cf", "counterfactual"})
         self.cec_cf_use_ctx_atomic = bool(cec.get("counterfactual_use_ctx_atomic", True))
         self.cec_cf_alpha = float(cec.get("counterfactual_alpha", self.alpha))
+        # BC^2-CEC: discount for expected atomic gain to avoid over-optimistic counterfactual baseline.
+        # 1.0 means "no discount" (legacy behavior). Typical useful range: 0.3~0.7.
+        self.cec_cf_discount = float(cec.get("counterfactual_discount", 1.0))
+        if not (self.cec_cf_discount == self.cec_cf_discount):  # NaN guard
+            self.cec_cf_discount = 1.0
+        self.cec_cf_discount = float(max(0.0, min(1.0, self.cec_cf_discount)))
         self.cec_family_blend_tau = float(cec.get("family_blend_tau", 8))
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
@@ -1114,7 +1120,7 @@ class MPVSController:
                 horizon = min(int(self.cec_ticket_horizon_mid_cap), int(horizon), int(rem_h))
         # BC^2-CEC: snapshot atomic baseline at win time to compute expected atomic gain over horizon
         rate0 = float(self._atomic_rate(str(ctx_key or "")))
-        exp_atomic_gain = float(rate0) * float(horizon)
+        exp_atomic_gain = float(rate0) * float(horizon) * float(self.cec_cf_discount)
         self.tickets.append(
             _Ticket(
                 src=comp,
@@ -1277,6 +1283,8 @@ class MPVSController:
             "heur_rate_ewma": float(self.heur_agg.rate),
             "cec_credit_metric": str("gain_cf" if bool(self.cec_counterfactual_credit) else "gain_long"),
         }
+        if bool(self.cec_counterfactual_credit):
+            out["cec_cf_discount"] = float(getattr(self, "cec_cf_discount", 1.0))
         if bool(self.cec_counterfactual_credit):
             try:
                 out["atomic_rate_ctx_n"] = int(len(self.atomic_by_ctx))
