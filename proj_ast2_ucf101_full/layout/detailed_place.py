@@ -1809,10 +1809,11 @@ def run_detailed_place(
                             try:
                                 if mpvs_ctrl is not None and macro_enabled:
                                     _ctx_key = str((step_ctx or {}).get("ctx_key", "") or "")
+                                    _release_ctx_key = str((step_ctx or {}).get("release_ctx_key", _ctx_key) or _ctx_key)
                                     _stage = str((step_ctx or {}).get("stage", "") or "")
                                     active_fams = []
-                                    if _ctx_key:
-                                        active_fams = list(mpvs_ctrl.get_active_families(ctx_key=_ctx_key, stage=_stage) or [])
+                                    if _release_ctx_key:
+                                        active_fams = list(mpvs_ctrl.get_active_families(ctx_key=_release_ctx_key, stage=_stage) or [])
                                     if active_fams:
                                         merged = []
                                         seen = set()
@@ -2506,7 +2507,7 @@ def run_detailed_place(
                                                             pass
                                                         continue
                                                     _pl["_cec_trial"] = 1
-                                                    _pl["_cec_ctx_key"] = str(step_ctx.get("ctx_key", ""))
+                                                    _pl["_cec_ctx_key"] = str((step_ctx or {}).get("release_ctx_key", step_ctx.get("ctx_key", "")))
                                                     _pl["_cec_family"] = str(nm)
                                                     _pl["_cec_trial_reason"] = str(reason or "")
                                                     _pl["_cec_trial_kind"] = str(reason or "")
@@ -2545,7 +2546,7 @@ def run_detailed_place(
                                                             _direct, _dreason, _dmeta = False, "", {}
                                                     if _direct:
                                                         _pl["_cec_trial"] = 1
-                                                        _pl["_cec_ctx_key"] = str(step_ctx.get("ctx_key", ""))
+                                                        _pl["_cec_ctx_key"] = str((step_ctx or {}).get("release_ctx_key", step_ctx.get("ctx_key", "")))
                                                         _pl["_cec_family"] = str(nm)
                                                         _pl["_cec_trial_reason"] = str(_dreason or "")
                                                         _pl["_cec_trial_kind"] = str(_dreason or "")
@@ -3094,7 +3095,7 @@ def run_detailed_place(
                                         if mpvs_ctrl is not None and _stage0 == "late":
                                             fam0 = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")) or "")
                                             is_sponsored = bool((best_plan or {}).get("_cec_trial", 0))
-                                            if is_sponsored or bool(mpvs_ctrl.candidate_active("macro", family=fam0, ctx=step_ctx)) or bool(mpvs_ctrl.release_active("macro", family=fam0, ctx=step_ctx)):
+                                            if is_sponsored or bool(mpvs_ctrl.release_active("macro", family=fam0, ctx=step_ctx)):
                                                 acc_min_gain = 0.0
                                     except Exception:
                                         pass
@@ -3493,7 +3494,7 @@ def run_detailed_place(
                                         src_grp = "llm" if src_sel.startswith("llm") else str(src_sel)
                                         if src_grp in {"macro", "mem", "llm"}:
                                             _is_sponsored = bool((best_plan or {}).get("_cec_trial", 0))
-                                            _ctx_key_for_ticket = str((best_plan or {}).get("_cec_ctx_key", step_ctx.get("ctx_key", "")))
+                                            _ctx_key_for_ticket = str((best_plan or {}).get("_cec_ctx_key", (step_ctx or {}).get("release_ctx_key", step_ctx.get("ctx_key", ""))))
                                             _family_for_ticket = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")))
                                             # default: keep existing behavior
                                             _ticket_best_total_seen = float(best_total_seen)

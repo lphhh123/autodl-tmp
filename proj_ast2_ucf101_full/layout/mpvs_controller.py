@@ -259,30 +259,23 @@ class MPVSController:
             "edge_family": edge_family,
             "credit_gain": float(credit_gain) if credit_gain is not None else 0.0,
         }
+        # Rule A (precision-first): realized-credit release.
+        # Once a sponsored macro has matured and produced non-negative counterfactual gain,
+        # do not let ex-ante scores block release.
         if (
             credit_gain is not None
-            and float(credit_gain) > float(self.cec_release_credit_floor)
+            and float(credit_gain) >= float(self.cec_release_credit_floor)
             and trial_won > 0
             and pass_heur > 0
-            and (
-                trial_score > float(self.cec_release_trial_score_floor)
-                or edge_local >= float(self.cec_release_edge_floor)
-                or edge_family >= float(self.cec_release_edge_floor)
-                or roi_family > float(self.cec_release_roi_floor_family)
-            )
         ):
-            return True, "credit_or_family_ok", meta
+            return True, "gain_cf_realized", meta
+        # Rule B: conservative fallback bridge.
         if (
             bool(getattr(ca, "candidate", 0))
             and trial_won > 0
             and (
                 roi_local > float(self.cec_release_roi_floor_local)
                 or roi_family > float(self.cec_release_roi_floor_family)
-            )
-            and (
-                trial_score > float(self.cec_release_trial_score_floor)
-                or edge_local >= float(self.cec_release_edge_floor)
-                or edge_family >= float(self.cec_release_edge_floor)
             )
         ):
             return True, "candidate_bridge", meta
@@ -352,7 +345,18 @@ class MPVSController:
             "stagn_bucket": int(stg_b),
             "health_bucket": int(health_b),
             "ctx_key": f"{stage}|stg{stg_b}|hlth{health_b}",
+            # v2.5 precision-first:
+            # Probe/sponsor may use fine ctx_key, but candidate/release should use a coarser key
+            # to avoid over-fragmentation and make successful macro evidence reusable.
+            "release_ctx_key": f"{stage}|stg{stg_b}",
         }
+
+    def _active_ctx_key(self, ctx: Optional[Dict[str, Any]]) -> str:
+        ctx0 = ctx or {}
+        stage = str(ctx0.get("stage", "") or "")
+        if stage == "late":
+            return str(ctx0.get("release_ctx_key", ctx0.get("ctx_key", "")) or "")
+        return str(ctx0.get("ctx_key", "") or "")
 
     def _share_ratio(self, comp: str) -> Tuple[float, float, float, float, int]:
         comp = str(comp)
@@ -610,7 +614,7 @@ class MPVSController:
             return False
         if not bool(self.cec_candidate_release):
             return False
-        a = self._get_ctx_agg("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
+        a = self._get_ctx_agg("macro", self._active_ctx_key(ctx0), str(family or ""))
         if bool(a.released):
             return False
         if int(getattr(a, "candidate", 0)) != 1:
@@ -688,16 +692,35 @@ class MPVSController:
         ctx0 = ctx or {}
         if str(ctx0.get("stage", "")) != "late":
             return False
-        ctx_key = str(ctx0.get("ctx_key", "") or "")
+        ctx_key = self._active_ctx_key(ctx0)
         if not ctx_key:
             return False
         fams = self.get_active_families(ctx_key=ctx_key, stage="late", count_hits=True)
         return bool(fams)
 
+    def release_any(self, comp: str, ctx: Optional[Dict[str, Any]] = None) -> bool:
+        if str(comp) != "macro":
+            return False
+        ctx0 = ctx or {}
+        if str(ctx0.get("stage", "")) != "late":
+            return False
+        ctx_key = self._active_ctx_key(ctx0)
+        if not ctx_key:
+            return False
+        for (c, ck, fam), a in self.ctx_agg.items():
+            if str(c) != "macro":
+                continue
+            if str(ck) != ctx_key:
+                continue
+            if bool(getattr(a, "released", 0)):
+                a.release_hits += 1
+                return True
+        return False
+
     def maybe_sponsor_trial(self, comp: str, family: str, ctx: Optional[Dict[str, Any]], step: int) -> Tuple[bool, str, Dict[str, Any]]:
         c = str(comp)
         ctx0 = ctx or {}
-        ctx_key = str(ctx0.get("ctx_key", ""))
+        ctx_key = self._active_ctx_key(ctx0)
         stage = str(ctx0.get("stage", "")).strip().lower()
         a = self._get_ctx_agg(c, ctx_key, family)
         af = self._get_family_agg(c, family)
@@ -786,7 +809,7 @@ class MPVSController:
         """
         c = str(comp)
         ctx0 = ctx or {}
-        ctx_key = str(ctx0.get("ctx_key", ""))
+        ctx_key = self._active_ctx_key(ctx0)
         stage = str(ctx0.get("stage", "")).strip().lower()
         a = self._get_ctx_agg(c, ctx_key, family)
         af = self._get_family_agg(c, family)
@@ -962,15 +985,13 @@ class MPVSController:
                 return False, "budget_early"
 
         rel = self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""}))
-        cand = self.candidate_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""}))
-        # v2.1: source-level candidate check (family not yet selected -> family=="")
-        cand_any = False
+        rel_any = False
         if comp == "macro" and not str(family or ""):
-            cand_any = self.candidate_any("macro", ctx=(ctx or {"stage": stage, "ctx_key": ""}))
+            rel_any = self.release_any("macro", ctx=(ctx or {"stage": stage, "ctx_key": ""}))
         _, _, ratio, slack, n = self._share_ratio(comp)
         if n >= int(self.share_min_samples):
             if float(ratio) < (1.0 - float(slack)):
-                if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or cand or cand_any)):
+                if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or rel_any)):
                     st.allow_last = False
                     st.deny_last_reason = "share_low"
                     return False, "share_low"
@@ -978,7 +999,7 @@ class MPVSController:
         roi_floor = float(cfg.get("roi_floor", -1.0))
         cold_start_allow = bool(cfg.get("allow_cold_start", True))
         if float(roi) < float(roi_floor) and not (cold_start_allow and int(st.fired) <= 0):
-            if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or cand or cand_any)):
+            if not (comp == "macro" and stage == "late" and (float(self.roi_long("macro")) > 0.0 or rel or rel_any)):
                 st.allow_last = False
                 st.deny_last_reason = "roi_low"
                 return False, "roi_low"
@@ -1128,7 +1149,7 @@ class MPVSController:
         ctx0 = ctx or {}
         if str(ctx0.get("stage", "")) != "late":
             return False
-        ctx_key = str(ctx0.get("ctx_key", ""))
+        ctx_key = self._active_ctx_key(ctx0)
         fam = str(family or "")
         a = self._get_ctx_agg("macro", ctx_key, fam)
         fa = self._get_family_agg("macro", fam)
@@ -1199,14 +1220,14 @@ class MPVSController:
         if comp == "macro" and stage == "late" and float(self.roi_long("macro")) > 0.0:
             q = min(qmax, q + 1)
 
-        # v2.1: if family is unknown at quota-time (family==""), use a ctx-level active check.
+        # v2.5 precision-first:
+        # candidate is only a light bias (family ordering), not a strong source-level quota bias.
+        # Only released families can increase macro quota.
         if comp == "macro" and not str(family or ""):
-            if self.candidate_any("macro", ctx=(ctx or {"stage": stage, "ctx_key": ""})):
+            if self.release_any("macro", ctx=(ctx or {"stage": stage, "ctx_key": ""})):
                 q = min(qmax, q + 1)
         else:
             if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
-                q = min(qmax, q + 1)
-            if comp == "macro" and self.candidate_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
                 q = min(qmax, q + 1)
 
         boost_hi = float(cfg.get("quota_boost_roi", 0.0))
@@ -1232,8 +1253,6 @@ class MPVSController:
         if comp == "macro" and bool(sponsored):
             return 0.0
         if comp == "macro" and self.release_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
-            return 0.0
-        if comp == "macro" and self.candidate_active(comp, family=family, ctx=(ctx or {"stage": stage, "ctx_key": ""})):
             return 0.0
         return float(max(0.0, mg))
 

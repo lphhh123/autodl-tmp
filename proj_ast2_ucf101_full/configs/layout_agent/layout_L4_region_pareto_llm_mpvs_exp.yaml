@@ -43,10 +43,10 @@ detailed_place:
         family_min_samples: 1
         local_min_samples: 1
         seed_trials_per_family: 2
-        sponsor_stages: ["mid", "late"]
+        sponsor_stages: ["late"]
         direct_pass_trial_stages: ["late"]
-        seed_trials_per_family_mid: 1
-        seed_trials_per_family_late: 3
+        seed_trials_per_family_mid: 0
+        seed_trials_per_family_late: 2
         direct_pass_seed_trials_per_family: 1
         seed_allow_low_sample: true
         seed_min_pass_heur: 1
@@ -61,7 +61,7 @@ detailed_place:
         ticket_horizon_late_cap: 2500
         candidate_release: true
         family_stage_prior: true
-        release_credit_floor: -0.0001
+        release_credit_floor: 0.0
         release_roi_floor_local: 0.0
         release_roi_floor_family: 0.0
         release_trial_score_floor: -0.02
@@ -69,9 +69,9 @@ detailed_place:
         release_keep_roi_floor_local: -0.000001
         release_keep_roi_floor_family: -0.000001
         release_keep_trial_score_floor: -0.05
-        candidate_grace_maturities: 2
-        candidate_grace_calls_mid: 12000
-        candidate_grace_calls_late: 6000
+        candidate_grace_maturities: 1
+        candidate_grace_calls_mid: 4000
+        candidate_grace_calls_late: 2500
         context:
           stagn_ratio_edges: [0.75, 1.50]
           repeat_ratio_edges: [0.55, 0.75]
