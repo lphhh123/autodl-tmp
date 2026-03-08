@@ -1840,11 +1840,11 @@ def run_detailed_place(
                             macro_names = list(macro_names or [])
                             macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
 
-                            try:
-                                if mpvs_ctrl is not None and macro_names:
-                                    mpvs_ctrl.fired("macro", step=int(step))
-                            except Exception:
-                                pass
+                            # IMPORTANT:
+                            # Do NOT call controller.fired("macro") here.
+                            # This path only means "macro candidates were proposed", not "macro was actually selected".
+                            # Calling fired() at proposal time consumes min_interval_steps and suppresses future macro usage
+                            # even when no macro ever entered execution.
 
                             # --- plan groups (with src tags) ---
                             heur_plans = [{"kind":"atomic","id":int(c.id),"cand":c,"src":"heuristic"} for c in heur_cands]
@@ -2373,6 +2373,21 @@ def run_detailed_place(
                                             base = max(base, dyn)
                                         except Exception:
                                             pass
+                                # v2.2: stage-aware cap.
+                                # Macro headroom in our experiments is mostly "late-stage, tiny immediate gain, positive long ROI".
+                                # Without a late cap, precheck blocks nearly all macro families before BC^2-CEC can act.
+                                try:
+                                    _stage0 = str((step_ctx or {}).get("stage", "") or "")
+                                except Exception:
+                                    _stage0 = ""
+                                if _stage0 == "mid":
+                                    mid_cap = float(_cfg_get(ver_cfg, "macro_min_gain_mid", 0.0))
+                                    if mid_cap > 0.0:
+                                        base = min(base, mid_cap)
+                                elif _stage0 == "late":
+                                    late_cap = float(_cfg_get(ver_cfg, "macro_min_gain_late", 0.0))
+                                    if late_cap > 0.0:
+                                        base = min(base, late_cap)
                                 return max(0.0, float(base))
 
                             # --- macro fast precheck: prevent macro/llm_macro from consuming verify budget unless it can beat heuristic ---
@@ -2466,18 +2481,26 @@ def run_detailed_place(
                                                     mpvs_stats["macro_precheck_fail_min_gain"] = int(mpvs_stats.get("macro_precheck_fail_min_gain", 0)) + 1
                                                     sponsored = False
                                                     reason = ""
+                                                    _meta = {}
                                                     if mpvs_ctrl is not None:
                                                         try:
                                                             sponsored, reason, _meta = mpvs_ctrl.maybe_sponsor_trial(
                                                                 comp="macro", family=str(nm), ctx=step_ctx, step=int(step)
                                                             )
                                                         except Exception:
-                                                            sponsored, reason = False, ""
+                                                            sponsored, reason, _meta = False, "", {}
                                                     if not sponsored:
                                                         try:
+                                                            _deny = mpvs_stats.setdefault("macro_trial_sponsor_deny_reason", {})
+                                                            _deny[str(reason or "")] = int(_deny.get(str(reason or ""), 0)) + 1
+                                                            mpvs_stats["macro_trial_sponsor_denied"] = int(mpvs_stats.get("macro_trial_sponsor_denied", 0)) + 1
                                                             cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail", 10))
                                                             if instance_tag == "randw":
                                                                 cd = int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail_randw", cd))
+                                                            # v2.2: late-stage pass_heur failures should not trigger a long global cooldown.
+                                                            # Otherwise macro never gets enough trials to accumulate BC^2-CEC evidence.
+                                                            if str((step_ctx or {}).get("stage", "")) == "late" and bool(pass_heur):
+                                                                cd = min(cd, int(_cfg_get(ver_cfg, "macro_precheck_cooldown_fail_late", 2)))
                                                             mpvs_trigger_state["cooldown"]["macro"] = max(int(mpvs_trigger_state["cooldown"].get("macro", 0)), cd)
                                                         except Exception:
                                                             pass
@@ -2496,6 +2519,8 @@ def run_detailed_place(
                                                     mpvs_stats["macro_trial_score_max"] = max(float(mpvs_stats.get("macro_trial_score_max", 0.0)), float((_meta or {}).get("trial_score", 0.0)))
                                                     if str(reason) == "seed_sponsor":
                                                         mpvs_stats["macro_trial_seed"] = int(mpvs_stats.get("macro_trial_seed", 0)) + 1
+                                                    if str(reason) == "seed_sponsor_low_sample":
+                                                        mpvs_stats["macro_trial_seed_low_sample"] = int(mpvs_stats.get("macro_trial_seed_low_sample", 0)) + 1
                                                     if str(reason) == "evidence_sponsor":
                                                         mpvs_stats["macro_trial_evidence"] = int(mpvs_stats.get("macro_trial_evidence", 0)) + 1
                                                     if str(reason) == "candidate_sponsor":
@@ -2968,6 +2993,14 @@ def run_detailed_place(
                                         if src_best.startswith("llm"):
                                             min_gain_cur = max(float(min_gain_cur), float(_cfg_get(ver_cfg, "llm_min_gain_current", 0.0002)))
 
+                                        # v2.2: cap macro current-gate in late stage.
+                                        # This does NOT disable the gate; it prevents tiny positive immediate gains
+                                        # from being rejected before long-horizon credit can be realized.
+                                        if src_best in {"macro", "llm_macro"} and str((step_ctx or {}).get("stage", "")) == "late":
+                                            late_macro_cap = float(_cfg_get(ver_cfg, "nonheuristic_min_gain_current_late_macro_cap", 0.0))
+                                            if late_macro_cap > 0.0:
+                                                min_gain_cur = min(float(min_gain_cur), float(late_macro_cap))
+
                                         # Budget-stage release: controller may relax min_gain_current for macro
                                         try:
                                             if mpvs_ctrl is not None:
@@ -3016,6 +3049,25 @@ def run_detailed_place(
                                         pass
                                 if src_best in {"macro", "llm_macro"} and best_heur_entry is not None and bool(_cfg_get(ver_cfg, "macro_monotone_enabled", True)):
                                     acc_min_gain = float(_cfg_get(ver_cfg, "macro_accept_min_gain", float(_macro_min_gain_cur())))
+                                    _stage0 = str((step_ctx or {}).get("stage", "") or "")
+                                    if _stage0 == "mid":
+                                        acc_mid = float(_cfg_get(ver_cfg, "macro_accept_min_gain_mid", 0.0))
+                                        if acc_mid > 0.0:
+                                            acc_min_gain = min(float(acc_min_gain), float(acc_mid))
+                                    elif _stage0 == "late":
+                                        acc_late = float(_cfg_get(ver_cfg, "macro_accept_min_gain_late", 0.0))
+                                        if acc_late > 0.0:
+                                            acc_min_gain = min(float(acc_min_gain), float(acc_late))
+                                    # Sponsored/candidate/released macro in late stage should not be killed by a strict
+                                    # monotone gate, because its value is exactly "small immediate gain, positive long ROI".
+                                    try:
+                                        if mpvs_ctrl is not None and _stage0 == "late":
+                                            fam0 = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")) or "")
+                                            is_sponsored = bool((best_plan or {}).get("_cec_trial", 0))
+                                            if is_sponsored or bool(mpvs_ctrl.candidate_active("macro", family=fam0, ctx=step_ctx)) or bool(mpvs_ctrl.release_active("macro", family=fam0, ctx=step_ctx)):
+                                                acc_min_gain = 0.0
+                                    except Exception:
+                                        pass
                                     if acc_min_gain > 0.0 and float(delta_v) > -float(acc_min_gain):
                                         mpvs_stats["macro_monotone_blocked"] = int(mpvs_stats.get("macro_monotone_blocked", 0)) + 1
                                         best_plan = best_heur_entry["plan"]
@@ -3361,6 +3413,16 @@ def run_detailed_place(
                             mpvs_stats["steps_mpvs"] += 1
                             if accept:
                                 src_sel = str(best_plan.get("src", ""))
+                                try:
+                                    if mpvs_ctrl is not None:
+                                        if src_sel in {"macro", "llm_macro"}:
+                                            mpvs_ctrl.fired("macro", step=int(step))
+                                        elif src_sel == "mem":
+                                            mpvs_ctrl.fired("mem", step=int(step))
+                                        elif src_sel.startswith("llm"):
+                                            mpvs_ctrl.fired("llm", step=int(step))
+                                except Exception:
+                                    pass
                                 if src_sel == "llm_macro":
                                     mpvs_stats["llm_macro_selected"] += 1
                                 if src_sel == "llm_atomic":
