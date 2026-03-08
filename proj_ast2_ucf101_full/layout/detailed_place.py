@@ -2975,6 +2975,13 @@ def run_detailed_place(
                                         _rctx_key0 = str((step_ctx or {}).get("release_ctx_key", "") or "")
                                         if _rctx_key0:
                                             mpvs_ctrl.observe_atomic(ctx_key=_rctx_key0, gain=float(heur_gain), calls=int(heur_calls))
+                                        # v2.6: realized-rate baseline for BC^2-CEC (update every step)
+                                        try:
+                                            mpvs_ctrl.observe_realized(ctx_key=_ctx_key0, used_calls=int(eval_calls_cum), best_total_seen=float(best_total_seen))
+                                            if _rctx_key0:
+                                                mpvs_ctrl.observe_realized(ctx_key=_rctx_key0, used_calls=int(eval_calls_cum), best_total_seen=float(best_total_seen))
+                                        except Exception:
+                                            pass
                                     except Exception:
                                         pass
                                     mpvs_stats["heuristic_rate_ewma"] = float(mpvs_ctrl.snapshot().get("heur_rate_ewma", 0.0))

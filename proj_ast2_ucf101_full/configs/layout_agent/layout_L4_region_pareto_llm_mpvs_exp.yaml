@@ -48,7 +48,7 @@ detailed_place:
         direct_pass_trial_stages: ["late"]
         seed_trials_per_family_mid: 0
         seed_trials_per_family_late: 4
-        direct_pass_seed_trials_per_family: 1
+        direct_pass_seed_trials_per_family: 3
         seed_allow_low_sample: true
         seed_min_pass_heur: 1
         family_cooldown_steps: 3
@@ -76,6 +76,7 @@ detailed_place:
         candidate_grace_calls_late: 1200
         # BC^2-CEC: reduce expected atomic gain a bit to avoid systematic negative gain_cf
         counterfactual_discount: 0.5
+        counterfactual_cap_mult: 2.0
         context:
           stagn_ratio_edges: [0.75, 1.50]
           repeat_ratio_edges: [0.55, 0.75]

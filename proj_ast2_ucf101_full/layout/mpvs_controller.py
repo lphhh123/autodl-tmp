@@ -168,6 +168,11 @@ class MPVSController:
         if not (self.cec_cf_discount == self.cec_cf_discount):  # NaN guard
             self.cec_cf_discount = 1.0
         self.cec_cf_discount = float(max(0.0, min(1.0, self.cec_cf_discount)))
+        # Cap counterfactual rate by (cap_mult * realized_rate) to avoid over-optimistic atomic baselines.
+        self.cec_cf_cap_mult = float(cec.get("counterfactual_cap_mult", 2.0))
+        if not (self.cec_cf_cap_mult == self.cec_cf_cap_mult):
+            self.cec_cf_cap_mult = 2.0
+        self.cec_cf_cap_mult = float(max(0.0, min(10.0, self.cec_cf_cap_mult)))
         self.cec_family_blend_tau = float(cec.get("family_blend_tau", 8))
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
@@ -229,6 +234,11 @@ class MPVSController:
             self.cec_blocked_ratio_edges = [0.15, 0.35]
         self.heur_agg = _HeurAgg()
         self.atomic_by_ctx: Dict[str, _HeurAgg] = {}
+        # v2.6: realized (diminishing-returns-aware) progress rate of best_total_seen, per ctx_key.
+        self.real_agg = _HeurAgg()
+        self.real_by_ctx: Dict[str, _HeurAgg] = {}
+        self._real_last_global: Optional[Tuple[int, float]] = None
+        self._real_last_by_ctx: Dict[str, Tuple[int, float]] = {}
         self.ctx_agg: Dict[Tuple[str, str, str], _CtxAgg] = {}
         self.family_agg: Dict[Tuple[str, str], _FamAgg] = {}
         self.family_stage_agg: Dict[Tuple[str, str, str], _FamAgg] = {}
@@ -432,6 +442,53 @@ class MPVSController:
             if ag is not None and float(ag.calls) > 0.0:
                 return float(ag.rate)
         return float(self.heur_agg.rate)
+
+    def observe_realized(self, ctx_key: str, used_calls: int, best_total_seen: float) -> None:
+        """Track realized improvement rate of best_total_seen per eval-call for this ctx_key."""
+        ck = str(ctx_key or "")
+        if not ck:
+            return
+        u = int(used_calls)
+        b = float(best_total_seen)
+        if u < 0 or not (b == b):
+            return
+
+        def _upd(agg: _HeurAgg, last: Tuple[int, float]) -> Tuple[int, float]:
+            lu, lb = int(last[0]), float(last[1])
+            dc = int(u) - int(lu)
+            if dc <= 0:
+                return (lu, lb)
+            dg = float(lb) - float(b)
+            if dg <= 0.0:
+                return (int(u), float(b))
+            al = float(self.alpha_long)
+            agg.gain = (1.0 - al) * float(agg.gain) + al * float(dg)
+            agg.calls = (1.0 - al) * float(agg.calls) + al * float(dc)
+            agg.rate = float(agg.gain) / float(max(1e-9, agg.calls))
+            return (int(u), float(b))
+
+        if self._real_last_global is None:
+            self._real_last_global = (int(u), float(b))
+        else:
+            self._real_last_global = _upd(self.real_agg, self._real_last_global)
+
+        last_ck = self._real_last_by_ctx.get(ck)
+        if last_ck is None:
+            self._real_last_by_ctx[ck] = (int(u), float(b))
+            return
+        ag = self.real_by_ctx.get(ck)
+        if ag is None:
+            ag = _HeurAgg()
+            self.real_by_ctx[ck] = ag
+        self._real_last_by_ctx[ck] = _upd(ag, last_ck)
+
+    def _realized_rate(self, ctx_key: str = "") -> float:
+        ck = str(ctx_key or "")
+        if ck:
+            ag = self.real_by_ctx.get(ck)
+            if ag is not None and float(ag.calls) > 0.0:
+                return float(ag.rate)
+        return float(self.real_agg.rate)
 
     def observe_probe(
         self,
@@ -1118,8 +1175,20 @@ class MPVSController:
             elif stage0 == "mid":
                 rem_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_mid_remaining_frac) * float(remaining)))
                 horizon = min(int(self.cec_ticket_horizon_mid_cap), int(horizon), int(rem_h))
-        # BC^2-CEC: snapshot atomic baseline at win time to compute expected atomic gain over horizon
-        rate0 = float(self._atomic_rate(str(ctx_key or "")))
+        # v2.6: In BC^2-CEC, treat late-stage accepted macro wins as sponsored by default.
+        stage0 = str(ctx_key or "").split("|", 1)[0] if str(ctx_key or "") else ""
+        if bool(self.cec_enabled) and bool(self.cec_counterfactual_credit) and comp == "macro" and stage0 == "late":
+            sponsored = True
+
+        # v2.6: conservative counterfactual baseline using realized-rate (captures saturation).
+        ck0 = str(ctx_key or "")
+        rate_best = float(self._atomic_rate(ck0))
+        rate_real = float(self._realized_rate(ck0))
+        if rate_real > 0.0:
+            rate0 = min(rate_best, float(self.cec_cf_cap_mult) * rate_real)
+        else:
+            rate0 = min(rate_best, max(0.0, float(self.real_agg.rate)))
+        rate0 = float(max(0.0, rate0))
         exp_atomic_gain = float(rate0) * float(horizon) * float(self.cec_cf_discount)
         self.tickets.append(
             _Ticket(
@@ -1292,6 +1361,13 @@ class MPVSController:
                 out["atomic_rate_by_ctx"] = {k: float(v.rate) for k, v in list(self.atomic_by_ctx.items())[:32]}
             except Exception:
                 pass
+        # realized-rate audit (debug counterfactual scale)
+        try:
+            out["realized_rate_ewma"] = float(self.real_agg.rate)
+            out["realized_rate_ctx_n"] = int(len(self.real_by_ctx))
+            out["realized_rate_by_ctx"] = {k: float(v.rate) for k, v in list(self.real_by_ctx.items())[:32]}
+        except Exception:
+            pass
         cec_ctx: Dict[str, Dict[str, Any]] = {}
         cec_family: Dict[str, Dict[str, Any]] = {}
         rel_total = 0
