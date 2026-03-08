@@ -2967,6 +2967,14 @@ def run_detailed_place(
                                     try:
                                         _ctx_key0 = str((step_ctx or {}).get("ctx_key", "") or "")
                                         mpvs_ctrl.observe_atomic(ctx_key=_ctx_key0, gain=float(heur_gain), calls=int(heur_calls))
+                                        # IMPORTANT:
+                                        # BC^2-CEC tickets use release_ctx_key (coarser key) to avoid over-fragmentation.
+                                        # If we only observe atomic on fine ctx_key but query atomic_rate on release_ctx_key,
+                                        # expected_atomic_gain will fall back to the GLOBAL heuristic rate and over-estimate
+                                        # the counterfactual, making gain_cf negative and preventing any release.
+                                        _rctx_key0 = str((step_ctx or {}).get("release_ctx_key", "") or "")
+                                        if _rctx_key0:
+                                            mpvs_ctrl.observe_atomic(ctx_key=_rctx_key0, gain=float(heur_gain), calls=int(heur_calls))
                                     except Exception:
                                         pass
                                     mpvs_stats["heuristic_rate_ewma"] = float(mpvs_ctrl.snapshot().get("heur_rate_ewma", 0.0))

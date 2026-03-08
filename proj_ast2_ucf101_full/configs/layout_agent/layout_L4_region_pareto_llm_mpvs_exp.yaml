@@ -33,7 +33,8 @@ detailed_place:
       ewma_alpha_long: 0.1
       budget_stage:
         early_frac: 0.20
-        late_frac: 0.70
+        # Start late stage earlier so BC^2-CEC has enough runway to sponsor + mature tickets.
+        late_frac: 0.55
       share:
         min_samples: 10
         slack_scale: 0.5
@@ -46,22 +47,23 @@ detailed_place:
         sponsor_stages: ["late"]
         direct_pass_trial_stages: ["late"]
         seed_trials_per_family_mid: 0
-        seed_trials_per_family_late: 2
+        seed_trials_per_family_late: 4
         direct_pass_seed_trials_per_family: 1
         seed_allow_low_sample: true
         seed_min_pass_heur: 1
-        family_cooldown_steps: 8
-        trial_max_per_step: 2
+        family_cooldown_steps: 3
+        trial_max_per_step: 3
         # v2.4 release / horizon
         ticket_horizon_min: 300
-        ticket_horizon_frac: 0.02
+        ticket_horizon_frac: 0.01
         ticket_horizon_mid_remaining_frac: 0.45
         ticket_horizon_late_remaining_frac: 0.25
         ticket_horizon_mid_cap: 6000
         ticket_horizon_late_cap: 2500
         candidate_release: true
         family_stage_prior: true
-        release_credit_floor: 0.0
+        # allow tiny numerical noise; still essentially ">=0"
+        release_credit_floor: -1.0e-4
         release_roi_floor_local: 0.0
         release_roi_floor_family: 0.0
         release_trial_score_floor: -0.02
@@ -70,8 +72,10 @@ detailed_place:
         release_keep_roi_floor_family: -0.000001
         release_keep_trial_score_floor: -0.05
         candidate_grace_maturities: 1
-        candidate_grace_calls_mid: 4000
-        candidate_grace_calls_late: 2500
+        candidate_grace_calls_mid: 2000
+        candidate_grace_calls_late: 1200
+        # BC^2-CEC: reduce expected atomic gain a bit to avoid systematic negative gain_cf
+        counterfactual_discount: 0.5
         context:
           stagn_ratio_edges: [0.75, 1.50]
           repeat_ratio_edges: [0.55, 0.75]
