@@ -16,7 +16,7 @@ detailed_place:
         llm_atomic: 0
         llm_macro: 0
         macro: 3
-        mem: 3
+        mem: 0
     controller:
       enabled: false
     ablation:
@@ -24,3 +24,5 @@ detailed_place:
     macros:
       enable_base_when_stagnation_ge: 0
       enable_extra_when_stagnation_ge: 0
+    memory:
+      enabled: false
