@@ -155,9 +155,30 @@ detailed_place:
         partner_topk: 8
         external_partner_topk: 4
         anchor_topk: 6
-        candidate_blocks: 18
-        eval_topk: 6
-        use_empty_only: true
+        candidate_blocks: 24
+        eval_topk: 8
+        use_empty_only: false
+        perm_sites_k: 6
+        perm_limit: 120
+        score_w_est: 1.0
+        score_w_internal: 1.0e-6
+        score_w_compact: 1.0e-6
+        score_w_centroid: 5.0e-7
+
+      ruin_repair:
+        ruin_ratios: [0.08, 0.15, 0.25]
+        candidates_per_ratio: 3
+        eval_topk: 8
+        hot_comm_k: 12
+        hot_therm_k: 10
+        hot_prob: 0.75
+        ruin_site_mode: far
+        far_site_k: 24
+        eval_random: 1
+        repair_pick: best
+        repair_steps: 10
+        repair_step_topk: 20
+        repair_step_sample_topk: 2
     explore:
       mode: hybrid
       every_n_steps: 20
