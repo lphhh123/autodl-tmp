@@ -421,16 +421,44 @@ case "$EXP_ID" in
   EXP-B2-ab-noverifier) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_noverifier_exp.yaml EXP-B2-ab-noverifier ;;
   EXP-B2-ab-nomacro)    run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_nomacro_exp.yaml    EXP-B2-ab-nomacro ;;
   EXP-B2-ab-nomem)      run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_ab_nomem_exp.yaml      EXP-B2-ab-nomem ;;
-  EXP-B2-ab-noqueue)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   EXP-B2-ab-noqueue ;;
-  EXP-B2-ab-nofeas)    run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    EXP-B2-ab-nofeas ;;
-  EXP-B2-ab-nodiverse) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml EXP-B2-ab-nodiverse ;;
+
+  # --- LEGACY (mixed_pick) ablations: kept only for historical comparison ---
+  # These belong to the old "mixed_pick" planner family (pre-MPVS/controller).
+  # They are NOT comparable to the MPVS/controller baselines, so we gate them
+  # behind ALLOW_LEGACY_MIXED_PICK=1 and store outputs under EXP-B2-legacy-*.
+  EXP-B2-legacy-mixedpick-ab-noqueue)
+    run_layout_multi run_layout configs/layout_agent/_legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml EXP-B2-legacy-mixedpick-ab-noqueue
+    ;;
+  EXP-B2-legacy-mixedpick-ab-nofeas)
+    run_layout_multi run_layout configs/layout_agent/_legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml  EXP-B2-legacy-mixedpick-ab-nofeas
+    ;;
+  EXP-B2-legacy-mixedpick-ab-nodiverse)
+    run_layout_multi run_layout configs/layout_agent/_legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml EXP-B2-legacy-mixedpick-ab-nodiverse
+    ;;
+
+  # Backward-compat aliases (deprecated). Refuse unless explicitly allowed.
+  EXP-B2-ab-noqueue|EXP-B2-ab-nofeas|EXP-B2-ab-nodiverse)
+    echo "[DEPRECATED] ${EXP_ID} is a LEGACY mixed_pick ablation (not MPVS/controller)."
+    echo "             Use EXP-B2-legacy-mixedpick-ab-* instead."
+    echo "             To run legacy on purpose: ALLOW_LEGACY_MIXED_PICK=1 ..."
+    if [[ "${ALLOW_LEGACY_MIXED_PICK:-0}" != "1" ]]; then
+      echo "[ERROR] Refusing to run legacy mixed_pick without ALLOW_LEGACY_MIXED_PICK=1"
+      exit 2
+    fi
+    case "${EXP_ID}" in
+      EXP-B2-ab-noqueue)   run_layout_multi run_layout configs/layout_agent/_legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml   EXP-B2-legacy-mixedpick-ab-noqueue ;;
+      EXP-B2-ab-nofeas)    run_layout_multi run_layout configs/layout_agent/_legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_nofeas_exp.yaml    EXP-B2-legacy-mixedpick-ab-nofeas ;;
+      EXP-B2-ab-nodiverse) run_layout_multi run_layout configs/layout_agent/_legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_nodiverse_exp.yaml EXP-B2-legacy-mixedpick-ab-nodiverse ;;
+    esac
+    ;;
 
   # --- New paper baselines/method (B1 & B3 unchanged) ---
   EXP-B2-std-budgetaware) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml EXP-B2-std-budgetaware ;;
   EXP-B2-bc2cec)          run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml          EXP-B2-bc2cec ;;
 
   # --- Headroom probes (no controller) ---
-  EXP-B2-naive-mixed)     run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml     EXP-B2-naive-mixed ;;
+  EXP-B2-naive-mixed)      run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml      EXP-B2-naive-mixed ;;
+  EXP-B2-naive-atomiconly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_atomiconly_nollm_exp.yaml EXP-B2-naive-atomiconly ;;
   EXP-B2-naive-macroonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_macroonly_nollm_exp.yaml EXP-B2-naive-macroonly ;;
   EXP-B2-naive-memonly)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_memonly_nollm_exp.yaml   EXP-B2-naive-memonly ;;
   EXP-B2-naive-chainonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_chainonly_nollm_exp.yaml EXP-B2-naive-chainonly ;;

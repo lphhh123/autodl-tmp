@@ -1,7 +1,3 @@
-_base_: ./layout_L4_region_pareto_llm_mixed_pick_exp.yaml
+_base_: _legacy_mixed_pick/layout_L4_region_pareto_llm_mixed_pick_ab_noqueue_exp.yaml
 
-detailed_place:
-  planner:
-    require_llm: true
-    disable_on_fatal: true
-    queue_enabled: false
+# DEPRECATED (legacy mixed_pick planner). Redirect only.

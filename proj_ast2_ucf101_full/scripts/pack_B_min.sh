@@ -14,10 +14,8 @@ TAG_RAW="${TAG_RAW:-nnnw}"
 TAG="$(printf "%s" "$TAG_RAW" | LC_ALL=C tr -c 'A-Za-z0-9_.+-' '_' )"
 
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
-PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2 \
-EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem EXP-B2-ab-nollm \
-EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate \
-EXP-B3}"
+# Default MIN pack focuses on paper table + headroom probes.
+PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3 EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly}"
 
 TAIL_N="${TAIL_N:-400}"
 TRACE_TAIL_N="${TRACE_TAIL_N:-300}"
@@ -171,6 +169,11 @@ tar -czf "$OUT/_meta/B_cfg_and_scripts.tgz" \
   configs/layout_agent \
   configs/llm \
   2>/dev/null || true
+
+# optional analysis (best-effort)
+if [[ -f scripts/analyze_B_oracle_regret.py ]]; then
+  python scripts/analyze_B_oracle_regret.py --root "${B_OUT_ROOT}" --out_dir "$OUT/_meta/_analysis" >/dev/null 2>&1 || true
+fi
 
 FINAL="${TAG}-ALL_B_PACKS_MIN.tgz"
 tar -czf "$FINAL" -C "$OUT" . 2>/dev/null || true
