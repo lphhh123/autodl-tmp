@@ -1,0 +1,31 @@
+# A4 + ACHO + ROI-Commit (v5.4)
+# - ACHO: accuracy-constrained lambda controller (auto-tunes lambda_hw_effective within schedule cap)
+# - ROI-Commit: only accept discrete mapping/layout changes that improve HW proxy and are safe w.r.t. acc margin
+#
+# Recommended usage:
+#   python -m scripts.run_version_c --cfg configs/vc_phase3_full_ucf101_A_acho_roi.yaml --out_dir outputs/P3/A4_acho_roi --seed 0
+#
+# NOTE: For a fair ablation against A4, keep lambda_hw_schedule.lambda_hw_max unchanged.
+#       For a "stress test" (show headroom), you may raise lambda_hw_max (e.g., 0.12) ONLY in an extra run.
+
+_base_: configs/vc_phase3_full_ucf101_A_main.yaml
+
+stable_hw:
+  acho:
+    enabled: true
+    # Scale-free controller (fractions of lambda_hw_max)
+    step_up_frac: 0.12
+    step_down_frac: 0.25
+    hysteresis_frac: 0.25
+    # Synergy: after a discrete commit, temporarily cap lambda to 0.5*base during ROI cooldown
+    post_commit_lambda_mul: 0.5
+    post_commit_block_increase: true
+
+  discrete_isolation:
+    roi_commit:
+      enabled: true
+      metric: proxy_raw_latency_ms
+      min_rel_improve: 0.01
+      min_margin: 0.0
+      cooldown_epochs: 2
+      require_hw_active: true

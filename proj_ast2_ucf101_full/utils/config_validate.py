@@ -939,6 +939,32 @@ def validate_and_fill_defaults(cfg: Any, mode: str = "version_c") -> Any:
     iso.setdefault("track_live_segments", False)
     iso.setdefault("use_cached_hw_mats", False)
 
+    # ---- ACHO defaults: accuracy-constrained lambda controller (optional) ----
+    if getattr(stable_hw, "acho", None) is None:
+        stable_hw.acho = OmegaConf.create({})
+    acho = stable_hw.acho
+    acho.setdefault("enabled", False)
+    # Step sizes are fractions of lambda_hw_max (scale-free)
+    acho.setdefault("step_up_frac", 0.12)
+    acho.setdefault("step_down_frac", 0.25)
+    # Hysteresis around boundary: max(hysteresis, hysteresis_frac * epsilon_drop)
+    acho.setdefault("hysteresis", 0.0)
+    acho.setdefault("hysteresis_frac", 0.25)
+    # Synergy with ROI-Commit: during roi cooldown, cap lambda to post_commit_lambda_mul * base cap.
+    acho.setdefault("post_commit_lambda_mul", 0.5)
+    acho.setdefault("post_commit_block_increase", True)
+
+    # ---- ROI-Commit defaults: safe discrete mapping/layout commit (optional) ----
+    iso.setdefault("roi_commit", OmegaConf.create({}))
+    roi = iso.roi_commit
+    roi.setdefault("enabled", False)
+    # HW metric used for ROI evaluation (lower is better)
+    roi.setdefault("metric", "proxy_raw_latency_ms")
+    roi.setdefault("min_rel_improve", 0.01)   # require >=1% improvement to accept a new discrete bundle
+    roi.setdefault("min_margin", 0.0)         # require acc_margin_last >= this before proposing updates
+    roi.setdefault("cooldown_epochs", 2)      # freeze discrete updates after a commit
+    roi.setdefault("require_hw_active", True) # don't propose updates when lambda_hw_effective==0
+
     # ===== v5.4 NoDoubleScale: stable_hw enabled => legacy lambda_hw MUST be 0 (warn + override) =====
     stable_en = bool(get_nested(cfg, "stable_hw.enabled", False))
     legacy_hw_lam = float(getattr(getattr(cfg, "hw", {}), "lambda_hw", 0.0) or 0.0)

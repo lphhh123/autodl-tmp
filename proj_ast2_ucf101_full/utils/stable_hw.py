@@ -344,6 +344,7 @@ def stable_hw_schedule(
     warmup_epochs = int(_cfg_get(sched, "warmup_epochs", 5))
     ramp_epochs = int(_cfg_get(sched, "ramp_epochs", 10))
     lambda_hw_max = _safe_float(_cfg_get(sched, "lambda_hw_max", _cfg_get(sched, "max_lambda", 0.0)), 0.0)
+    st["_lambda_hw_max_cfg"] = float(lambda_hw_max)
     clamp_min = _safe_float(
         _cfg_get(
             sched,
@@ -714,6 +715,135 @@ def _update_train_ema(stable_hw_cfg: Any, st: Dict[str, Any], acc: float) -> Non
         st["train_acc1_ema"] = float(beta) * float(prev) + (1.0 - float(beta)) * float(acc)
 
 
+
+
+
+# -------------------------
+# ACHO: Accuracy-Constrained HW Lambda Controller (v5.4+)
+# -------------------------
+def _get_acho_cfg(cfg_or_stable: Any) -> dict:
+    """Return the ACHO controller config as a plain dict.
+
+    Canonical path:
+      cfg.stable_hw.acho.*
+    Back-compat alias (optional):
+      cfg.stable_hw.accuracy_constrained_lambda.*
+    """
+    _, stable_hw_cfg = _get_root_and_stable(cfg_or_stable)
+    acho = _cfg_get(stable_hw_cfg, "acho", None)
+    if not acho:
+        acho = _cfg_get(stable_hw_cfg, "accuracy_constrained_lambda", None)
+    if acho is None:
+        return {}
+    if isinstance(acho, dict):
+        return dict(acho)
+    try:
+        return {k: acho[k] for k in acho}
+    except Exception:
+        try:
+            return dict(vars(acho))
+        except Exception:
+            return {}
+
+
+def _acho_step_size(max_lambda_cap: float, frac: float) -> float:
+    try:
+        cap = float(max_lambda_cap)
+        f = float(frac)
+    except Exception:
+        return 0.0
+    cap = max(0.0, cap)
+    f = max(0.0, f)
+    return cap * f
+
+
+def _apply_acho_controller(
+    *,
+    epoch: int,
+    stable_hw_cfg: Any,
+    st: Dict[str, Any],
+    base_cap: float,
+    guard_mode: str,
+    margin: float,
+    eps_used: float,
+) -> float:
+    """Update and return the ACHO-controlled lambda_hw_effective (<= base_cap).
+
+    We want: keep accuracy above (acc_ref - eps_used) while pushing HW pressure as high as safely possible.
+
+    Controller:
+      - if margin > hysteresis: increase lambda
+      - if margin < -hysteresis: decrease lambda
+      - else: keep lambda
+    And clamp into [0, base_cap]. In RECOVERY/VIOLATE/WARMUP -> force lambda=0 and reset integrator.
+
+    This is intentionally *scale-free* and *low-tuning*: step sizes are fractions of lambda_hw_max (cap).
+    """
+    acho_cfg = _get_acho_cfg(stable_hw_cfg)
+    enabled = bool(_cfg_get(acho_cfg, "enabled", False))
+    if not enabled:
+        return float(base_cap)
+
+    gm = str(guard_mode or "").upper().strip()
+    # Never push HW while reference isn't stable or while recovering.
+    if gm in ("WARMUP", "VIOLATE", "RECOVERY"):
+        st["acho_lambda"] = 0.0
+        st["acho_action"] = "reset_in_" + gm.lower()
+        st["acho_margin"] = float(margin)
+        st["acho_eps_used"] = float(eps_used)
+        return 0.0
+
+    cap = float(max(0.0, base_cap))
+    max_cap = float(st.get("_lambda_hw_max_cfg", cap) or cap)
+    max_cap = float(max(max_cap, cap))
+
+    lam = float(st.get("acho_lambda", 0.0) or 0.0)
+    # Clamp integrator into [0, cap] always
+    lam = float(max(0.0, min(cap, lam)))
+
+    # Hysteresis around the constraint boundary to avoid oscillation
+    hyst_frac = float(_cfg_get(acho_cfg, "hysteresis_frac", 0.25) or 0.25)
+    hyst_abs = float(_cfg_get(acho_cfg, "hysteresis", 0.0) or 0.0)
+    hyst = max(hyst_abs, float(eps_used) * max(0.0, hyst_frac))
+
+    step_up = float(_cfg_get(acho_cfg, "step_up_frac", 0.12) or 0.12)
+    step_dn = float(_cfg_get(acho_cfg, "step_down_frac", 0.25) or 0.25)
+    d_up = _acho_step_size(max_cap, step_up)
+    d_dn = _acho_step_size(max_cap, step_dn)
+
+    # Optional: after a discrete commit, temporarily cap lambda to let the model adapt.
+    # ROI-Commit (trainer) sets st['roi_cooldown_until']=outer+K.
+    post_mul = float(_cfg_get(acho_cfg, "post_commit_lambda_mul", 0.5) or 0.5)
+    block_inc = bool(_cfg_get(acho_cfg, "post_commit_block_increase", True))
+    cd_until = int(st.get("roi_cooldown_until", -1) or -1)
+    in_cd = (cd_until >= 0) and (int(epoch) < int(cd_until))
+    if in_cd:
+        cap = min(cap, float(base_cap) * max(0.0, min(1.0, post_mul)))
+        lam = min(lam, cap)
+
+    action = "hold"
+    if margin > hyst:
+        if (not in_cd) or (not block_inc):
+            lam = lam + d_up
+            action = "inc"
+        else:
+            action = "hold_cd"
+    elif margin < -hyst:
+        lam = lam - d_dn
+        action = "dec"
+
+    lam = float(max(0.0, min(cap, lam)))
+    st["acho_lambda"] = float(lam)
+    st["acho_action"] = str(action)
+    st["acho_margin"] = float(margin)
+    st["acho_eps_used"] = float(eps_used)
+    st["acho_cap"] = float(cap)
+    st["acho_max_cap"] = float(max_cap)
+    st["acho_hysteresis"] = float(hyst)
+
+    return float(lam)
+
+
 def apply_accuracy_guard(
     *,
     epoch: int,
@@ -1000,6 +1130,25 @@ def apply_accuracy_guard(
             st["freeze_schedule"] = True
     else:
         st["freeze_schedule"] = False
+
+    # -------------------------
+    # ACHO: Accuracy-Constrained HW lambda controller
+    #   - uses the same acc_ref/epsilon guard margin
+    #   - adjusts lambda_hw_effective within [0, after] (after is post-guard cap)
+    # -------------------------
+    try:
+        after = _apply_acho_controller(
+            epoch=int(epoch),
+            stable_hw_cfg=stable_hw_cfg,
+            st=st,
+            base_cap=float(after),
+            guard_mode=str(st.get("guard_mode", "HW_OPT")),
+            margin=float(margin),
+            eps_used=float(eps_used),
+        )
+    except Exception as exc:
+        # Never fail training due to controller bugs; fall back to post-guard value.
+        logger.warning("[ACHO] controller failed (fallback to after_guard): %s", exc)
 
     request_lr_restart = bool(st["guard_mode"] == "RECOVERY" and prev_guard_mode != "RECOVERY")
 
