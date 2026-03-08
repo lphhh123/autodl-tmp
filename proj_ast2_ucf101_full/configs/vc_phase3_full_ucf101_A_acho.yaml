@@ -1,0 +1,19 @@
+# A4 + ACHO (no ROI-Commit)
+# Fair comparison: inherit A4 main config, keep lambda_hw_schedule.lambda_hw_max unchanged.
+_base_: configs/vc_phase3_full_ucf101_A_main.yaml
+
+stable_hw:
+  acho:
+    enabled: true
+    # scale-free controller (fractions of lambda_hw_max)
+    step_up_frac: 0.12
+    step_down_frac: 0.25
+    hysteresis_frac: 0.25
+    # harmless defaults; ROI is disabled in this config
+    post_commit_lambda_mul: 0.5
+    post_commit_block_increase: true
+
+  discrete_isolation:
+    roi_commit:
+      enabled: false
+
