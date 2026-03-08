@@ -467,6 +467,7 @@ case "$EXP_ID" in
   EXP-B2-naive-memonly)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_memonly_nollm_exp.yaml   EXP-B2-naive-memonly ;;
   EXP-B2-naive-chainonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_chainonly_nollm_exp.yaml EXP-B2-naive-chainonly ;;
   EXP-B2-naive-ruinonly)  run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_ruinonly_nollm_exp.yaml  EXP-B2-naive-ruinonly ;;
+  EXP-B2-naive-blockonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_blockonly_nollm_exp.yaml EXP-B2-naive-blockonly ;;
 
   # -------------------------
   # Appendix / Optional (kept but not required for main table)

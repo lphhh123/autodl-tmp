@@ -70,6 +70,18 @@ def _apply_relocate_perm(assign: np.ndarray, i: int, site_id: int) -> np.ndarray
     return a
 
 
+def _dedup_ints(xs: List[int]) -> List[int]:
+    seen = set()
+    out: List[int] = []
+    for x in xs:
+        xi = int(x)
+        if xi in seen:
+            continue
+        seen.add(xi)
+        out.append(xi)
+    return out
+
+
 @dataclass
 class OpStat:
     tries: int = 0
@@ -124,6 +136,17 @@ class MacroEngine:
         self.rr_repair_steps = int(rr_cfg.get("repair_steps", 6))
         self.rr_repair_step_topk = int(rr_cfg.get("repair_step_topk", 12))
         self.rr_repair_step_sample_topk = int(rr_cfg.get("repair_step_sample_topk", 3))
+
+        # New macro family: block_relocate
+        br_cfg = (self.cfg.get("block_relocate") or {}) if isinstance(self.cfg, dict) else {}
+        self.br_block_size = int(br_cfg.get("block_size", 3))
+        self.br_seed_topk = int(br_cfg.get("seed_topk", 10))
+        self.br_partner_topk = int(br_cfg.get("partner_topk", 8))
+        self.br_external_partner_topk = int(br_cfg.get("external_partner_topk", 4))
+        self.br_anchor_topk = int(br_cfg.get("anchor_topk", 6))
+        self.br_candidate_blocks = int(br_cfg.get("candidate_blocks", 18))
+        self.br_eval_topk = int(br_cfg.get("eval_topk", 6))
+        self.br_use_empty_only = bool(br_cfg.get("use_empty_only", True))
 
     def _stat(self, name: str) -> OpStat:
         if name not in self.stats:
@@ -237,6 +260,185 @@ class MacroEngine:
             if len(out) >= max(20, int(self.cand_k)):
                 break
         return out
+
+    def _propose_block_relocate_candidates(
+        self,
+        assign: np.ndarray,
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+    ) -> List[Tuple[float, List[Dict[str, Any]], np.ndarray]]:
+        _ = site_to_region
+        a = np.asarray(assign, dtype=int)
+        S = int(a.shape[0])
+        Ns = int(sites_xy_mm.shape[0])
+        pos = np.asarray(sites_xy_mm, dtype=np.float64)[a]
+        all_sites = np.arange(Ns, dtype=int)
+        empty = self._empty_sites(a, Ns)
+
+        # seed chips: traffic-hot + thermal-hot
+        seeds_comm = self._hot_slots_by_traffic(traffic_sym, max(4, int(self.br_seed_topk)))
+        tdp = np.asarray(chip_tdp_w, dtype=np.float64)
+        seeds_therm = [
+            int(x)
+            for x in np.argsort(-tdp)[: max(1, min(S, int(max(4, self.br_seed_topk // 2))))].tolist()
+        ]
+        seeds = _dedup_ints(seeds_comm + seeds_therm)
+
+        candidates: List[Tuple[float, List[Dict[str, Any]], np.ndarray]] = []
+        if not seeds:
+            return candidates
+
+        for seed in seeds[: max(1, int(self.br_seed_topk))]:
+            # Build a correlated block around the seed using strong communication partners.
+            partners = self._top_partners(traffic_sym, int(seed), max(2, int(self.br_partner_topk)))
+            block = [int(seed)]
+            for j in partners:
+                if int(j) not in block:
+                    block.append(int(j))
+                if len(block) >= max(2, int(self.br_block_size)):
+                    break
+            block = _dedup_ints(block)
+            if len(block) < 2:
+                continue
+            block_set = set(int(x) for x in block)
+
+            # External centroid: where do these chips "want" to be, based on outside strong partners?
+            ext_w: Dict[int, float] = {}
+            for i in block:
+                row = np.asarray(traffic_sym, dtype=np.float64)[int(i)]
+                order = np.argsort(-row)
+                taken = 0
+                for j0 in order.tolist():
+                    j = int(j0)
+                    if j == int(i) or j in block_set:
+                        continue
+                    ext_w[j] = float(ext_w.get(j, 0.0)) + float(row[j])
+                    taken += 1
+                    if taken >= max(1, int(self.br_external_partner_topk)):
+                        break
+            ext_idxs = [int(x) for x in ext_w.keys()]
+            if ext_idxs:
+                ww = np.asarray([float(ext_w[j]) for j in ext_idxs], dtype=np.float64)
+                centroid = self._weighted_centroid(pos, ext_idxs, ww)
+            else:
+                centroid = np.asarray(pos[np.asarray(block, dtype=int)], dtype=np.float64).mean(axis=0)
+
+            # Prefer relocating into nearby empty sites; fallback to all sites if not enough empties.
+            if bool(self.br_use_empty_only) and int(empty.size) >= len(block):
+                site_pool = np.asarray(empty, dtype=int)
+            else:
+                site_pool = np.asarray(all_sites, dtype=int)
+
+            anchors = _nearest_sites(
+                np.asarray(sites_xy_mm, dtype=np.float64),
+                centroid,
+                site_pool,
+                max(len(block), int(self.br_anchor_topk)),
+            )
+            anchors = _dedup_ints([int(x) for x in anchors])
+
+            for anchor in anchors[: max(1, int(self.br_anchor_topk))]:
+                tgt = _nearest_sites(
+                    np.asarray(sites_xy_mm, dtype=np.float64),
+                    np.asarray(sites_xy_mm, dtype=np.float64)[int(anchor)],
+                    site_pool,
+                    len(block),
+                )
+                tgt = _dedup_ints([int(x) for x in tgt])
+                if len(tgt) < len(block):
+                    continue
+
+                cur_sites = [int(a[int(i)]) for i in block]
+                if set(tgt) == set(cur_sites):
+                    continue
+
+                acts: List[Dict[str, Any]] = []
+                cur = a.copy()
+                used = set()
+                for i, sid in zip(block, tgt):
+                    if int(sid) in used:
+                        continue
+                    used.add(int(sid))
+                    act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "relocate"}
+                    acts.append(dict(act))
+                    cur = self._apply_act(cur, act)
+
+                if len(acts) < 2:
+                    continue
+
+                # Light analytic proxy for ordering:
+                # prefer tighter final block compactness and smaller external-centroid distance.
+                new_pos = np.asarray(sites_xy_mm, dtype=np.float64)[
+                    np.asarray([int(cur[int(i)]) for i in block], dtype=int)
+                ]
+                compact = float(np.mean(np.sum((new_pos - new_pos.mean(axis=0, keepdims=True)) ** 2, axis=1)))
+                cent_dist = float(np.mean(np.sum((new_pos - centroid[None, :]) ** 2, axis=1)))
+                est0 = float(compact + 0.5 * cent_dist)
+                candidates.append((est0, acts, cur))
+                if len(candidates) >= max(4, int(self.br_candidate_blocks)):
+                    break
+            if len(candidates) >= max(4, int(self.br_candidate_blocks)):
+                break
+
+        candidates.sort(key=lambda x: float(x[0]))
+        return candidates[: max(1, int(self.br_candidate_blocks))]
+
+    def _run_block_relocate(
+        self,
+        name: str,
+        assign0: np.ndarray,
+        eval0: Dict[str, Any],
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+        evaluate_assign: Callable[[np.ndarray], Dict[str, Any]],
+    ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        st = self._stat(name)
+        info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
+        if st.cooldown > 0:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        st.tries += 1
+        info["tries"] = int(info.get("tries", 0)) + 1
+
+        candidates = self._propose_block_relocate_candidates(
+            assign=assign0,
+            sites_xy_mm=sites_xy_mm,
+            traffic_sym=traffic_sym,
+            chip_tdp_w=chip_tdp_w,
+            site_to_region=site_to_region,
+        )
+        if not candidates:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        k_eval = max(1, min(int(self.br_eval_topk), len(candidates)))
+
+        best_total = float(eval0.get("total_scalar", 0.0))
+        best_assign = assign0.copy()
+        best_eval = dict(eval0)
+        best_acts: List[Dict[str, Any]] = []
+        best_final = assign0.copy()
+
+        for _k in range(int(k_eval)):
+            _est, acts, final_assign = candidates[_k]
+            eo = evaluate_assign(final_assign)
+            info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+            v = float(eo.get("total_scalar", 1e30))
+            if v < best_total:
+                best_total = float(v)
+                best_assign = final_assign.copy()
+                best_eval = dict(eo)
+                best_acts = [dict(a) for a in acts]
+                best_final = final_assign.copy()
+
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+        calls = float(info.get("eval_calls", 0))
+        info["used_actions"] = int(len(best_acts))
+        self._update_stat_end(st, gain=gain, calls=calls, info=info)
+        return best_assign, best_eval, float(best_total), best_acts, best_final, info
 
     def _run_chain(
         self,
@@ -558,6 +760,17 @@ class MacroEngine:
             )
         if str(name) in {"ruin_repair", "ruin-and-recreate", "ruin"}:
             return self._run_ruin_repair(
+                name=str(name),
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy_mm,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp_w,
+                site_to_region=site_to_region,
+                evaluate_assign=evaluate_assign,
+            )
+        if str(name) in {"block_relocate", "block", "block-relocate"}:
+            return self._run_block_relocate(
                 name=str(name),
                 assign0=assign0,
                 eval0=eval0,

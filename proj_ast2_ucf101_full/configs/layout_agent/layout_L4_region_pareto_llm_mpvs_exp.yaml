@@ -148,6 +148,16 @@ detailed_place:
         fail_penalty: 0.2
         weight_floor: 0.1
         weight_cap: 5.0
+      # Optional macro family (kept out of the main pool until headroom is verified)
+      block_relocate:
+        block_size: 3
+        seed_topk: 10
+        partner_topk: 8
+        external_partner_topk: 4
+        anchor_topk: 6
+        candidate_blocks: 18
+        eval_topk: 6
+        use_empty_only: true
     explore:
       mode: hybrid
       every_n_steps: 20
