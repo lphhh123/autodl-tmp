@@ -3507,6 +3507,22 @@ def run_detailed_place(
                                             _is_sponsored = bool((best_plan or {}).get("_cec_trial", 0))
                                             _ctx_key_for_ticket = str((best_plan or {}).get("_cec_ctx_key", (step_ctx or {}).get("release_ctx_key", step_ctx.get("ctx_key", ""))))
                                             _family_for_ticket = str((best_plan or {}).get("_cec_family", (best_plan or {}).get("name", "")))
+                                            # v2.7: accept-as-sponsored (BC^2-CEC only)
+                                            # Many macro accepts are not marked as "_cec_trial" (so trial_won stays 0),
+                                            # which prevents any maturity->release loop from ever happening.
+                                            # Fix: if CEC is enabled and we are in late stage, treat an accepted macro as sponsored.
+                                            try:
+                                                if (
+                                                    src_grp == "macro"
+                                                    and (not _is_sponsored)
+                                                    and bool(getattr(mpvs_ctrl, "cec_enabled", False))
+                                                    and str((step_ctx or {}).get("stage", "") or "") == "late"
+                                                ):
+                                                    _is_sponsored = True
+                                                    if isinstance(best_plan, dict) and not best_plan.get("_cec_trial_reason"):
+                                                        best_plan["_cec_trial_reason"] = "accept_as_sponsored"
+                                            except Exception:
+                                                pass
                                             # default: keep existing behavior
                                             _ticket_best_total_seen = float(best_total_seen)
                                             # v2.1 baseline fix: sponsored macro wins use pre-apply baseline only
