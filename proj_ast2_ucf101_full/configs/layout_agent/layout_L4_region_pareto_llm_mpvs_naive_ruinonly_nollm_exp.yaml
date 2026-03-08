@@ -20,9 +20,17 @@ detailed_place:
       max_macros: 1
       n_steps: 1
       ruin_repair:
-        ruin_ratios: [0.10, 0.20, 0.30]
-        candidates_per_ratio: 2
-        eval_topk: 6
-        repair_steps: 6
-        repair_step_topk: 12
-        repair_step_sample_topk: 3
+        ruin_ratios: [0.08, 0.15, 0.25]
+        candidates_per_ratio: 3
+        eval_topk: 8
+        # v2.2 strengthen
+        hot_comm_k: 12
+        hot_therm_k: 10
+        hot_prob: 0.75
+        ruin_site_mode: far
+        far_site_k: 24
+        eval_random: 1
+        repair_pick: best
+        repair_steps: 10
+        repair_step_topk: 20
+        repair_step_sample_topk: 2

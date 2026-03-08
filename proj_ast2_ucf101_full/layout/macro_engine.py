@@ -13,6 +13,7 @@ This engine:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import permutations
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -82,6 +83,30 @@ def _dedup_ints(xs: List[int]) -> List[int]:
     return out
 
 
+def _pairwise_comm_cost(pos_xy: np.ndarray, chips: List[int], traffic_sym: np.ndarray) -> float:
+    """Weighted pairwise squared-distance cost inside a chip set.
+
+    Used to make block_relocate structurally different from ruin: block should explicitly
+    improve internal communication geometry for a small correlated group.
+    """
+    if not chips or len(chips) <= 1:
+        return 0.0
+    idx = [int(i) for i in chips]
+    pts = np.asarray(pos_xy, dtype=np.float64)[np.asarray(idx, dtype=int)]
+    tr = np.asarray(traffic_sym, dtype=np.float64)
+    tot = 0.0
+    for a in range(len(idx)):
+        ia = int(idx[a])
+        for b in range(a + 1, len(idx)):
+            ib = int(idx[b])
+            w = float(tr[ia, ib] + tr[ib, ia])
+            if w <= 0.0:
+                continue
+            d2 = float(np.sum((pts[a] - pts[b]) ** 2))
+            tot += w * d2
+    return float(tot)
+
+
 @dataclass
 class OpStat:
     tries: int = 0
@@ -137,6 +162,18 @@ class MacroEngine:
         self.rr_repair_step_topk = int(rr_cfg.get("repair_step_topk", 12))
         self.rr_repair_step_sample_topk = int(rr_cfg.get("repair_step_sample_topk", 3))
 
+        # v2.2: strengthen ruin-repair (otherwise it often never produces a net-improving candidate)
+        # - target ruined chips to "hard" parts (traffic-hot / thermal-hot)
+        # - make ruin move bigger (farthest-empty relocate)
+        # - rank candidates by analytic delta sum instead of random shuffling
+        self.rr_hot_comm_k = int(rr_cfg.get("hot_comm_k", 12))
+        self.rr_hot_therm_k = int(rr_cfg.get("hot_therm_k", 10))
+        self.rr_hot_prob = float(rr_cfg.get("hot_prob", 0.75))
+        self.rr_ruin_site_mode = str(rr_cfg.get("ruin_site_mode", "far"))  # far | random
+        self.rr_far_site_k = int(rr_cfg.get("far_site_k", 24))
+        self.rr_eval_random = int(rr_cfg.get("eval_random", 1))
+        self.rr_repair_pick = str(rr_cfg.get("repair_pick", "best"))  # best | sample
+
         # New macro family: block_relocate
         br_cfg = (self.cfg.get("block_relocate") or {}) if isinstance(self.cfg, dict) else {}
         self.br_block_size = int(br_cfg.get("block_size", 3))
@@ -147,6 +184,14 @@ class MacroEngine:
         self.br_candidate_blocks = int(br_cfg.get("candidate_blocks", 18))
         self.br_eval_topk = int(br_cfg.get("eval_topk", 6))
         self.br_use_empty_only = bool(br_cfg.get("use_empty_only", True))
+
+        # v2.2: strengthen block-relocate to be objective-aware and distinct from ruin
+        self.br_perm_sites_k = int(br_cfg.get("perm_sites_k", 6))
+        self.br_perm_limit = int(br_cfg.get("perm_limit", 120))
+        self.br_score_w_est = float(br_cfg.get("score_w_est", 1.0))
+        self.br_score_w_internal = float(br_cfg.get("score_w_internal", 1e-6))
+        self.br_score_w_compact = float(br_cfg.get("score_w_compact", 1e-6))
+        self.br_score_w_centroid = float(br_cfg.get("score_w_centroid", 5e-7))
 
     def _stat(self, name: str) -> OpStat:
         if name not in self.stats:
@@ -343,44 +388,75 @@ class MacroEngine:
             )
             anchors = _dedup_ints([int(x) for x in anchors])
 
+            # Precompute "before" structural terms for this block.
+            before_sites = [int(a[int(i)]) for i in block]
+            before_pos = np.asarray(sites_xy_mm, dtype=np.float64)[np.asarray(before_sites, dtype=int)]
+            compact_before = float(np.mean(np.sum((before_pos - before_pos.mean(axis=0, keepdims=True)) ** 2, axis=1)))
+            cent_before = float(np.mean(np.sum((before_pos - centroid[None, :]) ** 2, axis=1)))
+            tr_block = np.asarray(traffic_sym, dtype=np.float64)[np.ix_(block, block)]
+            internal_before = _pairwise_comm_cost(before_pos, list(range(len(block))), tr_block)
+
             for anchor in anchors[: max(1, int(self.br_anchor_topk))]:
-                tgt = _nearest_sites(
+                # Candidate target pool around anchor. We allow a few extra sites and then
+                # search a small permutation set to assign chips->sites (block_size is small).
+                m = max(len(block), int(self.br_perm_sites_k))
+                tgt0 = _nearest_sites(
                     np.asarray(sites_xy_mm, dtype=np.float64),
                     np.asarray(sites_xy_mm, dtype=np.float64)[int(anchor)],
                     site_pool,
-                    len(block),
+                    m,
                 )
-                tgt = _dedup_ints([int(x) for x in tgt])
-                if len(tgt) < len(block):
+                tgt0 = _dedup_ints([int(x) for x in tgt0])
+                if len(tgt0) < len(block):
+                    continue
+                if set(tgt0[: len(block)]) == set(before_sites):
                     continue
 
-                cur_sites = [int(a[int(i)]) for i in block]
-                if set(tgt) == set(cur_sites):
-                    continue
+                best_score: Optional[float] = None
+                best_acts: List[Dict[str, Any]] = []
+                best_cur = a.copy()
+                perm_count = 0
 
-                acts: List[Dict[str, Any]] = []
-                cur = a.copy()
-                used = set()
-                for i, sid in zip(block, tgt):
-                    if int(sid) in used:
+                # Permute assignment of block chips to nearby sites.
+                for perm in permutations(tgt0[:m], len(block)):
+                    perm_count += 1
+                    if perm_count > max(1, int(self.br_perm_limit)):
+                        break
+                    if set(int(x) for x in perm) == set(before_sites):
                         continue
-                    used.add(int(sid))
-                    act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "relocate"}
-                    acts.append(dict(act))
-                    cur = self._apply_act(cur, act)
 
-                if len(acts) < 2:
+                    cur = a.copy()
+                    acts: List[Dict[str, Any]] = []
+                    est_sum = 0.0
+                    for i, sid in zip(block, perm):
+                        act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "relocate"}
+                        est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                        est_sum += float(est.get("d_total", 0.0))
+                        acts.append(dict(act))
+                        cur = self._apply_act(cur, act)
+                    if len(acts) < 2:
+                        continue
+
+                    after_sites = [int(cur[int(i)]) for i in block]
+                    after_pos = np.asarray(sites_xy_mm, dtype=np.float64)[np.asarray(after_sites, dtype=int)]
+                    compact_after = float(np.mean(np.sum((after_pos - after_pos.mean(axis=0, keepdims=True)) ** 2, axis=1)))
+                    cent_after = float(np.mean(np.sum((after_pos - centroid[None, :]) ** 2, axis=1)))
+                    internal_after = _pairwise_comm_cost(after_pos, list(range(len(block))), tr_block)
+
+                    score = (
+                        float(self.br_score_w_est) * float(est_sum)
+                        + float(self.br_score_w_internal) * float(internal_after - internal_before)
+                        + float(self.br_score_w_compact) * float(compact_after - compact_before)
+                        + float(self.br_score_w_centroid) * float(cent_after - cent_before)
+                    )
+                    if best_score is None or float(score) < float(best_score):
+                        best_score = float(score)
+                        best_acts = [dict(x) for x in acts]
+                        best_cur = cur.copy()
+
+                if best_score is None or len(best_acts) < 2:
                     continue
-
-                # Light analytic proxy for ordering:
-                # prefer tighter final block compactness and smaller external-centroid distance.
-                new_pos = np.asarray(sites_xy_mm, dtype=np.float64)[
-                    np.asarray([int(cur[int(i)]) for i in block], dtype=int)
-                ]
-                compact = float(np.mean(np.sum((new_pos - new_pos.mean(axis=0, keepdims=True)) ** 2, axis=1)))
-                cent_dist = float(np.mean(np.sum((new_pos - centroid[None, :]) ** 2, axis=1)))
-                est0 = float(compact + 0.5 * cent_dist)
-                candidates.append((est0, acts, cur))
+                candidates.append((float(best_score), best_acts, best_cur))
                 if len(candidates) >= max(4, int(self.br_candidate_blocks)):
                     break
             if len(candidates) >= max(4, int(self.br_candidate_blocks)):
@@ -544,6 +620,20 @@ class MacroEngine:
         Ns = int(sites_xy_mm.shape[0])
         empty0 = self._empty_sites(assign0, Ns)
 
+        # Target hard parts: traffic-hot + thermal-hot chips.
+        try:
+            hot_comm = self._hot_slots_by_traffic(traffic_sym, max(2, int(self.rr_hot_comm_k)))
+        except Exception:
+            hot_comm = []
+        try:
+            tdp = np.asarray(chip_tdp_w, dtype=np.float64)
+            hot_therm = [int(x) for x in np.argsort(-tdp)[: max(2, min(S, int(self.rr_hot_therm_k)))].tolist()]
+        except Exception:
+            hot_therm = []
+        hot_pool = _dedup_ints([int(x) for x in (hot_comm + hot_therm)])
+
+        pos0 = np.asarray(sites_xy_mm, dtype=np.float64)[np.asarray(assign0, dtype=int)]
+
         ratios = [r for r in self.rr_ratios if r > 0.0]
         if not ratios:
             ratios = [0.2]
@@ -555,14 +645,49 @@ class MacroEngine:
             for _c in range(int(n_can)):
                 cur = assign0.copy()
                 acts: List[Dict[str, Any]] = []
-                for _t in range(int(n_ruin)):
-                    i = _rng_randint(self.rng, 0, S)
+                est_sum = 0.0
+
+                # Build a unique ruin set (avoid repeatedly "ruining" the same chip).
+                ruin_set: List[int] = []
+                tries_guard = 0
+                while len(ruin_set) < int(n_ruin) and tries_guard < int(n_ruin) * 4:
+                    tries_guard += 1
+                    use_hot = bool(hot_pool) and (
+                        float(getattr(self.rng, "random", lambda: np.random.rand())()) < float(self.rr_hot_prob)
+                    )
+                    if use_hot:
+                        i = int(hot_pool[_rng_randint(self.rng, 0, len(hot_pool))])
+                    else:
+                        i = _rng_randint(self.rng, 0, S)
+                    if i not in ruin_set:
+                        ruin_set.append(int(i))
+
+                for i in ruin_set:
                     if empty0.size > 0:
-                        sid = int(empty0[_rng_randint(self.rng, 0, empty0.size)])
+                        if str(self.rr_ruin_site_mode) == "far":
+                            far = _farthest_sites(
+                                np.asarray(sites_xy_mm, dtype=np.float64),
+                                np.asarray(pos0[int(i)], dtype=np.float64),
+                                np.asarray(empty0, dtype=int),
+                                max(1, min(int(self.rr_far_site_k), int(empty0.size))),
+                            )
+                            if far:
+                                pick_n = max(1, min(5, len(far)))
+                                sid = int(far[_rng_randint(self.rng, 0, pick_n)])
+                            else:
+                                sid = int(empty0[_rng_randint(self.rng, 0, empty0.size)])
+                        else:
+                            sid = int(empty0[_rng_randint(self.rng, 0, empty0.size)])
                         act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "relocate"}
                     else:
                         j = _rng_randint(self.rng, 0, S)
                         act = {"op": "swap", "i": int(i), "j": int(j), "type": "swap"}
+
+                    try:
+                        est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                        est_sum += float(est.get("d_total", 0.0))
+                    except Exception:
+                        pass
                     acts.append(dict(act))
                     cur = self._apply_act(cur, act)
 
@@ -576,27 +701,35 @@ class MacroEngine:
                         scored.append((float(est.get("d_total", 0.0)), dict(act)))
                     scored.sort(key=lambda x: float(x[0]))
                     topk = scored[: max(1, min(int(self.rr_repair_step_topk), len(scored)))]
-                    samp_n = max(1, min(int(self.rr_repair_step_sample_topk), len(topk)))
-                    pick = topk[_rng_randint(self.rng, 0, samp_n)] if samp_n > 1 else topk[0]
-                    _d0, a0 = float(pick[0]), dict(pick[1])
+                    if str(self.rr_repair_pick) == "best":
+                        _d0, a0 = float(topk[0][0]), dict(topk[0][1])
+                    else:
+                        samp_n = max(1, min(int(self.rr_repair_step_sample_topk), len(topk)))
+                        pick = topk[_rng_randint(self.rng, 0, samp_n)] if samp_n > 1 else topk[0]
+                        _d0, a0 = float(pick[0]), dict(pick[1])
+                    est_sum += float(_d0)
                     acts.append(dict(a0))
                     cur = self._apply_act(cur, a0)
 
-                est0 = float(r) + 1e-6 * float(len(acts))
-                candidates.append((est0, acts, cur))
+                # Rank candidates by analytic delta sum (lower is better).
+                est0 = float(est_sum) + 1e-6 * float(len(acts))
+                candidates.append((float(est0), acts, cur))
 
         if not candidates:
             return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
 
+        candidates.sort(key=lambda x: float(x[0]))
         k_eval = max(1, min(int(self.rr_eval_topk), len(candidates)))
-        try:
-            idxs = list(range(len(candidates)))
-            for i in range(len(idxs) - 1, 0, -1):
-                j = _rng_randint(self.rng, 0, i + 1)
-                idxs[i], idxs[j] = idxs[j], idxs[i]
-            candidates = [candidates[i] for i in idxs]
-        except Exception:
-            pass
+
+        # Evaluate a few best candidates plus a tiny random tail for diversity.
+        eval_random = max(0, min(int(self.rr_eval_random), max(0, k_eval - 1)))
+        keep_top = max(1, k_eval - eval_random)
+        eval_list = candidates[:keep_top]
+        if eval_random > 0 and len(candidates) > keep_top:
+            rest = candidates[keep_top:]
+            for _ in range(int(eval_random)):
+                eval_list.append(rest[_rng_randint(self.rng, 0, len(rest))])
+        candidates = eval_list
 
         best_total = float(eval0.get("total_scalar", 0.0))
         best_assign = assign0.copy()

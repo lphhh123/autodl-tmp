@@ -25,6 +25,13 @@ detailed_place:
         partner_topk: 8
         external_partner_topk: 4
         anchor_topk: 6
-        candidate_blocks: 18
-        eval_topk: 6
-        use_empty_only: true
+        candidate_blocks: 24
+        eval_topk: 8
+        # v2.2 strengthen & differentiate from ruin
+        use_empty_only: false
+        perm_sites_k: 6
+        perm_limit: 120
+        score_w_est: 1.0
+        score_w_internal: 1.0e-6
+        score_w_compact: 1.0e-6
+        score_w_centroid: 5.0e-7
