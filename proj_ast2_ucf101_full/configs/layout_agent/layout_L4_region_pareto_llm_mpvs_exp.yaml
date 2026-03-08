@@ -40,11 +40,13 @@ detailed_place:
       cec:
         enabled: true
         family_blend_tau: 8
-        family_min_samples: 6
-        local_min_samples: 2
-        seed_trials_per_family: 1
-        family_cooldown_steps: 25
-        trial_max_per_step: 1
+        family_min_samples: 1
+        local_min_samples: 1
+        seed_trials_per_family: 2
+        seed_allow_low_sample: true
+        seed_min_pass_heur: 1
+        family_cooldown_steps: 8
+        trial_max_per_step: 2
         candidate_release: true
         family_stage_prior: true
         context:
@@ -55,14 +57,14 @@ detailed_place:
       repeat_hi: 0.75
       macro:
         enabled: true
-        enable_when_stagnation_ge: 15
-        min_interval_steps: 5
+        enable_when_stagnation_ge: 12
+        min_interval_steps: 3
         roi_floor: 0.0
         allow_cold_start: true
-        cooldown_fail: 20
+        cooldown_fail: 10
         max_fail_streak: 3
-        quota_min: 0
-        quota_max: 3
+        quota_min: 1
+        quota_max: 4
         quota_boost_roi: 0.001
       mem:
         enabled: true
@@ -160,14 +162,15 @@ detailed_place:
 
       # P1: non-heuristic must also beat CURRENT by a minimum gain.
       nonheuristic_min_gain_current_early: 0.0
-      nonheuristic_min_gain_current_late: 0.0002
+      nonheuristic_min_gain_current_late: 0.00005
       nonheuristic_min_gain_current_switch_stagnation: 15
-      nonheuristic_min_gain_current_randw_scale: 1.5
+      nonheuristic_min_gain_current_randw_scale: 1.0
+      nonheuristic_min_gain_current_late_macro_cap: 0.00005
       llm_min_gain_current: 0.0002
       full_verify_always_include_sources: ["heuristic"]
       macro_gain_gate_enabled: true
       macro_gain_margin_early: 0.001
-      macro_gain_margin_late: 0.0002
+      macro_gain_margin_late: 0.00005
       macro_gain_switch_stagnation: 20
       macro_gain_randw_scale: 1.5
       macro_cost_lambda: 2e-7
@@ -176,20 +179,25 @@ detailed_place:
       # Macro must improve current total by at least min_gain, otherwise it is NOT allowed to compete.
       # Use dynamic mode to auto-adapt to instance difficulty (quantile over recent improvements).
       macro_min_gain_mode: dynamic   # fixed | dynamic
-      macro_min_gain: 0.001
-      macro_min_gain_randw: 0.0005
+      macro_min_gain: 0.0008
+      macro_min_gain_randw: 0.0004
       macro_min_gain_dynamic_window: 200
       macro_min_gain_dynamic_quantile: 0.30
       macro_min_gain_dynamic_scale: 1.0
-      macro_min_gain_dynamic_floor: 0.0002
-      macro_min_gain_dynamic_cap: 0.01
+      macro_min_gain_dynamic_floor: 0.00005
+      macro_min_gain_dynamic_cap: 0.003
       macro_min_gain_dynamic_min_samples: 10
       macro_precheck_cooldown_fail: 10
       macro_precheck_cooldown_fail_randw: 6
+      macro_precheck_cooldown_fail_late: 2
+      macro_min_gain_mid: 0.00015
+      macro_min_gain_late: 0.00005
 
       # Macro-monotone: even if selected, macro must provide >= macro_accept_min_gain improvement.
       macro_monotone_enabled: true
-      macro_accept_min_gain: 0.0008
+      macro_accept_min_gain: 0.0004
+      macro_accept_min_gain_mid: 0.00010
+      macro_accept_min_gain_late: 0.00002
 
       randw_switch_stagnation: 20
       randw_early_horizon_cap: 2
@@ -232,13 +240,13 @@ detailed_place:
       calls_baseline_min_samples: 20
       calls_gate_enabled: true
       macro:
-        enable_when_stagnation_ge: 20
-        min_interval_steps: 10
+        enable_when_stagnation_ge: 15
+        min_interval_steps: 6
         distress_mode: and
         stagnation_extra: 5
         credit_max: 3
         credit_add: 1
-        credit_cost: 3
+        credit_cost: 2
         cooldown_fail: 10
       verifier:
         enable_when_stagnation_ge: 12

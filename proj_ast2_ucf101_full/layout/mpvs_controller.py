@@ -164,6 +164,11 @@ class MPVSController:
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
         self.cec_seed_trials_per_family = int(cec.get("seed_trials_per_family", 1))
+        # v2.2: allow a tiny number of low-sample seed sponsors once a family has shown pass_heur.
+        # This is the missing on-ramp for BC^2-CEC: without it, many families never get their first
+        # sponsored win, so no ticket / no long credit / no release can ever happen.
+        self.cec_seed_allow_low_sample = bool(cec.get("seed_allow_low_sample", True))
+        self.cec_seed_min_pass_heur = int(cec.get("seed_min_pass_heur", 1))
         self.cec_family_cooldown_steps = int(cec.get("family_cooldown_steps", 25))
         self.cec_trial_max_per_step = int(cec.get("trial_max_per_step", 1))
         # v2.1: candidate soft-release + stage-aware family priors
@@ -600,7 +605,10 @@ class MPVSController:
             return False, "not_macro", meta
         if stage != "late":
             return False, "not_late", meta
-        if int(a.probe_pass_heur) <= 0 and int(af.probe_pass_heur) <= 0:
+        pass_heur_local = int(a.probe_pass_heur)
+        pass_heur_family = int(af.probe_pass_heur)
+        pass_heur_need = max(1, int(self.cec_seed_min_pass_heur))
+        if pass_heur_local < pass_heur_need and pass_heur_family < pass_heur_need:
             return False, "no_pass_heur", meta
 
         stp = int(step)
@@ -633,7 +641,18 @@ class MPVSController:
 
         if n_family >= int(self.cec_family_min_samples) and n_local >= int(self.cec_local_min_samples) and trial_score > 0.0:
             reason = "evidence_sponsor"
-        elif n_family >= int(self.cec_family_min_samples) and edge_family > 0.0 and int(a.probe_pass_heur) > 0:
+        # v2.2: true low-sample seeding path.
+        # If a family has already shown pass_heur but still lacks enough samples,
+        # allow a very small number of seed sponsors so it can collect its first realized long credit.
+        elif (
+            bool(self.cec_seed_allow_low_sample)
+            and n_family < int(self.cec_family_min_samples)
+            and (pass_heur_local >= pass_heur_need or pass_heur_family >= pass_heur_need)
+        ):
+            if int(af.trial_seed_used) >= max(0, int(self.cec_seed_trials_per_family)):
+                return False, "seed_budget_exhausted", meta
+            reason = "seed_sponsor_low_sample"
+        elif n_family >= int(self.cec_family_min_samples) and edge_family > 0.0 and pass_heur_local > 0:
             if int(af.trial_seed_used) >= max(0, int(self.cec_seed_trials_per_family)):
                 return False, "seed_budget_exhausted", meta
             reason = "seed_sponsor"
@@ -648,7 +667,7 @@ class MPVSController:
         a.last_trial_kind = str(reason)
         af.trial_sponsored += 1
         af.last_trial_step = stp
-        if reason == "seed_sponsor":
+        if reason in {"seed_sponsor", "seed_sponsor_low_sample"}:
             af.trial_seed_used += 1
         return True, reason, meta
 
