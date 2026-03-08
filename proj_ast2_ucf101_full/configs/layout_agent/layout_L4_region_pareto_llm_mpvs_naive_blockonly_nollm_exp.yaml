@@ -1,0 +1,30 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml
+
+# Headroom probe: block-relocate macro only (no controller).
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        macro: 3
+        mem: 0
+    memory:
+      enabled: false
+    controller:
+      enabled: false
+    macros:
+      # Always enable and ONLY use block-relocate macro
+      base: ["block_relocate"]
+      extra_on_stagnation: []
+      enable_base_when_stagnation_ge: 0
+      enable_extra_when_stagnation_ge: 999999
+      max_macros: 1
+      n_steps: 1
+      block_relocate:
+        block_size: 3
+        seed_topk: 10
+        partner_topk: 8
+        external_partner_topk: 4
+        anchor_topk: 6
+        candidate_blocks: 18
+        eval_topk: 6
+        use_empty_only: true

@@ -16,7 +16,7 @@ B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 #   - ABL: MPVS ablations
 #   - EVIDENCE: uncontrolled + controller ablations
 PACK_MAIN_DEFAULT="EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3"
-PACK_HEADROOM_DEFAULT="EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly"
+PACK_HEADROOM_DEFAULT="EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly EXP-B2-naive-blockonly"
 PACK_ABL_DEFAULT="EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B2-ab-nomem"
 PACK_EVIDENCE_DEFAULT="EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate"
 

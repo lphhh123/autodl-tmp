@@ -29,7 +29,7 @@ Headroom 前置（controller=0，用于构造 Oracle 与 sign-flip 证据）：
 
 ```bash
 RUN_HEADROOM=1 \
-EXPS_HEADROOM="EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly" \
+EXPS_HEADROOM="EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly EXP-B2-naive-blockonly" \
 INSTANCES_HEADROOM="cluster4 chain_skip chain_skip_randw" \
 BUDGETS_HEADROOM="50k 200k" \
 WEIGHT_PAIRS_HEADROOM="0.3,0.7" \

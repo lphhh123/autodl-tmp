@@ -15,7 +15,7 @@ TAG="$(printf "%s" "$TAG_RAW" | LC_ALL=C tr -c 'A-Za-z0-9_.+-' '_' )"
 
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 # Default MIN pack focuses on paper table + headroom probes.
-PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3 EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly}"
+PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3 EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly EXP-B2-naive-blockonly}"
 
 TAIL_N="${TAIL_N:-400}"
 TRACE_TAIL_N="${TRACE_TAIL_N:-300}"
