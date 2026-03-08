@@ -10,12 +10,30 @@ mkdir -p _pack_B
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 
 # Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
-DEFAULT_PACK_EXPS="EXP-B1 EXP-B2 \
-EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B2-ab-nomem \
-EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate \
-EXP-B3"
+# Groups:
+#   - MAIN: paper table (nollm baselines)
+#   - HEADROOM: controller=0 probes (for oracle/regret construction)
+#   - ABL: MPVS ablations
+#   - EVIDENCE: uncontrolled + controller ablations
+PACK_MAIN_DEFAULT="EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3"
+PACK_HEADROOM_DEFAULT="EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly"
+PACK_ABL_DEFAULT="EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B2-ab-nomem"
+PACK_EVIDENCE_DEFAULT="EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate"
+
+PACK_INCLUDE_ABLATIONS="${PACK_INCLUDE_ABLATIONS:-0}"
+PACK_INCLUDE_EVIDENCE="${PACK_INCLUDE_EVIDENCE:-0}"
+
+DEFAULT_PACK_EXPS="${PACK_MAIN_DEFAULT} ${PACK_HEADROOM_DEFAULT}"
+if [[ "${PACK_INCLUDE_ABLATIONS}" == "1" ]]; then
+  DEFAULT_PACK_EXPS="${DEFAULT_PACK_EXPS} ${PACK_ABL_DEFAULT}"
+fi
+if [[ "${PACK_INCLUDE_EVIDENCE}" == "1" ]]; then
+  DEFAULT_PACK_EXPS="${DEFAULT_PACK_EXPS} ${PACK_EVIDENCE_DEFAULT}"
+fi
+
 PACK_EXPS="${PACK_EXPS:-$DEFAULT_PACK_EXPS}"
 echo "[PACK] PACK_EXPS=${PACK_EXPS}"
+echo "[PACK] PACK_INCLUDE_ABLATIONS=${PACK_INCLUDE_ABLATIONS} PACK_INCLUDE_EVIDENCE=${PACK_INCLUDE_EVIDENCE}"
 
 # Whether to include legacy B0/B0* (default off)
 PACK_INCLUDE_B0="${PACK_INCLUDE_B0:-0}"
@@ -183,6 +201,16 @@ tar -czf _pack_B/B_cfg_and_scripts.tgz \
   configs/layout_agent \
   configs/llm \
   2>/dev/null || true
+
+# 2.5) analysis bundle (oracle/regret + macro utilization)
+if [[ -f scripts/analyze_B_oracle_regret.py ]]; then
+  echo "[PACK] running scripts/analyze_B_oracle_regret.py ..."
+  python scripts/analyze_B_oracle_regret.py --root "${B_OUT_ROOT}" --out_dir "${B_OUT_ROOT}/_analysis" >/dev/null 2>&1 || true
+  tar -czf _pack_B/B_analysis.tgz \
+    --ignore-failed-read \
+    "${B_OUT_ROOT}/_analysis" \
+    2>/dev/null || true
+fi
 
 # 3) final package (exclude self)
 rm -f _pack_B/ALL_B_PACKS.tgz

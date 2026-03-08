@@ -32,9 +32,21 @@ SEEDS_MAIN="${SEEDS_MAIN:-0 1 2 3 4}"   # strong argument
 SEEDS_ABL="${SEEDS_ABL:-0}"             # ablations single seed by default
 
 # Experiments
-EXPS_MAIN="${EXPS_MAIN:-EXP-B1 EXP-B2 EXP-B3}"
+# Mainline (paper table): keep it small and comparable.
+#   - EXP-B2 is the "full" MPVS config (may include LLM); prefer the nollm baselines below.
+EXPS_MAIN="${EXPS_MAIN:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3}"
+
+# MPVS-only ablations (paper ablations / sanity)
 EXPS_ABL="${EXPS_ABL:-EXP-B2-ab-nollm EXP-B2-ab-noverifier EXP-B2-ab-nomacro EXP-B2-ab-nomem}"
-RUN_ABLATIONS="${RUN_ABLATIONS:-1}"     # set 0 to skip ablations
+RUN_ABLATIONS="${RUN_ABLATIONS:-0}"     # default OFF (avoid runtime explosion)
+
+# Headroom probes (controller=0) for component capability diagnosis.
+RUN_HEADROOM="${RUN_HEADROOM:-0}"
+EXPS_HEADROOM="${EXPS_HEADROOM:-EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly}"
+SEEDS_HEADROOM="${SEEDS_HEADROOM:-0}"
+BUDGETS_HEADROOM="${BUDGETS_HEADROOM:-${BUDGETS}}"
+WEIGHT_PAIRS_HEADROOM="${WEIGHT_PAIRS_HEADROOM:-${WEIGHT_PAIRS}}"
+INSTANCES_HEADROOM="${INSTANCES_HEADROOM:-${INSTANCES}}"
 
 # Evidence suite for "control necessity" (uncontrolled + controller ablations)
 # Default OFF to avoid exploding runtime. Turn on with:
@@ -63,6 +75,7 @@ echo "[B-grid] SEEDS_MAIN=${SEEDS_MAIN}"
 echo "[B-grid] SEEDS_ABL=${SEEDS_ABL}"
 echo "[B-grid] EXPS_MAIN=${EXPS_MAIN}"
 echo "[B-grid] EXPS_ABL=${EXPS_ABL} (RUN_ABLATIONS=${RUN_ABLATIONS})"
+echo "[B-grid] RUN_HEADROOM=${RUN_HEADROOM}  EXPS_HEADROOM=${EXPS_HEADROOM}  SEEDS_HEADROOM=${SEEDS_HEADROOM}"
 echo "[B-grid] RUN_CTL_EVIDENCE=${RUN_CTL_EVIDENCE}"
 
 # ------------------------------------------------------------
@@ -142,6 +155,21 @@ if [[ "${RUN_ABLATIONS}" == "1" ]]; then
       for seed in ${SEEDS_ABL}; do
         for inst in ${INSTANCES}; do
           for exp in ${EXPS_ABL}; do
+            emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}"
+          done
+        done
+      done
+    done
+  done
+fi
+
+# Headroom grid (optional)
+if [[ "${RUN_HEADROOM}" == "1" ]]; then
+  for budget in ${BUDGETS_HEADROOM}; do
+    for wpair in ${WEIGHT_PAIRS_HEADROOM}; do
+      for seed in ${SEEDS_HEADROOM}; do
+        for inst in ${INSTANCES_HEADROOM}; do
+          for exp in ${EXPS_HEADROOM}; do
             emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}"
           done
         done

@@ -1,0 +1,25 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml
+
+# Headroom probe control (atomic ONLY):
+# - controller disabled
+# - macro disabled
+# - memory disabled
+# - LLM disabled (in base)
+#
+# Purpose:
+#   Provide a clean baseline under the SAME controller=0 setting, so that
+#   improvements from naive-chainonly / naive-ruinonly can be attributed to
+#   the macro family itself, not to toggling controller on/off.
+
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        macro: 0
+        mem: 0
+    macros:
+      enabled: false
+    memory:
+      enabled: false
+    controller:
+      enabled: false
