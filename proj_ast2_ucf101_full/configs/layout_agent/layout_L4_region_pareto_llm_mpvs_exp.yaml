@@ -52,14 +52,26 @@ detailed_place:
         seed_min_pass_heur: 1
         family_cooldown_steps: 8
         trial_max_per_step: 2
+        # v2.4 release / horizon
         ticket_horizon_min: 300
-        ticket_horizon_frac: 0.03
-        ticket_horizon_mid_remaining_frac: 0.70
-        ticket_horizon_late_remaining_frac: 0.50
-        ticket_horizon_mid_cap: 8000
-        ticket_horizon_late_cap: 4000
+        ticket_horizon_frac: 0.02
+        ticket_horizon_mid_remaining_frac: 0.45
+        ticket_horizon_late_remaining_frac: 0.25
+        ticket_horizon_mid_cap: 6000
+        ticket_horizon_late_cap: 2500
         candidate_release: true
         family_stage_prior: true
+        release_credit_floor: -0.0001
+        release_roi_floor_local: 0.0
+        release_roi_floor_family: 0.0
+        release_trial_score_floor: -0.02
+        release_edge_floor: -0.02
+        release_keep_roi_floor_local: -0.000001
+        release_keep_roi_floor_family: -0.000001
+        release_keep_trial_score_floor: -0.05
+        candidate_grace_maturities: 2
+        candidate_grace_calls_mid: 12000
+        candidate_grace_calls_late: 6000
         context:
           stagn_ratio_edges: [0.75, 1.50]
           repeat_ratio_edges: [0.55, 0.75]

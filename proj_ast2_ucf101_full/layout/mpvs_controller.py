@@ -88,6 +88,8 @@ class _CtxAgg:
     candidate: int = 0
     candidate_hits: int = 0
     last_candidate_step: int = -10**9
+    # v2.4: keep candidate alive across weak maturities before revoking.
+    candidate_mature_failures: int = 0
 
 
 @dataclass
@@ -187,16 +189,29 @@ class MPVSController:
         self.cec_seed_min_pass_heur = int(cec.get("seed_min_pass_heur", 1))
         self.cec_family_cooldown_steps = int(cec.get("family_cooldown_steps", 25))
         self.cec_trial_max_per_step = int(cec.get("trial_max_per_step", 1))
-        # v2.3: remaining-budget-aware ticket horizon (for sponsored macro only)
+        # v2.4: remaining-budget-aware ticket horizon (for sponsored macro only)
         self.cec_ticket_horizon_min = int(cec.get("ticket_horizon_min", 300))
-        self.cec_ticket_horizon_frac = float(cec.get("ticket_horizon_frac", 0.03))
-        self.cec_ticket_horizon_mid_remaining_frac = float(cec.get("ticket_horizon_mid_remaining_frac", 0.70))
-        self.cec_ticket_horizon_late_remaining_frac = float(cec.get("ticket_horizon_late_remaining_frac", 0.50))
-        self.cec_ticket_horizon_mid_cap = int(cec.get("ticket_horizon_mid_cap", 8000))
-        self.cec_ticket_horizon_late_cap = int(cec.get("ticket_horizon_late_cap", 4000))
+        self.cec_ticket_horizon_frac = float(cec.get("ticket_horizon_frac", 0.02))
+        self.cec_ticket_horizon_mid_remaining_frac = float(cec.get("ticket_horizon_mid_remaining_frac", 0.45))
+        self.cec_ticket_horizon_late_remaining_frac = float(cec.get("ticket_horizon_late_remaining_frac", 0.25))
+        self.cec_ticket_horizon_mid_cap = int(cec.get("ticket_horizon_mid_cap", 6000))
+        self.cec_ticket_horizon_late_cap = int(cec.get("ticket_horizon_late_cap", 2500))
         # v2.1: candidate soft-release + stage-aware family priors
         self.cec_candidate_release = bool(cec.get("candidate_release", True))
         self.cec_family_stage_prior = bool(cec.get("family_stage_prior", True))
+        # v2.4: soft/sticky release thresholds
+        self.cec_release_credit_floor = float(cec.get("release_credit_floor", -1e-4))
+        self.cec_release_roi_floor_local = float(cec.get("release_roi_floor_local", 0.0))
+        self.cec_release_roi_floor_family = float(cec.get("release_roi_floor_family", 0.0))
+        self.cec_release_trial_score_floor = float(cec.get("release_trial_score_floor", -0.02))
+        self.cec_release_edge_floor = float(cec.get("release_edge_floor", -0.02))
+        self.cec_release_keep_roi_floor_local = float(cec.get("release_keep_roi_floor_local", -1e-6))
+        self.cec_release_keep_roi_floor_family = float(cec.get("release_keep_roi_floor_family", -1e-6))
+        self.cec_release_keep_trial_score_floor = float(cec.get("release_keep_trial_score_floor", -0.05))
+        # v2.4: candidate grace window
+        self.cec_candidate_grace_maturities = int(cec.get("candidate_grace_maturities", 2))
+        self.cec_candidate_grace_calls_mid = int(cec.get("candidate_grace_calls_mid", 12000))
+        self.cec_candidate_grace_calls_late = int(cec.get("candidate_grace_calls_late", 6000))
         self.cec_stagn_ratio_edges = [float(x) for x in (ctx_cfg.get("stagn_ratio_edges", [0.75, 1.50]) or [0.75, 1.50])][:2]
         self.cec_repeat_ratio_edges = [float(x) for x in (ctx_cfg.get("repeat_ratio_edges", [0.55, 0.75]) or [0.55, 0.75])][:2]
         self.cec_blocked_ratio_edges = [float(x) for x in (ctx_cfg.get("blocked_ratio_edges", [0.15, 0.35]) or [0.15, 0.35])][:2]
@@ -213,6 +228,65 @@ class MPVSController:
         self.family_stage_agg: Dict[Tuple[str, str, str], _FamAgg] = {}
         self._sponsor_step = -1
         self._sponsor_count_step = 0
+
+    def _candidate_grace_calls(self, stage: str) -> int:
+        st = str(stage or "").strip().lower()
+        if st == "late":
+            return max(int(self.cec_ticket_horizon_min), int(self.cec_candidate_grace_calls_late))
+        return max(int(self.cec_ticket_horizon_min), int(self.cec_candidate_grace_calls_mid))
+
+    def _soft_release_eval(
+        self,
+        ctx_key: str,
+        family: str,
+        credit_gain: Optional[float] = None,
+    ) -> Tuple[bool, str, Dict[str, float]]:
+        ca = self._get_ctx_agg("macro", str(ctx_key or ""), str(family or ""))
+        fa = self._get_family_agg("macro", str(family or ""))
+        ts = self._trial_score("macro", str(ctx_key or ""), str(family or ""))
+        roi_local = float(getattr(ca, "roi_long", 0.0))
+        roi_family = float(getattr(fa, "roi_long", 0.0))
+        trial_score = float(ts.get("trial_score", 0.0))
+        edge_local = float(ts.get("edge_local", 0.0))
+        edge_family = float(ts.get("edge_family", 0.0))
+        trial_won = int(getattr(ca, "trial_won", 0))
+        pass_heur = max(int(getattr(ca, "probe_pass_heur", 0)), int(getattr(fa, "probe_pass_heur", 0)))
+        meta = {
+            "roi_local": roi_local,
+            "roi_family": roi_family,
+            "trial_score": trial_score,
+            "edge_local": edge_local,
+            "edge_family": edge_family,
+            "credit_gain": float(credit_gain) if credit_gain is not None else 0.0,
+        }
+        if (
+            credit_gain is not None
+            and float(credit_gain) > float(self.cec_release_credit_floor)
+            and trial_won > 0
+            and pass_heur > 0
+            and (
+                trial_score > float(self.cec_release_trial_score_floor)
+                or edge_local >= float(self.cec_release_edge_floor)
+                or edge_family >= float(self.cec_release_edge_floor)
+                or roi_family > float(self.cec_release_roi_floor_family)
+            )
+        ):
+            return True, "credit_or_family_ok", meta
+        if (
+            bool(getattr(ca, "candidate", 0))
+            and trial_won > 0
+            and (
+                roi_local > float(self.cec_release_roi_floor_local)
+                or roi_family > float(self.cec_release_roi_floor_family)
+            )
+            and (
+                trial_score > float(self.cec_release_trial_score_floor)
+                or edge_local >= float(self.cec_release_edge_floor)
+                or edge_family >= float(self.cec_release_edge_floor)
+            )
+        ):
+            return True, "candidate_bridge", meta
+        return False, "", meta
 
     def _seed_budget_for_stage(self, stage: str) -> int:
         st = str(stage or "").strip().lower()
@@ -800,29 +874,11 @@ class MPVSController:
                     # Only promote in late stage; keep release strictly ctx-local.
                     _stage = str(tk.ctx_key or "").split("|", 1)[0] if str(tk.ctx_key or "") else ""
                     if _stage == "late":
-                        ts = self._trial_score("macro", str(tk.ctx_key), str(tk.family))
-
-                        # v2.1: REALIZED-credit-first release rule.
-                        # If the realized long gain is positive, we should allow promotion even if
-                        # ex-ante probe scores are negative (opportunity cost can make trial_score<0).
-                        release_ok = False
-                        reason = ""
-
-                        if (
-                            float(credit_gain) > 0.0
-                            and int(getattr(ca, "trial_won", 0)) > 0
-                            and int(getattr(ca, "probe_pass_heur", 0)) > 0
-                        ):
-                            release_ok = True
-                            reason = "gain_cf_pos" if bool(self.cec_counterfactual_credit) else "gain_long_pos"
-
-                        # Fallback: keep previous score-gated rule (more conservative).
-                        if not release_ok:
-                            if float(ca.roi_long) > 0.0 and (
-                                float(ts.get("trial_score", 0.0)) > 0.0 or float(ts.get("edge_local", 0.0)) >= 0.0
-                            ):
-                                release_ok = True
-                                reason = "score_gate"
+                        release_ok, reason, _rmeta = self._soft_release_eval(
+                            ctx_key=str(tk.ctx_key),
+                            family=str(tk.family),
+                            credit_gain=float(credit_gain),
+                        )
 
                         if release_ok:
                             ca.released = 1
@@ -831,11 +887,18 @@ class MPVSController:
                             # Upgrade: candidate -> released
                             if bool(self.cec_candidate_release):
                                 ca.candidate = 0
+                                ca.candidate_mature_failures = 0
                         else:
-                            # Candidate is a short-lived bridge until horizon credit realizes.
-                            # If horizon expires and we still don't qualify for release, revoke candidate.
+                            # v2.4: candidate grace
                             if bool(self.cec_candidate_release) and int(getattr(ca, "candidate", 0)) == 1:
-                                ca.candidate = 0
+                                ca.candidate_mature_failures = int(getattr(ca, "candidate_mature_failures", 0)) + 1
+                                grace_calls = int(self._candidate_grace_calls(_stage))
+                                age_calls = int(used_calls) - int(getattr(ca, "last_candidate_step", -10**9))
+                                if (
+                                    int(getattr(ca, "candidate_mature_failures", 0)) >= int(self.cec_candidate_grace_maturities)
+                                    and int(age_calls) >= int(grace_calls)
+                                ):
+                                    ca.candidate = 0
         self.tickets = kept
 
     def allow(
@@ -1015,22 +1078,19 @@ class MPVSController:
         used_calls = int(used_calls)
         budget_total = int(budget_total)
         best_total_seen = float(best_total_seen)
-        horizon = max(int(self.cec_ticket_horizon_min), int(0.05 * float(budget_total))) if budget_total > 0 else int(self.cec_ticket_horizon_min)
+        horizon = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_frac) * float(budget_total))) if budget_total > 0 else int(self.cec_ticket_horizon_min)
 
         # v2.3: remaining-budget-aware horizon for sponsored macro tickets.
         # We want the first sponsored macro win to mature before the run ends.
         if comp == "macro" and bool(sponsored) and budget_total > 0:
             remaining = max(0, int(budget_total) - int(used_calls))
             stage0 = str(ctx_key or "").split("|", 1)[0] if str(ctx_key or "") else ""
-            base_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_frac) * float(budget_total)))
             if stage0 == "late":
                 rem_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_late_remaining_frac) * float(remaining)))
-                horizon = min(int(self.cec_ticket_horizon_late_cap), base_h, rem_h)
+                horizon = min(int(self.cec_ticket_horizon_late_cap), int(horizon), int(rem_h))
             elif stage0 == "mid":
                 rem_h = max(int(self.cec_ticket_horizon_min), int(float(self.cec_ticket_horizon_mid_remaining_frac) * float(remaining)))
-                horizon = min(int(self.cec_ticket_horizon_mid_cap), base_h, rem_h)
-            else:
-                horizon = base_h
+                horizon = min(int(self.cec_ticket_horizon_mid_cap), int(horizon), int(rem_h))
         # BC^2-CEC: snapshot atomic baseline at win time to compute expected atomic gain over horizon
         rate0 = float(self._atomic_rate(str(ctx_key or "")))
         exp_atomic_gain = float(rate0) * float(horizon)
@@ -1053,6 +1113,7 @@ class MPVSController:
             if bool(self.cec_candidate_release):
                 ca.candidate = 1
                 ca.last_candidate_step = int(used_calls)
+                ca.candidate_mature_failures = 0
             self._get_family_agg("macro", str(family)).trial_won += 1
 
     def roi_long(self, comp: str) -> float:
@@ -1067,18 +1128,37 @@ class MPVSController:
         ctx0 = ctx or {}
         if str(ctx0.get("stage", "")) != "late":
             return False
-        a = self._get_ctx_agg("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
-        ts = self._trial_score("macro", str(ctx0.get("ctx_key", "")), str(family or ""))
-        cond_release = int(a.trial_won) > 0 and float(a.roi_long) > 0.0 and (
-            float(ts.get("edge_local", 0.0)) >= 0.0 or float(ts.get("trial_score", 0.0)) > 0.0
-        )
-        if cond_release:
-            a.released = 1
-        if float(a.roi_long) <= 0.0 and float(ts.get("trial_score", 0.0)) <= 0.0:
-            a.released = 0
+        ctx_key = str(ctx0.get("ctx_key", ""))
+        fam = str(family or "")
+        a = self._get_ctx_agg("macro", ctx_key, fam)
+        fa = self._get_family_agg("macro", fam)
+        ts = self._trial_score("macro", ctx_key, fam)
+
         if bool(a.released):
+            if (
+                float(a.roi_long) <= float(self.cec_release_keep_roi_floor_local)
+                and float(fa.roi_long) <= float(self.cec_release_keep_roi_floor_family)
+                and float(ts.get("trial_score", 0.0)) <= float(self.cec_release_keep_trial_score_floor)
+            ):
+                a.released = 0
+            else:
+                a.release_hits += 1
+                return True
+
+        release_ok, reason, _meta = self._soft_release_eval(
+            ctx_key=ctx_key,
+            family=fam,
+            credit_gain=None,
+        )
+        if release_ok:
+            a.released = 1
+            a.last_release_reason = str(reason)
+            if bool(self.cec_candidate_release):
+                a.candidate = 0
+                a.candidate_mature_failures = 0
             a.release_hits += 1
-        return bool(a.released)
+            return True
+        return False
 
     def quota(
         self,
