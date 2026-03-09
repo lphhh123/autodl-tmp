@@ -3,11 +3,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-rm -rf _pack_B
-mkdir -p _pack_B
+PACK_OUT_DIR="${PACK_OUT_DIR:-_pack_B}"
+PACK_CLEAN_OUT_DIR="${PACK_CLEAN_OUT_DIR:-1}"
+if [[ "${PACK_CLEAN_OUT_DIR}" == "1" ]]; then
+  rm -rf "${PACK_OUT_DIR}"
+fi
+mkdir -p "${PACK_OUT_DIR}"
 
 # New B output root (post-migration). Can override if needed.
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
+PACK_MATCH_TAG="${PACK_MATCH_TAG:-}"
+PACK_SKIP_ANALYSIS="${PACK_SKIP_ANALYSIS:-0}"
 
 # Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
 # Groups:
@@ -34,6 +40,7 @@ fi
 PACK_EXPS="${PACK_EXPS:-$DEFAULT_PACK_EXPS}"
 echo "[PACK] PACK_EXPS=${PACK_EXPS}"
 echo "[PACK] PACK_INCLUDE_ABLATIONS=${PACK_INCLUDE_ABLATIONS} PACK_INCLUDE_EVIDENCE=${PACK_INCLUDE_EVIDENCE}"
+echo "[PACK] PACK_OUT_DIR=${PACK_OUT_DIR} PACK_MATCH_TAG=${PACK_MATCH_TAG} PACK_SKIP_ANALYSIS=${PACK_SKIP_ANALYSIS}"
 
 # Whether to include legacy B0/B0* (default off)
 PACK_INCLUDE_B0="${PACK_INCLUDE_B0:-0}"
@@ -83,7 +90,7 @@ _best_run_dir() {
 }
 
 # 0) layout_input
-tar -czf _pack_B/layout_input_P3A3.tgz \
+tar -czf "${PACK_OUT_DIR}/layout_input_P3A3.tgz" \
   --ignore-failed-read \
   outputs/P3/A3/layout_input.json \
   outputs/P3/A3/instances \
@@ -94,6 +101,10 @@ exp_dirs=()
 for prefix in ${PACK_EXPS}; do
   for d in ${B_OUT_ROOT}/${prefix}*; do
     [ -d "$d" ] || continue
+    bn="$(basename "$d")"
+    if [[ -n "${PACK_MATCH_TAG}" && "$bn" != *"${PACK_MATCH_TAG}"* ]]; then
+      continue
+    fi
     exp_dirs+=("$d")
   done
 done
@@ -116,7 +127,7 @@ for exp in "${exp_dirs[@]}"; do
     seed_name=$(basename "$seed")
 
     if [[ "$exp_name" == "EXP-B0" || "$exp_name" == "EXP-B0-random" ]]; then
-      out="_pack_B/${exp_name}_${seed_name}_FULL.tgz"
+      out="${PACK_OUT_DIR}/${exp_name}_${seed_name}_FULL.tgz"
       if [[ "${PACK_TRACE_CSV}" != "1" ]]; then
         tar -czf "$out" \
           --ignore-failed-read \
@@ -140,7 +151,7 @@ for exp in "${exp_dirs[@]}"; do
     latest_run_dir="$(_best_run_dir "$seed" || true)"
     if [ -n "$latest_run_dir" ] && [ -d "$latest_run_dir" ]; then
       run_id=$(basename "$latest_run_dir")
-      out="_pack_B/${exp_name}_${seed_name}_${run_id}.tgz"
+      out="${PACK_OUT_DIR}/${exp_name}_${seed_name}_${run_id}.tgz"
       if [[ "${PACK_TRACE_CSV}" != "1" ]]; then
         tar -czf "$out" \
           --ignore-failed-read \
@@ -169,7 +180,7 @@ for exp in "${exp_dirs[@]}"; do
       fi
       echo "[PACK] $out"
     else
-      out="_pack_B/${exp_name}_${seed_name}_NO_RUNID.tgz"
+      out="${PACK_OUT_DIR}/${exp_name}_${seed_name}_NO_RUNID.tgz"
       seed_files=(
         "$seed/report.json"
         "$seed/layout_best.json"
@@ -193,7 +204,7 @@ for exp in "${exp_dirs[@]}"; do
 done
 
 # 2) scripts and configs
-tar -czf _pack_B/B_cfg_and_scripts.tgz \
+tar -czf "${PACK_OUT_DIR}/B_cfg_and_scripts.tgz" \
   --ignore-failed-read \
   scripts/experiments_version_c.sh \
   scripts/launch_B_grid_parallel.sh \
@@ -206,17 +217,17 @@ tar -czf _pack_B/B_cfg_and_scripts.tgz \
   2>/dev/null || true
 
 # 2.5) analysis bundle (oracle/regret + macro utilization)
-if [[ -f scripts/analyze_B_oracle_regret.py ]]; then
+if [[ "${PACK_SKIP_ANALYSIS}" != "1" && -f scripts/analyze_B_oracle_regret.py ]]; then
   echo "[PACK] running scripts/analyze_B_oracle_regret.py ..."
   python scripts/analyze_B_oracle_regret.py --root "${B_OUT_ROOT}" --out_dir "${B_OUT_ROOT}/_analysis" >/dev/null 2>&1 || true
-  tar -czf _pack_B/B_analysis.tgz \
+  tar -czf "${PACK_OUT_DIR}/B_analysis.tgz" \
     --ignore-failed-read \
     "${B_OUT_ROOT}/_analysis" \
     2>/dev/null || true
 fi
 
 # 3) final package (exclude self)
-rm -f _pack_B/ALL_B_PACKS.tgz
-tar --ignore-failed-read --exclude=ALL_B_PACKS.tgz -czf _pack_B/ALL_B_PACKS.tgz -C _pack_B . 2>/dev/null || true
+rm -f "${PACK_OUT_DIR}/ALL_B_PACKS.tgz"
+tar --ignore-failed-read --exclude=ALL_B_PACKS.tgz -czf "${PACK_OUT_DIR}/ALL_B_PACKS.tgz" -C "${PACK_OUT_DIR}" . 2>/dev/null || true
 
-ls -lh _pack_B
+ls -lh "${PACK_OUT_DIR}"

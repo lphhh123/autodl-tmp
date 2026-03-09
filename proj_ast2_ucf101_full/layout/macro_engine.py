@@ -332,16 +332,41 @@ class MacroEngine:
         rate_op = float(raw_gain) / float(max(1e-9, raw_calls))
         rate_atomic = float(atomic_gain) / float(max(1e-9, atomic_calls))
 
-        cf_discount = float(cfg.get("cf_discount", cfg.get("counterfactual_discount", 1.0)))
+        # Stage-wise discount (optional): early/mid/late can differ to avoid over-subtraction.
+        stg = str(stage or "").strip().lower()
+        d_by_stage = cfg.get("cf_discount_by_stage", {}) if isinstance(cfg.get("cf_discount_by_stage", {}), dict) else {}
+        if isinstance(d_by_stage, dict) and stg in d_by_stage:
+            cf_discount = float(d_by_stage.get(stg, 1.0))
+        else:
+            cf_discount = float(cfg.get("cf_discount", cfg.get("counterfactual_discount", 1.0)))
         if not (cf_discount == cf_discount):
             cf_discount = 1.0
         cf_discount = float(max(0.0, min(1.0, cf_discount)))
 
-        rate_cf = float(rate_op) - float(cf_discount) * float(rate_atomic)
+        # Confidence gate + cap to reduce noisy/over-strong baselines dominating credit.
+        min_atomic_calls = int(cfg.get("min_atomic_calls_for_cf", 0))
+        use_cf = bool(min_atomic_calls <= 0 or float(atomic_calls) >= float(min_atomic_calls))
+
+        cf_cap_mult = float(cfg.get("cf_cap_mult", cfg.get("counterfactual_cap_mult", 1.5)))
+        if not (cf_cap_mult == cf_cap_mult):
+            cf_cap_mult = 1.5
+        cf_cap_mult = float(max(0.5, min(5.0, cf_cap_mult)))
+
+        if use_cf:
+            rate_atomic_eff = min(float(rate_atomic), float(cf_cap_mult) * max(float(rate_op), 1e-12))
+        else:
+            rate_atomic_eff = 0.0
+
+        rate_cf = float(rate_op) - float(cf_discount) * float(rate_atomic_eff)
         cf_gain = float(rate_cf) * float(raw_calls)
 
         a = float(cfg.get("ewma_alpha", getattr(self, "alpha", 0.2)))
         a = float(max(0.01, min(0.95, a)))
+        # Update raw EWMA too (stabilizes weight updates when CF is noisy/disabled).
+        st.ewma_gain = (1.0 - a) * float(getattr(st, "ewma_gain", 0.0)) + a * float(raw_gain)
+        st.ewma_calls = (1.0 - a) * float(getattr(st, "ewma_calls", 0.0)) + a * float(raw_calls)
+        st.ewma_gain_per_call = float(st.ewma_gain) / float(max(1e-9, st.ewma_calls))
+
         st.ewma_cf_gain = (1.0 - a) * float(getattr(st, "ewma_cf_gain", 0.0)) + a * float(cf_gain)
         st.ewma_cf_calls = (1.0 - a) * float(getattr(st, "ewma_cf_calls", 0.0)) + a * float(raw_calls)
         st.ewma_cf_gain_per_call = float(st.ewma_cf_gain) / float(max(1e-9, st.ewma_cf_calls))
@@ -351,7 +376,11 @@ class MacroEngine:
         update_weight = bool(cfg.get("update_weight", True))
         weight_metric = str(cfg.get("weight_metric", "cf")).lower()
         min_gain_per_call = float(cfg.get("min_gain_per_call", 0.0))
-        metric = float(rate_cf) if weight_metric in {"cf", "gain_cf", "counterfactual"} else float(rate_op)
+        use_ewma = bool(cfg.get("weight_use_ewma", True))
+        if weight_metric in {"cf", "gain_cf", "counterfactual"}:
+            metric = float(st.ewma_cf_gain_per_call) if use_ewma else float(rate_cf)
+        else:
+            metric = float(st.ewma_gain_per_call) if use_ewma else float(rate_op)
 
         boost_scale = float(cfg.get("success_boost_scale", 0.5))
         pen_scale = float(cfg.get("fail_penalty_scale", 0.5))
@@ -376,8 +405,11 @@ class MacroEngine:
             "atomic_calls": float(atomic_calls),
             "rate_op": float(rate_op),
             "rate_atomic": float(rate_atomic),
+            "rate_atomic_eff": float(rate_atomic_eff),
             "rate_cf": float(rate_cf),
             "cf_discount": float(cf_discount),
+            "cf_cap_mult": float(cf_cap_mult),
+            "use_cf": int(bool(use_cf)),
             "metric_used": float(metric),
             "weight": float(st.weight),
         }

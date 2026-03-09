@@ -167,11 +167,18 @@ detailed_place:
 
         # Counterfactual (operator vs atomic baseline) settings
         cf_discount: 0.7
+        # Optional stage-wise discount (overrides cf_discount when provided)
+        cf_discount_by_stage: {}
+        # Cap atomic baseline rate relative to op rate to avoid over-penalizing
+        cf_cap_mult: 1.5
+        # Only enable CF subtraction when atomic probe has enough calls
+        min_atomic_calls_for_cf: 150
         ewma_alpha: 0.2
 
         # Whether probe feedback should update MacroEngine's adaptive weights
         update_weight: true
         weight_metric: cf  # cf | raw
+        weight_use_ewma: true
         min_gain_per_call: 0.0
         success_boost_scale: 0.5
         fail_penalty_scale: 0.5
