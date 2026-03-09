@@ -138,14 +138,17 @@ detailed_place:
       # Stronger macro engine (delta-based proposing + limited verification)
       engine: delta_v1
       delta:
-        candidate_k: 30
-        eval_topk_per_step: 2
-        partner_topk: 8
-        empty_site_k: 20
-        hot_slots_k: 12
-        therm_hot_k: 10
-        therm_cold_k: 10
-        monotone: true
+        # DANGEROUS profile: increase macro candidate generation + evaluation pressure.
+        # Goal: make macro overhead noticeable under 20k budget.
+        candidate_k: 60
+        eval_topk_per_step: 4
+        partner_topk: 16
+        empty_site_k: 40
+        hot_slots_k: 20
+        therm_hot_k: 16
+        therm_cold_k: 16
+        # allow non-monotone proposals (riskier at low budget)
+        monotone: false
       adapt:
         enabled: true
         ewma_alpha: 0.2
@@ -158,42 +161,51 @@ detailed_place:
 
       # --- Macro family configs (explicit for reproducibility) ---
       chain:
-        chain_len: 5
-        propose_chains: 24
-        eval_topk: 6
-        step_topk: 10
-        step_sample_topk: 3
+        # DANGEROUS: longer + more random + much heavier evaluation
+        chain_len: 12
+        propose_chains: 96
+        # NOTE: chain macro eval_calls per invocation ~= eval_topk
+        eval_topk: 24
+        step_topk: 25
+        step_sample_topk: 10
 
       block_relocate:
-        block_size: 3
-        seed_topk: 10
-        partner_topk: 8
-        external_partner_topk: 4
-        anchor_topk: 6
-        candidate_blocks: 24
-        eval_topk: 8
+        # DANGEROUS: bigger blocks + heavier candidate search + heavier evaluation
+        block_size: 6
+        seed_topk: 24
+        partner_topk: 16
+        external_partner_topk: 10
+        anchor_topk: 16
+        candidate_blocks: 96
+        # NOTE: block macro eval_calls per invocation ~= eval_topk
+        eval_topk: 24
         use_empty_only: false
-        perm_sites_k: 6
-        perm_limit: 120
+        perm_sites_k: 12
+        perm_limit: 500
         score_w_est: 1.0
         score_w_internal: 1.0e-6
         score_w_compact: 1.0e-6
         score_w_centroid: 5.0e-7
 
       ruin_repair:
-        ruin_ratios: [0.08, 0.15, 0.25]
-        candidates_per_ratio: 3
-        eval_topk: 8
+        # DANGEROUS: larger destruction + weaker & stochastic repair + heavier evaluation
+        ruin_ratios: [0.20, 0.35, 0.50]
+        candidates_per_ratio: 4
+        # NOTE: ruin macro eval_calls per invocation ~= eval_topk
+        eval_topk: 24
         hot_comm_k: 12
         hot_therm_k: 10
         hot_prob: 0.75
         ruin_site_mode: far
-        far_site_k: 24
-        eval_random: 1
-        repair_pick: best
-        repair_steps: 10
-        repair_step_topk: 20
-        repair_step_sample_topk: 2
+        far_site_k: 80
+        # add diversity in evaluated candidates (riskier)
+        eval_random: 4
+        # not always best repair step -> more variance/risk
+        repair_pick: sample
+        # fewer repair steps -> more dangerous at low budget
+        repair_steps: 6
+        repair_step_topk: 40
+        repair_step_sample_topk: 12
     explore:
       mode: hybrid
       every_n_steps: 20

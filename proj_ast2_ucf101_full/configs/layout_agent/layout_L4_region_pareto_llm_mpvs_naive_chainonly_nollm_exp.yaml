@@ -20,8 +20,9 @@ detailed_place:
       max_macros: 1
       n_steps: 5
       chain:
-        chain_len: 5
-        propose_chains: 24
-        eval_topk: 6
-        step_topk: 10
-        step_sample_topk: 3
+        # DANGEROUS chain (match mpvs_exp.yaml)
+        chain_len: 12
+        propose_chains: 96
+        eval_topk: 24
+        step_topk: 25
+        step_sample_topk: 10
