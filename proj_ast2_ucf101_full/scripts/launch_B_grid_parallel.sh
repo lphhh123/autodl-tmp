@@ -131,6 +131,11 @@ emit_task() {
   local wt="${wpair%,*}"
   local wc="${wpair#*,}"
   local tag="b${budget}_wT$(fmt_tag "${wt}")_wC$(fmt_tag "${wc}")"
+  # Optional prefix to avoid overwriting across sweeps (e.g., HP00__b20k_...)
+  local pfx="${RUN_TAG_PREFIX:-}"
+  if [[ -n "${pfx}" ]]; then
+    tag="${pfx}__${tag}"
+  fi
   # We pass both: SCALAR_WEIGHTS_OVERRIDE for convenience, and tag for unique out dirs.
   echo "RUN_TAG='${tag}' INSTANCE='${inst}' BUDGET='${budget}' SCALAR_WEIGHTS_OVERRIDE='${wt},${wc}' bash scripts/experiments_version_c.sh '${exp}' '${seed}'" >> "${tmp_cmds}"
 }

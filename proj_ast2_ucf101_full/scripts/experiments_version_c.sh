@@ -484,10 +484,21 @@ case "$EXP_ID" in
   # --- New paper baselines/method (B1 & B3 unchanged) ---
   EXP-B2-std-budgetaware) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml EXP-B2-std-budgetaware ;;
   # Main method (default): BC^2-CEC + stage probes + atomic counterfactual baseline
-  EXP-B2-bc2cec)           run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml            EXP-B2-bc2cec ;;
+  # Allow overriding configs per sweep without editing code:
+  #   BC2CEC_CFG=... BC2CEC_RAW_CFG=... BC2CEC_NOPROBE_CFG=... RUN_TAG_PREFIX=... bash scripts/launch_B_grid_parallel.sh
+  EXP-B2-bc2cec)
+    _CFG="${BC2CEC_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec
+    ;;
   # Ablations to keep story clean (run only when needed)
-  EXP-B2-bc2cec-noprobe)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_noprobe_nollm_exp.yaml    EXP-B2-bc2cec-noprobe ;;
-  EXP-B2-bc2cec-probe-raw) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_probe_raw_nollm_exp.yaml  EXP-B2-bc2cec-probe-raw ;;
+  EXP-B2-bc2cec-noprobe)
+    _CFG="${BC2CEC_NOPROBE_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_noprobe_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-noprobe
+    ;;
+  EXP-B2-bc2cec-probe-raw)
+    _CFG="${BC2CEC_RAW_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_probe_raw_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-probe-raw
+    ;;
 
   # --- Headroom probes (no controller) ---
   EXP-B2-naive-mixed)      run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml      EXP-B2-naive-mixed ;;

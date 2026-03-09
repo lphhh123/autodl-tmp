@@ -19,14 +19,21 @@ detailed_place:
         atomic_call_budget: 0
         ops: ["relink", "shake", "tabu_search"]
         atomic_families: ["comm", "therm", "escape"]
-        atomic_eval_topk: 6
+        # Strengthen atomic probe slightly to make CF less noisy
+        atomic_eval_topk: 10
         macro_n_steps: 1
-        # counterfactual: rate_cf = rate_op - cf_discount * rate_atomic
-        cf_discount: 0.7
+        # Conservative CF w/ stage-wise ramp-up (helps threshold cases)
+        cf_discount: 0.35
+        cf_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
+        cf_cap_mult: 1.5
+        min_atomic_calls_for_cf: 180
         ewma_alpha: 0.2
         # Let probes shape macro selection weights (operator-agnostic)
         update_weight: true
         weight_metric: cf
+        weight_use_ewma: true
+        # gentler penalties from noisy probes
+        fail_penalty_scale: 0.25
         min_remaining_calls: 1500
     proposer:
       quota:
