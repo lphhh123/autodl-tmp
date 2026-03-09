@@ -1,0 +1,30 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml
+
+# Headroom probe: relink component only (no controller).
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        macro: 3
+        mem: 0
+    memory:
+      enabled: false
+    controller:
+      enabled: false
+    macros:
+      base: ["relink"]
+      extra_on_stagnation: []
+      enable_base_when_stagnation_ge: 0
+      enable_extra_when_stagnation_ge: 999999
+      max_macros: 1
+      n_steps: 5
+      elite_archive:
+        enabled: true
+        max_size: 8
+        min_hamming_frac: 0.08
+        keep_top_total: 8
+      relink:
+        eval_topk: 12
+        pick_k: 24
+        moves_per_step: 18
+        allow_worsen: true

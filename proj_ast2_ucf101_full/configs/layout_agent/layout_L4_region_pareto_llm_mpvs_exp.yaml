@@ -206,6 +206,35 @@ detailed_place:
         repair_steps: 6
         repair_step_topk: 40
         repair_step_sample_topk: 12
+
+      # --- New enhancement components (as macro families) ---
+      elite_archive:
+        enabled: true
+        max_size: 8
+        min_hamming_frac: 0.08
+        keep_top_total: 8
+      relink:
+        eval_topk: 12
+        pick_k: 24
+        moves_per_step: 18
+        allow_worsen: true
+
+      shake:
+        candidates: 16
+        kick_k: 8
+        kick_rounds: 2
+        eval_topk: 12
+        repair_steps: 4
+        repair_eval_topk: 4
+        allow_worsen: true
+
+      tabu_search:
+        steps: 12
+        tenure: 8
+        cand_k: 80
+        eval_topk: 6
+        allow_worsen: true
+        aspire_eps: 1.0e-4
     explore:
       mode: hybrid
       every_n_steps: 20

@@ -1,0 +1,27 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_mixed_nollm_exp.yaml
+
+# Headroom probe: tabu search component only (no controller).
+detailed_place:
+  mpvs:
+    proposer:
+      quota:
+        macro: 3
+        mem: 0
+    memory:
+      enabled: false
+    controller:
+      enabled: false
+    macros:
+      base: ["tabu_search"]
+      extra_on_stagnation: []
+      enable_base_when_stagnation_ge: 0
+      enable_extra_when_stagnation_ge: 999999
+      max_macros: 1
+      n_steps: 1
+      tabu_search:
+        steps: 12
+        tenure: 8
+        cand_k: 80
+        eval_topk: 6
+        allow_worsen: true
+        aspire_eps: 1.0e-4
