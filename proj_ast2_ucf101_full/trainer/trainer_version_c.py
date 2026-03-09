@@ -1979,12 +1979,24 @@ def train_version_c(
                         need_update_mapping = False
                         need_update_layout = False
 
+                # NOTE:
+                # ROI pre-gating (e.g., cooldown) can flip allow_discrete_updates AFTER we computed
+                # need_update_mapping/need_update_layout. Re-apply the gate here so we never enter
+                # mapping/layout discrete-update paths while the StableHW gate is closed.
+                if not allow_discrete_updates:
+                    need_update_mapping = False
+                    need_update_layout = False
+
                 if (not allow_discrete_updates) and cache["mapping"] is None:
                     stable_hw_state["discrete_frozen_init_mapping"] = True
 
                 if need_update_mapping:
                     assert allow_discrete_updates, (
-                        "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                        "StableHW gate closed (guard_mode=%s reason=%s): discrete updates must not run"
+                        % (
+                            str(stable_hw_state.get("guard_mode", "")),
+                            str(stable_hw_state.get("gating_reason_code", "")),
+                        )
                     )
                     roi_cfg_local = _roi_get_cfg(iso)
                     roi_enabled_local = bool(_cfg_get(roi_cfg_local, "enabled", False)) and bool(stable_hw_enabled)
@@ -2068,7 +2080,11 @@ def train_version_c(
 
                 if need_update_layout:
                     assert allow_discrete_updates, (
-                        "StableHW gate closed: discrete updates must not run in RECOVERY/WARMUP"
+                        "StableHW gate closed (guard_mode=%s reason=%s): discrete updates must not run"
+                        % (
+                            str(stable_hw_state.get("guard_mode", "")),
+                            str(stable_hw_state.get("gating_reason_code", "")),
+                        )
                     )
                     old_layout_sig = cache.get("layout_signature")
                     layout_res = _solve_layout_for_cache(
