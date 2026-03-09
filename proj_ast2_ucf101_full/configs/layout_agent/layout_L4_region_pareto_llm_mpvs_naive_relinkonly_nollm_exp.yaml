@@ -20,11 +20,12 @@ detailed_place:
       n_steps: 5
       elite_archive:
         enabled: true
-        max_size: 8
+        # keep consistent with main exp config (mild boost)
+        max_size: 10
         min_hamming_frac: 0.08
-        keep_top_total: 8
+        keep_top_total: 10
       relink:
-        eval_topk: 12
-        pick_k: 24
-        moves_per_step: 18
+        eval_topk: 13
+        pick_k: 28
+        moves_per_step: 24
         allow_worsen: true
