@@ -21,11 +21,11 @@ detailed_place:
       elite_archive:
         enabled: true
         # keep consistent with main exp config (mild boost)
-        max_size: 12
+        max_size: 10
         min_hamming_frac: 0.08
-        keep_top_total: 12
+        keep_top_total: 10
       relink:
-        eval_topk: 14
-        pick_k: 32
-        moves_per_step: 28
+        eval_topk: 13
+        pick_k: 28
+        moves_per_step: 24
         allow_worsen: true

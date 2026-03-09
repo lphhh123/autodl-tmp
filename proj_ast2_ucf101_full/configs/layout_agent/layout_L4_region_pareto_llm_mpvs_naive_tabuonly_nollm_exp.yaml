@@ -21,8 +21,8 @@ detailed_place:
       tabu_search:
         steps: 12
         # keep consistent with main exp config (mild boost)
-        tenure: 12
-        cand_k: 120
+        tenure: 10
+        cand_k: 100
         eval_topk: 7
         allow_worsen: true
         aspire_eps: 1.0e-4

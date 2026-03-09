@@ -210,15 +210,15 @@ detailed_place:
       # --- New enhancement components (as macro families) ---
       elite_archive:
         enabled: true
-        # v2 mild boost: slightly larger archive for more diverse relink targets
-        max_size: 12
+        # mild boost: slightly larger archive to improve relink target diversity
+        max_size: 10
         min_hamming_frac: 0.08
-        keep_top_total: 12
+        keep_top_total: 10
       relink:
-        # v2 mild boost: a bit more evaluation + slightly longer path
-        eval_topk: 14
-        pick_k: 32
-        moves_per_step: 28
+        # mild boost: a bit more evaluation + more candidate moves
+        eval_topk: 13
+        pick_k: 28
+        moves_per_step: 24
         allow_worsen: true
 
       shake:
@@ -235,9 +235,9 @@ detailed_place:
 
       tabu_search:
         steps: 12
-        # v2 mild boost: stronger anti-cycling + larger neighborhood (budget-friendly)
-        tenure: 12
-        cand_k: 120
+        # mild boost: stronger anti-cycling + slightly better lookahead
+        tenure: 10
+        cand_k: 100
         eval_topk: 7
         allow_worsen: true
         aspire_eps: 1.0e-4
