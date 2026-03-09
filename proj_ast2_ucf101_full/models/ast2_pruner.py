@@ -668,9 +668,13 @@ class ASTPruner(nn.Module):
             head_weights = torch.nan_to_num(head_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
             ch_weights = torch.nan_to_num(ch_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
             block_weights = torch.nan_to_num(block_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-        sparsity_head = 1.0 - head_weights.mean()
-        sparsity_ch = 1.0 - ch_weights.mean()
-        sparsity_block = 1.0 - block_weights.mean()
+        # IMPORTANT:
+        # Treat these as active ratios (keep factors). Minimizing L_AST should
+        # reduce them and therefore encourage pruning, so we use mean(weight)
+        # rather than (1 - mean).
+        sparsity_head = head_weights.mean()
+        sparsity_ch = ch_weights.mean()
+        sparsity_block = block_weights.mean()
         L_AST = self.compute_L_AST(stats_token["sparsity_token"], sparsity_head, sparsity_ch, sparsity_block)
         return ASTOutputs(
             token_mask=stats_token["mask"],
