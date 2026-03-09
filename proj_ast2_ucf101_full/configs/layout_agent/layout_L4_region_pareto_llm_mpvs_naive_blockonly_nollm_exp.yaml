@@ -20,17 +20,17 @@ detailed_place:
       max_macros: 1
       n_steps: 1
       block_relocate:
-        block_size: 3
-        seed_topk: 10
-        partner_topk: 8
-        external_partner_topk: 4
-        anchor_topk: 6
-        candidate_blocks: 24
-        eval_topk: 8
-        # v2.2 strengthen & differentiate from ruin
+        # DANGEROUS block_relocate (match mpvs_exp.yaml)
+        block_size: 6
+        seed_topk: 24
+        partner_topk: 16
+        external_partner_topk: 10
+        anchor_topk: 16
+        candidate_blocks: 96
+        eval_topk: 24
         use_empty_only: false
-        perm_sites_k: 6
-        perm_limit: 120
+        perm_sites_k: 12
+        perm_limit: 500
         score_w_est: 1.0
         score_w_internal: 1.0e-6
         score_w_compact: 1.0e-6
