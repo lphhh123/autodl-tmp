@@ -12,7 +12,7 @@ EXPS="${EXPS:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B
 
 # Optional headroom probes (controller=0)
 RUN_HEADROOM="${RUN_HEADROOM:-0}"
-EXPS_HEADROOM="${EXPS_HEADROOM:-EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly}"
+EXPS_HEADROOM="${EXPS_HEADROOM:-EXP-B2-naive-atomiconly EXP-B2-naive-relinkonly EXP-B2-naive-shakeonly EXP-B2-naive-tabuonly}"
 PARALLEL="${PARALLEL:-0}"
 MAX_JOBS="${MAX_JOBS:-8}"
 

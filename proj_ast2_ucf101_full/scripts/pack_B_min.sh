@@ -15,7 +15,7 @@ TAG="$(printf "%s" "$TAG_RAW" | LC_ALL=C tr -c 'A-Za-z0-9_.+-' '_' )"
 
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 # Default MIN pack focuses on paper table + headroom probes.
-PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3 EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly EXP-B2-naive-blockonly}"
+PACK_EXPS="${PACK_EXPS:-EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B2-bc2cec-noprobe EXP-B2-bc2cec-probe-raw EXP-B3 EXP-B2-naive-atomiconly EXP-B2-naive-relinkonly EXP-B2-naive-shakeonly EXP-B2-naive-tabuonly}"
 
 TAIL_N="${TAIL_N:-400}"
 TRACE_TAIL_N="${TRACE_TAIL_N:-300}"
@@ -163,6 +163,10 @@ done
 tar -czf "$OUT/_meta/B_cfg_and_scripts.tgz" \
   --ignore-failed-read \
   scripts/experiments_version_c.sh \
+  scripts/launch_B_grid_parallel.sh \
+  scripts/launch_B_mainline.sh \
+  scripts/pack_B_outputs.sh \
+  scripts/pack_B_min.sh \
   scripts/run_layout_agent.py \
   scripts/validate_min_pack.py \
   layout \

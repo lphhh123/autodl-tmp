@@ -1,0 +1,12 @@
+_base_: layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml
+
+# Ablation: probes ON but NO counterfactual (raw gain-per-call); still updates weights.
+detailed_place:
+  mpvs:
+    macros:
+      probe:
+        enabled: true
+        # make it explicit this is "raw" (no atomic subtraction)
+        cf_discount: 0.0
+        weight_metric: raw
+        update_weight: true

@@ -190,12 +190,21 @@ def main():
     )
     _write_csv(runs, out_dir / "run_table.csv")
 
+    # Headroom probes (controller=0) used to build an oracle upper bound.
+    # Keep legacy arms for backward compatibility; mainline uses the 3 enhancement components.
     headroom_arms = {
         "EXP-B2-naive-atomiconly": "atom",
+        "EXP-B2-naive-relinkonly": "relink",
+        "EXP-B2-naive-shakeonly": "shake",
+        "EXP-B2-naive-tabuonly": "tabu",
+        # legacy (optional)
         "EXP-B2-naive-chainonly": "chain",
         "EXP-B2-naive-ruinonly": "ruin",
         "EXP-B2-naive-macroonly": "macro",
+        "EXP-B2-naive-blockonly": "block",
     }
+
+    arm_order = ["atom", "relink", "shake", "tabu", "chain", "ruin", "block", "macro"]
 
     key_fields = ("instance", "budget", "wT", "wC", "seed")
     arm_by_key: Dict[Tuple[Any, ...], Dict[str, float]] = defaultdict(dict)
@@ -216,7 +225,7 @@ def main():
                 best_val = v
                 best_arm = a
         row = {f: v for f, v in zip(key_fields, k)}
-        row.update({f"arm_{a}": arms.get(a) for a in ("atom", "chain", "ruin", "macro")})
+        row.update({f"arm_{a}": arms.get(a) for a in arm_order})
         row["oracle_best"] = best_val if math.isfinite(best_val) else None
         row["oracle_arm"] = best_arm
         oracle_rows.append(row)
@@ -235,6 +244,8 @@ def main():
         "EXP-B2-mpvs-only",
         "EXP-B2-std-budgetaware",
         "EXP-B2-bc2cec",
+        "EXP-B2-bc2cec-noprobe",
+        "EXP-B2-bc2cec-probe-raw",
         "EXP-B3",
     ]
 
@@ -297,7 +308,7 @@ def main():
     md = [
         "# B Oracle/Regret Summary",
         "",
-        "Oracle: best among headroom arms {atom, chain, ruin, macro} under controller=0.",
+        "Oracle: best among headroom arms {atom, relink, shake, tabu} under controller=0 (legacy arms also supported).",
         "Regret: selected_total_scalar(method) - oracle_best (lower is better).",
         "",
         "| method | budget | mean_regret | n |",

@@ -126,8 +126,10 @@ detailed_place:
         cooldown_steps: 30
     macros:
       enabled: true
-      # Keep ONLY these 3 macro families in the mainline universe.
-      base: ["chain", "ruin_repair", "block_relocate"]
+      # Mainline macro pool (3 enhancement components).
+      # NOTE: legacy chain/ruin/block configs are kept below for headroom/diagnostics,
+      # but they are NOT part of the default mainline pool.
+      base: ["relink", "shake", "tabu_search"]
       extra_on_stagnation: []
       enable_base_when_stagnation_ge: 0
       enable_extra_when_stagnation_ge: 999999
