@@ -1161,14 +1161,17 @@ class MacroEngine:
         info["tries"] = int(info.get("tries", 0)) + 1
 
         a0 = np.asarray(assign0, dtype=int).copy()
-        Ns = int(np.asarray(sites_xy_mm, dtype=np.float64).shape[0])
-        empty0 = self._empty_sites(a0, Ns)
-        hot = self._hot_slots_by_traffic(traffic_sym, max(8, self.hot_slots_k))
-        tdp = np.asarray(chip_tdp_w, dtype=np.float64)
-        hot_t = [int(x) for x in np.argsort(-tdp)[: max(6, min(a0.shape[0], self.therm_hot_k))].tolist()]
-        pool = list(dict.fromkeys([int(x) for x in hot] + hot_t))
-        if not pool:
-            pool = [int(_rng_randint(self.rng, 0, int(a0.shape[0]))) for _ in range(min(8, int(a0.shape[0])))]
+        # NOTE:
+        # Old shake kick stage used fully random relocations (hot chips -> random sites).
+        # In this task it almost always destroys structure (esp. under boundary-like penalties),
+        # and the short repair cannot recover => gain==0 => success==0 across the grid.
+        #
+        # Fix:
+        # Make kick stage structured BUT still stochastic:
+        #   - Sample candidates from propose_actions("escape"/"comm"/"therm")
+        #   - Score by estimate_action_delta
+        #   - Randomly pick within top-K (K = shake_eval_topk) to keep exploration
+        # Repair stage becomes multi-objective (comm + therm).
 
         best_total = float(eval0.get("total_scalar", 0.0))
         best_assign = a0.copy()
@@ -1180,21 +1183,62 @@ class MacroEngine:
             cur = a0.copy()
             acts: List[Dict[str, Any]] = []
             for _r in range(max(1, int(self.shake_kick_rounds))):
-                self.rng.shuffle(pool)
-                for i in pool[: max(1, int(self.shake_kick_k))]:
-                    i = int(i)
-                    if empty0.size > 0 and self.rng.random() < 0.7:
-                        sid = int(empty0[_rng_randint(self.rng, 0, int(empty0.size))])
-                    else:
-                        sid = int(_rng_randint(self.rng, 0, Ns))
-                    act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "shake"}
-                    cur = _apply_relocate_perm(cur, int(i), int(sid))
+                # Build a structured candidate pool for the kick.
+                kick_cand: List[Dict[str, Any]] = []
+                try:
+                    kick_cand.extend(self.propose_actions("escape", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+                except Exception:
+                    pass
+                try:
+                    kick_cand.extend(self.propose_actions("comm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+                except Exception:
+                    pass
+                try:
+                    kick_cand.extend(self.propose_actions("therm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+                except Exception:
+                    pass
+
+                # Fallback: if propose_actions returns nothing (should be rare), do a mild random swap.
+                if not kick_cand:
+                    i = int(_rng_randint(self.rng, 0, int(cur.shape[0])))
+                    j = int(_rng_randint(self.rng, 0, int(cur.shape[0])))
+                    if i != j:
+                        act = {"op": "swap", "i": int(i), "j": int(j), "type": "shake"}
+                        cur = self._apply_act(cur, act)
+                        acts.append(dict(act))
+                    continue
+
+                # Score candidates by estimated delta (lower is better).
+                scored_kick: List[Tuple[float, Dict[str, Any]]] = []
+                for act in kick_cand:
+                    est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                    act2 = dict(act)
+                    act2["type"] = "shake"  # normalize type for logging/analysis
+                    act2["_est"] = dict(est)
+                    scored_kick.append((float(est.get("d_total", 0.0)), act2))
+                scored_kick.sort(key=lambda x: float(x[0]))
+
+                # Apply a few stochastic kicks: random pick inside top-K (K = shake_eval_topk).
+                k_pool = max(1, min(int(self.shake_eval_topk), len(scored_kick)))
+                for _ in range(max(1, int(self.shake_kick_k))):
+                    pick = int(_rng_randint(self.rng, 0, int(k_pool)))
+                    act = scored_kick[pick][1]
+                    cur = self._apply_act(cur, act)
                     acts.append(dict(act))
 
             cur_eval = evaluate_assign(cur)
             info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
             for _rs in range(max(0, int(self.shake_repair_steps))):
-                cand = self.propose_actions("comm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region)
+                # Repair should be multi-objective (comm + therm) to recover from perturbations.
+                cand: List[Dict[str, Any]] = []
+                try:
+                    cand.extend(self.propose_actions("comm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+                except Exception:
+                    pass
+                try:
+                    cand.extend(self.propose_actions("therm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+                except Exception:
+                    pass
                 if not cand:
                     break
                 scored: List[Tuple[float, Dict[str, Any]]] = []

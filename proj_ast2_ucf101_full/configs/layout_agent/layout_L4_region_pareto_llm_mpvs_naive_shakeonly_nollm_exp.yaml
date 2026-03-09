@@ -19,10 +19,11 @@ detailed_place:
       max_macros: 1
       n_steps: 1
       shake:
-        candidates: 16
-        kick_k: 8
-        kick_rounds: 2
+        # Make shake milder + more recoverable so it can actually show headroom / budget effects.
+        candidates: 12
+        kick_k: 4
+        kick_rounds: 1
         eval_topk: 12
-        repair_steps: 4
-        repair_eval_topk: 4
+        repair_steps: 6
+        repair_eval_topk: 6
         allow_worsen: true
