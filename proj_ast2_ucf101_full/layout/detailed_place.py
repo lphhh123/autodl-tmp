@@ -38,7 +38,7 @@ from layout.candidate_pool import (
 )
 from layout.policy_switch import EvalCache, PolicySwitchController
 from layout.delta_eval import ObjectiveParams, estimate_action_seq_delta
-from layout.macro_engine import MacroEngine
+from layout.macro_engine import MacroEngine, EvalBudgetExceeded
 from layout.verifier_engine import ROITracker, compute_gain
 from layout.memory_bank import MemoryBank
 from layout.mpvs_controller import MPVSController
@@ -697,6 +697,286 @@ def run_detailed_place(
         except Exception:
             macro_engine = None
             mpvs_obj_params = None
+
+    # ----------------------------
+    # Stage-stratified probing (optional, hyperparameterized via config)
+    # ----------------------------
+    probe_cfg: Dict[str, Any] = {}
+    probe_enabled: bool = False
+    probe_triggers_calls: List[int] = []
+    probe_fired: set = set()
+    probe_events: List[Dict[str, Any]] = []
+
+    if mpvs_enabled:
+        try:
+            _macro_cfg0 = _cfg_get(mpvs_cfg, "macros", {}) or {}
+            _probe_cfg0 = _cfg_get(_macro_cfg0, "probe", {}) or {}
+            probe_cfg = _cfg_to_dict(_probe_cfg0) if _probe_cfg0 else {}
+            probe_enabled = bool(_cfg_get(probe_cfg, "enabled", False)) and (macro_engine is not None) and (total_eval_budget > 0)
+        except Exception:
+            probe_cfg = {}
+            probe_enabled = False
+
+    if probe_enabled:
+        try:
+            # triggers can be defined as fractions of total budget and/or absolute call counts
+            fracs = list(_cfg_get(probe_cfg, "trigger_fracs", [0.20, 0.60, 0.85]) or [])
+            calls_abs = list(_cfg_get(probe_cfg, "trigger_calls", []) or [])
+            trig = []
+            for x in fracs:
+                try:
+                    fx = float(x)
+                    if fx > 0.0 and fx < 1.0:
+                        trig.append(int(round(fx * float(total_eval_budget))))
+                except Exception:
+                    continue
+            for x in calls_abs:
+                try:
+                    cx = int(x)
+                    if cx > 0:
+                        trig.append(cx)
+                except Exception:
+                    continue
+            trig = sorted({int(t) for t in trig if int(t) > 0})
+            probe_triggers_calls = trig
+        except Exception:
+            probe_triggers_calls = []
+
+    def _probe_budget_stage(used_calls: int) -> str:
+        # Align with MPVSController stage split when available.
+        try:
+            if total_eval_budget <= 0:
+                return ""
+            p = float(int(used_calls)) / float(max(1, int(total_eval_budget)))
+        except Exception:
+            p = 0.0
+        try:
+            if mpvs_ctrl is not None:
+                return str(mpvs_ctrl._stage(p))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        # fallback
+        if p < 0.20:
+            return "early"
+        if p < 0.70:
+            return "mid"
+        return "late"
+
+    def _make_capped_eval(start_calls: int, cap_calls: int):
+        cap_calls = int(max(1, cap_calls))
+        start_calls = int(start_calls)
+
+        def _eval_cap(a: np.ndarray) -> Dict[str, Any]:
+            try:
+                used = int(getattr(evaluator, "evaluator_calls", 0)) - int(start_calls)
+            except Exception:
+                used = 0
+            if used >= int(cap_calls):
+                raise EvalBudgetExceeded("probe_eval_budget_exceeded")
+            return _evaluate_assign_cached(a)
+
+        return _eval_cap
+
+    def _run_atomic_probe(assign0: np.ndarray, eval0: Dict[str, Any], cap_calls: int) -> Tuple[float, int]:
+        """Atomic baseline probe using MacroEngine's atomic action proposals (operator-agnostic).
+
+        Returns: (gain, calls_spent)
+        """
+        if macro_engine is None:
+            return 0.0, 0
+        start_calls = int(getattr(evaluator, "evaluator_calls", 0))
+        ev = _make_capped_eval(start_calls, int(cap_calls))
+        best_total = float(eval0.get("total_scalar", 0.0))
+        best_gain = 0.0
+
+        fams = list(_cfg_get(probe_cfg, "atomic_families", ["comm", "therm", "escape"]) or [])
+        cand: List[Dict[str, Any]] = []
+        for fam in fams:
+            try:
+                cand.extend(macro_engine.propose_actions(str(fam), assign0, sites_xy, traffic_sym, chip_tdp, site_to_region))
+            except Exception:
+                continue
+
+        # score by analytic delta and verify top-k
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for act in (cand or []):
+            try:
+                est = estimate_action_seq_delta(assign0, [act], sites_xy, traffic_sym, chip_tdp, mpvs_obj_params) if mpvs_obj_params is not None else {}
+                scored.append((float(est.get("d_total", 0.0)), dict(act)))
+            except Exception:
+                continue
+        scored.sort(key=lambda x: float(x[0]))
+
+        k_eval = int(_cfg_get(probe_cfg, "atomic_eval_topk", 6))
+        k_eval = max(1, min(k_eval, len(scored))) if scored else 0
+
+        for _k in range(int(k_eval)):
+            act = scored[_k][1]
+            try:
+                trial = macro_engine._apply_act(assign0, act)  # type: ignore[attr-defined]
+            except Exception:
+                continue
+            try:
+                eo = ev(np.asarray(trial, dtype=int))
+            except EvalBudgetExceeded:
+                break
+            v = float(eo.get("total_scalar", 1e30))
+            if v < best_total:
+                best_total = v
+                best_gain = max(best_gain, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+
+        end_calls = int(getattr(evaluator, "evaluator_calls", 0))
+        spent = max(0, int(end_calls) - int(start_calls))
+        return float(max(0.0, best_gain)), int(spent)
+
+    def _run_macro_probe(name: str, assign0: np.ndarray, eval0: Dict[str, Any], cap_calls: int) -> Tuple[float, int, Dict[str, Any]]:
+        """Run one macro operator under a strict eval-call cap, without mutating MacroEngine internal state."""
+        if macro_engine is None:
+            return 0.0, 0, {"name": str(name), "skipped": True}
+        name = str(name)
+        # Snapshot mutable MacroEngine state (stats + elite archive) to keep probe side-effect free.
+        st_prev = None
+        had_stat = False
+        try:
+            had_stat = name in getattr(macro_engine, "stats", {})
+            if had_stat:
+                st_prev = copy.deepcopy(getattr(macro_engine, "stats", {}).get(name))
+            else:
+                _ = macro_engine._stat(name)  # type: ignore[attr-defined]
+                st_prev = copy.deepcopy(getattr(macro_engine, "stats", {}).get(name))
+        except Exception:
+            st_prev = None
+        elite_prev = None
+        elite_idx_prev = None
+        try:
+            elite_prev = copy.deepcopy(getattr(macro_engine, "_elite", []))
+            elite_idx_prev = dict(getattr(macro_engine, "_elite_sig_to_idx", {}) or {})
+        except Exception:
+            elite_prev = None
+            elite_idx_prev = None
+
+        start_calls = int(getattr(evaluator, "evaluator_calls", 0))
+        ev = _make_capped_eval(start_calls, int(cap_calls))
+
+        n_steps_probe = int(_cfg_get(probe_cfg, "macro_n_steps", int(_cfg_get(_macro_cfg0, "n_steps", 1))))
+        max_eval_per_step = _cfg_get(probe_cfg, "max_eval_per_step", None)
+        try:
+            _b_assign, _b_eval, b_total, _acts, _cur_after, info = macro_engine.run_macro(
+                name=name,
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp,
+                site_to_region=site_to_region,
+                evaluate_assign=ev,
+                n_steps=int(n_steps_probe),
+                max_eval_per_step=(int(max_eval_per_step) if max_eval_per_step is not None else None),
+            )
+        except EvalBudgetExceeded:
+            b_total = float(eval0.get("total_scalar", 0.0))
+            info = {"name": name, "budget_exceeded": 1}
+        except Exception as e:
+            b_total = float(eval0.get("total_scalar", 0.0))
+            info = {"name": name, "error": repr(e)}
+
+        end_calls = int(getattr(evaluator, "evaluator_calls", 0))
+        spent = max(0, int(end_calls) - int(start_calls))
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(b_total))
+
+        # Restore MacroEngine state
+        try:
+            if st_prev is not None:
+                getattr(macro_engine, "stats", {})[name] = st_prev
+            else:
+                if not had_stat and name in getattr(macro_engine, "stats", {}):
+                    del getattr(macro_engine, "stats", {})[name]
+        except Exception:
+            pass
+        try:
+            if elite_prev is not None:
+                setattr(macro_engine, "_elite", elite_prev)
+            if elite_idx_prev is not None:
+                setattr(macro_engine, "_elite_sig_to_idx", elite_idx_prev)
+        except Exception:
+            pass
+
+        return float(gain), int(spent), dict(info or {})
+
+    def _maybe_run_stage_probes(assign0: np.ndarray, eval0: Dict[str, Any], step: int) -> None:
+        if not probe_enabled:
+            return
+        if macro_engine is None or total_eval_budget <= 0:
+            return
+        if not probe_triggers_calls:
+            return
+
+        used_calls = int(getattr(evaluator, "evaluator_calls", 0))
+        fired_now = [t for t in probe_triggers_calls if (used_calls >= int(t) and int(t) not in probe_fired)]
+        if not fired_now:
+            return
+        t_fire = int(fired_now[0])
+        probe_fired.add(int(t_fire))
+
+        min_rem = int(_cfg_get(probe_cfg, "min_remaining_calls", 1500))
+        if _budget_remaining() < min_rem:
+            return
+
+        stage_cap = int(_cfg_get(probe_cfg, "stage_call_budget", 1200))
+        stage_cap = max(50, stage_cap)
+        per_op_cap = int(_cfg_get(probe_cfg, "per_op_call_budget", 0))
+        atomic_cap = int(_cfg_get(probe_cfg, "atomic_call_budget", 0))
+
+        ops = list(_cfg_get(probe_cfg, "ops", ["relink", "shake", "tabu_search"]) or [])
+        ops = [str(x) for x in ops if str(x or "").strip()]
+        if not ops:
+            return
+
+        if atomic_cap <= 0:
+            atomic_cap = max(50, stage_cap // max(2, (len(ops) + 1)))
+        if per_op_cap <= 0:
+            per_op_cap = max(50, stage_cap // max(1, (len(ops) + 1)))
+
+        stage = _probe_budget_stage(used_calls)
+
+        atomic_gain, atomic_calls = _run_atomic_probe(assign0, eval0, cap_calls=atomic_cap)
+
+        rec: Dict[str, Any] = {
+            "kind": "stage_probe",
+            "step": int(step),
+            "trigger_calls": int(t_fire),
+            "used_calls": int(used_calls),
+            "stage": str(stage),
+            "atomic_gain": float(atomic_gain),
+            "atomic_calls": int(atomic_calls),
+            "ops": [],
+        }
+
+        for op in ops:
+            if _budget_remaining() < min_rem:
+                break
+            g, c, info = _run_macro_probe(op, assign0, eval0, cap_calls=per_op_cap)
+            try:
+                fb = macro_engine.apply_probe_feedback(
+                    name=str(op),
+                    raw_gain=float(g),
+                    raw_calls=float(max(1, c)),
+                    atomic_gain=float(atomic_gain),
+                    atomic_calls=float(max(1, atomic_calls)),
+                    stage=str(stage),
+                    now_calls=int(used_calls),
+                    probe_cfg=probe_cfg,
+                )
+            except Exception:
+                fb = {"name": str(op), "error": "apply_probe_feedback_failed"}
+            fb["info"] = info
+            rec["ops"].append(fb)
+
+        probe_events.append(rec)
+        try:
+            mpvs_stats["stage_probes"] = probe_events[-int(_cfg_get(probe_cfg, "max_records", 50)) :]
+        except Exception:
+            pass
 
     # Providers: always have heuristic; LLM optional
     heuristic_provider: LLMProvider = HeuristicProvider()
@@ -1449,6 +1729,12 @@ def run_detailed_place(
                         # let LLM decide strong move on stagnation; do NOT inject deterministic forced action
                         force_explore_for_llm = True
                     eval_calls_before = int(getattr(evaluator, "evaluator_calls", eval_calls_cum))
+                    # Optional stage-probe hook (budget×instance sensing)
+                    if probe_enabled:
+                        try:
+                            _maybe_run_stage_probes(assign, eval_out, step=int(step))
+                        except Exception:
+                            pass
                     h0 = eval_cache.hits if eval_cache is not None else 0
                     m0 = eval_cache.misses if eval_cache is not None else 0
                     forced_family = None
