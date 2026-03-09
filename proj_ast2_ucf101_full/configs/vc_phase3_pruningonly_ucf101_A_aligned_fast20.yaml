@@ -5,6 +5,10 @@ _base_: configs/vc_phase3_full_ucf101_A_main_fast20.yaml
 
 stable_hw:
   enabled: true
+  # v5.4 contract: version_c + stable_hw.enabled requires core submodules enabled.
+  # This pruning-only baseline intentionally disables lambda_hw_schedule / HW optimization,
+  # so we must opt-in to the explicit ablation escape hatch.
+  force_disable_ok: true
   lambda_hw_schedule:
     enabled: false
   discrete_isolation:
