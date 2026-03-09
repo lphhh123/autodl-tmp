@@ -7,6 +7,27 @@ detailed_place:
   planner:
     type: heuristic
   mpvs:
+    # NEW (default ON): stage-stratified probing + atomic counterfactual baseline
+    # This is the main method variant used in the paper tables.
+    macros:
+      probe:
+        enabled: true
+        # Keep these explicit for reproducibility (can still be overridden per run).
+        trigger_fracs: [0.20, 0.60, 0.85]
+        stage_call_budget: 1200
+        per_op_call_budget: 0
+        atomic_call_budget: 0
+        ops: ["relink", "shake", "tabu_search"]
+        atomic_families: ["comm", "therm", "escape"]
+        atomic_eval_topk: 6
+        macro_n_steps: 1
+        # counterfactual: rate_cf = rate_op - cf_discount * rate_atomic
+        cf_discount: 0.7
+        ewma_alpha: 0.2
+        # Let probes shape macro selection weights (operator-agnostic)
+        update_weight: true
+        weight_metric: cf
+        min_remaining_calls: 1500
     proposer:
       quota:
         mem: 0

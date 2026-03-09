@@ -42,7 +42,7 @@ RUN_ABLATIONS="${RUN_ABLATIONS:-0}"     # default OFF (avoid runtime explosion)
 
 # Headroom probes (controller=0) for component capability diagnosis.
 RUN_HEADROOM="${RUN_HEADROOM:-0}"
-EXPS_HEADROOM="${EXPS_HEADROOM:-EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly EXP-B2-naive-blockonly}"
+EXPS_HEADROOM="${EXPS_HEADROOM:-EXP-B2-naive-atomiconly EXP-B2-naive-relinkonly EXP-B2-naive-shakeonly EXP-B2-naive-tabuonly}"
 SEEDS_HEADROOM="${SEEDS_HEADROOM:-0}"
 BUDGETS_HEADROOM="${BUDGETS_HEADROOM:-${BUDGETS}}"
 WEIGHT_PAIRS_HEADROOM="${WEIGHT_PAIRS_HEADROOM:-${WEIGHT_PAIRS}}"

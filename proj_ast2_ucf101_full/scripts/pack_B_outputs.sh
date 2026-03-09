@@ -15,8 +15,8 @@ B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 #   - HEADROOM: controller=0 probes (for oracle/regret construction)
 #   - ABL: MPVS ablations
 #   - EVIDENCE: uncontrolled + controller ablations
-PACK_MAIN_DEFAULT="EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3"
-PACK_HEADROOM_DEFAULT="EXP-B2-naive-atomiconly EXP-B2-naive-macroonly EXP-B2-naive-chainonly EXP-B2-naive-ruinonly EXP-B2-naive-blockonly"
+PACK_MAIN_DEFAULT="EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B2-bc2cec-noprobe EXP-B2-bc2cec-probe-raw EXP-B3"
+PACK_HEADROOM_DEFAULT="EXP-B2-naive-atomiconly EXP-B2-naive-relinkonly EXP-B2-naive-shakeonly EXP-B2-naive-tabuonly"
 PACK_ABL_DEFAULT="EXP-B2-ab-nollm EXP-B2-ab-nomacro EXP-B2-ab-noverifier EXP-B2-ab-nomem"
 PACK_EVIDENCE_DEFAULT="EXP-B2-uncontrolled EXP-B2-ctl-ab-notrigger EXP-B2-ctl-ab-nomacrostrict EXP-B2-ctl-ab-nomemgate"
 
@@ -196,6 +196,9 @@ done
 tar -czf _pack_B/B_cfg_and_scripts.tgz \
   --ignore-failed-read \
   scripts/experiments_version_c.sh \
+  scripts/launch_B_grid_parallel.sh \
+  scripts/launch_B_mainline.sh \
+  scripts/pack_B_outputs.sh \
   scripts/run_layout_agent.py \
   layout \
   configs/layout_agent \
