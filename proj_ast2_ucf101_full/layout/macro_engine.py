@@ -21,6 +21,10 @@ import numpy as np
 
 from layout.delta_eval import ObjectiveParams, estimate_action_delta
 
+class EvalBudgetExceeded(RuntimeError):
+    """Raised by capped evaluate_assign wrappers when probe eval-call budget is exhausted."""
+    pass
+
 
 def _rng_randint(rng, low: int, high: int) -> int:
     if hasattr(rng, "integers"):
@@ -116,6 +120,13 @@ class OpStat:
     ewma_gain_per_call: float = 0.0
     ewma_gain: float = 0.0
     ewma_calls: float = 0.0
+    # Counterfactual probe EWMA (operator gain-per-call minus atomic baseline rate)
+    ewma_cf_gain_per_call: float = 0.0
+    ewma_cf_gain: float = 0.0
+    ewma_cf_calls: float = 0.0
+    # Probe accounting
+    probe_n: int = 0
+    probe_last_stage: str = ""
     cooldown: int = 0
     weight: float = 1.0
 
@@ -283,10 +294,93 @@ class MacroEngine:
                 "success": int(st.success),
                 "fail": int(st.fail),
                 "ewma_gain_per_call": float(st.ewma_gain_per_call),
+                "ewma_cf_gain_per_call": float(getattr(st, "ewma_cf_gain_per_call", 0.0)),
+                "probe_n": int(getattr(st, "probe_n", 0)),
+                "probe_last_stage": str(getattr(st, "probe_last_stage", "")),
                 "cooldown": int(st.cooldown),
                 "weight": float(st.weight),
             }
         return out
+
+    # ----------------------------
+    # Stage-stratified probing feedback (operator-agnostic)
+    # ----------------------------
+    def apply_probe_feedback(
+        self,
+        name: str,
+        raw_gain: float,
+        raw_calls: float,
+        atomic_gain: float,
+        atomic_calls: float,
+        stage: str = "",
+        now_calls: int = 0,
+        probe_cfg: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Update per-operator probe statistics and (optionally) adaptation weights.
+
+        This method is intended to be called by external stage-probe schedulers.
+        It does not call the evaluator; it only consumes observed probe outcomes.
+        """
+        st = self._stat(str(name))
+        cfg = probe_cfg or {}
+
+        raw_gain = float(raw_gain)
+        raw_calls = float(max(1.0, raw_calls))
+        atomic_gain = float(atomic_gain)
+        atomic_calls = float(max(1.0, atomic_calls))
+
+        rate_op = float(raw_gain) / float(max(1e-9, raw_calls))
+        rate_atomic = float(atomic_gain) / float(max(1e-9, atomic_calls))
+
+        cf_discount = float(cfg.get("cf_discount", cfg.get("counterfactual_discount", 1.0)))
+        if not (cf_discount == cf_discount):
+            cf_discount = 1.0
+        cf_discount = float(max(0.0, min(1.0, cf_discount)))
+
+        rate_cf = float(rate_op) - float(cf_discount) * float(rate_atomic)
+        cf_gain = float(rate_cf) * float(raw_calls)
+
+        a = float(cfg.get("ewma_alpha", getattr(self, "alpha", 0.2)))
+        a = float(max(0.01, min(0.95, a)))
+        st.ewma_cf_gain = (1.0 - a) * float(getattr(st, "ewma_cf_gain", 0.0)) + a * float(cf_gain)
+        st.ewma_cf_calls = (1.0 - a) * float(getattr(st, "ewma_cf_calls", 0.0)) + a * float(raw_calls)
+        st.ewma_cf_gain_per_call = float(st.ewma_cf_gain) / float(max(1e-9, st.ewma_cf_calls))
+        st.probe_n = int(getattr(st, "probe_n", 0)) + 1
+        st.probe_last_stage = str(stage or "")
+
+        update_weight = bool(cfg.get("update_weight", True))
+        weight_metric = str(cfg.get("weight_metric", "cf")).lower()
+        min_gain_per_call = float(cfg.get("min_gain_per_call", 0.0))
+        metric = float(rate_cf) if weight_metric in {"cf", "gain_cf", "counterfactual"} else float(rate_op)
+
+        boost_scale = float(cfg.get("success_boost_scale", 0.5))
+        pen_scale = float(cfg.get("fail_penalty_scale", 0.5))
+        boost_scale = float(max(0.0, min(2.0, boost_scale)))
+        pen_scale = float(max(0.0, min(2.0, pen_scale)))
+
+        if update_weight and bool(getattr(self, "adapt_enabled", True)):
+            if metric > float(min_gain_per_call):
+                st.weight = min(self.weight_cap, float(st.weight) * (1.0 + float(self.success_boost) * boost_scale))
+                st.cooldown = max(int(st.cooldown), int(self.success_cooldown))
+            else:
+                st.weight = max(self.weight_floor, float(st.weight) * (1.0 - float(self.fail_penalty) * pen_scale))
+                st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
+
+        return {
+            "name": str(name),
+            "stage": str(stage or ""),
+            "now_calls": int(now_calls),
+            "raw_gain": float(raw_gain),
+            "raw_calls": float(raw_calls),
+            "atomic_gain": float(atomic_gain),
+            "atomic_calls": float(atomic_calls),
+            "rate_op": float(rate_op),
+            "rate_atomic": float(rate_atomic),
+            "rate_cf": float(rate_cf),
+            "cf_discount": float(cf_discount),
+            "metric_used": float(metric),
+            "weight": float(st.weight),
+        }
 
     # ----------------------------
     # Elite archive (for relinking)

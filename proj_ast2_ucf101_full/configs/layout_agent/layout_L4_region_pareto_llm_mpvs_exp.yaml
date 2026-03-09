@@ -135,6 +135,49 @@ detailed_place:
       # chain uses n_steps; ruin/block have their own internal steps.
       n_steps: 5
 
+      # ------------------------------------------------------------
+      # Stage-stratified probing (optional): budget-stage probes + atomic counterfactual baseline
+      # NOTE: keep enabled=false by default; tune via YAML without code changes.
+      # ------------------------------------------------------------
+      probe:
+        enabled: false
+        # Fire probe rounds when used_eval_calls reaches these fractions of total budget.
+        # (Alternatively, you may specify trigger_calls for absolute thresholds.)
+        trigger_fracs: [0.20, 0.60, 0.85]
+        trigger_calls: []
+
+        # Total eval-call budget to spend per probe round.
+        stage_call_budget: 1200
+        # Per-operator eval-call cap in that round (0 => auto split).
+        per_op_call_budget: 0
+        # Atomic baseline probe cap (0 => auto split).
+        atomic_call_budget: 0
+
+        # Which macro operators to probe (operator-agnostic; new ops can be added here).
+        ops: ["relink", "shake", "tabu_search"]
+        # Atomic probe uses MacroEngine's atomic proposals over these families.
+        atomic_families: ["comm", "therm", "escape"]
+        atomic_eval_topk: 6
+
+        # Macro probe execution controls
+        macro_n_steps: 1
+        max_eval_per_step: null
+
+        # Counterfactual (operator vs atomic baseline) settings
+        cf_discount: 0.7
+        ewma_alpha: 0.2
+
+        # Whether probe feedback should update MacroEngine's adaptive weights
+        update_weight: true
+        weight_metric: cf  # cf | raw
+        min_gain_per_call: 0.0
+        success_boost_scale: 0.5
+        fail_penalty_scale: 0.5
+
+        # Safety: do not probe when too close to budget exhaustion
+        min_remaining_calls: 1500
+        max_records: 50
+
       # Stronger macro engine (delta-based proposing + limited verification)
       engine: delta_v1
       delta:
