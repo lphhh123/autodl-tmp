@@ -44,3 +44,13 @@ ast:
     lambda_head: 0.0
     lambda_ch: 0.02
     lambda_block: 0.0
+
+# IMPORTANT:
+# Version-C stable_hw locked_acc_ref reads a baseline stdout curve for acc_ref.
+# The global base config points to outputs/EXP-A2/... which does not exist for FAST runs.
+# Point to the FAST dense baseline instead.
+stable_hw:
+  locked_acc_ref:
+    baseline_stdout_path: "outputs/EXP-A1-fast/seed{seed}/stdout"
+    stdout_prefer_mode: "fast"
+    strict: false
