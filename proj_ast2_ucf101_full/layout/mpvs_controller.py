@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -51,6 +52,47 @@ class _Ticket:
     # BC^2-CEC: counterfactual baseline snapshot at ticket creation
     start_atomic_rate: float = 0.0
     expected_atomic_gain: float = 0.0
+    # v2.8: track best (minimum) total seen during the ticket horizon (extreme-value credit)
+    min_best_total: float = 1.0e30
+    min_best_calls: int = -1
+
+
+class _CallWindowAgg:
+    """Call-indexed sliding window aggregator.
+
+    Store samples as (end_calls, gain, calls) and keep only those within a call window.
+    This is the standard fix for non-stationary credit assignment in operator selection / AOS.
+    Returned rate = sum(gain) / sum(calls).
+    """
+
+    def __init__(self, window_calls: int) -> None:
+        self.window_calls = int(max(50, window_calls))
+        self.items = deque()  # (end_calls, gain, calls)
+        self.sum_gain = 0.0
+        self.sum_calls = 0.0
+        self.n = 0
+
+    def _trim(self, now_calls: int) -> None:
+        lo = int(now_calls) - int(self.window_calls)
+        while self.items and int(self.items[0][0]) < lo:
+            _end, _g, _c = self.items.popleft()
+            self.sum_gain -= float(_g)
+            self.sum_calls -= float(_c)
+
+    def add(self, now_calls: int, gain: float, calls: int) -> None:
+        now_calls = int(now_calls)
+        g = float(gain)
+        c = float(max(1, int(calls)))
+        self.items.append((now_calls, g, c))
+        self.sum_gain += g
+        self.sum_calls += c
+        self.n += 1
+        self._trim(now_calls)
+
+    @property
+    def rate(self) -> float:
+        denom = float(max(1e-9, self.sum_calls))
+        return float(self.sum_gain) / denom
 
 
 @dataclass
@@ -90,6 +132,24 @@ class _CtxAgg:
     last_candidate_step: int = -10**9
     # v2.4: keep candidate alive across weak maturities before revoking.
     candidate_mature_failures: int = 0
+
+
+@dataclass
+class _AosTicket:
+    """Short-horizon credit ticket for AOS-style family selection.
+
+    AOS needs low-latency credit updates; we maintain a shorter horizon and update
+    per-family sliding-window credit when the ticket matures.
+    """
+
+    start_calls: int
+    start_best_total: float
+    expire_calls: int
+    stage: str
+    ctx_key: str
+    family: str
+    min_best_total: float = 1.0e30
+    min_best_calls: int = -1
 
 
 @dataclass
@@ -234,6 +294,48 @@ class MPVSController:
             self.cec_blocked_ratio_edges = [0.15, 0.35]
         self.heur_agg = _HeurAgg()
         self.atomic_by_ctx: Dict[str, _HeurAgg] = {}
+
+        # ------------------------------------------------------------------
+        # AOS-style family selection (non-stationary, budget-stage conditioned)
+        # ------------------------------------------------------------------
+        cec = (self.cfg.get("cec") or {}) if isinstance(self.cfg, dict) else {}
+        aos = (cec.get("aos") or {}) if isinstance(cec, dict) else {}
+        self.aos_enabled = bool(aos.get("enabled", False))
+        # Sliding window size in eval-calls.
+        self.aos_window_calls = int(aos.get("window_calls", 6000))
+        self.aos_min_samples = int(aos.get("min_samples", 2))
+        # UCB-style exploration coefficient.
+        self.aos_ucb_c = float(aos.get("ucb_c", 0.6))
+        # Extreme-value gain inside horizon ("min") or end-point ("end")
+        self.aos_gain_mode = str(aos.get("gain_mode", "min") or "min").strip().lower()
+        if self.aos_gain_mode not in {"min", "end"}:
+            self.aos_gain_mode = "min"
+        # Short horizon for AOS maturation (calls)
+        self.aos_horizon_min = int(aos.get("horizon_min", 200))
+        self.aos_horizon_frac = float(aos.get("horizon_frac", 0.006))
+        self.aos_horizon_mid_cap = int(aos.get("horizon_mid_cap", 3200))
+        self.aos_horizon_late_cap = int(aos.get("horizon_late_cap", 1600))
+        # Conservative counterfactual baseline for AOS credit (avoid suppressing macros)
+        self.aos_cf_discount = float(aos.get("cf_discount", 0.35))
+        self.aos_cf_cap_mult = float(aos.get("cf_cap_mult", 1.5))
+        if not (self.aos_cf_discount == self.aos_cf_discount):
+            self.aos_cf_discount = 0.35
+        if not (self.aos_cf_cap_mult == self.aos_cf_cap_mult):
+            self.aos_cf_cap_mult = 1.5
+        self.aos_cf_discount = float(max(0.0, min(1.0, self.aos_cf_discount)))
+        self.aos_cf_cap_mult = float(max(0.0, min(10.0, self.aos_cf_cap_mult)))
+
+        # Internal windows:
+        # - family credit window: (stage, family) -> credit/call
+        # - realized slope window: (stage, ctx_key) -> gain/call of best_total_seen
+        self._aos_fam_win: Dict[Tuple[str, str], _CallWindowAgg] = {}
+        self._aos_stage_total_n: Dict[str, int] = {"early": 0, "mid": 0, "late": 0}
+        self._real_win: Dict[Tuple[str, str], _CallWindowAgg] = {}
+        self._real_last: Dict[Tuple[str, str], Tuple[int, float]] = {}
+        self._aos_tickets: List[_AosTicket] = []
+
+        # Debounce for on_progress to avoid double-processing at the same used_calls
+        self._last_progress_calls = -1
         # v2.6: realized (diminishing-returns-aware) progress rate of best_total_seen, per ctx_key.
         self.real_agg = _HeurAgg()
         self.real_by_ctx: Dict[str, _HeurAgg] = {}
@@ -442,6 +544,91 @@ class MPVSController:
             if ag is not None and float(ag.calls) > 0.0:
                 return float(ag.rate)
         return float(self.heur_agg.rate)
+
+    # ----------------------------
+    # AOS: non-stationary baselines
+    # ----------------------------
+    def _get_win(self, store: Dict[Tuple[str, str], _CallWindowAgg], key: Tuple[str, str], window_calls: int) -> _CallWindowAgg:
+        w = store.get(key)
+        if w is None:
+            w = _CallWindowAgg(int(window_calls))
+            store[key] = w
+        return w
+
+    def _stage_from_ctx_key(self, ctx_key: str) -> str:
+        s = str(ctx_key or "")
+        if not s:
+            return ""
+        st = s.split("|", 1)[0].strip().lower()
+        return st if st in {"early", "mid", "late"} else ""
+
+    def observe_best_total(self, ctx_key: str, stage: str, used_calls: int, best_total_seen: float) -> None:
+        """Update realized atomic baseline via sliding-window slope of best_total_seen."""
+        stage = str(stage or "").strip().lower()
+        if stage not in {"early", "mid", "late"}:
+            return
+        ck = str(ctx_key or "").strip()
+        if not ck:
+            return
+        u = int(used_calls)
+        b = float(best_total_seen)
+        last = self._real_last.get((stage, ck))
+        if last is None:
+            self._real_last[(stage, ck)] = (u, b)
+            return
+        lu, lb = int(last[0]), float(last[1])
+        dc = int(u) - int(lu)
+        if dc <= 0:
+            return
+        dg = float(lb) - float(b)
+        self._real_last[(stage, ck)] = (u, b)
+        if dg <= 0.0:
+            return
+        w = self._get_win(self._real_win, (stage, ck), int(self.aos_window_calls))
+        w.add(now_calls=u, gain=float(dg), calls=int(dc))
+
+    def _aos_realized_rate(self, ctx_key: str, stage: str) -> float:
+        stage = str(stage or "").strip().lower()
+        ck = str(ctx_key or "").strip()
+        if stage in {"early", "mid", "late"} and ck:
+            w = self._real_win.get((stage, ck))
+            if w is not None and float(w.sum_calls) > 0.0:
+                return float(w.rate)
+        return 0.0
+
+    def _aos_score(self, family: str, stage: str) -> Tuple[float, int]:
+        stage = str(stage or "").strip().lower()
+        fam = str(family or "").strip()
+        w = self._aos_fam_win.get((stage, fam))
+        if w is None:
+            return 0.0, 0
+        return float(w.rate), int(w.n)
+
+    def rank_macro_families(self, families: List[str], ctx: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Rank macro families for proposing, using AOS-style sliding-window credit + UCB bonus."""
+        if not bool(self.aos_enabled):
+            return list(families or [])
+        fams = [str(x or "").strip() for x in (families or []) if str(x or "").strip()]
+        if len(fams) <= 1:
+            return fams
+        ctx0 = ctx or {}
+        stage = str(ctx0.get("stage", "") or "").strip().lower()
+        if stage not in {"early", "mid", "late"}:
+            stage = self._stage_from_ctx_key(str(ctx0.get("ctx_key", "") or ""))
+        if stage not in {"early", "mid", "late"}:
+            return fams
+
+        t = int(self._aos_stage_total_n.get(stage, 0))
+        scored: List[Tuple[float, int, str]] = []
+        for i, f in enumerate(fams):
+            s, n = self._aos_score(f, stage)
+            bonus = 0.0
+            if float(self.aos_ucb_c) > 0.0:
+                bonus = float(self.aos_ucb_c) * math.sqrt(math.log(float(1 + t)) / float(1 + n))
+            scored.append((float(s) + float(bonus), int(i), f))
+        # stable: tie keeps original order
+        scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+        return [f for _, __, f in scored]
 
     def observe_realized(self, ctx_key: str, used_calls: int, best_total_seen: float) -> None:
         """Track realized improvement rate of best_total_seen per eval-call for this ctx_key."""
@@ -923,13 +1110,92 @@ class MPVSController:
         if int(self._sponsor_step) != int(step):
             self._sponsor_count_step = 0
 
-    def on_progress(self, used_calls: int, budget_total: int, best_total_seen: float) -> None:
+    def on_progress(self, used_calls: int, budget_total: int, best_total_seen: float, ctx: Optional[Dict[str, Any]] = None) -> None:
+        """Advance horizon tickets and update AOS windows.
+
+        NOTE: detailed_place should call this EVERY step; otherwise horizon credit never matures.
+        """
         used_calls = int(used_calls)
-        cur_best = float(best_total_seen)
-        if not self.tickets:
+        if used_calls <= int(getattr(self, "_last_progress_calls", -1)):
             return
+        self._last_progress_calls = int(used_calls)
+
+        cur_best = float(best_total_seen)
+        ctx0 = ctx or {}
+        stage = str(ctx0.get("stage", "") or "").strip().lower()
+        if stage not in {"early", "mid", "late"}:
+            try:
+                stage = str(self._stage(self._budget_progress(used_calls, budget_total)))
+            except Exception:
+                stage = ""
+
+        # Update realized baseline for both fine and coarse ctx keys
+        try:
+            ck_fine = str(ctx0.get("ctx_key", "") or "")
+            ck_coarse = str(ctx0.get("release_ctx_key", "") or "")
+            if ck_fine:
+                self.observe_best_total(ctx_key=ck_fine, stage=stage, used_calls=used_calls, best_total_seen=cur_best)
+            if ck_coarse:
+                self.observe_best_total(ctx_key=ck_coarse, stage=stage, used_calls=used_calls, best_total_seen=cur_best)
+        except Exception:
+            pass
+
+        if (not self.tickets) and (not self._aos_tickets):
+            return
+
+        # --- AOS tickets (short horizon) ---
+        if bool(self.aos_enabled) and self._aos_tickets:
+            kept_aos: List[_AosTicket] = []
+            for tk in self._aos_tickets:
+                try:
+                    if float(cur_best) < float(getattr(tk, "min_best_total", 1.0e30)):
+                        tk.min_best_total = float(cur_best)
+                        tk.min_best_calls = int(used_calls)
+                except Exception:
+                    pass
+                if used_calls < int(tk.expire_calls):
+                    kept_aos.append(tk)
+                    continue
+
+                if str(self.aos_gain_mode) == "end":
+                    gain_long = float(tk.start_best_total) - float(cur_best)
+                    span_calls = max(1, int(tk.expire_calls) - int(tk.start_calls))
+                else:
+                    mb = float(getattr(tk, "min_best_total", cur_best))
+                    mc = int(getattr(tk, "min_best_calls", -1))
+                    gain_long = float(tk.start_best_total) - float(mb)
+                    span_calls = max(1, (mc - int(tk.start_calls)) if mc > int(tk.start_calls) else (int(tk.expire_calls) - int(tk.start_calls)))
+                if gain_long < 0.0:
+                    gain_long = 0.0
+
+                stg = str(tk.stage or "").strip().lower()
+                ck = str(tk.ctx_key or "").strip()
+                rate_best = float(self._atomic_rate(ck))
+                rate_real = float(self._aos_realized_rate(ck, stg))
+                if rate_real > 0.0:
+                    rate0 = min(rate_best, float(self.aos_cf_cap_mult) * float(rate_real))
+                else:
+                    rate0 = min(rate_best, float(rate_real))
+                rate0 = float(max(0.0, rate0))
+                exp_atomic = float(rate0) * float(span_calls) * float(self.aos_cf_discount)
+                credit = float(gain_long) - float(exp_atomic)
+
+                fam = str(tk.family or "").strip()
+                if stg in {"early", "mid", "late"} and fam:
+                    w = self._get_win(self._aos_fam_win, (stg, fam), int(self.aos_window_calls))
+                    w.add(now_calls=used_calls, gain=float(credit), calls=int(span_calls))
+                    self._aos_stage_total_n[stg] = int(self._aos_stage_total_n.get(stg, 0)) + 1
+            self._aos_tickets = kept_aos
+
+        # --- Existing long-horizon tickets (CEC/release) ---
         kept: List[_Ticket] = []
         for tk in self.tickets:
+            try:
+                if float(cur_best) < float(getattr(tk, "min_best_total", 1.0e30)):
+                    tk.min_best_total = float(cur_best)
+                    tk.min_best_calls = int(used_calls)
+            except Exception:
+                pass
             if used_calls < int(tk.expire_calls):
                 kept.append(tk)
                 continue
@@ -1201,8 +1467,42 @@ class MPVSController:
                 sponsored=bool(sponsored),
                 start_atomic_rate=float(rate0),
                 expected_atomic_gain=float(exp_atomic_gain),
+                min_best_total=float(best_total_seen),
+                min_best_calls=int(used_calls),
             )
         )
+
+        # v2.8 (AOS): create a short-horizon ticket for macro family credit updates.
+        if bool(self.aos_enabled) and comp == "macro":
+            stg = self._stage_from_ctx_key(str(ctx_key or ""))
+            if stg not in {"early", "mid", "late"}:
+                try:
+                    stg = str(self._stage(self._budget_progress(used_calls, budget_total)))
+                except Exception:
+                    stg = ""
+            fam = str(family or "").strip()
+            ck = str(ctx_key or "").strip()
+            if stg in {"early", "mid", "late"} and fam and ck and budget_total > 0:
+                rem = max(0, int(budget_total) - int(used_calls))
+                h = max(int(self.aos_horizon_min), int(float(self.aos_horizon_frac) * float(budget_total)))
+                if stg == "late":
+                    h = min(int(self.aos_horizon_late_cap), int(h), int(max(self.aos_horizon_min, rem)))
+                elif stg == "mid":
+                    h = min(int(self.aos_horizon_mid_cap), int(h), int(max(self.aos_horizon_min, rem)))
+                else:
+                    h = min(int(h), int(max(self.aos_horizon_min, rem)))
+                self._aos_tickets.append(
+                    _AosTicket(
+                        start_calls=int(used_calls),
+                        start_best_total=float(best_total_seen),
+                        expire_calls=int(used_calls) + int(h),
+                        stage=str(stg),
+                        ctx_key=str(ck),
+                        family=str(fam),
+                        min_best_total=float(best_total_seen),
+                        min_best_calls=int(used_calls),
+                    )
+                )
         if comp == "macro" and str(ctx_key or "") and str(family or "") and bool(sponsored):
             ca = self._get_ctx_agg("macro", str(ctx_key), str(family))
             ca.trial_won += 1
@@ -1351,6 +1651,7 @@ class MPVSController:
             "cec_v2_enabled": int(bool(self.cec_enabled)),
             "heur_rate_ewma": float(self.heur_agg.rate),
             "cec_credit_metric": str("gain_cf" if bool(self.cec_counterfactual_credit) else "gain_long"),
+            "aos_enabled": int(bool(getattr(self, "aos_enabled", False))),
         }
         if bool(self.cec_counterfactual_credit):
             out["cec_cf_discount"] = float(getattr(self, "cec_cf_discount", 1.0))
@@ -1433,6 +1734,21 @@ class MPVSController:
         out["cec_seed_total"] = int(seed_total)
         out["cec_ctx"] = cec_ctx
         out["cec_family"] = cec_family
+
+        # AOS audit (stage-conditioned sliding window credit)
+        if bool(getattr(self, "aos_enabled", False)):
+            try:
+                out["aos_window_calls"] = int(getattr(self, "aos_window_calls", 0))
+                out["aos_gain_mode"] = str(getattr(self, "aos_gain_mode", ""))
+                out["aos_ucb_c"] = float(getattr(self, "aos_ucb_c", 0.0))
+                out["aos_cf_discount"] = float(getattr(self, "aos_cf_discount", 0.0))
+                out["aos_cf_cap_mult"] = float(getattr(self, "aos_cf_cap_mult", 0.0))
+                out["aos_stage_total_n"] = {k: int(v) for k, v in (getattr(self, "_aos_stage_total_n", {}) or {}).items()}
+                _pairs = list((getattr(self, "_aos_fam_win", {}) or {}).items())[:48]
+                out["aos_family_rate"] = {f"{k0}|{k1}": float(v.rate) for (k0, k1), v in _pairs}
+                out["aos_family_n"] = {f"{k0}|{k1}": int(v.n) for (k0, k1), v in _pairs}
+            except Exception:
+                pass
 
         # v2.1: stage-family aggregates (auditability for stage-aware priors)
         cec_family_stage: Dict[str, Dict[str, Any]] = {}

@@ -21,3 +21,17 @@ detailed_place:
         counterfactual_credit: true
         counterfactual_use_ctx_atomic: true
         counterfactual_alpha: 0.2
+        # v2.8: AOS-style family selection (non-stationary, budget-stage conditioned)
+        aos:
+          enabled: true
+          window_calls: 6000
+          min_samples: 2
+          ucb_c: 0.8
+          gain_mode: min
+          horizon_min: 200
+          horizon_frac: 0.006
+          horizon_mid_cap: 3200
+          horizon_late_cap: 1600
+          # conservative counterfactual baseline for AOS credit
+          cf_discount: 0.35
+          cf_cap_mult: 1.5
