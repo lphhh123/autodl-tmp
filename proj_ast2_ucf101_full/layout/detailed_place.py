@@ -1833,6 +1833,15 @@ def run_detailed_place(
                             except Exception:
                                 pass
 
+                            # v2.8 (AOS): rank macro families by stage-conditioned sliding-window credit.
+                            # This does NOT require discrete "release"; it directly biases which families are
+                            # proposed (and therefore evaluated) first, improving signal-to-calls.
+                            try:
+                                if mpvs_ctrl is not None and macro_enabled and macro_names:
+                                    macro_names = list(mpvs_ctrl.rank_macro_families(list(macro_names), ctx=step_ctx) or [])
+                            except Exception:
+                                pass
+
                             # Enforce cap after priority merge
                             macro_names = list(macro_names or [])
                             macro_names = macro_names[: max(0, min(len(macro_names), macro_max))]
@@ -3549,6 +3558,19 @@ def run_detailed_place(
                                                     mpvs_stats["macro_release_hit"] = int(mpvs_stats.get("macro_release_hit", 0)) + 1
                                 except Exception:
                                     pass
+
+                            # v2.8: advance horizon tickets every step.
+                            # Without this, horizon credit (and AOS tickets) can never mature on runs dominated by heuristic steps.
+                            try:
+                                if mpvs_ctrl is not None:
+                                    mpvs_ctrl.on_progress(
+                                        int(eval_calls_cum),
+                                        int(budget_total_calls),
+                                        float(best_total_seen),
+                                        ctx=step_ctx,
+                                    )
+                            except Exception:
+                                pass
 
                             mpvs_stats["mem_global_until"] = int(mpvs_mem_global_until)
                             try:
