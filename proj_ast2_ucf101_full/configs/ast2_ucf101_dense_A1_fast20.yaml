@@ -1,0 +1,22 @@
+# A1-fast (dense baseline, FAST iteration)
+#
+# Purpose:
+# - Same as A1 dense protocol (no pruning, no HW optimization), but with:
+#   * deterministic 20% dataset subset (for rapid iteration)
+#   * fewer epochs (35)
+#
+# IMPORTANT:
+# - This is ONLY for fast debugging/iteration. Do NOT use for final paper numbers.
+
+_base_: configs/ast2_ucf101_dense_A1.yaml
+
+data:
+  # Deterministic subset for fast iteration.
+  subset_ratio_train: 0.20
+  subset_ratio_eval: 0.20
+  subset_seed: 0
+
+train:
+  # Shorter schedule for quick iteration.
+  epochs: 35
+
