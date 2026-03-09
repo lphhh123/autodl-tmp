@@ -220,12 +220,15 @@ detailed_place:
         allow_worsen: true
 
       shake:
-        candidates: 16
-        kick_k: 8
-        kick_rounds: 2
-        eval_topk: 12
-        repair_steps: 4
-        repair_eval_topk: 4
+        # Medium-strength shake:
+        # - fewer candidates / kicks -> less dominant, less budget-hungry
+        # - keep some repair so it remains feasible (avoid "success=0" regression)
+        candidates: 8
+        kick_k: 4
+        kick_rounds: 1
+        eval_topk: 8
+        repair_steps: 3
+        repair_eval_topk: 3
         allow_worsen: true
 
       tabu_search:
