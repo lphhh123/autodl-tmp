@@ -1,0 +1,21 @@
+# Fast-iteration pruning-only baseline (A2-fast): same Version-C trainer path as A4,
+# but with StableHW disabled and HW loss off.
+
+_base_: configs/vc_phase3_full_ucf101_A_main_fast20.yaml
+
+stable_hw:
+  enabled: false
+  force_disable_ok: true
+  discrete_isolation:
+    mapping_update_every_epochs: 1000000000
+    layout_update_every_epochs:  1000000000
+
+training:
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+
+loss:
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0

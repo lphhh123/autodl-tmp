@@ -1,0 +1,46 @@
+# Fast-iteration config (20% data, 35 epochs) for Innovation-A channel-pruning mainline.
+#
+# Intent:
+#   - Turn OFF token pruning (token_gating_policy=off)
+#   - Keep pruning gentle (gates init near 1; only channel sparsity regularized)
+#   - Reduce training volume for rapid iteration (subset_ratio_train=0.2, epochs=35)
+#   - Shorter AST schedule (warmup=5, ramp=15)
+
+_base_: configs/vc_phase3_full_ucf101_A_main.yaml
+
+data:
+  # Deterministic subset for fast iteration.
+  subset_ratio_train: 0.20
+  subset_ratio_eval:  0.20
+  subset_seed: 0
+
+train:
+  epochs: 35
+
+ast:
+  # Disable token pruning entirely; channel pruning is the main structural lever.
+  token_gating_policy: "off"
+  strict_masking: false
+  rho_token_target: 1.0
+
+  # Gates start almost fully open to avoid early accuracy collapse.
+  gate_init_open: 0.99
+  ch_init_open: 0.99
+  head_init_open: 0.99
+  block_init_open: 0.99
+
+  schedule:
+    enabled: true
+    warmup_epochs: 5
+    ramp_epochs: 15
+    curve: "cosine"
+    rho_start: 1.0
+    temp_start: 1.0
+    lambda_ast_start: 0.0
+
+  # Gentle sparsity: focus on channel only.
+  loss:
+    lambda_token: 0.0
+    lambda_head: 0.0
+    lambda_ch: 0.02
+    lambda_block: 0.0

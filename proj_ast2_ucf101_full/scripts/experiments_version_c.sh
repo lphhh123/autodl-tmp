@@ -372,6 +372,21 @@ case "$EXP_ID" in
   EXP-A2p)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_aligned.yaml "${OUT_PREFIX}/NEW_B1/seed${SEED}"
     ;;
+
+  # ---- FAST ITERATION (20% data, 35 epochs, token pruning OFF) ----
+  # These are for rapid debugging/iteration; do NOT use for final paper numbers.
+  EXP-A2p-fast)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20.yaml "$(odir EXP-A2p-fast)"
+    ;;
+  EXP-A4-fast)
+    run_vc configs/vc_phase3_full_ucf101_A_main_fast20.yaml "$(odir EXP-A4-fast)"
+    ;;
+  EXP-A4-acho-fast)
+    run_vc configs/vc_phase3_full_ucf101_A_acho_fast20.yaml "$(odir EXP-A4-acho-fast)"
+    ;;
+  EXP-A4-acho-roi-fast)
+    run_vc configs/vc_phase3_full_ucf101_A_acho_roi_fast20.yaml "$(odir EXP-A4-acho-roi-fast)"
+    ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
   # A4 + ACHO (same lambda_hw_max as A4 for fair comparison)

@@ -1,0 +1,20 @@
+# A4-fast + ACHO + ROI-Commit
+_base_: configs/vc_phase3_full_ucf101_A_main_fast20.yaml
+
+stable_hw:
+  acho:
+    enabled: true
+    step_up_frac: 0.12
+    step_down_frac: 0.25
+    hysteresis_frac: 0.25
+    post_commit_lambda_mul: 0.5
+    post_commit_block_increase: true
+
+  discrete_isolation:
+    roi_commit:
+      enabled: true
+      metric: proxy_raw_latency_ms
+      min_rel_improve: 0.01
+      min_margin: 0.0
+      cooldown_epochs: 2
+      require_hw_active: true
