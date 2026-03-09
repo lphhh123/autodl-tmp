@@ -844,6 +844,12 @@ def run_detailed_place(
                     # enforce min_T
                     T = max(T, sa_min_T)
                     prev_assign = assign.copy()
+                    # v6.0: seed elite archive with initial solution (used by relinking component).
+                    try:
+                        if macro_engine is not None:
+                            macro_engine.observe_elite(prev_assign, eval_out)
+                    except Exception:
+                        pass
                     accepted_steps = 0
                     assign_signature = signature_for_assign(prev_assign)
                     op_args_obj = {"op": "init"}
@@ -3412,6 +3418,12 @@ def run_detailed_place(
                                     )
                                     if added:
                                         mpvs_stats["pareto_added"] += 1
+                                        # v6.0: feed elite archive with newly accepted Pareto points.
+                                        try:
+                                            if macro_engine is not None:
+                                                macro_engine.observe_elite(assign, eval_out)
+                                        except Exception:
+                                            pass
                                 except Exception:
                                     added = False
 

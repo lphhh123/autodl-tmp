@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import permutations
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import hashlib
 
 import numpy as np
 
@@ -119,6 +120,23 @@ class OpStat:
     weight: float = 1.0
 
 
+@dataclass
+class EliteEntry:
+    sig: str
+    total: float
+    comm: float
+    therm: float
+    assign: np.ndarray
+    eval: Dict[str, Any]
+
+
+def _hamming_assign(a: np.ndarray, b: np.ndarray) -> int:
+    try:
+        return int(np.count_nonzero(np.asarray(a, dtype=int) != np.asarray(b, dtype=int)))
+    except Exception:
+        return 0
+
+
 class MacroEngine:
     def __init__(self, macro_cfg: Dict[str, Any], obj: ObjectiveParams, rng: Any) -> None:
         self.cfg = macro_cfg or {}
@@ -193,6 +211,46 @@ class MacroEngine:
         self.br_score_w_compact = float(br_cfg.get("score_w_compact", 1e-6))
         self.br_score_w_centroid = float(br_cfg.get("score_w_centroid", 5e-7))
 
+        # ------------------------------------------------------------------
+        # Elite archive (for relinking / robust escape)
+        # ------------------------------------------------------------------
+        ea_cfg = (self.cfg.get("elite_archive") or {}) if isinstance(self.cfg, dict) else {}
+        self.elite_enabled = bool(ea_cfg.get("enabled", True))
+        self.elite_max_size = int(ea_cfg.get("max_size", 8))
+        self.elite_min_hamming_frac = float(ea_cfg.get("min_hamming_frac", 0.08))
+        self.elite_keep_top_total = int(ea_cfg.get("keep_top_total", self.elite_max_size))
+        self._elite: List[EliteEntry] = []
+        self._elite_sig_to_idx: Dict[str, int] = {}
+
+        # ------------------------------------------------------------------
+        # New enhancement components as macro families:
+        #   - relink (elite archive + path relinking)
+        #   - shake  (ILS-style perturbation + short repair)
+        #   - tabu_search (tabu local search with controlled non-improving moves)
+        # ------------------------------------------------------------------
+        rl_cfg = (self.cfg.get("relink") or self.cfg.get("elite_relink") or {}) if isinstance(self.cfg, dict) else {}
+        self.rlk_eval_topk = int(rl_cfg.get("eval_topk", 12))
+        self.rlk_pick_k = int(rl_cfg.get("pick_k", 24))
+        self.rlk_moves_per_step = int(rl_cfg.get("moves_per_step", 18))
+        self.rlk_allow_worsen = bool(rl_cfg.get("allow_worsen", True))
+
+        sh_cfg = (self.cfg.get("shake") or self.cfg.get("ils_shake") or {}) if isinstance(self.cfg, dict) else {}
+        self.shake_candidates = int(sh_cfg.get("candidates", 16))
+        self.shake_kick_k = int(sh_cfg.get("kick_k", 8))
+        self.shake_kick_rounds = int(sh_cfg.get("kick_rounds", 2))
+        self.shake_eval_topk = int(sh_cfg.get("eval_topk", 12))
+        self.shake_repair_steps = int(sh_cfg.get("repair_steps", 4))
+        self.shake_repair_eval_topk = int(sh_cfg.get("repair_eval_topk", 4))
+        self.shake_allow_worsen = bool(sh_cfg.get("allow_worsen", True))
+
+        tb_cfg = (self.cfg.get("tabu_search") or self.cfg.get("tabu") or {}) if isinstance(self.cfg, dict) else {}
+        self.tabu_steps = int(tb_cfg.get("steps", 12))
+        self.tabu_tenure = int(tb_cfg.get("tenure", 8))
+        self.tabu_cand_k = int(tb_cfg.get("cand_k", 80))
+        self.tabu_eval_topk = int(tb_cfg.get("eval_topk", 6))
+        self.tabu_allow_worsen = bool(tb_cfg.get("allow_worsen", True))
+        self.tabu_aspire_eps = float(tb_cfg.get("aspire_eps", 1e-4))
+
     def _stat(self, name: str) -> OpStat:
         if name not in self.stats:
             self.stats[name] = OpStat()
@@ -229,6 +287,74 @@ class MacroEngine:
                 "weight": float(st.weight),
             }
         return out
+
+    # ----------------------------
+    # Elite archive (for relinking)
+    # ----------------------------
+    def observe_elite(self, assign: np.ndarray, eo: Dict[str, Any]) -> None:
+        """Insert a solution into the elite archive (dedup + size cap + light diversity)."""
+        if not bool(getattr(self, "elite_enabled", True)):
+            return
+        try:
+            a = np.asarray(assign, dtype=int).reshape(-1)
+        except Exception:
+            return
+        try:
+            total = float((eo or {}).get("total_scalar", 1e30))
+            comm = float((eo or {}).get("comm_norm", 0.0))
+            therm = float((eo or {}).get("therm_norm", 0.0))
+        except Exception:
+            return
+
+        # signature (content-based)
+        try:
+            md = hashlib.md5(a.tobytes()).hexdigest()
+        except Exception:
+            md = str(int(total * 1e9))
+
+        # update existing
+        idx = self._elite_sig_to_idx.get(md)
+        if idx is not None and 0 <= int(idx) < len(self._elite):
+            if total + 1e-12 < float(self._elite[int(idx)].total):
+                self._elite[int(idx)] = EliteEntry(sig=md, total=total, comm=comm, therm=therm, assign=a.copy(), eval=dict(eo or {}))
+            return
+
+        # diversity gate: avoid near-duplicates unless very good
+        min_h = int(max(1, float(self.elite_min_hamming_frac) * float(a.shape[0])))
+        for e in self._elite:
+            if _hamming_assign(a, e.assign) < min_h and total >= float(e.total) - 1e-9:
+                return
+
+        self._elite.append(EliteEntry(sig=md, total=total, comm=comm, therm=therm, assign=a.copy(), eval=dict(eo or {})))
+
+        # keep a small archive: primarily by total
+        self._elite.sort(key=lambda x: float(x.total))
+        keep_n = int(max(2, min(int(self.elite_keep_top_total), int(self.elite_max_size))))
+        self._elite = self._elite[:keep_n]
+        self._elite_sig_to_idx = {e.sig: i for i, e in enumerate(self._elite)}
+
+    def _pick_elite_target(self, cur_assign: np.ndarray) -> Optional[EliteEntry]:
+        if len(self._elite) < 2:
+            return None
+        a = np.asarray(cur_assign, dtype=int).reshape(-1)
+        # pick good-but-different target: among top half, maximize hamming distance
+        cand = self._elite[: max(2, len(self._elite) // 2)]
+        best = None
+        best_d = -1
+        for e in cand:
+            d = _hamming_assign(a, e.assign)
+            if d <= 0:
+                continue
+            if d > best_d:
+                best_d = d
+                best = e
+        if best is None:
+            for e in self._elite:
+                d = _hamming_assign(a, e.assign)
+                if d > best_d:
+                    best_d = d
+                    best = e
+        return best
 
     def _empty_sites(self, assign: np.ndarray, Ns: int) -> np.ndarray:
         used = np.zeros(Ns, dtype=bool)
@@ -903,6 +1029,335 @@ class MacroEngine:
                 break
         return uniq
 
+    # ----------------------------
+    # Component A: Elite archive + Path Relinking
+    # ----------------------------
+    def _run_relink(
+        self,
+        name: str,
+        assign0: np.ndarray,
+        eval0: Dict[str, Any],
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+        evaluate_assign: Callable[[np.ndarray], Dict[str, Any]],
+        n_steps: int = 3,
+    ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        st = self._stat(name)
+        info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
+        if st.cooldown > 0:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        st.tries += 1
+        info["tries"] = int(info.get("tries", 0)) + 1
+
+        tgt = self._pick_elite_target(assign0)
+        if tgt is None:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        cur = assign0.copy()
+        cur_eval = dict(eval0)
+        best_total = float(cur_eval.get("total_scalar", 0.0))
+        best_assign = cur.copy()
+        best_eval = dict(cur_eval)
+        executed: List[Dict[str, Any]] = []
+
+        S = int(cur.shape[0])
+        hot_comm = self._hot_slots_by_traffic(traffic_sym, max(8, self.hot_slots_k))
+        tdp = np.asarray(chip_tdp_w, dtype=np.float64)
+        hot_therm = [int(x) for x in np.argsort(-tdp)[: max(6, min(S, self.therm_hot_k))].tolist()]
+        pri = list(dict.fromkeys([int(x) for x in hot_comm] + hot_therm))
+
+        for _t in range(max(1, int(n_steps))):
+            diff = np.nonzero(np.asarray(cur, dtype=int) != np.asarray(tgt.assign, dtype=int))[0].astype(int).tolist()
+            if not diff:
+                break
+            cand_chips: List[int] = []
+            for i in pri:
+                if i in diff:
+                    cand_chips.append(int(i))
+                if len(cand_chips) >= max(4, int(self.rlk_pick_k)):
+                    break
+            if len(cand_chips) < max(4, int(self.rlk_pick_k)):
+                self.rng.shuffle(diff)
+                for i in diff:
+                    if i not in cand_chips:
+                        cand_chips.append(int(i))
+                    if len(cand_chips) >= max(4, int(self.rlk_pick_k)):
+                        break
+
+            scored: List[Tuple[float, Dict[str, Any]]] = []
+            for i in cand_chips[: max(1, int(self.rlk_moves_per_step))]:
+                sid = int(np.asarray(tgt.assign, dtype=int)[int(i)])
+                act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "relink"}
+                est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                act2 = dict(act); act2["_est"] = dict(est)
+                scored.append((float(est.get("d_total", 0.0)), act2))
+            scored.sort(key=lambda x: float(x[0]))
+            if not scored:
+                break
+
+            k_eval = max(1, min(int(self.rlk_eval_topk), len(scored)))
+            best_step_total = float(cur_eval.get("total_scalar", 0.0))
+            best_step_assign = None
+            best_step_eval = None
+            best_step_act = None
+            for _k in range(int(k_eval)):
+                act = scored[_k][1]
+                trial = _apply_relocate_perm(cur, int(act.get("i", 0)), int(act.get("site_id", 0)))
+                eo = evaluate_assign(trial)
+                info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+                v = float(eo.get("total_scalar", 1e30))
+                if v < best_step_total:
+                    best_step_total = v
+                    best_step_assign = trial
+                    best_step_eval = eo
+                    best_step_act = act
+            if best_step_assign is None:
+                break
+
+            if (best_step_total <= float(cur_eval.get("total_scalar", 0.0)) + 1e-12) or bool(self.rlk_allow_worsen):
+                cur = np.asarray(best_step_assign, dtype=int).copy()
+                cur_eval = dict(best_step_eval or cur_eval)
+                executed.append(dict(best_step_act or {}))
+                if best_step_total < best_total:
+                    best_total = float(best_step_total)
+                    best_assign = cur.copy()
+                    best_eval = dict(cur_eval)
+                try:
+                    self.observe_elite(cur, cur_eval)
+                except Exception:
+                    pass
+            else:
+                break
+
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+        calls = float(info.get("eval_calls", 0))
+        info["used_actions"] = int(len(executed))
+        self._update_stat_end(st, gain=gain, calls=calls, info=info)
+        return best_assign, best_eval, float(best_total), executed, cur.copy(), info
+
+    # ----------------------------
+    # Component B: ILS-style Shake (perturb + short repair)
+    # ----------------------------
+    def _run_shake(
+        self,
+        name: str,
+        assign0: np.ndarray,
+        eval0: Dict[str, Any],
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+        evaluate_assign: Callable[[np.ndarray], Dict[str, Any]],
+    ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        st = self._stat(name)
+        info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
+        if st.cooldown > 0:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        st.tries += 1
+        info["tries"] = int(info.get("tries", 0)) + 1
+
+        a0 = np.asarray(assign0, dtype=int).copy()
+        Ns = int(np.asarray(sites_xy_mm, dtype=np.float64).shape[0])
+        empty0 = self._empty_sites(a0, Ns)
+        hot = self._hot_slots_by_traffic(traffic_sym, max(8, self.hot_slots_k))
+        tdp = np.asarray(chip_tdp_w, dtype=np.float64)
+        hot_t = [int(x) for x in np.argsort(-tdp)[: max(6, min(a0.shape[0], self.therm_hot_k))].tolist()]
+        pool = list(dict.fromkeys([int(x) for x in hot] + hot_t))
+        if not pool:
+            pool = [int(_rng_randint(self.rng, 0, int(a0.shape[0]))) for _ in range(min(8, int(a0.shape[0])))]
+
+        best_total = float(eval0.get("total_scalar", 0.0))
+        best_assign = a0.copy()
+        best_eval = dict(eval0)
+        best_acts: List[Dict[str, Any]] = []
+        best_final = a0.copy()
+
+        for _c in range(max(1, int(self.shake_candidates))):
+            cur = a0.copy()
+            acts: List[Dict[str, Any]] = []
+            for _r in range(max(1, int(self.shake_kick_rounds))):
+                self.rng.shuffle(pool)
+                for i in pool[: max(1, int(self.shake_kick_k))]:
+                    i = int(i)
+                    if empty0.size > 0 and self.rng.random() < 0.7:
+                        sid = int(empty0[_rng_randint(self.rng, 0, int(empty0.size))])
+                    else:
+                        sid = int(_rng_randint(self.rng, 0, Ns))
+                    act = {"op": "relocate", "i": int(i), "site_id": int(sid), "type": "shake"}
+                    cur = _apply_relocate_perm(cur, int(i), int(sid))
+                    acts.append(dict(act))
+
+            cur_eval = evaluate_assign(cur)
+            info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+            for _rs in range(max(0, int(self.shake_repair_steps))):
+                cand = self.propose_actions("comm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region)
+                if not cand:
+                    break
+                scored: List[Tuple[float, Dict[str, Any]]] = []
+                for act in cand:
+                    est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                    act2 = dict(act); act2["_est"] = dict(est)
+                    scored.append((float(est.get("d_total", 0.0)), act2))
+                scored.sort(key=lambda x: float(x[0]))
+                k_eval = max(1, min(int(self.shake_repair_eval_topk), len(scored)))
+                best_step_total = float(cur_eval.get("total_scalar", 1e30))
+                best_step = None
+                best_step_eval = None
+                best_act = None
+                for _k in range(int(k_eval)):
+                    act = scored[_k][1]
+                    trial = self._apply_act(cur, act)
+                    eo = evaluate_assign(trial)
+                    info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+                    v = float(eo.get("total_scalar", 1e30))
+                    if v < best_step_total:
+                        best_step_total = v
+                        best_step = trial
+                        best_step_eval = eo
+                        best_act = act
+                if best_step is None:
+                    break
+                if (best_step_total <= float(cur_eval.get("total_scalar", 0.0)) + 1e-12) or bool(self.shake_allow_worsen):
+                    cur = np.asarray(best_step, dtype=int).copy()
+                    cur_eval = dict(best_step_eval or cur_eval)
+                    if best_act is not None:
+                        acts.append(dict(best_act))
+                else:
+                    break
+
+            v = float(cur_eval.get("total_scalar", 1e30))
+            if v < best_total:
+                best_total = float(v)
+                best_assign = cur.copy()
+                best_eval = dict(cur_eval)
+                best_acts = [dict(a) for a in acts]
+                best_final = cur.copy()
+
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+        calls = float(info.get("eval_calls", 0))
+        info["used_actions"] = int(len(best_acts))
+        self._update_stat_end(st, gain=gain, calls=calls, info=info)
+        return best_assign, best_eval, float(best_total), best_acts, best_final, info
+
+    # ----------------------------
+    # Component C: Tabu Search (short-run)
+    # ----------------------------
+    def _run_tabu_search(
+        self,
+        name: str,
+        assign0: np.ndarray,
+        eval0: Dict[str, Any],
+        sites_xy_mm: np.ndarray,
+        traffic_sym: np.ndarray,
+        chip_tdp_w: np.ndarray,
+        site_to_region: Optional[np.ndarray],
+        evaluate_assign: Callable[[np.ndarray], Dict[str, Any]],
+    ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        st = self._stat(name)
+        info: Dict[str, Any] = {"name": str(name), "tries": 0, "success": 0, "fail": 0, "eval_calls": 0, "used_actions": 0}
+        if st.cooldown > 0:
+            return assign0.copy(), dict(eval0), float(eval0.get("total_scalar", 0.0)), [], assign0.copy(), info
+
+        st.tries += 1
+        info["tries"] = int(info.get("tries", 0)) + 1
+
+        cur = np.asarray(assign0, dtype=int).copy()
+        cur_eval = dict(eval0)
+        best_total = float(cur_eval.get("total_scalar", 0.0))
+        best_assign = cur.copy()
+        best_eval = dict(cur_eval)
+        executed: List[Dict[str, Any]] = []
+
+        tabu: Dict[int, int] = {}  # chip -> expiry_step
+        stepN = max(1, int(self.tabu_steps))
+        tenure = max(1, int(self.tabu_tenure))
+
+        for t in range(stepN):
+            cand = []
+            try:
+                cand.extend(self.propose_actions("comm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+            except Exception:
+                pass
+            try:
+                cand.extend(self.propose_actions("therm", cur, sites_xy_mm, traffic_sym, chip_tdp_w, site_to_region))
+            except Exception:
+                pass
+            if not cand:
+                break
+
+            scored: List[Tuple[float, Dict[str, Any]]] = []
+            for act in cand[: max(1, int(self.tabu_cand_k))]:
+                op = str(act.get("op"))
+                chips: List[int] = []
+                if op == "swap":
+                    chips = [int(act.get("i", -1)), int(act.get("j", -1))]
+                elif op == "relocate":
+                    chips = [int(act.get("i", -1))]
+                is_tabu = False
+                for c in chips:
+                    if c >= 0 and int(tabu.get(int(c), -1)) > int(t):
+                        is_tabu = True
+                        break
+                est = estimate_action_delta(cur, act, sites_xy_mm, traffic_sym, chip_tdp_w, self.obj)
+                d = float(est.get("d_total", 0.0))
+                if is_tabu and d >= -float(self.tabu_aspire_eps):
+                    continue
+                act2 = dict(act); act2["_est"] = dict(est)
+                scored.append((d, act2))
+            if not scored:
+                break
+            scored.sort(key=lambda x: float(x[0]))
+
+            k_eval = max(1, min(int(self.tabu_eval_topk), len(scored)))
+            best_step_total = float(cur_eval.get("total_scalar", 1e30))
+            best_step = None
+            best_step_eval = None
+            best_act = None
+            for _k in range(int(k_eval)):
+                act = scored[_k][1]
+                trial = self._apply_act(cur, act)
+                eo = evaluate_assign(trial)
+                info["eval_calls"] = int(info.get("eval_calls", 0)) + 1
+                v = float(eo.get("total_scalar", 1e30))
+                if v < best_step_total:
+                    best_step_total = v
+                    best_step = trial
+                    best_step_eval = eo
+                    best_act = act
+            if best_step is None:
+                break
+
+            if (best_step_total <= float(cur_eval.get("total_scalar", 0.0)) + 1e-12) or bool(self.tabu_allow_worsen):
+                cur = np.asarray(best_step, dtype=int).copy()
+                cur_eval = dict(best_step_eval or cur_eval)
+                if best_act is not None:
+                    executed.append(dict(best_act))
+                    op = str(best_act.get("op"))
+                    touched: List[int] = []
+                    if op == "swap":
+                        touched = [int(best_act.get("i", -1)), int(best_act.get("j", -1))]
+                    elif op == "relocate":
+                        touched = [int(best_act.get("i", -1))]
+                    for c in touched:
+                        if c >= 0:
+                            tabu[int(c)] = int(t) + int(tenure)
+                if float(cur_eval.get("total_scalar", 1e30)) < best_total:
+                    best_total = float(cur_eval.get("total_scalar", 1e30))
+                    best_assign = cur.copy()
+                    best_eval = dict(cur_eval)
+            else:
+                break
+
+        gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(best_total))
+        calls = float(info.get("eval_calls", 0))
+        info["used_actions"] = int(len(executed))
+        self._update_stat_end(st, gain=gain, calls=calls, info=info)
+        return best_assign, best_eval, float(best_total), executed, cur.copy(), info
+
     def run_macro(
         self,
         name: str,
@@ -916,6 +1371,40 @@ class MacroEngine:
         n_steps: int = 3,
         max_eval_per_step: Optional[int] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any], float, List[Dict[str, Any]], np.ndarray, Dict[str, Any]]:
+        if str(name) in {"relink", "elite_relink", "path_relink"}:
+            return self._run_relink(
+                name=str(name),
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy_mm,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp_w,
+                site_to_region=site_to_region,
+                evaluate_assign=evaluate_assign,
+                n_steps=int(n_steps),
+            )
+        if str(name) in {"shake", "ils_shake", "kick_repair"}:
+            return self._run_shake(
+                name=str(name),
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy_mm,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp_w,
+                site_to_region=site_to_region,
+                evaluate_assign=evaluate_assign,
+            )
+        if str(name) in {"tabu", "tabu_search", "tabu_ls"}:
+            return self._run_tabu_search(
+                name=str(name),
+                assign0=assign0,
+                eval0=eval0,
+                sites_xy_mm=sites_xy_mm,
+                traffic_sym=traffic_sym,
+                chip_tdp_w=chip_tdp_w,
+                site_to_region=site_to_region,
+                evaluate_assign=evaluate_assign,
+            )
         if str(name) in {"chain", "macro_chain"}:
             return self._run_chain(
                 name=str(name),
