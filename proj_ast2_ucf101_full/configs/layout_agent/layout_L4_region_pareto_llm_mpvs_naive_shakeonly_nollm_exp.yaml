@@ -19,11 +19,11 @@ detailed_place:
       max_macros: 1
       n_steps: 1
       shake:
-        # Make shake milder + more recoverable so it can actually show headroom / budget effects.
-        candidates: 12
+        # Keep consistent with the main exp config (medium-strength shake)
+        candidates: 8
         kick_k: 4
         kick_rounds: 1
-        eval_topk: 12
-        repair_steps: 6
-        repair_eval_topk: 6
+        eval_topk: 8
+        repair_steps: 3
+        repair_eval_topk: 3
         allow_worsen: true
