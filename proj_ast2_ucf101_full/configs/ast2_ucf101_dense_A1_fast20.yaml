@@ -20,3 +20,11 @@ train:
   # Shorter schedule for quick iteration.
   epochs: 35
 
+# IMPORTANT:
+# The base config (configs/ast2_ucf101.yaml) sets AST schedule for train.epochs=50:
+# warmup=15, ramp=25. For fast runs (35 epochs), we must override these to keep
+# the phase alignment correct and avoid an overly long warmup.
+ast:
+  schedule:
+    warmup_epochs: 5
+    ramp_epochs: 15
