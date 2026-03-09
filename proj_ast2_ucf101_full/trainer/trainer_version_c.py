@@ -1045,9 +1045,11 @@ def _roi_should_commit(
     old_metric: float,
     new_metric: float,
     min_rel_improve: float,
+    min_abs_improve: float = 0.0,
 ) -> bool:
+    abs_impr = float(old_metric) - float(new_metric)
     rel = _roi_rel_improve(old_metric, new_metric)
-    return rel >= float(min_rel_improve)
+    return (abs_impr >= float(min_abs_improve)) and (rel >= float(min_rel_improve))
 
 
 def train_version_c(
@@ -2022,6 +2024,7 @@ def train_version_c(
                         if (gm == "OK") and (not bool(stable_hw_state.get("hw_stabilizing", False))):
                             metric_key = str(_cfg_get(roi_cfg_local, "metric", "proxy_raw_latency_ms") or "proxy_raw_latency_ms")
                             min_rel = float(_cfg_get(roi_cfg_local, "min_rel_improve", 0.01) or 0.01)
+                            min_abs = float(_cfg_get(roi_cfg_local, "min_abs_improve", 0.0) or 0.0)
                             try:
                                 old_metric, _, _ = _roi_eval_hw_metric(
                                     cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
@@ -2034,11 +2037,21 @@ def train_version_c(
                                     mapping_res=cand_mapping_res, metric_key=metric_key,
                                 )
                                 rel = float(_roi_rel_improve(old_metric, new_metric))
-                                commit = _roi_should_commit(old_metric=old_metric, new_metric=new_metric, min_rel_improve=min_rel)
-                                roi_reason = f"metric={metric_key} old={old_metric:.6g} new={new_metric:.6g} rel={rel:.4f} min_rel={min_rel:.4f}"
+                                commit = _roi_should_commit(
+                                    old_metric=old_metric,
+                                    new_metric=new_metric,
+                                    min_rel_improve=min_rel,
+                                    min_abs_improve=min_abs,
+                                )
+                                abs_impr = float(old_metric) - float(new_metric)
+                                roi_reason = (
+                                    f"metric={metric_key} old={old_metric:.6g} new={new_metric:.6g} "
+                                    f"abs={abs_impr:.6g} rel={rel:.4f} min_abs={min_abs:.6g} min_rel={min_rel:.4f}"
+                                )
                                 stable_hw_state["roi_last_eval"] = {
                                     "outer": int(outer), "metric": metric_key,
                                     "old": float(old_metric), "new": float(new_metric),
+                                    "abs_improve": float(abs_impr), "min_abs": float(min_abs),
                                     "rel_improve": float(rel), "min_rel": float(min_rel),
                                     "commit": bool(commit),
                                 }
@@ -3354,6 +3367,11 @@ def train_version_c(
                 wafer_layout=wafer_layout,
                 seed=int(getattr(cfg.train, "seed", 0)),
             )
+
+        try:
+            (out_dir / "DONE").write_text("done\n", encoding="utf-8")
+        except Exception:
+            pass
     except Exception as e:
         from utils.trace_guard import write_exception_json
         write_exception_json(trace_dir, e, stage="trainer_version_c")

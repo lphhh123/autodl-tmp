@@ -145,6 +145,61 @@ class VideoViT(nn.Module):
             head_keep = 1.0 - float(sparsity.get("head", 0.0))
             ch_keep = 1.0 - float(sparsity.get("ch", 0.0))
             block_keep = 1.0 - float(sparsity.get("block", 0.0))
+        depth = int(self.cfg.depth)
+
+        def _mean_per_layer(ws, n: int, default: float = 1.0):
+            if ws is None:
+                return [float(default)] * n, torch.full((n,), float(default), device=x.device, dtype=torch.float32)
+            if isinstance(ws, (list, tuple)):
+                vals_t = []
+                vals_f = []
+                for w in ws:
+                    if torch.is_tensor(w):
+                        vv = w.float().mean()
+                        vals_t.append(vv)
+                        vals_f.append(float(vv.detach().cpu().item()))
+                    else:
+                        vals_t.append(torch.tensor(float(w), device=x.device, dtype=torch.float32))
+                        vals_f.append(float(w))
+                if len(vals_t) != n and len(vals_t) > 0:
+                    vals_t = [vals_t[0]] * n
+                    vals_f = [vals_f[0]] * n
+                return vals_f, torch.stack(vals_t, dim=0) if len(vals_t) > 0 else torch.full((n,), float(default), device=x.device)
+            if torch.is_tensor(ws):
+                ww = ws.float()
+                vv = ww if ww.ndim == 1 else ww.mean(dim=-1)
+                if int(vv.numel()) != n and int(vv.numel()) > 0:
+                    vv = vv.reshape(-1)[:1].repeat(n)
+                vv = vv.reshape(n)
+                return [float(v.detach().cpu().item()) for v in vv], vv
+            return [float(ws)] * n, torch.full((n,), float(ws), device=x.device, dtype=torch.float32)
+
+        head_keep_list, head_keep_t = _mean_per_layer(head_w, depth, 1.0)
+        ch_keep_list, ch_keep_t = _mean_per_layer(ch_w, depth, 1.0)
+        block_keep_list, block_keep_t = _mean_per_layer(block_w, depth, 1.0)
+        token_keep_list = [float(token_keep)] * depth
+        token_keep_t = torch.full((depth,), float(token_keep), device=x.device, dtype=torch.float32)
+
+        keep_factors = {
+            "token_keep": token_keep_list,
+            "head_keep": head_keep_list,
+            "ch_keep": ch_keep_list,
+            "block_keep": block_keep_list,
+        }
+        keep_factors_t = {
+            "token_keep": token_keep_t,
+            "head_keep": head_keep_t,
+            "ch_keep": ch_keep_t,
+            "block_keep": block_keep_t,
+        }
+        arch = {
+            "depth": int(depth),
+            "embed_dim": int(self.cfg.embed_dim),
+            "num_heads": int(self.cfg.num_heads),
+            "mlp_ratio": float(self.cfg.mlp_ratio),
+            "num_tokens": int(self.num_tokens),
+            "precision": 1,
+        }
         info = {
             "L_AST": L_ast_val,
             "token_feat": tokens.view(b, t, self.num_tokens, -1),
@@ -153,6 +208,9 @@ class VideoViT(nn.Module):
                 "head_keep": head_keep,
                 "ch_keep": ch_keep,
                 "block_keep": block_keep,
+                "keep_factors": keep_factors,
+                "keep_factors_t": keep_factors_t,
+                "arch": arch,
             },
             "gates": {
                 "token_mask": ast_out.token_mask if ast_out is not None else torch.ones(b, t, self.num_tokens, device=x.device),

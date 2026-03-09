@@ -1596,6 +1596,12 @@ def train_single_device(
             ast_sched_override=test_ast_sched,
         )
 
+    if out_dir is not None:
+        try:
+            (Path(out_dir) / "DONE").write_text("done\n", encoding="utf-8")
+        except Exception:
+            pass
+
 
 def validate(
     model: nn.Module,
