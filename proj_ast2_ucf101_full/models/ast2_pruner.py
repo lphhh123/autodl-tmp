@@ -186,9 +186,23 @@ class ASTPruner(nn.Module):
         self.modality_logit = nn.Parameter(torch.zeros(self.num_modalities))
 
         hidden_dim = int(embed_dim * cfg.get("mlp_ratio", 4.0)) if "mlp_ratio" in cfg else int(embed_dim * 4)
-        self.g_head = nn.Parameter(torch.zeros(depth, num_heads))
-        self.g_ch = nn.Parameter(torch.zeros(depth, hidden_dim))
-        self.g_block = nn.Parameter(torch.zeros(depth))
+
+        # Gate logits initialization
+        # IMPORTANT: default init must be close to "fully open" (sigmoid~=0.99)
+        # to avoid immediately damaging accuracy when pruning is enabled.
+        def _logit(p: float) -> float:
+            p = float(p)
+            p = min(max(p, 1e-4), 1.0 - 1e-4)
+            return float(math.log(p / (1.0 - p)))
+
+        init_open = float(cfg.get("gate_init_open", 0.99))
+        init_open_head = float(cfg.get("head_init_open", init_open))
+        init_open_ch = float(cfg.get("ch_init_open", init_open))
+        init_open_block = float(cfg.get("block_init_open", init_open))
+
+        self.g_head = nn.Parameter(torch.full((depth, num_heads), _logit(init_open_head)))
+        self.g_ch = nn.Parameter(torch.full((depth, hidden_dim), _logit(init_open_ch)))
+        self.g_block = nn.Parameter(torch.full((depth,), _logit(init_open_block)))
 
         self.gating_fp32 = bool(cfg.get("gating_fp32", True))
         self.detach_mask = bool(cfg.get("detach_mask", True))
@@ -569,6 +583,21 @@ class ASTPruner(nn.Module):
     def forward_token_gating(
         self, x: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None, token_score: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        # Token pruning OFF: return dense mask but still allow structural gates (head/ch/block).
+        # This is the recommended fast-iteration setting when channel pruning is the main lever.
+        policy = str(self.cfg.get("token_gating_policy", "entropy")).lower()
+        if policy in ("off", "none", "disable", "disabled"):
+            b, t, n, _ = x.shape
+            mask = x.new_ones((b, t, n))
+            zero = x.new_tensor(0.0)
+            return x, {
+                "sparsity_token": zero,
+                "token_prune": zero,
+                "token_keep": x.new_tensor(1.0),
+                "mask": mask,
+                "modal_stats": {},
+            }
+
         x_gate = x
         if self.detach_mask:
             x_gate = x_gate.detach()

@@ -238,7 +238,9 @@ class VideoViT(nn.Module):
         if self.use_ast and self.ast_pruner is not None:
             token_score = None
             policy = str(_cfg_get(self.ast_cfg, "token_gating_policy", "entropy")).lower()
-            if policy == "pixel_entropy":
+            if policy in ("off", "none", "disable", "disabled"):
+                token_score = None
+            elif policy == "pixel_entropy":
                 pe = _cfg_get(self.ast_cfg, "pixel_entropy", None)
                 token_score = compute_pixel_entropy_density_score_video(
                     x,

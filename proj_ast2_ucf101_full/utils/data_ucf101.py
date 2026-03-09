@@ -471,6 +471,10 @@ class UCF101Dataset(Dataset):
             "eval_stride_ratio": float(getattr(cfg.data, "eval_stride_ratio", 0.5)),
             "clip_jitter": bool(getattr(cfg.data, "clip_jitter", False)),
             "window_retention": window_retention,
+            # Deterministic subset for fast iteration (does NOT change semantics; only reduces data volume).
+            "subset_ratio_train": float(getattr(cfg.data, "subset_ratio_train", 1.0)),
+            "subset_ratio_eval": float(getattr(cfg.data, "subset_ratio_eval", 1.0)),
+            "subset_seed": int(getattr(cfg.data, "subset_seed", 0)),
         }
         cache_key_json = json.dumps(cache_key, sort_keys=True)
         cache_hash = hashlib.sha1(cache_key_json.encode("utf-8")).hexdigest()[:12]
@@ -614,6 +618,40 @@ class UCF101Dataset(Dataset):
                     cache_path,
                 )
                 print(f"[UCF101Dataset] Saved clips cache: {cache_path}")
+
+        # ---- deterministic subset (fast iteration) ----
+        # Use subset_ratio_train/eval to keep only a fixed fraction of clips.
+        # Selection is deterministic across runs given subset_seed and clip ordering.
+        subset_ratio = float(getattr(cfg.data, "subset_ratio_train", 1.0)) if self.is_train else float(
+            getattr(cfg.data, "subset_ratio_eval", 1.0)
+        )
+        subset_seed = int(getattr(cfg.data, "subset_seed", 0))
+        if subset_ratio < 1.0:
+            subset_ratio = max(0.0, min(1.0, subset_ratio))
+            n_total = len(self.clips)
+            n_keep = int(max(1, round(n_total * subset_ratio)))
+            # Stable ordering key
+            ordered = sorted(
+                self.clips,
+                key=lambda c: (str(c.video_id), int(c.cover_len), int(c.t_start)),
+            )
+            # Seeded stride selection to avoid always picking the same temporal region.
+            if n_keep < n_total:
+                rnd = random.Random(subset_seed)
+                offset = rnd.randint(0, max(0, (n_total // n_keep) - 1)) if n_keep > 0 else 0
+                step = max(1, n_total // n_keep)
+                picked = []
+                for i in range(offset, n_total, step):
+                    picked.append(ordered[i])
+                    if len(picked) >= n_keep:
+                        break
+                self.clips = picked
+            else:
+                self.clips = ordered
+            print(
+                f"[UCF101Dataset] Subset enabled split={split_label} ratio={subset_ratio:.3f} "
+                f"seed={subset_seed} kept={len(self.clips)}/{n_total}"
+            )
 
         if self.is_train:
             self.transform = transforms.Compose(
