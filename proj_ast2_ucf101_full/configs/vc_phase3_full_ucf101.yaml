@@ -6,13 +6,14 @@ stable_hw:
   hw_ref_source: "baseline_stats"
   locked_acc_ref:
     enabled: true
-    # Same-epoch baseline reference curve parsed from EXP-A2 stdout
+    # Same-epoch baseline reference curve parsed from EXP-A1-fast (dense) stdout
     source: "baseline_stdout_curve"
     mode: "curve_stdout"
-    baseline_stdout_path: "outputs/EXP-A2/seed{seed}/stdout"
+    baseline_stdout_path: "outputs/EXP-A1-fast/seed{seed}/stdout"
+    baseline_curve_path: "outputs/EXP-A1-fast/seed{seed}/acc_ref_curve.json"
     stdout_prefer_mode: "fast"
     curve_ema_alpha: 0.2
-    curve_margin: 0.01
+    curve_margin: 0.0
     freeze_epoch: 15
     strict: true
   no_drift:
@@ -51,7 +52,7 @@ stable_hw:
     controller:
       metric: val_acc1
       # Too strict + noisy fast-val (20 batches) => permanent VIOLATE. Relax and add hysteresis.
-      epsilon_drop: 0.025
+      epsilon_drop: 0.02
       hysteresis: 0.002
       # avoid "lock then immediately violate" at freeze_epoch boundary
       lock_grace_epochs: 1
@@ -74,4 +75,4 @@ stable_hw:
     track_live_in_inner_steps: false
 train:
   mode: version_c
-  acc_drop_max: 0.025
+  acc_drop_max: 0.02

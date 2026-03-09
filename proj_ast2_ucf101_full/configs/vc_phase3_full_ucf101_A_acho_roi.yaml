@@ -26,6 +26,7 @@ stable_hw:
       enabled: true
       metric: proxy_raw_latency_ms
       min_rel_improve: 0.01
+      min_abs_improve: 0.05
       min_margin: 0.0
       cooldown_epochs: 2
       require_hw_active: true

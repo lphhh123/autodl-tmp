@@ -14,8 +14,8 @@ data:
   subset_ratio_eval:  0.20
   subset_seed: 0
 
-train:
-  epochs: 35
+training:
+  outer_epochs: 35
 
 ast:
   # Disable token pruning entirely; channel pruning is the main structural lever.
@@ -52,5 +52,6 @@ ast:
 stable_hw:
   locked_acc_ref:
     baseline_stdout_path: "outputs/EXP-A1-fast/seed{seed}/stdout"
+    baseline_curve_path:  "outputs/EXP-A1-fast/seed{seed}/acc_ref_curve.json"
     stdout_prefer_mode: "fast"
-    strict: false
+    strict: true

@@ -255,6 +255,108 @@ def compute_hw_loss(
         energy_mj = torch.tensor(float(pred.get("energy_mj", 0.0)), device=device)
         comm_ms = torch.tensor(0.0, device=device)
 
+    # ---- v5.4+: surrogate gradient for pruning keep_factors (straight-through) ----
+    try:
+        sur_cfg = getattr(getattr(cfg, "hw", None), "surrogate_grad", None)
+        sur_enabled = False
+        sur_weight = 1.0
+        if sur_cfg is not None:
+            if isinstance(sur_cfg, dict):
+                sur_enabled = bool(sur_cfg.get("enabled", False))
+                sur_weight = float(sur_cfg.get("weight", 1.0) or 1.0)
+            else:
+                sur_enabled = bool(getattr(sur_cfg, "enabled", False))
+                sur_weight = float(getattr(sur_cfg, "weight", 1.0) or 1.0)
+        if sur_enabled and torch.is_grad_enabled() and isinstance(model_info, dict) and hw_proxy is not None:
+            kft = model_info.get("keep_factors_t", None)
+            arch = model_info.get("arch", None)
+            if isinstance(kft, dict) and isinstance(arch, dict):
+                depth = int(arch.get("depth", 0) or 0)
+                embed_dim = int(arch.get("embed_dim", 0) or 0)
+                num_heads = int(arch.get("num_heads", 1) or 1)
+                mlp_ratio = float(arch.get("mlp_ratio", 4.0) or 4.0)
+                num_tokens = int(arch.get("num_tokens", 0) or 0)
+                precision_flag = float(arch.get("precision", 1) or 1)
+
+                def _as_vec(x, n: int, default: float = 1.0):
+                    if x is None:
+                        return torch.full((n,), float(default), device=device, dtype=torch.float32)
+                    if torch.is_tensor(x):
+                        xx = x.to(device=device, dtype=torch.float32)
+                        if xx.ndim == 0:
+                            return xx.repeat(n)
+                        if int(xx.numel()) == n:
+                            return xx.reshape(n)
+                        return xx.reshape(-1)[:1].repeat(n)
+                    return torch.full((n,), float(x), device=device, dtype=torch.float32)
+
+                if depth > 0 and embed_dim > 0 and num_tokens > 0:
+                    tk = _as_vec(kft.get("token_keep", None), depth, 1.0)
+                    hk = _as_vec(kft.get("head_keep", None), depth, 1.0)
+                    ck = _as_vec(kft.get("ch_keep", None), depth, 1.0)
+                    bk = _as_vec(kft.get("block_keep", None), depth, 1.0)
+
+                    seq_len = torch.tensor(float(num_tokens), device=device, dtype=torch.float32)
+                    ed = torch.tensor(float(embed_dim), device=device, dtype=torch.float32)
+                    mr = torch.tensor(float(mlp_ratio), device=device, dtype=torch.float32)
+
+                    layers_cfg = []
+                    bytes_per_elem = torch.tensor(2.0 if precision_flag <= 1.0 else 4.0, device=device)
+                    for i in range(depth):
+                        tki = torch.clamp(tk[i], 0.0, 1.0)
+                        hki = torch.clamp(hk[i], 0.0, 1.0)
+                        cki = torch.clamp(ck[i], 0.0, 1.0)
+                        bki = torch.clamp(bk[i], 0.0, 1.0)
+
+                        attn_flops = 4.0 * seq_len * (ed ** 2) * (tki ** 2) * hki * bki
+                        mlp_flops = 2.0 * seq_len * ed * (ed * mr) * tki * cki * bki
+                        attn_bytes = seq_len * ed * bytes_per_elem * tki
+                        mlp_bytes = seq_len * ed * bytes_per_elem * tki
+
+                        layers_cfg.append({
+                            "layer_type": "attn",
+                            "flops": attn_flops,
+                            "bytes": attn_bytes,
+                            "embed_dim": float(embed_dim),
+                            "num_heads": float(num_heads),
+                            "mlp_ratio": float(mlp_ratio),
+                            "seq_len": seq_len * tki,
+                            "precision": float(precision_flag),
+                        })
+                        layers_cfg.append({
+                            "layer_type": "mlp",
+                            "flops": mlp_flops,
+                            "bytes": mlp_bytes,
+                            "embed_dim": float(embed_dim),
+                            "num_heads": float(num_heads),
+                            "mlp_ratio": float(mlp_ratio),
+                            "seq_len": seq_len * tki,
+                            "precision": float(precision_flag),
+                        })
+
+                    pred = hw_proxy.predict_layers_batch_torch(layers_cfg, device=device)
+                    lat_s = pred["lat_ms"].sum()
+                    mem_s = pred["mem_mb"].max() if pred["mem_mb"].numel() > 0 else torch.zeros((), device=device)
+                    eng_s = (pred["power_w"] * pred["lat_ms"]).sum() / 1000.0 if pred["power_w"].numel() > 0 else torch.zeros((), device=device)
+
+                    if latency_ms is not None:
+                        latency_ms = latency_ms + float(sur_weight) * (lat_s - lat_s.detach())
+                    if mem_mb is not None:
+                        mem_mb = mem_mb + float(sur_weight) * (mem_s - mem_s.detach())
+                    if energy_mj is not None:
+                        energy_mj = energy_mj + float(sur_weight) * (eng_s - eng_s.detach())
+
+                    st_surr = {
+                        "surrogate_latency_ms": float(lat_s.detach().cpu().item()),
+                        "surrogate_mem_mb": float(mem_s.detach().cpu().item()),
+                        "surrogate_energy_mj": float(eng_s.detach().cpu().item()),
+                        "surrogate_weight": float(sur_weight),
+                    }
+                    stable_hw_state = stable_hw_state or {}
+                    stable_hw_state["surrogate_last"] = st_surr
+    except Exception:
+        pass
+
     norm_cfg = getattr(stable_hw_cfg, "normalize", None) if stable_hw_cfg is not None else None
     if stable_hw_state is None:
         stable_hw_state = {}

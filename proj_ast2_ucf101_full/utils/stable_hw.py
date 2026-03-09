@@ -529,8 +529,64 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
             st["acc_ref_source"] = f"baseline_stats_parse_error:{p}"
             return
 
-    # ===== baseline stdout curve (EXP-A1 stdout) =====
+    # ===== baseline curve file (JSON snapshot) =====
+    # Optional fast path: load a precomputed acc_ref_curve JSON to avoid re-parsing stdout
+    # and to ensure the reference is complete (launch scripts can require this file).
     mode = str(_cfg_get(locked, "mode", "") or "").lower().strip()
+    if source in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
+        seed = int(st.get("seed", 0))
+        env_curve = str(os.environ.get("BASELINE_ACC_CURVE", "") or "").strip()
+        curve_tmpl = env_curve or str(_cfg_get(locked, "baseline_curve_path", "") or "").strip()
+        if curve_tmpl:
+            p_curve = Path(_format_seed_template(curve_tmpl, seed))
+            if p_curve.exists() and p_curve.is_file():
+                try:
+                    obj = json.loads(p_curve.read_text(encoding="utf-8"))
+                    curve = None
+                    if isinstance(obj, dict):
+                        for k in ("acc_ref_curve", "curve", "curve_ema", "acc_curve"):
+                            if k in obj and isinstance(obj.get(k), (list, tuple)):
+                                curve = [float(v) for v in obj[k]]
+                                break
+                        if curve is None and all(isinstance(k, (str, int)) for k in obj.keys()):
+                            try:
+                                items = []
+                                for kk, vv in obj.items():
+                                    try:
+                                        ep = int(kk)
+                                    except Exception:
+                                        continue
+                                    items.append((ep, float(vv)))
+                                if items:
+                                    items.sort(key=lambda x: x[0])
+                                    max_ep = items[-1][0]
+                                    m = {ep: acc for ep, acc in items}
+                                    last = None
+                                    curve = []
+                                    for ep in range(max_ep + 1):
+                                        if ep in m:
+                                            last = m[ep]
+                                        if last is None:
+                                            last = 0.0
+                                        curve.append(float(last))
+                            except Exception:
+                                curve = None
+                    elif isinstance(obj, (list, tuple)):
+                        curve = [float(v) for v in obj]
+
+                    if curve and len(curve) > 0:
+                        st["acc_ref_curve"] = list(curve)
+                        st["acc_ref_curve_raw"] = list(curve)
+                        st["acc_ref_source"] = f"baseline_curve_file:{p_curve}"
+                        st["acc_ref_locked"] = True
+                        logger.info("[LockedAccRef] loaded baseline curve file: path=%s len=%s", str(p_curve), int(len(curve)))
+                        return
+                except Exception as exc:
+                    if strict:
+                        raise RuntimeError(f"[v5.4 LockedAccRef] failed to load baseline_curve_path={p_curve}: {exc}")
+                    st["acc_ref_source"] = f"baseline_curve_parse_error:{p_curve}"
+
+    # ===== baseline stdout curve (EXP-A1 stdout) =====
     if source in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
         seed = int(st.get("seed", 0))
         # Path template priority:

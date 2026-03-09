@@ -7,11 +7,16 @@ training:
   hw_loss_norm_min_denom: 1e-3
   hw_loss_norm_clip: 10.0
 
+hw:
+  surrogate_grad:
+    enabled: true
+    weight: 1.0
+
 train:
   mode: version_c
   # v5.4 contract: keep aligned with stable_hw.accuracy_guard.controller.epsilon_drop
   # to avoid "stable_hw.acc_drop_max missing/0; force to 0.002" fallback logs.
-  acc_drop_max: 0.025
+  acc_drop_max: 0.02
   # Reduce log bloat from repeated per-step warnings in Version-C runs.
   # 0 => auto (use LOG_INTERVAL_STEPS / default 200)
   warn_every_steps: 200
@@ -30,19 +35,20 @@ stable_hw:
     epochs: 1
   locked_acc_ref:
     enabled: true
-    # Use per-epoch reference curve parsed from EXP-A2 stdout.
+    # Use per-epoch reference curve parsed from EXP-A1-fast stdout.
     mode: curve_stdout
     source: baseline_stdout_curve
-    baseline_stdout_path: outputs/EXP-A2/seed{seed}/stdout
+    baseline_stdout_path: outputs/EXP-A1-fast/seed{seed}/stdout
+    baseline_curve_path: outputs/EXP-A1-fast/seed{seed}/acc_ref_curve.json
     # Make reference consistent with fast-val used in guard; if both full/fast exist, pick fast.
     # Options: fast (default), full, min
     stdout_prefer_mode: fast
     curve_ema_alpha: 0.2
     # Extra slack on reference curve (in addition to epsilon_drop). Recommended: 0.01
-    curve_margin: 0.01
+    curve_margin: 0.0
   accuracy_guard:
     controller:
-      epsilon_drop: 0.025
+      epsilon_drop: 0.02
       use_acc_ema: true
       acc_ema_alpha: 0.3
       k_enter: 2

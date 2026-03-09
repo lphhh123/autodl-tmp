@@ -358,13 +358,17 @@ case "$EXP_ID" in
   # -------------------------
   EXP-A1)
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
-    run_ast configs/ast2_ucf101_dense_A1.yaml "$(odir EXP-A1)"
+    OUT="$(odir EXP-A1)"
+    run_ast configs/ast2_ucf101_dense_A1.yaml "$OUT"
+    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer fast --ema-alpha 0.2 --curve-margin 0.0 || true
     ;;
   # A1-fast: dense baseline (FAST iteration: 20% data, 35 epochs)
   # NOTE: Still exports baseline stats for downstream stable_hw runs.
   EXP-A1-fast)
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
-    run_ast configs/ast2_ucf101_dense_A1_fast20.yaml "$(odir EXP-A1-fast)"
+    OUT="$(odir EXP-A1-fast)"
+    run_ast configs/ast2_ucf101_dense_A1_fast20.yaml "$OUT"
+    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer fast --ema-alpha 0.2 --curve-margin 0.0 || true
     ;;
   # A1' (aligned): Dense baseline under Version-C trainer (avoid pipeline confounds).
   # Output -> outputs[/SMOKE]/NEW_A1/seed{SEED}
