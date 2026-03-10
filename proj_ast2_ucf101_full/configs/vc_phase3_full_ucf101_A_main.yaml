@@ -30,7 +30,7 @@ training:
   stable_hw_eval_max_batches: 500
   # Perf: when lambda_hw_eff==0, skip HW proxy forward (does not change gradients).
   # Keep evaluation (val_acc1) unchanged.
-  compute_hw_when_lambda0: false
+  compute_hw_when_lambda0: true
   hw_term_ratio_cap: 0.1
   hw_loss_norm_enabled: true
   hw_loss_norm_ema_alpha: 0.98
@@ -59,3 +59,48 @@ train:
   grad_clip_norm: 1.0
   warn_every_steps: 200
   nan_guard_warn_every_steps: 200
+
+
+# -------------------------
+# AST / channel-gate pruning control (MorphNet-style)
+# -------------------------
+ast:
+  # A-main: token pruning OFF; channel pruning is the primary lever.
+  token_gating_policy: "off"
+  strict_masking: false
+  rho_token_target: 1.0
+
+  gate_init_open: 0.99
+  ch_init_open: 0.99
+  head_init_open: 0.99
+  block_init_open: 0.99
+
+  schedule:
+    enabled: true
+    # Align with StableHW LockedAccRef (freeze_epoch=15 in base config)
+    warmup_epochs: 15
+    force_dense_epochs: 15
+    ramp_epochs: 10
+    curve: "cosine"
+    rho_start: 1.0
+    temp_start: 1.0
+    lambda_ast_start: 0.0
+    lambda_ast_end: 0.2
+
+    # Target keep ratio for channel gates (slow/controlled)
+    ch_keep_start: 1.0
+    ch_keep_end: 0.85
+    ch_ramp_epochs: 10
+
+  loss:
+    lambda_token: 0.0
+    lambda_head: 0.0
+    lambda_ch: 1.0
+    lambda_block: 0.0
+    ch_reg_mode: "hinge_to_target"
+    ch_reg_power: 2.0
+    ch_layer_policy: "late_only"
+    ch_freeze_prefix_ratio: 0.33
+
+  channel_prune:
+    freeze_prefix_ratio: 0.33

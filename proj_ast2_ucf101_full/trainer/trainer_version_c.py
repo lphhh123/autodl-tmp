@@ -119,6 +119,12 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
         return {"phase": "disabled"}
 
     warm = int(getattr(sched, "warmup_epochs", 0) or 0)
+    # v5.4+: allow extending the dense warmup beyond warmup_epochs.
+    # This is crucial when channel/structural gates exist: we often want to keep them fully open
+    # until LockedAccRef is ready (e.g. freeze_epoch=15), otherwise the model can lose accuracy
+    # before the guard becomes active.
+    force_dense_epochs = int(getattr(sched, "force_dense_epochs", warm) or warm)
+    warm_eff = max(int(warm), int(force_dense_epochs))
     ramp = int(getattr(sched, "ramp_epochs", 0) or 0)
     curve = str(getattr(sched, "curve", "cosine") or "cosine")
 
@@ -132,7 +138,8 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
     lam_end = float(getattr(sched, "lambda_ast_end", getattr(loss_cfg, "lambda_AST", 1.0) if loss_cfg is not None else 1.0) or (getattr(loss_cfg, "lambda_AST", 1.0) if loss_cfg is not None else 1.0))
     lam_start = float(getattr(sched, "lambda_ast_start", 0.0) or 0.0)
 
-    if epoch < warm:
+    # NOTE: use warm_eff (not warm) for force_dense gating.
+    if epoch < warm_eff:
         return {
             "phase": "warmup",
             "t": 0.0,
@@ -140,9 +147,19 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
             "rho_token": 1.0,
             "token_temperature": temp_start,
             "lambda_ast": lam_start,
+            # Channel keep target (MorphNet-style controlled pruning).
+            "ch_keep_target": 1.0,
         }
 
+    # Channel keep target schedule (defaults to "no channel pruning" if ch_keep_end==1.0)
+    ch_keep_start = float(getattr(sched, "ch_keep_start", 1.0) or 1.0)
+    ch_keep_end = float(getattr(sched, "ch_keep_end", 1.0) or 1.0)
+    ch_ramp = int(getattr(sched, "ch_ramp_epochs", ramp) or ramp)
+
     if ramp <= 0:
+        # token schedule has no ramp; still provide ch_keep_target
+        t_ch = 1.0 if ch_ramp <= 0 else 0.0
+        ch_keep_target = _ast_interp(ch_keep_start, ch_keep_end, t_ch, curve=curve) if ch_keep_end != ch_keep_start else float(ch_keep_end)
         return {
             "phase": "stabilize",
             "t": 1.0,
@@ -150,14 +167,23 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
             "rho_token": rho_end,
             "token_temperature": temp_end,
             "lambda_ast": lam_end,
+            "ch_keep_target": float(ch_keep_target),
         }
 
     # Ramp progress for this epoch.
-    # Use t=0 at the first ramp epoch (epoch == warmup_epochs) so
+    # Use t=0 at the first ramp epoch (epoch == warm_eff) so
     # rho/temp/lambda start from *_start without an immediate jump.
-    t = float(epoch - warm) / float(ramp)
+    t = float(epoch - warm_eff) / float(ramp)
     t = float(max(0.0, min(1.0, t)))
     phase = "ramp" if t < 1.0 else "stabilize"
+
+    # Channel keep schedule uses its own ramp length (defaults to ramp).
+    if ch_ramp <= 0:
+        t_ch = 1.0
+    else:
+        t_ch = float(epoch - warm_eff) / float(ch_ramp)
+        t_ch = float(max(0.0, min(1.0, t_ch)))
+    ch_keep_target = _ast_interp(ch_keep_start, ch_keep_end, t_ch, curve=curve)
     return {
         "phase": phase,
         "t": t,
@@ -165,6 +191,7 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
         "rho_token": _ast_interp(rho_start, rho_end, t, curve=curve),
         "token_temperature": _ast_interp(temp_start, temp_end, t, curve=curve),
         "lambda_ast": _ast_interp(lam_start, lam_end, t, curve=curve),
+        "ch_keep_target": float(ch_keep_target),
     }
 
 
@@ -194,8 +221,19 @@ def _apply_ast_runtime_overrides_to_model(model: torch.nn.Module, cfg, ast_sched
         ast_sched.get("token_temperature", getattr(ast_cfg, "token_temperature", 0.1) if ast_cfg is not None else 0.1)
     )
 
-    pruner.set_runtime_overrides(force_dense=force_dense, rho_token=rho_token, token_temperature=token_temperature)
-    return {"force_dense": force_dense, "rho_token": float(rho_token), "token_temperature": float(token_temperature)}
+    ch_keep_target = ast_sched.get("ch_keep_target", None)
+    pruner.set_runtime_overrides(
+        force_dense=force_dense,
+        rho_token=rho_token,
+        token_temperature=token_temperature,
+        ch_keep_target=(float(ch_keep_target) if ch_keep_target is not None else None),
+    )
+    return {
+        "force_dense": force_dense,
+        "rho_token": float(rho_token),
+        "token_temperature": float(token_temperature),
+        "ch_keep_target": float(ch_keep_target) if ch_keep_target is not None else None,
+    }
 
 
 def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict[str, Any], outer: int) -> Tuple[dict, int]:
@@ -217,6 +255,20 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         v_epoch = int(outer)
 
     freeze_now = _stablehw_freeze_ast_now(stable_state)
+
+    # If we just exited RECOVERY/VIOLATE, back off the virtual epoch a bit to avoid
+    # immediately re-entering violation with the same (too aggressive) sparsity target.
+    was_frozen = bool(stable_state.get("_ast_freeze_prev", False))
+    backoff = 0
+    try:
+        backoff = int(get_nested(cfg, "stable_hw.accuracy_guard.controller.sched_backoff_epochs", 0) or 0)
+    except Exception:
+        backoff = 0
+    if was_frozen and (not freeze_now) and backoff > 0:
+        try:
+            v_epoch = max(0, int(v_epoch) - int(backoff))
+        except Exception:
+            pass
 
     if freeze_now:
         # Prefer a pinned snapshot; fall back to last applied schedule.
@@ -250,8 +302,8 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         else:
             frozen = dict(frozen)
 
-        # During recovery: PAUSE schedule progression, but DO NOT revert to full dense.
-        # Hold the last applied rho_token/temperature so the model can actually adapt at this sparsity level.
+        # During recovery: PAUSE schedule progression.
+        # Optionally force full dense to quickly recover accuracy (recommended for channel-gate pruning).
         ast_cfg = getattr(cfg, "ast", None)
 
         # Keep previous settings if present; otherwise fall back to dense safely.
@@ -268,9 +320,22 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
 
         rho_hold = min(1.0, max(0.0, rho_prev + relax))
 
-        frozen["force_dense"] = bool(frozen.get("force_dense", False))  # keep prior; do not force True
-        frozen["rho_token"] = float(rho_hold)
-        frozen["token_temperature"] = float(temp_prev)
+        # v5.4+: allow forcing full dense on VIOLATE/RECOVERY (prevents irreversible accuracy collapse).
+        force_dense_on_violate = False
+        try:
+            force_dense_on_violate = bool(get_nested(cfg, "stable_hw.accuracy_guard.controller.force_dense_on_violate", False))
+        except Exception:
+            force_dense_on_violate = False
+        guard_mode = str(stable_state.get("guard_mode", "")).upper()
+        if force_dense_on_violate and guard_mode in ("VIOLATE", "RECOVERY"):
+            frozen["force_dense"] = True
+            frozen["rho_token"] = 1.0
+            frozen["token_temperature"] = float(temp_prev)
+            frozen["ch_keep_target"] = 1.0
+        else:
+            frozen["force_dense"] = bool(frozen.get("force_dense", False))
+            frozen["rho_token"] = float(rho_hold)
+            frozen["token_temperature"] = float(temp_prev)
 
         # Disable AST auxiliary loss during recovery to reduce extra instability.
         frozen["lambda_ast"] = 0.0
@@ -278,9 +343,11 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         stable_state["ast_sched_frozen"] = dict(frozen)
         stable_state["ast_sched_frozen_outer"] = int(outer)
         # Do NOT advance virtual epoch.
+        stable_state["_ast_freeze_prev"] = True
         return dict(frozen), int(v_epoch)
 
     # not frozen => advance virtual epoch
+    stable_state["_ast_freeze_prev"] = False
     ast_epoch_used = int(v_epoch)
     ast_sched = compute_ast_schedule_effective(cfg, ast_epoch_used)
     if not isinstance(ast_sched, dict):
@@ -3325,6 +3392,25 @@ def train_version_c(
             metrics[k] = v
         with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
             safe_dump(metrics, f, indent=2)
+
+        # Optional: export baseline stats for downstream StableHW runs.
+        # This mirrors trainer_single_device behavior (BASELINE_STATS_EXPORT) so users can
+        # generate outputs/dense_baseline/metrics.json from a Version-C dense baseline.
+        baseline_export_path = os.environ.get("BASELINE_STATS_EXPORT", "").strip()
+        if baseline_export_path:
+            export_path = Path(baseline_export_path)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = export_path.with_suffix(export_path.suffix + f".tmp.{os.getpid()}")
+            try:
+                with tmp_path.open("w", encoding="utf-8") as tmp_f:
+                    safe_dump(metrics, tmp_f, indent=2)
+                os.replace(tmp_path, export_path)
+            finally:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
         hw_stats_out = dict(last_hw_stats or {})
         hw_stats_out.update(
             {

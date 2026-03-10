@@ -38,8 +38,8 @@ stable_hw:
     # Use per-epoch reference curve parsed from EXP-A1-fast stdout.
     mode: curve_stdout
     source: baseline_stdout_curve
-    baseline_stdout_path: outputs/EXP-A1-fast/seed{seed}/stdout
-    baseline_curve_path: outputs/EXP-A1-fast/seed{seed}/acc_ref_curve.json
+    baseline_stdout_path: outputs/EXP-A1p-fast/seed{seed}/stdout
+    baseline_curve_path: outputs/EXP-A1p-fast/seed{seed}/acc_ref_curve.json
     # Make reference consistent with fast-val used in guard; if both full/fast exist, pick fast.
     # Options: fast (default), full, min
     stdout_prefer_mode: fast
