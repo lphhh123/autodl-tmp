@@ -49,6 +49,18 @@ detailed_place:
         counterfactual_credit: true
         counterfactual_use_ctx_atomic: true
         counterfactual_alpha: 0.2
+        # IMPORTANT: without discount, expected_atomic_gain is often over-estimated -> gain_cf negative -> no release
+        counterfactual_discount: 0.35
+        # Stage-wise discount: be conservative early, allow more subtraction late
+        counterfactual_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
+        # Cap atomic baseline by realized-rate when available (prevents optimistic baselines)
+        counterfactual_cap_mult: 1.5
+        counterfactual_cap_mult_by_stage: {early: 1.2, mid: 1.5, late: 1.8}
+        # Only trust realized-rate after enough accumulation (EWMA calls)
+        counterfactual_min_real_calls: 200
+        # Baseline mode: recommended (avoid global realized fallback that can be polluted by macros)
+        counterfactual_baseline_mode: atomic_cap_ctx_real
+        counterfactual_fallback_real_rate: 0.0
         # v2.8: AOS-style family selection (non-stationary, budget-stage conditioned)
         aos:
           enabled: true
