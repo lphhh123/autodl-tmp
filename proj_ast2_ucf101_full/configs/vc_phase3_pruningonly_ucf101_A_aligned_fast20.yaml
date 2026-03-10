@@ -1,19 +1,20 @@
 # Fast-iteration pruning-only baseline (A2-fast): same Version-C trainer path as A4,
-# but with StableHW disabled and HW loss off.
+# with StableHW guard/ref enabled but HW optimization neutralized.
 
 _base_: configs/vc_phase3_full_ucf101_A_main_fast20.yaml
 
 stable_hw:
   enabled: true
-  # v5.4 contract: version_c + stable_hw.enabled requires core submodules enabled.
-  # This pruning-only baseline intentionally disables lambda_hw_schedule / HW optimization,
-  # so we must opt-in to the explicit ablation escape hatch.
-  force_disable_ok: true
+  # Keep StableHW on for self-ref + accuracy guard, but disable HW optimization by setting lambda_hw_max=0.
+  force_disable_ok: false
   lambda_hw_schedule:
-    enabled: false
+    enabled: true
+    lambda_hw_max: 0.0
   discrete_isolation:
     mapping_update_every_epochs: 1000000000
     layout_update_every_epochs:  1000000000
+    roi_commit:
+      enabled: false
 
 training:
   inner_steps_alpha: 0

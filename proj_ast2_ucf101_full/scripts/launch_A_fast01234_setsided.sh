@@ -34,6 +34,13 @@ EXP_JOINT="${EXP_JOINT:-EXP-A4-fast}"
 EXP_ACHO="${EXP_ACHO:-EXP-A4-acho-fast}"
 EXP_ROI="${EXP_ROI:-EXP-A4-acho-roi-fast}"
 
+NO_BASELINE="${NO_BASELINE:-0}"
+if [[ "${NO_BASELINE}" == "1" ]]; then
+  REQUIRE_BASELINE=0
+  REQUIRE_BASELINE_DONE=0
+  REQUIRE_REF_CURVE=0
+fi
+
 OUT_PREFIX="outputs"
 [[ "${SMOKE}" == "1" ]] && OUT_PREFIX="outputs/SMOKE"
 

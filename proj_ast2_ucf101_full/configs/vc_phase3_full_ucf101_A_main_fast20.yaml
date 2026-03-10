@@ -1,10 +1,10 @@
-# Fast-iteration config (20% data, 35 epochs) for Innovation-A channel-pruning mainline.
+# Fast-iteration config (20% data, 10 dense + 20 prune epochs) for Innovation-A channel-pruning mainline.
 #
 # Intent:
 #   - Turn OFF token pruning (token_gating_policy=off)
 #   - Keep pruning gentle (gates init near 1; only channel sparsity regularized)
-#   - Reduce training volume for rapid iteration (subset_ratio_train=0.2, epochs=35)
-#   - Shorter AST schedule (warmup=5, ramp=15)
+#   - Reduce training volume for rapid iteration (subset_ratio_train=0.2, epochs=30)
+#   - Pruning protocol: dense warmup=10, pruning ramp=20
 
 _base_: configs/vc_phase3_full_ucf101_A_main.yaml
 
@@ -15,8 +15,9 @@ data:
   subset_seed: 0
 
 training:
-  outer_epochs: 35
-  # Keep eval protocol aligned with A1p-fast reference (full eval each epoch on the same eval subset).
+  # Protocol: 10 dense + 20 prune
+  outer_epochs: 30
+  # Keep eval protocol aligned across fast experiments (full eval each epoch on the same eval subset).
   stable_hw_eval_max_batches: 0
   compute_hw_when_lambda0: true
 
@@ -36,9 +37,11 @@ ast:
     enabled: true
     # Keep the model fully dense (incl. channel/head/block gates) until LockedAccRef is ready.
     # This prevents "early pruning" from causing large accuracy drops before the guard becomes active.
-    warmup_epochs: 15
-    force_dense_epochs: 15
-    ramp_epochs: 10
+    # 10 epochs dense (outer=0..9), start pruning from outer=10
+    warmup_epochs: 10
+    force_dense_epochs: 10
+    # 20 epochs pruning ramp
+    ramp_epochs: 20
     curve: "cosine"
     rho_start: 1.0
     temp_start: 1.0
@@ -48,7 +51,7 @@ ast:
     # MorphNet-style controlled channel pruning: target keep ratio slowly decreases.
     ch_keep_start: 1.0
     ch_keep_end: 0.85
-    ch_ramp_epochs: 10
+    ch_ramp_epochs: 20
 
   # Gentle sparsity: focus on channel only.
   loss:
@@ -68,12 +71,13 @@ ast:
     freeze_prefix_ratio: 0.33
 
 # IMPORTANT:
-# Version-C stable_hw locked_acc_ref reads a baseline stdout curve for acc_ref.
-# The global base config points to outputs/EXP-A2/... which does not exist for FAST runs.
-# Point to the FAST dense baseline instead.
+# FAST protocol uses self-ref lock at pruning boundary (no external A1 curve required).
 stable_hw:
   locked_acc_ref:
-    baseline_stdout_path: "outputs/EXP-A1p-fast/seed{seed}/stdout"
-    baseline_curve_path:  "outputs/EXP-A1p-fast/seed{seed}/acc_ref_curve.json"
-    stdout_prefer_mode: "full"
+    # lock ref at the pruning boundary (end of dense epoch 9)
+    freeze_epoch: 10
     strict: true
+  lambda_hw_schedule:
+    # keep HW pressure off during dense stage, ramp during pruning stage
+    warmup_epochs: 10
+    ramp_epochs: 20
