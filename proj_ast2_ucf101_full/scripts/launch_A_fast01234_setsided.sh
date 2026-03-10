@@ -11,7 +11,11 @@ GPU3="${GPU3:-3}"
 GPU4="${GPU4:-4}"
 SEED="${SEED:-0}"
 SMOKE="${SMOKE:-0}"
-INSTANCE="${INSTANCE:-chain_skip}"
+# A-line experiments (A1p/A2p/A4/ACHO/ROI) expect a single canonical output root
+# so StableHW locked_acc_ref can find the baseline curve at:
+#   outputs/EXP-A1p-fast/seed${SEED}/acc_ref_curve.json
+# Therefore default INSTANCE to "base" (no suffix).
+INSTANCE="${INSTANCE:-base}"
 RUN_TAG="${RUN_TAG:-}" 
 SKIP_DONE="${SKIP_DONE:-1}"
 
