@@ -1017,6 +1017,20 @@ def apply_accuracy_guard(
     # ===== acc_ref selection =====
     curve = st.get("acc_ref_curve", None)
     curve_margin = float(_cfg_get(_get_locked_cfg(stable_hw_cfg), "curve_margin", 0.0) or 0.0)
+    # Self-ref lock: use this run's own validation accuracy to lock a constant reference at freeze_epoch.
+    # This is useful when we do NOT have an external dense baseline (no A1), and want:
+    #   - run dense for N epochs
+    #   - start pruning afterwards
+    #   - constrain acc drop w.r.t. the dense accuracy at the pruning start
+    locked = _get_locked_cfg(stable_hw_cfg) or {}
+    src = str(_cfg_get(locked, "source", _cfg_get(locked, "ref_source", "warmup_best")) or "warmup_best").lower().strip()
+    self_lock = src in ("self", "self_val", "self_lock", "self_val_lock")
+    if self_lock and has_val_this_epoch and val_metric_or_none is not None:
+        hist = st.get("self_ref_hist", None)
+        if not isinstance(hist, list):
+            hist = []
+        hist.append(float(val_metric_or_none))
+        st["self_ref_hist"] = hist
 
     if isinstance(curve, list) and len(curve) > 0 and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
         idx = int(epoch)
@@ -1034,8 +1048,36 @@ def apply_accuracy_guard(
             st["below_cnt"] = 0
             st["acc_ref_just_locked"] = True
     else:
-        # fallback legacy: warmup_best constant ref
-        if st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
+        # self-ref: lock ref at freeze_epoch using last-K validation accuracies (median/mean/last), then HOLD constant.
+        if self_lock and st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
+            hist = st.get("self_ref_hist", [])
+            if isinstance(hist, list) and len(hist) > 0:
+                k = int(_cfg_get(locked, "self_ref_window", 3) or 3)
+                k = max(1, k)
+                tail = [float(v) for v in hist[-k:]]
+                agg = str(_cfg_get(locked, "self_ref_agg", "median") or "median").lower().strip()
+                if agg == "mean":
+                    ref_lock = sum(tail) / float(len(tail))
+                elif agg == "last":
+                    ref_lock = float(tail[-1])
+                else:
+                    # median (default)
+                    tail_sorted = sorted(tail)
+                    mid = len(tail_sorted) // 2
+                    ref_lock = float(tail_sorted[mid]) if (len(tail_sorted) % 2 == 1) else float(0.5 * (tail_sorted[mid - 1] + tail_sorted[mid]))
+
+                ref_lock = float(ref_lock) - float(curve_margin)
+                st["acc_ref"] = float(ref_lock)
+                st["acc_ref_source"] = f"self_val_lock(window={k},agg={agg})"
+                st["acc_ref_locked"] = True
+                st["acc_ref_dynamic"] = False
+                st["acc_ref_freeze_epoch"] = int(freeze_epoch)
+                st["acc_ref_locked_epoch"] = int(epoch)
+                st["below_cnt"] = 0
+                st["acc_ref_just_locked"] = True
+                st["self_ref_lock_value"] = float(ref_lock)
+        # fallback legacy: warmup_best constant ref (only if NOT using self-ref)
+        elif (not self_lock) and st.get("acc_ref") is None and freeze_epoch > 0 and (epoch + 1) >= freeze_epoch:
             if st.get("warmup_acc_best") is not None:
                 st["acc_ref"] = float(st["warmup_acc_best"])
                 st["acc_ref_source"] = "warmup_best"

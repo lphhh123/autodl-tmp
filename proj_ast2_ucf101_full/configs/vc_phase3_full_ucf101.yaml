@@ -6,12 +6,10 @@ stable_hw:
   hw_ref_source: "baseline_stats"
   locked_acc_ref:
     enabled: true
-    # Same-epoch baseline reference curve parsed from EXP-A1-fast (dense) stdout
-    source: "baseline_stdout_curve"
-    mode: "curve_stdout"
-    baseline_stdout_path: "outputs/EXP-A1p-fast/seed{seed}/stdout"
-    baseline_curve_path: "outputs/EXP-A1p-fast/seed{seed}/acc_ref_curve.json"
-    stdout_prefer_mode: "fast"
+    # No A1: lock reference from this run itself at freeze_epoch (self-ref), then hold constant.
+    source: "self_val_lock"
+    self_ref_window: 3
+    self_ref_agg: "median"
     curve_ema_alpha: 0.2
     curve_margin: 0.0
     freeze_epoch: 15
