@@ -16,6 +16,7 @@ data:
 
 training:
   outer_epochs: 35
+  compute_hw_when_lambda0: true
 
 ast:
   # Disable token pruning entirely; channel pruning is the main structural lever.

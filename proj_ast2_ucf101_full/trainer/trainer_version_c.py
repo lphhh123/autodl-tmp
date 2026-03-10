@@ -39,6 +39,15 @@ from utils.stable_hash import stable_hash
 from utils.safe_json import safe_dump, safe_dumps
 
 
+def _oc_select(cfg, key: str, default=None):
+    """OmegaConf-safe nested key access with a plain default."""
+    try:
+        value = OmegaConf.select(cfg, key)
+        return default if value is None else value
+    except Exception:
+        return default
+
+
 def _resolve_amp_settings(cfg, device_type: str, logger=None):
     """
     Resolve AMP settings:
@@ -259,11 +268,7 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
     # If we just exited RECOVERY/VIOLATE, back off the virtual epoch a bit to avoid
     # immediately re-entering violation with the same (too aggressive) sparsity target.
     was_frozen = bool(stable_state.get("_ast_freeze_prev", False))
-    backoff = 0
-    try:
-        backoff = int(get_nested(cfg, "stable_hw.accuracy_guard.controller.sched_backoff_epochs", 0) or 0)
-    except Exception:
-        backoff = 0
+    backoff = int(_oc_select(cfg, "stable_hw.accuracy_guard.controller.sched_backoff_epochs", 0) or 0)
     if was_frozen and (not freeze_now) and backoff > 0:
         try:
             v_epoch = max(0, int(v_epoch) - int(backoff))
@@ -321,11 +326,7 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         rho_hold = min(1.0, max(0.0, rho_prev + relax))
 
         # v5.4+: allow forcing full dense on VIOLATE/RECOVERY (prevents irreversible accuracy collapse).
-        force_dense_on_violate = False
-        try:
-            force_dense_on_violate = bool(get_nested(cfg, "stable_hw.accuracy_guard.controller.force_dense_on_violate", False))
-        except Exception:
-            force_dense_on_violate = False
+        force_dense_on_violate = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.force_dense_on_violate", False))
         guard_mode = str(stable_state.get("guard_mode", "")).upper()
         if force_dense_on_violate and guard_mode in ("VIOLATE", "RECOVERY"):
             frozen["force_dense"] = True
@@ -2692,6 +2693,11 @@ def train_version_c(
                             "acc1": acc1.item(),
                             # Masking-based pruning compute estimates (theoretical; does not claim real speedup).
                             "token_keep": float(model_info.get("token_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "head_keep": float(model_info.get("head_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "ch_keep": float(model_info.get("ch_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "block_keep": float(model_info.get("block_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "ch_keep_target": float(ast_sched.get("ch_keep_target", 1.0)) if isinstance(ast_sched, dict) else 1.0,
+                            "force_dense": bool(ast_sched.get("force_dense", False)) if isinstance(ast_sched, dict) else False,
                             "seq_len_total": float(model_info.get("seq_len_total", 0.0)) if isinstance(model_info, dict) else 0.0,
                             "seq_len_effective": float(model_info.get("seq_len_effective", 0.0)) if isinstance(model_info, dict) else 0.0,
                             "est_attn_flops_ratio": float(model_info.get("est_attn_flops_ratio", 1.0)) if isinstance(model_info, dict) else 1.0,
