@@ -922,20 +922,60 @@ def run_detailed_place(
         if _budget_remaining() < min_rem:
             return
 
-        stage_cap = int(_cfg_get(probe_cfg, "stage_call_budget", 1200))
-        stage_cap = max(50, stage_cap)
+        # ----------------------------
+        # Budget-aware probe budgets (fraction-of-total support)
+        # Priority: *_call_budget_frac (if >0) -> *_call_budget -> auto split
+        # ----------------------------
+        def _cap_from_cfg(key_calls: str, key_frac: str, default_calls: int) -> int:
+            # clip bounds
+            min_cap = int(_cfg_get(probe_cfg, "min_probe_calls", 50))
+            max_cap = int(_cfg_get(probe_cfg, "max_probe_calls", int(total_eval_budget)))
+            min_cap = max(1, min_cap)
+            max_cap = max(min_cap, max_cap)
+
+            frac = _cfg_get(probe_cfg, key_frac, 0.0)
+            try:
+                frac = float(frac)
+            except Exception:
+                frac = 0.0
+            if frac > 0.0:
+                cap = int(round(frac * float(total_eval_budget)))
+            else:
+                cap = int(_cfg_get(probe_cfg, key_calls, default_calls))
+            cap = int(max(min_cap, min(max_cap, cap)))
+            return cap
+
+        stage_cap = _cap_from_cfg("stage_call_budget", "stage_call_budget_frac", 1200)
         per_op_cap = int(_cfg_get(probe_cfg, "per_op_call_budget", 0))
         atomic_cap = int(_cfg_get(probe_cfg, "atomic_call_budget", 0))
+        # Allow explicit frac caps for atomic/per-op; if set, override absolute values.
+        # (0 => keep existing absolute value / auto split)
+        try:
+            _a_frac = float(_cfg_get(probe_cfg, "atomic_call_budget_frac", 0.0))
+        except Exception:
+            _a_frac = 0.0
+        try:
+            _p_frac = float(_cfg_get(probe_cfg, "per_op_call_budget_frac", 0.0))
+        except Exception:
+            _p_frac = 0.0
+        if _a_frac > 0.0:
+            atomic_cap = _cap_from_cfg("atomic_call_budget", "atomic_call_budget_frac", 0)
+        if _p_frac > 0.0:
+            per_op_cap = _cap_from_cfg("per_op_call_budget", "per_op_call_budget_frac", 0)
 
         ops = list(_cfg_get(probe_cfg, "ops", ["relink", "shake", "tabu_search"]) or [])
         ops = [str(x) for x in ops if str(x or "").strip()]
         if not ops:
             return
 
+        # Auto-split remaining stage cap if per-op/atomic caps are not explicitly provided.
+        # Keep them >= min_probe_calls to avoid "no-signal" probes.
+        min_cap = int(_cfg_get(probe_cfg, "min_probe_calls", 50))
+        min_cap = max(1, min_cap)
         if atomic_cap <= 0:
-            atomic_cap = max(50, stage_cap // max(2, (len(ops) + 1)))
+            atomic_cap = max(min_cap, stage_cap // max(2, (len(ops) + 1)))
         if per_op_cap <= 0:
-            per_op_cap = max(50, stage_cap // max(1, (len(ops) + 1)))
+            per_op_cap = max(min_cap, stage_cap // max(1, (len(ops) + 1)))
 
         stage = _probe_budget_stage(used_calls)
 
