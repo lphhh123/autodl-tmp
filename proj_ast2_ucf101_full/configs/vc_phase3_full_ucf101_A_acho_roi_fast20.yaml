@@ -10,12 +10,28 @@ stable_hw:
     post_commit_lambda_mul: 0.5
     post_commit_block_increase: true
 
+    # ROI feedback: when ROI rejects frequently, make ACHO more conservative.
+    roi_reject_high: 0.6
+    roi_step_up_mul_high_reject: 0.5
+    roi_cap_mul_high_reject: 0.8
+    # If a commit improves a lot, cap harder for a short adaptation window.
+    roi_big_commit_rel: 0.03
+    roi_post_commit_lambda_mul_big: 0.3
+
   discrete_isolation:
     roi_commit:
       enabled: true
-      metric: proxy_raw_latency_ms
+      # Align ROI commit decision with the same HW objective used by training.
+      metric: L_hw_total
       min_rel_improve: 0.01
-      min_abs_improve: 0.05
+      # L_hw_total is normalized/unitless; avoid brittle absolute thresholds.
+      min_abs_improve: 0.0
       min_margin: 0.0
       cooldown_epochs: 2
+      keep_ema_alpha: 0.2
+      # Adapt cooldown to the size of improvement (bigger change -> longer adaptation).
+      cooldown_scale: 6
+      cooldown_max_extra: 6
+      # Optional: try multiple mapping strategies and pick the best candidate.
+      # candidate_strategies: ["greedy_local", "greedy_global"]
       require_hw_active: true
