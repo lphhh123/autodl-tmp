@@ -485,11 +485,18 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
     if st.get("acc_ref") is not None:
         return
 
-    source = str(_cfg_get(locked, "source", _cfg_get(locked, "ref_source", "warmup_best")))
+    source = str(_cfg_get(locked, "source", _cfg_get(locked, "ref_source", "warmup_best")) or "warmup_best")
+    src = source.lower().strip()
     strict = bool(_cfg_get(locked, "strict", True))
+
+    # Self-ref mode: do NOT load any external baseline files.
+    # Reference will be locked from this run's own val metric at freeze_epoch.
+    if src in ("self", "self_lock", "self_val", "self_val_lock"):
+        st.setdefault("acc_ref_source", "self_val_lock_pending")
+        return
     baseline_stats_path = _cfg_get(locked, "baseline_stats_path", None)
     baseline_stats_path = _expand_out_dir_template(baseline_stats_path, st.get("out_dir"))
-    if source == "baseline_stats":
+    if src == "baseline_stats":
         if not baseline_stats_path:
             if strict:
                 raise RuntimeError("[v5.4 LockedAccRef] baseline_stats_path is required (strict=true).")
@@ -533,7 +540,7 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
     # Optional fast path: load a precomputed acc_ref_curve JSON to avoid re-parsing stdout
     # and to ensure the reference is complete (launch scripts can require this file).
     mode = str(_cfg_get(locked, "mode", "") or "").lower().strip()
-    if source in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
+    if src in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
         seed = int(st.get("seed", 0))
         env_curve = str(os.environ.get("BASELINE_ACC_CURVE", "") or "").strip()
         curve_tmpl = env_curve or str(_cfg_get(locked, "baseline_curve_path", "") or "").strip()
@@ -587,7 +594,7 @@ def _load_locked_acc_ref(stable_hw_cfg: Any, st: Dict[str, Any]) -> None:
                     st["acc_ref_source"] = f"baseline_curve_parse_error:{p_curve}"
 
     # ===== baseline stdout curve (EXP-A1 stdout) =====
-    if source in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
+    if src in ("baseline_stdout_curve", "baseline_stdout") or mode in ("curve_stdout", "baseline_stdout_curve"):
         seed = int(st.get("seed", 0))
         # Path template priority:
         # 1) env BASELINE_STDOUT (absolute or relative to repo CWD which is project root)

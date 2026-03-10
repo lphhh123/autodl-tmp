@@ -74,6 +74,9 @@ ast:
 # FAST protocol uses self-ref lock at pruning boundary (no external A1 curve required).
 stable_hw:
   locked_acc_ref:
+    source: "self_val_lock"
+    self_ref_window: 3
+    self_ref_agg: "median"
     # lock ref at the pruning boundary (end of dense epoch 9)
     freeze_epoch: 10
     strict: true
