@@ -13,7 +13,8 @@ detailed_place:
       probe:
         enabled: true
         # Keep these explicit for reproducibility (can still be overridden per run).
-        trigger_fracs: [0.20, 0.60, 0.85]
+        # Shift the first probe later to reduce early-noise impact on low budgets (e.g., 20k).
+        trigger_fracs: [0.30, 0.65, 0.85]
         # Budget-aware probe cost: scale with total eval-call budget to avoid hurting small budgets.
         # Per probe round = 1.5% of total budget (3 rounds => ~4.5% total probe overhead).
         stage_call_budget: 0
