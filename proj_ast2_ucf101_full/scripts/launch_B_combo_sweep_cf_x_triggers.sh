@@ -50,9 +50,12 @@ T5c	[0.30, 0.50, 0.65, 0.80, 0.92]
 TRIG
 )
 
-schemes=$(
-cat <<'SCH'
-S0_base	cf_discount: 0.35
+emit_scheme_body() {
+  local sid="$1"
+  case "$sid" in
+    S0_base)
+      cat <<'YAML'
+cf_discount: 0.35
 cf_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
 cf_cap_mult: 1.5
 min_atomic_calls_for_cf: 10
@@ -60,8 +63,11 @@ cf_reliability_tau: 0.0
 cf_one_sided_update: false
 success_boost_scale: 0.50
 fail_penalty_scale: 0.25
----
-S1_soft	cf_discount: 0.35
+YAML
+      ;;
+    S1_soft)
+      cat <<'YAML'
+cf_discount: 0.35
 cf_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
 cf_cap_mult: 1.5
 min_atomic_calls_for_cf: 0
@@ -69,8 +75,11 @@ cf_reliability_tau: 120.0
 cf_one_sided_update: false
 success_boost_scale: 0.50
 fail_penalty_scale: 0.25
----
-S2_oneside	cf_discount: 0.35
+YAML
+      ;;
+    S2_oneside)
+      cat <<'YAML'
+cf_discount: 0.35
 cf_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
 cf_cap_mult: 1.5
 min_atomic_calls_for_cf: 0
@@ -80,8 +89,11 @@ cf_one_sided_penalty_mode: raw
 cf_one_sided_penalty_scale: 1.0
 success_boost_scale: 0.60
 fail_penalty_scale: 0.25
----
-S3_aggr_late	cf_discount: 0.35
+YAML
+      ;;
+    S3_aggr_late)
+      cat <<'YAML'
+cf_discount: 0.35
 cf_discount_by_stage: {early: 0.10, mid: 0.30, late: 0.65}
 cf_cap_mult: 1.5
 min_atomic_calls_for_cf: 0
@@ -91,23 +103,22 @@ cf_one_sided_penalty_mode: raw
 cf_one_sided_penalty_scale: 0.7
 success_boost_scale: 0.70
 fail_penalty_scale: 0.20
-SCH
-)
+YAML
+      ;;
+    *)
+      echo "[COMBO] unknown scheme id: $sid" >&2
+      exit 2
+      ;;
+  esac
+}
+
+SCHEMES=(S0_base S1_soft S2_oneside S3_aggr_late)
 
 combo_idx=0
 while IFS=$'\t' read -r trig_id trig_list; do
   [[ -z "${trig_id}" ]] && continue
 
-  while IFS= read -r block; do
-    [[ -z "${block}" ]] && continue
-    scheme_id="$(printf '%s' "$block" | head -n1 | cut -f1)"
-    scheme_head="$(printf '%s' "$block" | head -n1 | cut -f2-)"
-    scheme_tail="$(printf '%s' "$block" | tail -n +2)"
-    if [[ -n "${scheme_tail}" ]]; then
-      scheme_body="${scheme_head}"$'\n'"${scheme_tail}"
-    else
-      scheme_body="${scheme_head}"
-    fi
+  for scheme_id in "${SCHEMES[@]}"; do
 
     combo_id=$(printf "C%03d_%s_%s" "${combo_idx}" "${scheme_id}" "${trig_id}")
     combo_idx=$((combo_idx+1))
@@ -124,7 +135,7 @@ detailed_place:
       probe:
         enabled: true
         trigger_fracs: ${trig_list}
-$(printf '%s\n' "${scheme_body}" | sed 's/^/        /')
+$(emit_scheme_body "${scheme_id}" | sed 's/^/        /')
 YAML
 
     cat > "${cfg_raw}" <<YAML
@@ -169,7 +180,7 @@ YAML
     out_dir="${SWEEP_DIR}/${combo_id}"
     final_name="${combo_id}__PACK.tgz"
     run_pack_one "${out_dir}" "${combo_id}__" "${final_name}"
-  done < <(printf '%s' "${schemes}" | awk 'BEGIN{RS="---\n"} {gsub(/\n$/,"",$0); if(length($0)>0) print $0}')
+  done
 done <<< "${triggers}"
 
 echo "[COMBO] done. Packs -> ${SWEEP_DIR}"
