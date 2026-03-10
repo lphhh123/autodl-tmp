@@ -16,6 +16,8 @@ training:
   # For baselines, we WANT hw_stats to be computed even when lambda_hw_eff==0,
   # so downstream refs (baseline_stats_path) are meaningful.
   compute_hw_when_lambda0: true
+  # Make validation FULL each epoch to reduce reference curve noise.
+  stable_hw_eval_max_batches: 0
 
 test:
   run_final_test: false
