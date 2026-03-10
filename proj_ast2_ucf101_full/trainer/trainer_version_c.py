@@ -1409,7 +1409,12 @@ def train_version_c(
             val_kwargs.update(dict(persistent_workers=persistent_workers, prefetch_factor=prefetch_factor))
         val_loader = DataLoader(**val_kwargs)
 
-        max_eval_batches = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
+        # training.stable_hw_eval_max_batches:
+        #   >0  : evaluate at most N val batches (fast eval)
+        #   <=0 : FULL eval (all val batches). NOTE: eval_acc1 treats max_batches=0 as "run 0 batches",
+        #         so we convert <=0 -> None here.
+        max_eval_batches_cfg = int(getattr(cfg.training, "stable_hw_eval_max_batches", 20))
+        max_eval_batches_for_eval = None if max_eval_batches_cfg <= 0 else max_eval_batches_cfg
         data_iter = iter(loader)
 
         # NOTE(v5.4 contract): cfg is sealed after validate_and_fill_defaults().
@@ -3136,7 +3141,7 @@ def train_version_c(
                     val_loader,
                     device,
                     model_type=str(getattr(cfg.training, "model_type", "video")),
-                    max_batches=max_eval_batches,
+                    max_batches=max_eval_batches_for_eval,
                     aggregate=val_agg,
                 )
                 # ---- audit-friendly [val] line (used by LockedAccRef curve parser) ----
@@ -3144,7 +3149,7 @@ def train_version_c(
                     n_val = len(val_loader)
                 except Exception:
                     n_val = -1
-                if int(max_eval_batches) <= 0 or (n_val > 0 and int(max_eval_batches) >= int(n_val)):
+                if int(max_eval_batches_cfg) <= 0 or (n_val > 0 and int(max_eval_batches_cfg) >= int(n_val)):
                     val_mode = "full"
                 else:
                     val_mode = "fast"
