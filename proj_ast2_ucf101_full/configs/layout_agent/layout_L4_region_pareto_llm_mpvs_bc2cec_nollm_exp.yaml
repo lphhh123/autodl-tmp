@@ -14,9 +14,17 @@ detailed_place:
         enabled: true
         # Keep these explicit for reproducibility (can still be overridden per run).
         trigger_fracs: [0.20, 0.60, 0.85]
-        stage_call_budget: 1200
+        # Budget-aware probe cost: scale with total eval-call budget to avoid hurting small budgets.
+        # Per probe round = 1.5% of total budget (3 rounds => ~4.5% total probe overhead).
+        stage_call_budget: 0
+        stage_call_budget_frac: 0.015
         per_op_call_budget: 0
         atomic_call_budget: 0
+        per_op_call_budget_frac: 0.0
+        atomic_call_budget_frac: 0.0
+        min_probe_calls: 50
+        # Optional safety: keep per-round cap from exploding at huge budgets
+        max_probe_calls: 5000
         ops: ["relink", "shake", "tabu_search"]
         atomic_families: ["comm", "therm", "escape"]
         # Strengthen atomic probe slightly to make CF less noisy

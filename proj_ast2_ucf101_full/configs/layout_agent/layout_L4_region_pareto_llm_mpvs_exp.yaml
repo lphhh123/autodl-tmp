@@ -149,11 +149,20 @@ detailed_place:
         trigger_calls: []
 
         # Total eval-call budget to spend per probe round.
+        # You may specify either an absolute cap (stage_call_budget) OR a fraction-of-total budget (stage_call_budget_frac).
+        # If both are set, *_frac takes priority when >0.
         stage_call_budget: 1200
+        stage_call_budget_frac: 0.0
         # Per-operator eval-call cap in that round (0 => auto split).
         per_op_call_budget: 0
+        per_op_call_budget_frac: 0.0
         # Atomic baseline probe cap (0 => auto split).
         atomic_call_budget: 0
+        atomic_call_budget_frac: 0.0
+
+        # Clip bounds for all probe caps (helps prevent low-budget over-shoot & high-budget runaway)
+        min_probe_calls: 50
+        max_probe_calls: 1000000000
 
         # Which macro operators to probe (operator-agnostic; new ops can be added here).
         ops: ["relink", "shake", "tabu_search"]
