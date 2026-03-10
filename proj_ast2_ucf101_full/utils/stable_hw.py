@@ -1018,6 +1018,19 @@ def apply_accuracy_guard(
                 st["acc_ref_just_locked"] = True
 
     acc_ref = st.get("acc_ref", None)
+
+    # ---- Guard stability: when acc_ref is first locked, reset entry EMA to the current metric.
+    # During WARMUP, acc_used_ema can be stale/low (e.g. very early epochs), and carrying it into
+    # the first guarded epoch can trigger an immediate false VIOLATE.
+    if bool(st.get("acc_ref_just_locked", False)):
+        metric_now = None
+        if has_val_this_epoch and val_metric_or_none is not None:
+            metric_now = float(val_metric_or_none)
+        elif acc_used is not None:
+            metric_now = float(acc_used)
+        if metric_now is not None:
+            st["acc_used_ema"] = float(metric_now)
+            st["acc_used_ema_reset_epoch"] = int(epoch)
     if acc_ref is None:
         # No reliable reference yet: hard-disable HW influence (Acc-First)
         st["guard_mode"] = "WARMUP"
@@ -1042,8 +1055,19 @@ def apply_accuracy_guard(
 
         # Make warmup logs informative (avoid None spam in early epochs)
         st["acc_used_raw"] = float(metric_now) if metric_now is not None else None
-        if metric_now is not None and st.get("acc_used_ema", None) is None:
-            st["acc_used_ema"] = float(metric_now)
+        # IMPORTANT: keep acc_used_ema updated during warmup so the guard doesn't
+        # enter with a stale low value.
+        if metric_now is not None:
+            use_acc_ema = bool(_cfg_get(ctrl, "use_acc_ema", True))
+            acc_ema_alpha = float(_cfg_get(ctrl, "acc_ema_alpha", 0.3) or 0.3)
+            prev = st.get("acc_used_ema", None)
+            if not use_acc_ema:
+                st["acc_used_ema"] = float(metric_now)
+            else:
+                if prev is None:
+                    st["acc_used_ema"] = float(metric_now)
+                else:
+                    st["acc_used_ema"] = float(acc_ema_alpha) * float(metric_now) + (1.0 - float(acc_ema_alpha)) * float(prev)
         st["acc_used_enter"] = float(st.get("acc_used_ema")) if st.get("acc_used_ema") is not None else st["acc_used_raw"]
         st["acc_ref_value"] = None
         st["eps_enter"] = float(eps_used)

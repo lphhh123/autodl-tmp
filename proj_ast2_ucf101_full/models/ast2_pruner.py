@@ -216,6 +216,8 @@ class ASTPruner(nn.Module):
         self._runtime_force_dense: bool = False
         self._runtime_rho_token: Optional[float] = None
         self._runtime_token_temperature: Optional[float] = None
+        # MorphNet-style controlled channel pruning: target keep ratio for g_ch.
+        self._runtime_ch_keep_target: Optional[float] = None
 
     def set_runtime_overrides(
         self,
@@ -223,6 +225,7 @@ class ASTPruner(nn.Module):
         force_dense: Optional[bool] = None,
         rho_token: Optional[float] = None,
         token_temperature: Optional[float] = None,
+        ch_keep_target: Optional[float] = None,
     ) -> None:
         """Set per-epoch runtime overrides without mutating cfg."""
         if force_dense is not None:
@@ -235,6 +238,11 @@ class ASTPruner(nn.Module):
             self._runtime_token_temperature = float(token_temperature)
         else:
             self._runtime_token_temperature = None
+
+        if ch_keep_target is not None:
+            self._runtime_ch_keep_target = float(ch_keep_target)
+        else:
+            self._runtime_ch_keep_target = None
 
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         return minmax_norm_per_batch(H)
@@ -621,13 +629,72 @@ class ASTPruner(nn.Module):
             "modal_stats": modal_stats,
         }
 
-    def compute_L_AST(self, sparsity_token: torch.Tensor, sparsity_head: torch.Tensor, sparsity_ch: torch.Tensor, sparsity_block: torch.Tensor) -> torch.Tensor:
+    def compute_L_AST(
+        self,
+        sparsity_token: torch.Tensor,
+        sparsity_head: torch.Tensor,
+        sparsity_ch: torch.Tensor,
+        sparsity_block: torch.Tensor,
+        *,
+        ch_weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         loss_cfg = self.cfg.get("loss", self.cfg)
         lambda_token = loss_cfg.get("lambda_token", 1.0)
         lambda_head = loss_cfg.get("lambda_head", 0.1)
         lambda_ch = loss_cfg.get("lambda_ch", 0.1)
         lambda_block = loss_cfg.get("lambda_block", 0.1)
-        return lambda_token * sparsity_token + lambda_head * sparsity_head + lambda_ch * sparsity_ch + lambda_block * sparsity_block
+
+        # -------------------------
+        # Channel pruning control (MorphNet-style)
+        # -------------------------
+        # Default behavior (backward compatible): penalize mean keep directly.
+        ch_reg_mode = str(loss_cfg.get("ch_reg_mode", "mean_keep") or "mean_keep").lower().strip()
+        ch_term = sparsity_ch
+
+        if ch_reg_mode in ("hinge_to_target", "hinge", "target"):
+            # Only push channels DOWN when above target_keep; do not keep pushing below target.
+            # This prevents overshooting and makes recovery possible.
+            target = self._runtime_ch_keep_target
+            if target is None:
+                target = loss_cfg.get("ch_keep_target", None)
+            if target is None:
+                target = None
+            try:
+                if target is not None:
+                    target_f = float(target)
+                    target_f = float(max(0.0, min(1.0, target_f)))
+
+                    # Prefer layer-weighted mean to avoid "every layer shrinks a bit" capacity collapse.
+                    mean_keep = None
+                    if ch_weights is not None and ch_weights.dim() == 2:
+                        per_layer = ch_weights.mean(dim=1)  # [depth]
+                        policy = str(loss_cfg.get("ch_layer_policy", "uniform") or "uniform").lower().strip()
+                        if policy in ("late_only", "late"):
+                            front_ratio = float(loss_cfg.get("ch_freeze_prefix_ratio", 0.0) or 0.0)
+                            front_ratio = float(max(0.0, min(1.0, front_ratio)))
+                            k = int(round(float(self.depth) * front_ratio))
+                            w = torch.ones_like(per_layer)
+                            if k > 0:
+                                w[:k] = 0.0
+                        elif policy in ("linear", "linear_ramp"):
+                            w = torch.linspace(0.0, 1.0, steps=int(per_layer.numel()), device=per_layer.device, dtype=per_layer.dtype)
+                        else:
+                            w = torch.ones_like(per_layer)
+                        denom = w.sum().clamp_min(1e-6)
+                        mean_keep = (per_layer * w).sum() / denom
+                    if mean_keep is None:
+                        mean_keep = sparsity_ch
+
+                    d = torch.relu(mean_keep - target_f)
+                    power = float(loss_cfg.get("ch_reg_power", 2.0) or 2.0)
+                    if abs(power - 1.0) < 1e-6:
+                        ch_term = d
+                    else:
+                        ch_term = d.pow(power)
+            except Exception:
+                ch_term = sparsity_ch
+
+        return lambda_token * sparsity_token + lambda_head * sparsity_head + lambda_ch * ch_term + lambda_block * sparsity_block
 
     def forward(self, token_feat: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None, token_score: Optional[torch.Tensor] = None) -> ASTOutputs:
         force_dense = bool(self._runtime_force_dense or bool(self.cfg.get("force_dense", False)))
@@ -664,6 +731,19 @@ class ASTPruner(nn.Module):
         head_weights = torch.sigmoid(self.g_head)
         ch_weights = torch.sigmoid(self.g_ch)
         block_weights = torch.sigmoid(self.g_block)
+
+        # Optional: protect early layers from channel pruning (common practice).
+        # This avoids "each layer prunes a little" accumulating into a large accuracy drop.
+        try:
+            pr_cfg = self.cfg.get("channel_prune", self.cfg)  # allow either ast.channel_prune.* or flat keys
+            front_ratio = float(pr_cfg.get("freeze_prefix_ratio", self.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+            front_ratio = float(max(0.0, min(1.0, front_ratio)))
+            k = int(round(float(self.depth) * front_ratio))
+            if k > 0 and ch_weights.dim() == 2 and ch_weights.shape[0] >= k:
+                ch_weights = ch_weights.clone()
+                ch_weights[:k, :] = 1.0
+        except Exception:
+            pass
         if self.sanitize_nan:
             head_weights = torch.nan_to_num(head_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
             ch_weights = torch.nan_to_num(ch_weights, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
@@ -675,7 +755,13 @@ class ASTPruner(nn.Module):
         sparsity_head = head_weights.mean()
         sparsity_ch = ch_weights.mean()
         sparsity_block = block_weights.mean()
-        L_AST = self.compute_L_AST(stats_token["sparsity_token"], sparsity_head, sparsity_ch, sparsity_block)
+        L_AST = self.compute_L_AST(
+            stats_token["sparsity_token"],
+            sparsity_head,
+            sparsity_ch,
+            sparsity_block,
+            ch_weights=ch_weights,
+        )
         return ASTOutputs(
             token_mask=stats_token["mask"],
             head_weights=head_weights,

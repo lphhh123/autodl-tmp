@@ -373,7 +373,18 @@ case "$EXP_ID" in
   # A1' (aligned): Dense baseline under Version-C trainer (avoid pipeline confounds).
   # Output -> outputs[/SMOKE]/NEW_A1/seed{SEED}
   EXP-A1p)
-    run_vc configs/vc_phase3_denseonly_ucf101_A_aligned.yaml "${OUT_PREFIX}/NEW_A1/seed${SEED}"
+    # Keep legacy output path for backward compatibility.
+    OUT="${OUT_PREFIX}/NEW_A1/seed${SEED}"
+    run_vc configs/vc_phase3_denseonly_ucf101_A_aligned.yaml "$OUT"
+    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer fast --ema-alpha 0.2 --curve-margin 0.0 || true
+    ;;
+  # A1' fast (aligned): Version-C dense baseline (FAST iteration: 20% data, 35 epochs)
+  # This is the recommended reference for StableHW LockedAccRef in A4/ACHO/ROI.
+  EXP-A1p-fast)
+    export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
+    OUT="$(odir EXP-A1p-fast)"
+    run_vc configs/vc_phase3_denseonly_ucf101_A_aligned_fast20.yaml "$OUT"
+    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer fast --ema-alpha 0.2 --curve-margin 0.0 || true
     ;;
   # A2: Token-only (HW off, Window off, Token on)
   EXP-A2) run_ast configs/ast2_ucf101_ast_only_A2.yaml           "$(odir EXP-A2)" ;;

@@ -39,6 +39,10 @@ def parse_stdout_curve(stdout_path: Path, prefer: str = "fast") -> Dict[int, flo
             continue
         ep = int(m.group("ep"))
         mode = str(m.group("mode") or "").lower().strip()
+        # Do NOT mix final test-set evaluation into the reference curve.
+        # LockedAccRef is meant to reflect the validation protocol used for guard.
+        if mode == "test":
+            continue
         acc = float(m.group("acc_video"))
         if mode == "fast":
             best.setdefault(ep, acc)

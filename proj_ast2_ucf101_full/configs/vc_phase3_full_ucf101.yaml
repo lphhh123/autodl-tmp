@@ -9,8 +9,8 @@ stable_hw:
     # Same-epoch baseline reference curve parsed from EXP-A1-fast (dense) stdout
     source: "baseline_stdout_curve"
     mode: "curve_stdout"
-    baseline_stdout_path: "outputs/EXP-A1-fast/seed{seed}/stdout"
-    baseline_curve_path: "outputs/EXP-A1-fast/seed{seed}/acc_ref_curve.json"
+    baseline_stdout_path: "outputs/EXP-A1p-fast/seed{seed}/stdout"
+    baseline_curve_path: "outputs/EXP-A1p-fast/seed{seed}/acc_ref_curve.json"
     stdout_prefer_mode: "fast"
     curve_ema_alpha: 0.2
     curve_margin: 0.0
@@ -55,7 +55,7 @@ stable_hw:
       epsilon_drop: 0.02
       hysteresis: 0.002
       # avoid "lock then immediately violate" at freeze_epoch boundary
-      lock_grace_epochs: 1
+      lock_grace_epochs: 3
       # require consecutive drops before entering VIOLATE (anti-noise)
       k_enter: 2
       use_acc_ema: true
@@ -66,6 +66,12 @@ stable_hw:
       recovery_min_epochs: 2
       k_exit: 2
       margin_exit: 0.002
+
+      # v5.4+: if we violate the accuracy constraint, force a short return-to-dense
+      # so accuracy can recover (prevents irreversible gate collapse).
+      force_dense_on_violate: true
+      # when leaving recovery, back off the sparsity schedule a bit to avoid re-violating immediately.
+      sched_backoff_epochs: 2
 
   discrete_isolation:
     mapping_update_every_epochs: 1

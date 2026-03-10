@@ -1,0 +1,21 @@
+# Fast-iteration Version-C dense baseline (A1p-fast):
+# - SAME trainer path / AMP dtype as A4 (version_c, bf16)
+# - No pruning (dense), no StableHW, no HW optimization
+# - Still computes HW proxy stats so it can export outputs/dense_baseline/metrics.json
+#   (via BASELINE_STATS_EXPORT) for downstream StableHW normalization.
+
+_base_: configs/vc_phase3_denseonly_ucf101_A_aligned.yaml
+
+data:
+  subset_ratio_train: 0.20
+  subset_ratio_eval:  0.20
+  subset_seed: 0
+
+training:
+  outer_epochs: 35
+  # For baselines, we WANT hw_stats to be computed even when lambda_hw_eff==0,
+  # so downstream refs (baseline_stats_path) are meaningful.
+  compute_hw_when_lambda0: true
+
+test:
+  run_final_test: false

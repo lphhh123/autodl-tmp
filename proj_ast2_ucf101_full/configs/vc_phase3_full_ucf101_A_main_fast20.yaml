@@ -31,19 +31,38 @@ ast:
 
   schedule:
     enabled: true
-    warmup_epochs: 5
-    ramp_epochs: 15
+    # Keep the model fully dense (incl. channel/head/block gates) until LockedAccRef is ready.
+    # This prevents "early pruning" from causing large accuracy drops before the guard becomes active.
+    warmup_epochs: 15
+    force_dense_epochs: 15
+    ramp_epochs: 10
     curve: "cosine"
     rho_start: 1.0
     temp_start: 1.0
     lambda_ast_start: 0.0
+    lambda_ast_end: 0.2
+
+    # MorphNet-style controlled channel pruning: target keep ratio slowly decreases.
+    ch_keep_start: 1.0
+    ch_keep_end: 0.85
+    ch_ramp_epochs: 10
 
   # Gentle sparsity: focus on channel only.
   loss:
     lambda_token: 0.0
     lambda_head: 0.0
-    lambda_ch: 0.02
+    # Use hinge-to-target (not raw mean keep) to avoid overshooting.
+    lambda_ch: 1.0
     lambda_block: 0.0
+    ch_reg_mode: "hinge_to_target"
+    ch_reg_power: 2.0
+    # Avoid "every layer shrinks a bit": prune mostly in later layers.
+    ch_layer_policy: "late_only"
+    ch_freeze_prefix_ratio: 0.33
+
+  channel_prune:
+    # Also hard-protect early layers in forward (common practice)
+    freeze_prefix_ratio: 0.33
 
 # IMPORTANT:
 # Version-C stable_hw locked_acc_ref reads a baseline stdout curve for acc_ref.
@@ -51,7 +70,7 @@ ast:
 # Point to the FAST dense baseline instead.
 stable_hw:
   locked_acc_ref:
-    baseline_stdout_path: "outputs/EXP-A1-fast/seed{seed}/stdout"
-    baseline_curve_path:  "outputs/EXP-A1-fast/seed{seed}/acc_ref_curve.json"
+    baseline_stdout_path: "outputs/EXP-A1p-fast/seed{seed}/stdout"
+    baseline_curve_path:  "outputs/EXP-A1p-fast/seed{seed}/acc_ref_curve.json"
     stdout_prefer_mode: "fast"
     strict: true
