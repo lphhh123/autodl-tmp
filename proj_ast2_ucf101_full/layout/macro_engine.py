@@ -357,7 +357,21 @@ class MacroEngine:
         else:
             rate_atomic_eff = 0.0
 
-        rate_cf = float(rate_op) - float(cf_discount) * float(rate_atomic_eff)
+        # Reliability-weighted CF subtraction (soft CF):
+        #   w_cf = clip(atomic_calls / tau, 0..1), tau<=0 => w_cf=1
+        # This avoids noisy baseline subtraction in low-signal regimes, without hard gating.
+        try:
+            tau = float(cfg.get("cf_reliability_tau", 0.0))
+        except Exception:
+            tau = 0.0
+        if tau > 0.0:
+            w_cf = float(max(0.0, min(1.0, float(atomic_calls) / float(max(1e-9, tau)))))
+        else:
+            w_cf = 1.0
+        if not use_cf:
+            w_cf = 0.0
+
+        rate_cf = float(rate_op) - float(w_cf) * float(cf_discount) * float(rate_atomic_eff)
         cf_gain = float(rate_cf) * float(raw_calls)
 
         a = float(cfg.get("ewma_alpha", getattr(self, "alpha", 0.2)))
@@ -387,13 +401,37 @@ class MacroEngine:
         boost_scale = float(max(0.0, min(2.0, boost_scale)))
         pen_scale = float(max(0.0, min(2.0, pen_scale)))
 
+        # One-sided CF update (safe strengthening):
+        # If enabled and weight_metric is CF, we do not penalize based solely on negative CF
+        # (optionally penalize using RAW metric instead).
+        one_sided = bool(cfg.get("cf_one_sided_update", False)) and (weight_metric in {"cf", "gain_cf", "counterfactual"})
+        pen_mode = str(cfg.get("cf_one_sided_penalty_mode", "raw") or "raw").strip().lower()
+        if pen_mode not in {"raw", "none"}:
+            pen_mode = "raw"
+        try:
+            pen_scale_os = float(cfg.get("cf_one_sided_penalty_scale", 1.0))
+        except Exception:
+            pen_scale_os = 1.0
+        pen_scale_os = float(max(0.0, min(2.0, pen_scale_os)))
+
         if update_weight and bool(getattr(self, "adapt_enabled", True)):
             if metric > float(min_gain_per_call):
                 st.weight = min(self.weight_cap, float(st.weight) * (1.0 + float(self.success_boost) * boost_scale))
                 st.cooldown = max(int(st.cooldown), int(self.success_cooldown))
             else:
-                st.weight = max(self.weight_floor, float(st.weight) * (1.0 - float(self.fail_penalty) * pen_scale))
-                st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
+                if one_sided:
+                    if pen_mode == "none":
+                        # No penalty from CF-negative; keep weight unchanged.
+                        pass
+                    else:
+                        # Penalize only if RAW metric is also poor.
+                        raw_metric = float(st.ewma_gain_per_call) if use_ewma else float(rate_op)
+                        if raw_metric <= float(min_gain_per_call):
+                            st.weight = max(self.weight_floor, float(st.weight) * (1.0 - float(self.fail_penalty) * pen_scale * pen_scale_os))
+                            st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
+                else:
+                    st.weight = max(self.weight_floor, float(st.weight) * (1.0 - float(self.fail_penalty) * pen_scale))
+                    st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
 
         return {
             "name": str(name),
@@ -410,6 +448,9 @@ class MacroEngine:
             "cf_discount": float(cf_discount),
             "cf_cap_mult": float(cf_cap_mult),
             "use_cf": int(bool(use_cf)),
+            "cf_weight": float(w_cf),
+            "cf_one_sided": int(bool(one_sided)),
+            "cf_pen_mode": str(pen_mode),
             "metric_used": float(metric),
             "weight": float(st.weight),
         }

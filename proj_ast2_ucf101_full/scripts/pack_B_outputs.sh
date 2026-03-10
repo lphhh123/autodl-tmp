@@ -14,6 +14,7 @@ mkdir -p "${PACK_OUT_DIR}"
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 PACK_MATCH_TAG="${PACK_MATCH_TAG:-}"
 PACK_SKIP_ANALYSIS="${PACK_SKIP_ANALYSIS:-0}"
+PACK_FINAL_NAME="${PACK_FINAL_NAME:-ALL_B_PACKS.tgz}"  # final archive filename (per-sweep unique)
 
 # Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
 # Groups:
@@ -227,7 +228,14 @@ if [[ "${PACK_SKIP_ANALYSIS}" != "1" && -f scripts/analyze_B_oracle_regret.py ]]
 fi
 
 # 3) final package (exclude self)
-rm -f "${PACK_OUT_DIR}/ALL_B_PACKS.tgz"
-tar --ignore-failed-read --exclude=ALL_B_PACKS.tgz -czf "${PACK_OUT_DIR}/ALL_B_PACKS.tgz" -C "${PACK_OUT_DIR}" . 2>/dev/null || true
+# Allow unique final filename to avoid overwriting when collecting packs.
+rm -f "${PACK_OUT_DIR}/${PACK_FINAL_NAME}"
+tar --ignore-failed-read --exclude=ALL_B_PACKS.tgz --exclude="${PACK_FINAL_NAME}" \
+  -czf "${PACK_OUT_DIR}/${PACK_FINAL_NAME}" -C "${PACK_OUT_DIR}" . 2>/dev/null || true
+
+# Backward-compat: keep a stable name as symlink when final name differs.
+if [[ "${PACK_FINAL_NAME}" != "ALL_B_PACKS.tgz" ]]; then
+  ln -sf "${PACK_FINAL_NAME}" "${PACK_OUT_DIR}/ALL_B_PACKS.tgz" 2>/dev/null || true
+fi
 
 ls -lh "${PACK_OUT_DIR}"

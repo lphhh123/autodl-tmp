@@ -182,6 +182,8 @@ detailed_place:
         cf_cap_mult: 1.5
         # Only enable CF subtraction when atomic probe has enough calls
         min_atomic_calls_for_cf: 150
+        # Soft CF: reliability-weighted subtraction (tau<=0 disables weighting, w_cf=1)
+        cf_reliability_tau: 0.0
         ewma_alpha: 0.2
 
         # Whether probe feedback should update MacroEngine's adaptive weights
@@ -191,6 +193,14 @@ detailed_place:
         min_gain_per_call: 0.0
         success_boost_scale: 0.5
         fail_penalty_scale: 0.5
+
+        # One-sided CF update (optional): avoid penalizing solely due to negative CF.
+        cf_one_sided_update: false
+        # If one-sided enabled, penalty_mode:
+        #   - raw  : penalize only if RAW metric is also poor
+        #   - none : never penalize on CF-negative
+        cf_one_sided_penalty_mode: raw
+        cf_one_sided_penalty_scale: 1.0
 
         # Safety: do not probe when too close to budget exhaustion
         min_remaining_calls: 1500
