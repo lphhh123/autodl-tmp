@@ -51,6 +51,10 @@ class _Ticket:
     sponsored: bool = False
     # BC^2-CEC: counterfactual baseline snapshot at ticket creation
     start_atomic_rate: float = 0.0
+    start_real_rate: float = 0.0
+    start_cf_discount: float = 1.0
+    start_cf_cap_mult: float = 2.0
+    start_cf_mode: str = ""
     expected_atomic_gain: float = 0.0
     # v2.8: track best (minimum) total seen during the ticket horizon (extreme-value credit)
     min_best_total: float = 1.0e30
@@ -233,6 +237,54 @@ class MPVSController:
         if not (self.cec_cf_cap_mult == self.cec_cf_cap_mult):
             self.cec_cf_cap_mult = 2.0
         self.cec_cf_cap_mult = float(max(0.0, min(10.0, self.cec_cf_cap_mult)))
+
+        # ----------------------------
+        # Counterfactual (CEC) extra knobs
+        # ----------------------------
+        # Stage-wise discount/cap (helps early noise; aligns with your "low suppress high boost" story)
+        self.cec_cf_discount_by_stage: Dict[str, float] = {}
+        try:
+            m = cec.get("counterfactual_discount_by_stage", {})
+            if isinstance(m, dict):
+                for k, v in m.items():
+                    kk = str(k or "").strip().lower()
+                    if kk in {"early", "mid", "late"}:
+                        fv = float(v)
+                        if fv == fv:
+                            self.cec_cf_discount_by_stage[kk] = float(max(0.0, min(1.0, fv)))
+        except Exception:
+            self.cec_cf_discount_by_stage = {}
+
+        self.cec_cf_cap_mult_by_stage: Dict[str, float] = {}
+        try:
+            m = cec.get("counterfactual_cap_mult_by_stage", {})
+            if isinstance(m, dict):
+                for k, v in m.items():
+                    kk = str(k or "").strip().lower()
+                    if kk in {"early", "mid", "late"}:
+                        fv = float(v)
+                        if fv == fv:
+                            self.cec_cf_cap_mult_by_stage[kk] = float(max(0.0, min(10.0, fv)))
+        except Exception:
+            self.cec_cf_cap_mult_by_stage = {}
+
+        # Gate using realized-rate baseline: require enough accumulated calls (EWMA calls).
+        self.cec_cf_min_real_calls = int(cec.get("counterfactual_min_real_calls", 0))
+        self.cec_cf_min_real_calls = int(max(0, self.cec_cf_min_real_calls))
+
+        # Baseline mode:
+        #  - "atomic":              use atomic (heuristic) rate only
+        #  - "atomic_cap_ctx_real": cap atomic by ctx-realized when available (recommended)
+        #  - "atomic_cap_real":     cap atomic by ctx-realized else global-realized/fallback
+        self.cec_cf_mode = str(cec.get("counterfactual_baseline_mode", "atomic_cap_ctx_real") or "atomic_cap_ctx_real").strip().lower()
+        if self.cec_cf_mode not in {"atomic", "atomic_cap_ctx_real", "atomic_cap_real"}:
+            self.cec_cf_mode = "atomic_cap_ctx_real"
+
+        # Optional fallback real-rate when ctx-realized is missing (only used in atomic_cap_real).
+        self.cec_cf_fallback_real_rate = float(cec.get("counterfactual_fallback_real_rate", 0.0))
+        if not (self.cec_cf_fallback_real_rate == self.cec_cf_fallback_real_rate):
+            self.cec_cf_fallback_real_rate = 0.0
+        self.cec_cf_fallback_real_rate = float(max(0.0, self.cec_cf_fallback_real_rate))
         self.cec_family_blend_tau = float(cec.get("family_blend_tau", 8))
         self.cec_family_min_samples = int(cec.get("family_min_samples", cec.get("probe_min_samples", 6)))
         self.cec_local_min_samples = int(cec.get("local_min_samples", 2))
@@ -676,6 +728,25 @@ class MPVSController:
             if ag is not None and float(ag.calls) > 0.0:
                 return float(ag.rate)
         return float(self.real_agg.rate)
+
+    def _cf_stage_from_ctx_key(self, ctx_key: str) -> str:
+        s = str(ctx_key or "")
+        if not s:
+            return ""
+        st = s.split("|", 1)[0].strip().lower()
+        return st if st in {"early", "mid", "late"} else ""
+
+    def _cf_discount_for_stage(self, stage: str) -> float:
+        st = str(stage or "").strip().lower()
+        if st in self.cec_cf_discount_by_stage:
+            return float(self.cec_cf_discount_by_stage[st])
+        return float(self.cec_cf_discount)
+
+    def _cf_cap_for_stage(self, stage: str) -> float:
+        st = str(stage or "").strip().lower()
+        if st in self.cec_cf_cap_mult_by_stage:
+            return float(self.cec_cf_cap_mult_by_stage[st])
+        return float(self.cec_cf_cap_mult)
 
     def observe_probe(
         self,
@@ -1446,16 +1517,52 @@ class MPVSController:
         if bool(self.cec_enabled) and bool(self.cec_counterfactual_credit) and comp == "macro" and stage0 == "late":
             sponsored = True
 
-        # v2.6: conservative counterfactual baseline using realized-rate (captures saturation).
+        # BC^2-CEC: improved counterfactual baseline snapshot at ticket creation.
+        # Key fix: avoid over-penalizing macros when realized-rate is missing/noisy;
+        # default fallback becomes atomic baseline (discounted), NOT global realized rate.
         ck0 = str(ctx_key or "")
+        stg0 = self._cf_stage_from_ctx_key(ck0)
+        d0 = float(self._cf_discount_for_stage(stg0))
+        cap0 = float(self._cf_cap_for_stage(stg0))
+
         rate_best = float(self._atomic_rate(ck0))
-        rate_real = float(self._realized_rate(ck0))
-        if rate_real > 0.0:
-            rate0 = min(rate_best, float(self.cec_cf_cap_mult) * rate_real)
+
+        # Gate realized-rate by min_real_calls (EWMA calls).
+        rate_real_ctx = 0.0
+        try:
+            ag = self.real_by_ctx.get(ck0)
+            if ag is not None and float(ag.calls) >= float(self.cec_cf_min_real_calls) and float(ag.rate) > 0.0:
+                rate_real_ctx = float(ag.rate)
+        except Exception:
+            rate_real_ctx = 0.0
+
+        rate_real_global = 0.0
+        try:
+            if float(self.real_agg.calls) >= float(self.cec_cf_min_real_calls) and float(self.real_agg.rate) > 0.0:
+                rate_real_global = float(self.real_agg.rate)
+        except Exception:
+            rate_real_global = 0.0
+
+        mode = str(getattr(self, "cec_cf_mode", "atomic_cap_ctx_real"))
+        if mode == "atomic":
+            real_used = 0.0
+            rate0 = float(rate_best)
+        elif mode == "atomic_cap_real":
+            real_used = float(rate_real_ctx) if rate_real_ctx > 0.0 else (float(rate_real_global) if rate_real_global > 0.0 else float(self.cec_cf_fallback_real_rate))
+            if real_used > 0.0:
+                rate0 = min(float(rate_best), float(cap0) * float(real_used))
+            else:
+                rate0 = float(rate_best)
         else:
-            rate0 = min(rate_best, max(0.0, float(self.real_agg.rate)))
+            # recommended
+            real_used = float(rate_real_ctx)
+            if real_used > 0.0:
+                rate0 = min(float(rate_best), float(cap0) * float(real_used))
+            else:
+                rate0 = float(rate_best)
+
         rate0 = float(max(0.0, rate0))
-        exp_atomic_gain = float(rate0) * float(horizon) * float(self.cec_cf_discount)
+        exp_atomic_gain = float(rate0) * float(horizon) * float(d0)
         self.tickets.append(
             _Ticket(
                 src=comp,
@@ -1466,6 +1573,10 @@ class MPVSController:
                 family=str(family or ""),
                 sponsored=bool(sponsored),
                 start_atomic_rate=float(rate0),
+                start_real_rate=float(real_used),
+                start_cf_discount=float(d0),
+                start_cf_cap_mult=float(cap0),
+                start_cf_mode=str(mode),
                 expected_atomic_gain=float(exp_atomic_gain),
                 min_best_total=float(best_total_seen),
                 min_best_calls=int(used_calls),
@@ -1655,6 +1766,12 @@ class MPVSController:
         }
         if bool(self.cec_counterfactual_credit):
             out["cec_cf_discount"] = float(getattr(self, "cec_cf_discount", 1.0))
+            out["cec_cf_discount_by_stage"] = dict(getattr(self, "cec_cf_discount_by_stage", {}) or {})
+            out["cec_cf_cap_mult"] = float(getattr(self, "cec_cf_cap_mult", 2.0))
+            out["cec_cf_cap_mult_by_stage"] = dict(getattr(self, "cec_cf_cap_mult_by_stage", {}) or {})
+            out["cec_cf_mode"] = str(getattr(self, "cec_cf_mode", ""))
+            out["cec_cf_min_real_calls"] = int(getattr(self, "cec_cf_min_real_calls", 0))
+            out["cec_cf_fallback_real_rate"] = float(getattr(self, "cec_cf_fallback_real_rate", 0.0))
         if bool(self.cec_counterfactual_credit):
             try:
                 out["atomic_rate_ctx_n"] = int(len(self.atomic_by_ctx))
