@@ -864,12 +864,40 @@ def _apply_acho_controller(
 
     step_up = float(_cfg_get(acho_cfg, "step_up_frac", 0.12) or 0.12)
     step_dn = float(_cfg_get(acho_cfg, "step_down_frac", 0.25) or 0.25)
+
+    # ROI feedback: if ROI rejects often, be more conservative with lambda increases.
+    rr = st.get("roi_reject_rate", None)
+    if rr is None:
+        win = st.get("roi_decisions_window", None)
+        if isinstance(win, list) and len(win) > 0:
+            try:
+                rr = float(1.0 - (sum(1 for x in win if x) / max(1.0, float(len(win)))))
+            except Exception:
+                rr = None
+    if rr is not None:
+        st["acho_roi_reject_rate"] = float(rr)
+        thr = float(_cfg_get(acho_cfg, "roi_reject_high", 0.6) or 0.6)
+        if float(rr) >= float(thr):
+            step_up_mul = float(_cfg_get(acho_cfg, "roi_step_up_mul_high_reject", 0.5) or 0.5)
+            cap_mul = float(_cfg_get(acho_cfg, "roi_cap_mul_high_reject", 0.8) or 0.8)
+            step_up = float(step_up) * max(0.0, float(step_up_mul))
+            cap = min(float(cap), float(base_cap) * max(0.0, float(cap_mul)))
+            lam = min(lam, cap)
     d_up = _acho_step_size(max_cap, step_up)
     d_dn = _acho_step_size(max_cap, step_dn)
 
     # Optional: after a discrete commit, temporarily cap lambda to let the model adapt.
     # ROI-Commit (trainer) sets st['roi_cooldown_until']=outer+K.
     post_mul = float(_cfg_get(acho_cfg, "post_commit_lambda_mul", 0.5) or 0.5)
+    # If the last ROI commit made a large jump, cap lambda harder during cooldown.
+    try:
+        relc = float(st.get("roi_last_commit_rel_improve", 0.0) or 0.0)
+    except Exception:
+        relc = 0.0
+    big_thr = float(_cfg_get(acho_cfg, "roi_big_commit_rel", 0.03) or 0.03)
+    if relc >= big_thr:
+        post_big = float(_cfg_get(acho_cfg, "roi_post_commit_lambda_mul_big", 0.3) or 0.3)
+        post_mul = min(float(post_mul), max(0.0, min(1.0, float(post_big))))
     block_inc = bool(_cfg_get(acho_cfg, "post_commit_block_increase", True))
     cd_until = int(st.get("roi_cooldown_until", -1) or -1)
     in_cd = (cd_until >= 0) and (int(epoch) < int(cd_until))

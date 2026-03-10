@@ -948,6 +948,7 @@ def _solve_mapping_for_cache(
     partitioner: PartitionPlanner,
     hw_cfg: Any,
     model_info: Optional[Dict[str, Any]] = None,
+    mapping_strategy: Optional[str] = None,
 ) -> Dict[str, Any]:
     slot_out = chiplet_slots(hard=False)
     eff_specs = slot_out["eff_specs"]
@@ -964,7 +965,7 @@ def _solve_mapping_for_cache(
         eff_specs,
         hw_proxy,
         layout_positions=wafer_layout.current_pos_continuous(),
-        strategy=getattr(hw_cfg, "mapping_strategy", "greedy_local"),
+        strategy=(str(mapping_strategy) if mapping_strategy is not None else getattr(hw_cfg, "mapping_strategy", "greedy_local")),
         distance_scale_ms=getattr(hw_cfg, "distance_scale_ms", 0.0),
         alpha=slot_out["alpha"],
     )
@@ -1118,6 +1119,75 @@ def _roi_should_commit(
     abs_impr = float(old_metric) - float(new_metric)
     rel = _roi_rel_improve(old_metric, new_metric)
     return (abs_impr >= float(min_abs_improve)) and (rel >= float(min_rel_improve))
+
+
+def _roi_extract_keep_factors(model_info: Optional[Dict[str, Any]], depth: int) -> Dict[str, List[float]]:
+    """Extract per-layer keep signals as lists to stabilize discrete planning."""
+    if not model_info:
+        return {"token_keep": [1.0] * depth, "head_keep": [1.0] * depth, "ch_keep": [1.0] * depth, "block_keep": [1.0] * depth}
+
+    mi = model_info
+    if isinstance(mi, dict) and ("model_info" in mi) and isinstance(mi.get("model_info"), dict):
+        if not any(k in mi for k in ("keep_factors", "token_keep", "head_keep", "ch_keep", "block_keep")):
+            mi = mi["model_info"]
+
+    kf = None
+    if isinstance(mi, dict) and mi.get("keep_factors") is not None:
+        kf = mi.get("keep_factors")
+    elif isinstance(mi, dict):
+        kf = mi
+
+    def _as_list(x, n: int, default: float = 1.0) -> List[float]:
+        if x is None:
+            return [default] * n
+        if isinstance(x, (int, float)):
+            return [float(x)] * n
+        if isinstance(x, (list, tuple)):
+            if len(x) == 0:
+                return [default] * n
+            if len(x) == n:
+                return [float(v) for v in x]
+            return [float(x[0])] * n
+        return [default] * n
+
+    if isinstance(kf, dict):
+        return {
+            "token_keep": _as_list(kf.get("token_keep", 1.0), depth, 1.0),
+            "head_keep": _as_list(kf.get("head_keep", 1.0), depth, 1.0),
+            "ch_keep": _as_list(kf.get("ch_keep", 1.0), depth, 1.0),
+            "block_keep": _as_list(kf.get("block_keep", 1.0), depth, 1.0),
+        }
+    return {"token_keep": [1.0] * depth, "head_keep": [1.0] * depth, "ch_keep": [1.0] * depth, "block_keep": [1.0] * depth}
+
+
+def _roi_update_keep_ema(stable_hw_state: Dict[str, Any], model_info: Optional[Dict[str, Any]], *, ema_alpha: float = 0.2) -> None:
+    """Update EMA of keep_factors; used for stable discrete planning + ROI evaluation."""
+    if not isinstance(stable_hw_state, dict) or (not isinstance(model_info, dict)):
+        return
+    depth = 0
+    arch = model_info.get("arch")
+    if arch is None and isinstance(model_info.get("model_info"), dict):
+        arch = model_info["model_info"].get("arch")
+    if isinstance(arch, dict):
+        depth = int(arch.get("depth", 0) or 0)
+    if depth <= 0:
+        return
+
+    cur = _roi_extract_keep_factors(model_info, depth)
+    prev = stable_hw_state.get("roi_keep_ema", None)
+    a = float(max(0.0, min(1.0, float(ema_alpha))))
+    if not isinstance(prev, dict):
+        stable_hw_state["roi_keep_ema"] = cur
+        return
+
+    out: Dict[str, List[float]] = {}
+    for k in ("token_keep", "head_keep", "ch_keep", "block_keep"):
+        c = cur.get(k, [1.0] * depth)
+        p = prev.get(k, [1.0] * depth) if isinstance(prev.get(k), list) else [1.0] * depth
+        if len(p) != depth:
+            p = [float(p[0])] * depth if p else [1.0] * depth
+        out[k] = [a * float(c[i]) + (1.0 - a) * float(p[i]) for i in range(depth)]
+    stable_hw_state["roi_keep_ema"] = out
 
 
 def train_version_c(
@@ -2073,16 +2143,94 @@ def train_version_c(
                     old_mapping_res = cache.get("mapping")
                     old_sig = cache.get("mapping_signature")
 
-                    cand_mapping_res = _solve_mapping_for_cache(
-                        model=model,
-                        chiplet_slots=chiplet_slots,
-                        mapping_solver=mapping_solver,
-                        hw_proxy=hw_proxy,
-                        wafer_layout=wafer_layout,
-                        partitioner=partitioner,
-                        hw_cfg=cfg.hw,
-                        model_info=run_state.get("last_model_info"),
-                    )
+                    # Prepare a stable model_info snapshot for discrete planning.
+                    # When ROI is enabled, use EMA keep_factors to reduce noisy churn.
+                    last_info = run_state.get("last_model_info")
+                    model_info_for_discrete = last_info
+                    if roi_enabled_local and isinstance(stable_hw_state.get("roi_keep_ema", None), dict):
+                        model_info_for_discrete = {}
+                        if isinstance(last_info, dict):
+                            arch = last_info.get("arch")
+                            if arch is None and isinstance(last_info.get("model_info"), dict):
+                                arch = last_info["model_info"].get("arch")
+                            if isinstance(arch, dict):
+                                model_info_for_discrete["arch"] = arch
+                        model_info_for_discrete["keep_factors"] = stable_hw_state.get("roi_keep_ema")
+
+                    # Candidate generation: optionally try multiple mapping strategies and pick the best by ROI metric.
+                    strategies = _cfg_get(roi_cfg_local, "candidate_strategies", None)
+                    if not strategies:
+                        strategies = [None]
+
+                    cand_mapping_res = None
+                    cand_sig = None
+                    cand_strategy = None
+                    cand_metric = None
+
+                    # Pre-compute the old metric once (if ROI is active and we have a previous mapping).
+                    old_metric = None
+                    metric_key = str(_cfg_get(roi_cfg_local, "metric", "proxy_raw_latency_ms") or "proxy_raw_latency_ms")
+                    if roi_enabled_local and (old_mapping_res is not None):
+                        gm = str(stable_hw_state.get("guard_mode", "")).upper()
+                        if (gm == "OK") and (not bool(stable_hw_state.get("hw_stabilizing", False))):
+                            try:
+                                old_metric, _, _ = _roi_eval_hw_metric(
+                                    cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
+                                    stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
+                                    mapping_res=old_mapping_res, metric_key=metric_key,
+                                )
+                            except Exception:
+                                old_metric = None
+
+                    for stg in strategies:
+                        cand = _solve_mapping_for_cache(
+                            model=model,
+                            chiplet_slots=chiplet_slots,
+                            mapping_solver=mapping_solver,
+                            hw_proxy=hw_proxy,
+                            wafer_layout=wafer_layout,
+                            partitioner=partitioner,
+                            hw_cfg=cfg.hw,
+                            model_info=model_info_for_discrete,
+                            mapping_strategy=(str(stg) if stg is not None else None),
+                        )
+                        mval = None
+                        if roi_enabled_local and (old_metric is not None):
+                            try:
+                                mval, _, _ = _roi_eval_hw_metric(
+                                    cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
+                                    stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
+                                    mapping_res=cand, metric_key=metric_key,
+                                )
+                            except Exception:
+                                mval = None
+
+                        if cand_mapping_res is None:
+                            cand_mapping_res = cand
+                            cand_metric = mval
+                            cand_strategy = (str(stg) if stg is not None else str(getattr(cfg.hw, "mapping_strategy", "greedy_local")))
+                        elif (mval is not None) and (cand_metric is not None) and (float(mval) < float(cand_metric)):
+                            cand_mapping_res = cand
+                            cand_metric = mval
+                            cand_strategy = (str(stg) if stg is not None else str(getattr(cfg.hw, "mapping_strategy", "greedy_local")))
+
+                        # If ROI isn't active yet, don't waste time scoring more candidates.
+                        if (not roi_enabled_local) or (old_metric is None):
+                            break
+
+                    if cand_mapping_res is None:
+                        cand_mapping_res = _solve_mapping_for_cache(
+                            model=model,
+                            chiplet_slots=chiplet_slots,
+                            mapping_solver=mapping_solver,
+                            hw_proxy=hw_proxy,
+                            wafer_layout=wafer_layout,
+                            partitioner=partitioner,
+                            hw_cfg=cfg.hw,
+                            model_info=model_info_for_discrete,
+                        )
+                        cand_strategy = str(getattr(cfg.hw, "mapping_strategy", "greedy_local"))
+
                     cand_sig = cand_mapping_res.get("mapping_sig") or cand_mapping_res.get("signature")
 
                     commit = True
@@ -2094,35 +2242,52 @@ def train_version_c(
                             min_rel = float(_cfg_get(roi_cfg_local, "min_rel_improve", 0.01) or 0.01)
                             min_abs = float(_cfg_get(roi_cfg_local, "min_abs_improve", 0.0) or 0.0)
                             try:
-                                old_metric, _, _ = _roi_eval_hw_metric(
-                                    cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
-                                    stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
-                                    mapping_res=old_mapping_res, metric_key=metric_key,
-                                )
-                                new_metric, _, _ = _roi_eval_hw_metric(
-                                    cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
-                                    stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
-                                    mapping_res=cand_mapping_res, metric_key=metric_key,
-                                )
-                                rel = float(_roi_rel_improve(old_metric, new_metric))
+                                om = old_metric
+                                if om is None:
+                                    om, _, _ = _roi_eval_hw_metric(
+                                        cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
+                                        stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
+                                        mapping_res=old_mapping_res, metric_key=metric_key,
+                                    )
+                                nm = cand_metric
+                                if nm is None:
+                                    nm, _, _ = _roi_eval_hw_metric(
+                                        cfg=cfg, hw_proxy=hw_proxy, mapping_solver=mapping_solver, wafer_layout=wafer_layout,
+                                        stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
+                                        mapping_res=cand_mapping_res, metric_key=metric_key,
+                                    )
+                                rel = float(_roi_rel_improve(om, nm))
                                 commit = _roi_should_commit(
-                                    old_metric=old_metric,
-                                    new_metric=new_metric,
+                                    old_metric=om,
+                                    new_metric=nm,
                                     min_rel_improve=min_rel,
                                     min_abs_improve=min_abs,
                                 )
-                                abs_impr = float(old_metric) - float(new_metric)
+                                abs_impr = float(om) - float(nm)
                                 roi_reason = (
-                                    f"metric={metric_key} old={old_metric:.6g} new={new_metric:.6g} "
-                                    f"abs={abs_impr:.6g} rel={rel:.4f} min_abs={min_abs:.6g} min_rel={min_rel:.4f}"
+                                    f"metric={metric_key} old={om:.6g} new={nm:.6g} "
+                                    f"abs={abs_impr:.6g} rel={rel:.4f} min_abs={min_abs:.6g} min_rel={min_rel:.4f} strategy={cand_strategy}"
                                 )
                                 stable_hw_state["roi_last_eval"] = {
                                     "outer": int(outer), "metric": metric_key,
-                                    "old": float(old_metric), "new": float(new_metric),
+                                    "old": float(om), "new": float(nm),
                                     "abs_improve": float(abs_impr), "min_abs": float(min_abs),
                                     "rel_improve": float(rel), "min_rel": float(min_rel),
                                     "commit": bool(commit),
                                 }
+                                # Record a short decision window for ACHO feedback.
+                                w = int(_cfg_get(roi_cfg_local, "window_size", 10) or 10)
+                                win = stable_hw_state.get("roi_decisions_window", [])
+                                if not isinstance(win, list):
+                                    win = []
+                                win.append(bool(commit))
+                                if w > 0 and len(win) > w:
+                                    win = win[-w:]
+                                stable_hw_state["roi_decisions_window"] = win
+                                try:
+                                    stable_hw_state["roi_reject_rate"] = float(1.0 - (sum(1 for x in win if x) / max(1.0, float(len(win)))))
+                                except Exception:
+                                    pass
                             except Exception as exc:
                                 commit = True
                                 roi_reason = f"roi_eval_error:{exc}"
@@ -2140,10 +2305,25 @@ def train_version_c(
                         mapping_res = cand_mapping_res
                         mapping_updated = bool(old_sig is None or (str(cand_sig) != str(old_sig)))
                         if roi_enabled_local and mapping_updated:
-                            cd = int(_cfg_get(roi_cfg_local, "cooldown_epochs", 2) or 2)
+                            base_cd = int(_cfg_get(roi_cfg_local, "cooldown_epochs", 2) or 2)
+                            scale = int(_cfg_get(roi_cfg_local, "cooldown_scale", 0) or 0)
+                            max_extra = int(_cfg_get(roi_cfg_local, "cooldown_max_extra", 0) or 0)
+                            rel = 0.0
+                            try:
+                                rel = float(stable_hw_state.get("roi_last_eval", {}).get("rel_improve", 0.0))
+                            except Exception:
+                                rel = 0.0
+                            extra = 0
+                            if scale > 0:
+                                extra = int(math.ceil(max(0.0, rel) * float(scale)))
+                                if max_extra > 0:
+                                    extra = min(extra, int(max_extra))
+                            cd = int(base_cd) + int(extra)
                             stable_hw_state["roi_cooldown_until"] = int(outer) + int(cd)
                             stable_hw_state["roi_last_commit_outer"] = int(outer)
                             stable_hw_state["roi_last_commit_reason"] = str(roi_reason)
+                            stable_hw_state["roi_last_commit_rel_improve"] = float(rel)
+                            stable_hw_state["roi_last_commit_cooldown"] = int(cd)
                             logger.info("[ROICommit] mapping COMMIT outer=%s %s", int(outer), str(roi_reason))
                     else:
                         mapping_res = old_mapping_res
@@ -2248,6 +2428,17 @@ def train_version_c(
                         else:
                             logits, info = model(x, return_intermediate=True)
                         run_state["last_model_info"] = info
+                        if stable_hw_enabled:
+                            # Stabilize discrete planning with EMA keep signals.
+                            ema_a = 0.2
+                            try:
+                                iso_cfg = getattr(getattr(cfg, "stable_hw", None), "discrete_isolation", None)
+                                roi_cfg = getattr(iso_cfg, "roi_commit", None) if iso_cfg is not None else None
+                                if roi_cfg is not None:
+                                    ema_a = float(getattr(roi_cfg, "keep_ema_alpha", 0.2) or 0.2)
+                            except Exception:
+                                ema_a = 0.2
+                            _roi_update_keep_ema(stable_hw_state, info, ema_alpha=ema_a)
                         # Hard guard: if model produced non-finite logits, skip the step.
                         if not torch.isfinite(logits).all():
                             run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
