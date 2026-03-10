@@ -360,7 +360,7 @@ case "$EXP_ID" in
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
     OUT="$(odir EXP-A1)"
     run_ast configs/ast2_ucf101_dense_A1.yaml "$OUT"
-    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer fast --ema-alpha 0.2 --curve-margin 0.0 || true
+    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer full --ema-alpha 0.2 --curve-margin 0.0 || true
     ;;
   # A1-fast: dense baseline (FAST iteration: 20% data, 35 epochs)
   # NOTE: Still exports baseline stats for downstream stable_hw runs.
@@ -384,7 +384,7 @@ case "$EXP_ID" in
     export BASELINE_STATS_EXPORT="outputs/dense_baseline/metrics.json"
     OUT="$(odir EXP-A1p-fast)"
     run_vc configs/vc_phase3_denseonly_ucf101_A_aligned_fast20.yaml "$OUT"
-    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer fast --ema-alpha 0.2 --curve-margin 0.0 || true
+    python -m scripts.make_acc_ref_curve --stdout "$OUT/stdout.log" --out "$OUT/acc_ref_curve.json" --prefer full --ema-alpha 0.2 --curve-margin 0.0 || true
     ;;
   # A2: Token-only (HW off, Window off, Token on)
   EXP-A2) run_ast configs/ast2_ucf101_ast_only_A2.yaml           "$(odir EXP-A2)" ;;

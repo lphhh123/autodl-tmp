@@ -16,6 +16,8 @@ data:
 
 training:
   outer_epochs: 35
+  # Keep eval protocol aligned with A1p-fast reference (full eval each epoch on the same eval subset).
+  stable_hw_eval_max_batches: 0
   compute_hw_when_lambda0: true
 
 ast:
@@ -73,5 +75,5 @@ stable_hw:
   locked_acc_ref:
     baseline_stdout_path: "outputs/EXP-A1p-fast/seed{seed}/stdout"
     baseline_curve_path:  "outputs/EXP-A1p-fast/seed{seed}/acc_ref_curve.json"
-    stdout_prefer_mode: "fast"
+    stdout_prefer_mode: "full"
     strict: true
