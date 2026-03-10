@@ -1573,9 +1573,9 @@ def train_version_c(
         no_drift_enabled = bool(
             (no_drift_cfg.get("enabled", True) if isinstance(no_drift_cfg, dict) else getattr(no_drift_cfg, "enabled", True))
         )
-        allow_train_ema_fallback = get_nested(cfg, "stable_hw.allow_train_ema_fallback", None)
+        allow_train_ema_fallback = _oc_select(cfg, "stable_hw.allow_train_ema_fallback", None)
         if allow_train_ema_fallback is None:
-            allow_train_ema_fallback = get_nested(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
+            allow_train_ema_fallback = _oc_select(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
         if stable_hw_cfg is not None:
             nd_cfg = getattr(stable_hw_cfg, "no_drift", None)
             if isinstance(nd_cfg, bool):
@@ -1649,9 +1649,9 @@ def train_version_c(
             encoding="utf-8",
         )
         stable_hw_state.setdefault("gating_reason_code", "")
-        requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+        requested_cfg = _oc_select(cfg, "_contract.requested_config_snapshot", {}) or {}
         effective_cfg = OmegaConf.to_container(cfg, resolve=True)
-        contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+        contract_overrides = _oc_select(cfg, "_contract.overrides", []) or []
 
         def _get_req(path, default=None):
             cur = requested_cfg
@@ -1664,9 +1664,9 @@ def train_version_c(
         req_fb = _get_req("stable_hw.allow_train_ema_fallback", None)
         if req_fb is None:
             req_fb = _get_req("stable_hw.accuracy_guard.allow_train_ema_fallback", None)
-        eff_fb = get_nested(cfg, "stable_hw.allow_train_ema_fallback", None)
+        eff_fb = _oc_select(cfg, "stable_hw.allow_train_ema_fallback", None)
         if eff_fb is None:
-            eff_fb = get_nested(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
+            eff_fb = _oc_select(cfg, "stable_hw.accuracy_guard.allow_train_ema_fallback", None)
 
         trace_header_payload = build_trace_header_payload_v54(
             signature=signature,
@@ -3478,9 +3478,9 @@ def train_version_c(
                 if not _tep.exists():
                     _tep.write_text("", encoding="utf-8")
 
-            requested_cfg = get_nested(cfg, "_contract.requested_config_snapshot", {}) or {}
+            requested_cfg = _oc_select(cfg, "_contract.requested_config_snapshot", {}) or {}
             effective_cfg = cfg.to_dict() if hasattr(cfg, "to_dict") else {}
-            contract_overrides = get_nested(cfg, "_contract.overrides", []) or []
+            contract_overrides = _oc_select(cfg, "_contract.overrides", []) or []
             signature = build_signature_v54(cfg, method_name="ours_version_c")
 
             trace_header_payload = build_trace_header_payload_v54(
