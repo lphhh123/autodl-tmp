@@ -1173,6 +1173,64 @@ def main():
         except Exception:
             pass
 
+    # ---- Probe CF call-accounting override (sweep axis) ----
+    # Supported env:
+    #   PROBE_CALLS_MODE="miss" | "eff"   (eff also accepts: effective/attempts/unique)
+    #   EFF_CALLS_ALPHA_OVERRIDE="3.0"    (alpha in eff_calls=min(attempts, alpha*unique_keys))
+    probe_calls_mode = os.environ.get("PROBE_CALLS_MODE", "").strip().lower()
+    eff_alpha_env = os.environ.get("EFF_CALLS_ALPHA_OVERRIDE", "").strip()
+
+    if probe_calls_mode:
+        try:
+            if probe_calls_mode in {"eff", "effective", "attempts", "unique", "uniq"}:
+                eff_mode = "eff"
+            else:
+                eff_mode = "miss"
+
+            if not hasattr(cfg, "mpvs") or cfg.mpvs is None:
+                cfg.mpvs = OmegaConf.create({})
+            if not hasattr(cfg.mpvs, "probe") or cfg.mpvs.probe is None:
+                cfg.mpvs.probe = OmegaConf.create({})
+
+            old_mode = get_nested(cfg, "mpvs.probe.calls_mode", None)
+            cfg.mpvs.probe.calls_mode = str(eff_mode)
+
+            ov = list(get_nested(cfg, "_contract.overrides", []) or [])
+            ov.append(
+                {
+                    "path": "mpvs.probe.calls_mode",
+                    "requested": old_mode,
+                    "effective": str(eff_mode),
+                    "reason": "env:PROBE_CALLS_MODE",
+                }
+            )
+            cfg._contract.overrides = ov
+        except Exception:
+            pass
+
+    if eff_alpha_env:
+        try:
+            a = float(eff_alpha_env)
+            if not hasattr(cfg, "mpvs") or cfg.mpvs is None:
+                cfg.mpvs = OmegaConf.create({})
+            if not hasattr(cfg.mpvs, "probe") or cfg.mpvs.probe is None:
+                cfg.mpvs.probe = OmegaConf.create({})
+            old_a = get_nested(cfg, "mpvs.probe.eff_calls_alpha", None)
+            cfg.mpvs.probe.eff_calls_alpha = float(a)
+
+            ov = list(get_nested(cfg, "_contract.overrides", []) or [])
+            ov.append(
+                {
+                    "path": "mpvs.probe.eff_calls_alpha",
+                    "requested": old_a,
+                    "effective": float(a),
+                    "reason": "env:EFF_CALLS_ALPHA_OVERRIDE",
+                }
+            )
+            cfg._contract.overrides = ov
+        except Exception:
+            pass
+
     # NOW seal + fill defaults (seal_digest matches final cfg)
     cfg = validate_and_fill_defaults(cfg, mode="layout")
     seed_everything(int(args.seed))

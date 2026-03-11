@@ -14,7 +14,7 @@ cd "$ROOT"
 # ------------------------------------------------------------
 
 # Concurrency
-MAX_JOBS="${MAX_JOBS:-24}"   # adjust if API rate-limits; 8~24 usually safe
+MAX_JOBS="${MAX_JOBS:-42}"   # user default: 42
 DRY_RUN="${DRY_RUN:-0}"
 
 # Instances (explicit; do not rely on INSTANCE=all to keep parallelism high)
@@ -81,6 +81,22 @@ echo "[B-grid] RUN_HEADROOM=${RUN_HEADROOM}  EXPS_HEADROOM=${EXPS_HEADROOM}  SEE
 echo "[B-grid] RUN_CTL_EVIDENCE=${RUN_CTL_EVIDENCE}"
 
 # ------------------------------------------------------------
+# Probe CF call-accounting mode sweep:
+#   - PROBE_CALLS_MODE: single value ("miss" or "eff")
+#   - PROBE_CALLS_MODES: list, e.g. "miss eff" (recommended for sweep axis)
+# If both set, PROBE_CALLS_MODES takes priority.
+# ------------------------------------------------------------
+PROBE_CALLS_MODE="${PROBE_CALLS_MODE:-}"
+PROBE_CALLS_MODES="${PROBE_CALLS_MODES:-}"
+EFF_CALLS_ALPHA_OVERRIDE="${EFF_CALLS_ALPHA_OVERRIDE:-}"
+
+if [[ -n "${PROBE_CALLS_MODES}" ]]; then
+  echo "[B-grid] PROBE_CALLS_MODES=${PROBE_CALLS_MODES} (sweeping calls_mode)"
+else
+  echo "[B-grid] PROBE_CALLS_MODE=${PROBE_CALLS_MODE:-<unset>} (single)"
+fi
+
+# ------------------------------------------------------------
 # Optional clean to avoid historical accumulation in outputs/B
 #   KEEP_B_OUTPUTS=1 -> skip cleaning
 # ------------------------------------------------------------
@@ -140,6 +156,7 @@ emit_task() {
   local inst="$3"
   local budget="$4"
   local wpair="$5"   # therm,comm
+  local cmode="${6:-}"  # miss/eff/empty
   local wt="${wpair%,*}"
   local wc="${wpair#*,}"
   local tag="b${budget}_wT$(fmt_tag "${wt}")_wC$(fmt_tag "${wc}")"
@@ -148,9 +165,34 @@ emit_task() {
   if [[ -n "${pfx}" ]]; then
     tag="${pfx}__${tag}"
   fi
+  # Append calls_mode marker to ensure no overwrite across miss/eff sweeps.
+  if [[ -n "${cmode}" ]]; then
+    local cm="$(printf '%s' "${cmode}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+    tag="${tag}_cm${cm}"
+  fi
   # We pass both: SCALAR_WEIGHTS_OVERRIDE for convenience, and tag for unique out dirs.
-  echo "RUN_TAG='${tag}' INSTANCE='${inst}' BUDGET='${budget}' SCALAR_WEIGHTS_OVERRIDE='${wt},${wc}' bash scripts/experiments_version_c.sh '${exp}' '${seed}'" >> "${tmp_cmds}"
+  local env_prefix=""
+  if [[ -n "${cmode}" ]]; then
+    env_prefix="PROBE_CALLS_MODE='${cmode}'"
+    if [[ -n "${EFF_CALLS_ALPHA_OVERRIDE}" ]]; then
+      env_prefix="${env_prefix} EFF_CALLS_ALPHA_OVERRIDE='${EFF_CALLS_ALPHA_OVERRIDE}'"
+    fi
+  fi
+  echo "${env_prefix} RUN_TAG='${tag}' INSTANCE='${inst}' BUDGET='${budget}' SCALAR_WEIGHTS_OVERRIDE='${wt},${wc}' bash scripts/experiments_version_c.sh '${exp}' '${seed}'" >> "${tmp_cmds}"
 }
+
+# Determine calls_mode list for task expansion.
+_cm_list=()
+if [[ -n "${PROBE_CALLS_MODES}" ]]; then
+  # shellcheck disable=SC2206
+  _cm_list=( ${PROBE_CALLS_MODES} )
+else
+  if [[ -n "${PROBE_CALLS_MODE}" ]]; then
+    _cm_list=( "${PROBE_CALLS_MODE}" )
+  else
+    _cm_list=( "" )
+  fi
+fi
 
 # Mainline grid
 for budget in ${BUDGETS}; do
@@ -166,7 +208,9 @@ for budget in ${BUDGETS}; do
           fi
         fi
         for seed in ${seeds_for_exp}; do
-          emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}"
+          for cmode in "${_cm_list[@]}"; do
+            emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}"
+          done
         done
       done
     done
@@ -180,7 +224,9 @@ if [[ "${RUN_ABLATIONS}" == "1" ]]; then
       for seed in ${SEEDS_ABL}; do
         for inst in ${INSTANCES}; do
           for exp in ${EXPS_ABL}; do
-            emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}"
+            for cmode in "${_cm_list[@]}"; do
+              emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}"
+            done
           done
         done
       done
@@ -195,7 +241,9 @@ if [[ "${RUN_HEADROOM}" == "1" ]]; then
       for seed in ${SEEDS_HEADROOM}; do
         for inst in ${INSTANCES_HEADROOM}; do
           for exp in ${EXPS_HEADROOM}; do
-            emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}"
+            for cmode in "${_cm_list[@]}"; do
+              emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}"
+            done
           done
         done
       done
