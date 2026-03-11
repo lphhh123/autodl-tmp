@@ -30,6 +30,8 @@ WEIGHT_PAIRS="${WEIGHT_PAIRS:-0.2,0.8 0.3,0.7 0.5,0.5}"
 # Seeds
 SEEDS_MAIN="${SEEDS_MAIN:-0 1 2 3 4}"   # strong argument
 SEEDS_ABL="${SEEDS_ABL:-0}"             # ablations single seed by default
+EXPS_ONCE="${EXPS_ONCE:-}"
+SEEDS_ONCE="${SEEDS_ONCE:-0}"
 
 # Experiments
 # Mainline (paper table): keep it small and comparable.
@@ -122,6 +124,16 @@ fmt_tag() {
   printf '%s' "${1}" | tr '.' 'p' | tr -c 'A-Za-z0-9p' '_'
 }
 
+_in_list() {
+  local needle="$1"; shift
+  for x in "$@"; do
+    if [[ "$x" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 emit_task() {
   local exp="$1"
   local seed="$2"
@@ -143,9 +155,17 @@ emit_task() {
 # Mainline grid
 for budget in ${BUDGETS}; do
   for wpair in ${WEIGHT_PAIRS}; do
-    for seed in ${SEEDS_MAIN}; do
-      for inst in ${INSTANCES}; do
-        for exp in ${EXPS_MAIN}; do
+    for inst in ${INSTANCES}; do
+      for exp in ${EXPS_MAIN}; do
+        seeds_for_exp="${SEEDS_MAIN}"
+        if [[ -n "${EXPS_ONCE}" ]]; then
+          # shellcheck disable=SC2206
+          _once_list=( ${EXPS_ONCE} )
+          if _in_list "${exp}" "${_once_list[@]}"; then
+            seeds_for_exp="${SEEDS_ONCE}"
+          fi
+        fi
+        for seed in ${seeds_for_exp}; do
           emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}"
         done
       done
@@ -208,7 +228,10 @@ echo "[B-grid] done."
 PACK_AFTER="${PACK_AFTER:-1}"
 if [[ "${PACK_AFTER}" == "1" && -f scripts/pack_B_outputs.sh ]]; then
   echo "[B-grid] packing results ... (PACK_TRACE_CSV=${PACK_TRACE_CSV:-0})"
-  PACK_TRACE_CSV="${PACK_TRACE_CSV:-0}" bash scripts/pack_B_outputs.sh || true
+  PACK_TRACE_CSV="${PACK_TRACE_CSV:-0}" \
+  PACK_MATCH_TAG="${PACK_MATCH_TAG:-${RUN_TAG_PREFIX:-}}" \
+  PACK_MODE="${PACK_MODE:-full}" \
+  bash scripts/pack_B_outputs.sh || true
 else
   echo "[B-grid] PACK_AFTER=0 or pack script missing -> skip packing"
 fi
