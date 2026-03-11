@@ -1,0 +1,18 @@
+_base_: layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml
+
+# Ultra-weak shake diagnostic:
+# - fewer restarts
+# - heavier perturbation
+# - much weaker repair
+# Goal: make shake "still potentially useful, but clearly unstable".
+detailed_place:
+  mpvs:
+    macros:
+      shake:
+        candidates: 2
+        kick_k: 8
+        kick_rounds: 3
+        eval_topk: 24
+        repair_steps: 1
+        repair_eval_topk: 1
+        allow_worsen: true
