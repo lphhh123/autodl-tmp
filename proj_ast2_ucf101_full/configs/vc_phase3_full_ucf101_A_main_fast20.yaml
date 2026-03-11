@@ -9,9 +9,10 @@
 _base_: configs/vc_phase3_full_ucf101_A_main.yaml
 
 data:
-  # Deterministic subset for fast iteration.
-  subset_ratio_train: 0.20
-  subset_ratio_eval:  0.20
+  # Train on 30% for faster iteration, but use full validation to stabilize
+  # self-ref locking and accuracy-guard decisions.
+  subset_ratio_train: 0.30
+  subset_ratio_eval:  1.00
   subset_seed: 0
 
 training:
