@@ -1,0 +1,21 @@
+_base_: layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml
+
+# Diagnostic weak-shake variant:
+# Keep everything else unchanged, only make shake noisier / more fragile.
+detailed_place:
+  mpvs:
+    macros:
+      shake:
+        # fewer restarts -> less stable chance of recovery
+        candidates: 4
+        # stronger perturbation -> easier to destroy good structure
+        kick_k: 6
+        kick_rounds: 2
+        # code picks uniformly from top-K scored kick actions;
+        # larger K => more randomness / weaker targeting
+        eval_topk: 16
+        # deliberately weaker repair
+        repair_steps: 1
+        repair_eval_topk: 1
+        # keep non-monotone behavior so instability can surface
+        allow_worsen: true
