@@ -1,0 +1,14 @@
+_base_: layout_L4_region_pareto_llm_mpvs_naive_shakeonly_nollm_exp.yaml
+
+# Diagnostic weak-shake variant for headroom probe.
+detailed_place:
+  mpvs:
+    macros:
+      shake:
+        candidates: 4
+        kick_k: 6
+        kick_rounds: 2
+        eval_topk: 16
+        repair_steps: 1
+        repair_eval_topk: 1
+        allow_worsen: true

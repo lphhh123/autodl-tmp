@@ -493,7 +493,10 @@ case "$EXP_ID" in
     ;;
 
   # --- New paper baselines/method (B1 & B3 unchanged) ---
-  EXP-B2-std-budgetaware) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml EXP-B2-std-budgetaware ;;
+  EXP-B2-std-budgetaware)
+    _CFG="${STD_BUDGETAWARE_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-std-budgetaware
+    ;;
   # Main method (default): BC^2-CEC + stage probes + atomic counterfactual baseline
   # Allow overriding configs per sweep without editing code:
   #   BC2CEC_CFG=... BC2CEC_RAW_CFG=... BC2CEC_NOPROBE_CFG=... RUN_TAG_PREFIX=... bash scripts/launch_B_grid_parallel.sh
@@ -520,7 +523,10 @@ case "$EXP_ID" in
   EXP-B2-naive-ruinonly)  run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_ruinonly_nollm_exp.yaml  EXP-B2-naive-ruinonly ;;
   EXP-B2-naive-blockonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_blockonly_nollm_exp.yaml EXP-B2-naive-blockonly ;;
   EXP-B2-naive-relinkonly) run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_relinkonly_nollm_exp.yaml EXP-B2-naive-relinkonly ;;
-  EXP-B2-naive-shakeonly)  run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_shakeonly_nollm_exp.yaml  EXP-B2-naive-shakeonly ;;
+  EXP-B2-naive-shakeonly)
+    _CFG="${NAIVE_SHAKEONLY_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_shakeonly_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-naive-shakeonly
+    ;;
   EXP-B2-naive-tabuonly)   run_layout_multi run_layout configs/layout_agent/layout_L4_region_pareto_llm_mpvs_naive_tabuonly_nollm_exp.yaml   EXP-B2-naive-tabuonly ;;
 
   # -------------------------
