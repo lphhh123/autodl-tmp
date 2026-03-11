@@ -9,9 +9,9 @@
 _base_: configs/vc_phase3_full_ucf101_A_main.yaml
 
 data:
-  # Train on 30% for faster iteration, but use full validation to stabilize
-  # self-ref locking and accuracy-guard decisions.
-  subset_ratio_train: 0.30
+  # Use full train + full eval to reduce late-stage drift and stabilize
+  # self-ref / guard decisions.
+  subset_ratio_train: 1.00
   subset_ratio_eval:  1.00
   subset_seed: 0
 
