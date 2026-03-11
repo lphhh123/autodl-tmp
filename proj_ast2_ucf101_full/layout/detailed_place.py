@@ -777,15 +777,55 @@ def run_detailed_place(
 
         return _eval_cap
 
-    def _run_atomic_probe(assign0: np.ndarray, eval0: Dict[str, Any], cap_calls: int) -> Tuple[float, int]:
+    def _make_capped_eval_with_stats(start_calls: int, cap_calls: int, track_keys: bool = True):
+        """Capped eval with robust accounting for stage probes.
+
+        - Budget cap is still evaluator_calls (cache-miss eval-calls), preserving eval-calls semantics.
+        - Additionally tracks:
+            * attempts: number of eval calls (hit+miss)
+            * unique_keys: number of distinct cache keys (effective sample size)
+        """
+        cap_calls = int(max(1, cap_calls))
+        start_calls = int(start_calls)
+        attempts = 0
+        uniq: set = set()
+
+        def _eval_cap(a: np.ndarray) -> Dict[str, Any]:
+            nonlocal attempts, uniq
+            attempts += 1
+            if track_keys:
+                try:
+                    sig = signature_for_assign(a)
+                    ck = _make_cache_key(sig, objective_hash)
+                    uniq.add(str(ck))
+                except Exception:
+                    pass
+            try:
+                used = int(getattr(evaluator, "evaluator_calls", 0)) - int(start_calls)
+            except Exception:
+                used = 0
+            if used >= int(cap_calls):
+                raise EvalBudgetExceeded("probe_eval_budget_exceeded")
+            return _evaluate_assign_cached(a)
+
+        def _stats() -> Dict[str, int]:
+            try:
+                u = int(len(uniq))
+            except Exception:
+                u = 0
+            return {"attempts": int(attempts), "unique_keys": int(u)}
+
+        return _eval_cap, _stats
+
+    def _run_atomic_probe(assign0: np.ndarray, eval0: Dict[str, Any], cap_calls: int) -> Tuple[float, int, Dict[str, int]]:
         """Atomic baseline probe using MacroEngine's atomic action proposals (operator-agnostic).
 
         Returns: (gain, calls_spent)
         """
         if macro_engine is None:
-            return 0.0, 0
+            return 0.0, 0, {"miss_calls": 0, "attempts": 0, "unique_keys": 0, "eff_calls": 0}
         start_calls = int(getattr(evaluator, "evaluator_calls", 0))
-        ev = _make_capped_eval(start_calls, int(cap_calls))
+        ev, _st = _make_capped_eval_with_stats(start_calls, int(cap_calls), track_keys=bool(mpvs_cache is not None))
         best_total = float(eval0.get("total_scalar", 0.0))
         best_gain = 0.0
 
@@ -826,13 +866,34 @@ def run_detailed_place(
                 best_gain = max(best_gain, float(eval0.get("total_scalar", 0.0)) - float(best_total))
 
         end_calls = int(getattr(evaluator, "evaluator_calls", 0))
-        spent = max(0, int(end_calls) - int(start_calls))
-        return float(max(0.0, best_gain)), int(spent)
+        spent_miss = max(0, int(end_calls) - int(start_calls))
+        st = {}
+        try:
+            st = dict(_st() or {})
+        except Exception:
+            st = {}
+        attempts = int(st.get("attempts", 0))
+        unique_keys = int(st.get("unique_keys", 0))
+        # Effective calls: soft-clipped attempts to avoid raw_calls=1 blowups,
+        # while not over-counting repeated hits.
+        try:
+            alpha_eff = float(_cfg_get(probe_cfg, "eff_calls_alpha", 3.0))
+        except Exception:
+            alpha_eff = 3.0
+        alpha_eff = float(max(1.0, min(10.0, alpha_eff)))
+        eff_calls = int(max(1, min(int(attempts), int(alpha_eff * max(1, unique_keys)))))
+        detail = {
+            "miss_calls": int(spent_miss),
+            "attempts": int(attempts),
+            "unique_keys": int(unique_keys),
+            "eff_calls": int(eff_calls),
+        }
+        return float(max(0.0, best_gain)), int(eff_calls), detail
 
-    def _run_macro_probe(name: str, assign0: np.ndarray, eval0: Dict[str, Any], cap_calls: int) -> Tuple[float, int, Dict[str, Any]]:
+    def _run_macro_probe(name: str, assign0: np.ndarray, eval0: Dict[str, Any], cap_calls: int) -> Tuple[float, int, Dict[str, int], Dict[str, Any]]:
         """Run one macro operator under a strict eval-call cap, without mutating MacroEngine internal state."""
         if macro_engine is None:
-            return 0.0, 0, {"name": str(name), "skipped": True}
+            return 0.0, 0, {"miss_calls": 0, "attempts": 0, "unique_keys": 0, "eff_calls": 0}, {"name": str(name), "skipped": True}
         name = str(name)
         # Snapshot mutable MacroEngine state (stats + elite archive) to keep probe side-effect free.
         st_prev = None
@@ -856,7 +917,7 @@ def run_detailed_place(
             elite_idx_prev = None
 
         start_calls = int(getattr(evaluator, "evaluator_calls", 0))
-        ev = _make_capped_eval(start_calls, int(cap_calls))
+        ev, _st = _make_capped_eval_with_stats(start_calls, int(cap_calls), track_keys=bool(mpvs_cache is not None))
 
         n_steps_probe = int(_cfg_get(probe_cfg, "macro_n_steps", int(_cfg_get(_macro_cfg0, "n_steps", 1))))
         max_eval_per_step = _cfg_get(probe_cfg, "max_eval_per_step", None)
@@ -881,8 +942,28 @@ def run_detailed_place(
             info = {"name": name, "error": repr(e)}
 
         end_calls = int(getattr(evaluator, "evaluator_calls", 0))
-        spent = max(0, int(end_calls) - int(start_calls))
+        spent_miss = max(0, int(end_calls) - int(start_calls))
         gain = max(0.0, float(eval0.get("total_scalar", 0.0)) - float(b_total))
+
+        st = {}
+        try:
+            st = dict(_st() or {})
+        except Exception:
+            st = {}
+        attempts = int(st.get("attempts", 0))
+        unique_keys = int(st.get("unique_keys", 0))
+        try:
+            alpha_eff = float(_cfg_get(probe_cfg, "eff_calls_alpha", 3.0))
+        except Exception:
+            alpha_eff = 3.0
+        alpha_eff = float(max(1.0, min(10.0, alpha_eff)))
+        eff_calls = int(max(1, min(int(attempts), int(alpha_eff * max(1, unique_keys)))))
+        detail_calls = {
+            "miss_calls": int(spent_miss),
+            "attempts": int(attempts),
+            "unique_keys": int(unique_keys),
+            "eff_calls": int(eff_calls),
+        }
 
         # Restore MacroEngine state
         try:
@@ -901,7 +982,7 @@ def run_detailed_place(
         except Exception:
             pass
 
-        return float(gain), int(spent), dict(info or {})
+        return float(gain), int(eff_calls), detail_calls, dict(info or {})
 
     def _maybe_run_stage_probes(assign0: np.ndarray, eval0: Dict[str, Any], step: int) -> None:
         if not probe_enabled:
@@ -979,7 +1060,7 @@ def run_detailed_place(
 
         stage = _probe_budget_stage(used_calls)
 
-        atomic_gain, atomic_calls = _run_atomic_probe(assign0, eval0, cap_calls=atomic_cap)
+        atomic_gain, atomic_calls_eff, atomic_calls_detail = _run_atomic_probe(assign0, eval0, cap_calls=atomic_cap)
 
         rec: Dict[str, Any] = {
             "kind": "stage_probe",
@@ -988,21 +1069,29 @@ def run_detailed_place(
             "used_calls": int(used_calls),
             "stage": str(stage),
             "atomic_gain": float(atomic_gain),
-            "atomic_calls": int(atomic_calls),
+            "atomic_calls": int(atomic_calls_eff),
+            "atomic_calls_detail": dict(atomic_calls_detail or {}),
             "ops": [],
         }
 
         for op in ops:
             if _budget_remaining() < min_rem:
                 break
-            g, c, info = _run_macro_probe(op, assign0, eval0, cap_calls=per_op_cap)
+            g, c_eff, c_detail, info = _run_macro_probe(op, assign0, eval0, cap_calls=per_op_cap)
+            calls_mode = str(_cfg_get(probe_cfg, "calls_mode", "miss") or "miss").strip().lower()
+            if calls_mode in {"eff", "effective", "attempts", "unique"}:
+                raw_calls_fb = float(max(1, int(c_eff)))
+                atomic_calls_fb = float(max(1, int(atomic_calls_eff)))
+            else:
+                raw_calls_fb = float(max(1, int((c_detail or {}).get("miss_calls", c_eff))))
+                atomic_calls_fb = float(max(1, int((atomic_calls_detail or {}).get("miss_calls", atomic_calls_eff))))
             try:
                 fb = macro_engine.apply_probe_feedback(
                     name=str(op),
                     raw_gain=float(g),
-                    raw_calls=float(max(1, c)),
+                    raw_calls=float(raw_calls_fb),
                     atomic_gain=float(atomic_gain),
-                    atomic_calls=float(max(1, atomic_calls)),
+                    atomic_calls=float(atomic_calls_fb),
                     stage=str(stage),
                     now_calls=int(used_calls),
                     probe_cfg=probe_cfg,
@@ -1010,6 +1099,7 @@ def run_detailed_place(
             except Exception:
                 fb = {"name": str(op), "error": "apply_probe_feedback_failed"}
             fb["info"] = info
+            fb["calls_detail"] = dict(c_detail or {})
             rec["ops"].append(fb)
 
         probe_events.append(rec)

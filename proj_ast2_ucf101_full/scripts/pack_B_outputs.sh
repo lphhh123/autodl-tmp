@@ -9,12 +9,18 @@ if [[ "${PACK_CLEAN_OUT_DIR}" == "1" ]]; then
   rm -rf "${PACK_OUT_DIR}"
 fi
 mkdir -p "${PACK_OUT_DIR}"
+RUN_LIST_FILE="${PACK_OUT_DIR}/_packed_run_dirs.txt"
+: > "${RUN_LIST_FILE}"
 
 # New B output root (post-migration). Can override if needed.
 B_OUT_ROOT="${B_OUT_ROOT:-outputs/B}"
 PACK_MATCH_TAG="${PACK_MATCH_TAG:-}"
 PACK_SKIP_ANALYSIS="${PACK_SKIP_ANALYSIS:-0}"
 PACK_FINAL_NAME="${PACK_FINAL_NAME:-ALL_B_PACKS.tgz}"  # final archive filename (per-sweep unique)
+PACK_MODE="${PACK_MODE:-full}"
+PACK_SUMMARY="${PACK_SUMMARY:-1}"
+PACK_SUMMARY_STORE="${PACK_SUMMARY_STORE:-1}"
+SUMMARY_STORE_DIR="${SUMMARY_STORE_DIR:-${B_OUT_ROOT:-outputs/B}/_summary_store}"
 
 # Pack only selected experiment prefixes by default (avoid packing all historical EXP-B*)
 # Groups:
@@ -151,7 +157,12 @@ for exp in "${exp_dirs[@]}"; do
 
     latest_run_dir="$(_best_run_dir "$seed" || true)"
     if [ -n "$latest_run_dir" ] && [ -d "$latest_run_dir" ]; then
+      echo "${latest_run_dir}" >> "${RUN_LIST_FILE}"
       run_id=$(basename "$latest_run_dir")
+      if [[ "${PACK_MODE}" != "full" ]]; then
+        echo "[PACK] PACK_MODE=${PACK_MODE} -> skip per-run tgz for ${seed}/${run_id}"
+        continue
+      fi
       out="${PACK_OUT_DIR}/${exp_name}_${seed_name}_${run_id}.tgz"
       if [[ "${PACK_TRACE_CSV}" != "1" ]]; then
         tar -czf "$out" \
@@ -204,18 +215,40 @@ for exp in "${exp_dirs[@]}"; do
   done
 done
 
+if [[ "${PACK_SUMMARY}" == "1" && -f scripts/summarize_B_runs_compact.py ]]; then
+  echo "[PACK] generating compact summary ..."
+  python scripts/summarize_B_runs_compact.py \
+    --run-dirs-file "${RUN_LIST_FILE}" \
+    --out-tsv "${PACK_OUT_DIR}/B_key_runs.tsv" \
+    --out-jsonl "${PACK_OUT_DIR}/B_key_runs.jsonl" \
+    --out-md "${PACK_OUT_DIR}/B_compare.md" \
+    >/dev/null 2>&1 || true
+
+  if [[ "${PACK_SUMMARY_STORE}" == "1" && -f scripts/append_B_summary_store.py ]]; then
+    mkdir -p "${SUMMARY_STORE_DIR}"
+    python scripts/append_B_summary_store.py \
+      --in-tsv "${PACK_OUT_DIR}/B_key_runs.tsv" \
+      --store-dir "${SUMMARY_STORE_DIR}" \
+      >/dev/null 2>&1 || true
+  fi
+fi
+
 # 2) scripts and configs
-tar -czf "${PACK_OUT_DIR}/B_cfg_and_scripts.tgz" \
-  --ignore-failed-read \
-  scripts/experiments_version_c.sh \
-  scripts/launch_B_grid_parallel.sh \
-  scripts/launch_B_mainline.sh \
-  scripts/pack_B_outputs.sh \
-  scripts/run_layout_agent.py \
-  layout \
-  configs/layout_agent \
-  configs/llm \
-  2>/dev/null || true
+if [[ "${PACK_MODE}" != "minimal" ]]; then
+  tar -czf "${PACK_OUT_DIR}/B_cfg_and_scripts.tgz" \
+    --ignore-failed-read \
+    scripts/experiments_version_c.sh \
+    scripts/launch_B_grid_parallel.sh \
+    scripts/launch_B_mainline.sh \
+    scripts/pack_B_outputs.sh \
+    scripts/run_layout_agent.py \
+    scripts/summarize_B_runs_compact.py \
+    scripts/append_B_summary_store.py \
+    layout \
+    configs/layout_agent \
+    configs/llm \
+    2>/dev/null || true
+fi
 
 # 2.5) analysis bundle (oracle/regret + macro utilization)
 if [[ "${PACK_SKIP_ANALYSIS}" != "1" && -f scripts/analyze_B_oracle_regret.py ]]; then
