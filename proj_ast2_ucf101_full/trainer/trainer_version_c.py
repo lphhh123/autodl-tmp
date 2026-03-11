@@ -265,6 +265,23 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
 
     freeze_now = _stablehw_freeze_ast_now(stable_state)
 
+    # Trust-region limits for channel keep target (prevents overshoot and makes recovery easier).
+    # Defaults are conservative; configs can override.
+    tr_delta_down = float(_oc_select(cfg, "stable_hw.accuracy_guard.controller.trust_region.delta_down", 0.0) or 0.0)
+    tr_delta_up = float(_oc_select(cfg, "stable_hw.accuracy_guard.controller.trust_region.delta_up", 0.02) or 0.02)
+    tr_delta_down = max(0.0, float(tr_delta_down))
+    tr_delta_up = max(0.0, float(tr_delta_up))
+
+    # Soft recovery: instead of hard force-dense, gently roll back pruning target when violating accuracy.
+    sr_enabled = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.soft_recovery.enabled", True))
+    sr_step = float(_oc_select(cfg, "stable_hw.accuracy_guard.controller.soft_recovery.rollback_step", 0.03) or 0.03)
+    sr_hold = int(_oc_select(cfg, "stable_hw.accuracy_guard.controller.soft_recovery.hold_epochs", 2) or 2)
+    sr_max = int(_oc_select(cfg, "stable_hw.accuracy_guard.controller.soft_recovery.max_rollbacks", 3) or 3)
+    sr_fallback_force_dense = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.soft_recovery.fallback_force_dense", False))
+    sr_step = max(0.0, float(sr_step))
+    sr_hold = max(0, int(sr_hold))
+    sr_max = max(0, int(sr_max))
+
     # If we just exited RECOVERY/VIOLATE, back off the virtual epoch a bit to avoid
     # immediately re-entering violation with the same (too aggressive) sparsity target.
     was_frozen = bool(stable_state.get("_ast_freeze_prev", False))
@@ -325,18 +342,62 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
 
         rho_hold = min(1.0, max(0.0, rho_prev + relax))
 
-        # v5.4+: allow forcing full dense on VIOLATE/RECOVERY (prevents irreversible accuracy collapse).
-        force_dense_on_violate = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.force_dense_on_violate", False))
         guard_mode = str(stable_state.get("guard_mode", "")).upper()
-        if force_dense_on_violate and guard_mode in ("VIOLATE", "RECOVERY"):
-            frozen["force_dense"] = True
-            frozen["rho_token"] = 1.0
-            frozen["token_temperature"] = float(temp_prev)
-            frozen["ch_keep_target"] = 1.0
-        else:
-            frozen["force_dense"] = bool(frozen.get("force_dense", False))
+        last_keep = float(stable_state.get("ch_keep_target_last", frozen.get("ch_keep_target", 1.0) if isinstance(frozen, dict) else 1.0) or 1.0)
+
+        if sr_enabled and guard_mode in ("VIOLATE", "RECOVERY"):
+            # Enter / continue soft recovery: raise ch_keep_target gradually and hold.
+            entering = (not was_frozen)
+            rollbacks = int(stable_state.get("soft_recovery_rollbacks", 0) or 0)
+            hold_until = int(stable_state.get("soft_recovery_hold_until", -1) or -1)
+            if entering:
+                rollbacks = 0
+                hold_until = int(outer) + int(sr_hold)
+
+            do_rb = bool(entering or (int(outer) >= int(hold_until) and (sr_max <= 0 or int(rollbacks) < int(sr_max))))
+            if do_rb:
+                rollbacks = int(rollbacks) + 1
+                hold_until = int(outer) + int(sr_hold)
+                desired = min(1.0, float(last_keep) + float(sr_step))
+                stable_state["soft_recovery_last_rollback_outer"] = int(outer)
+            else:
+                desired = float(last_keep)
+
+            # Trust region clamp (avoid oscillation): allow limited up/down adjustments.
+            lo = float(last_keep) - float(tr_delta_down)
+            hi = float(last_keep) + float(tr_delta_up)
+            new_keep = float(max(lo, min(hi, float(desired))))
+            new_keep = float(max(0.0, min(1.0, new_keep)))
+
+            stable_state["soft_recovery_rollbacks"] = int(rollbacks)
+            stable_state["soft_recovery_hold_until"] = int(hold_until)
+            stable_state["soft_recovery_desired"] = float(desired)
+            stable_state["ch_keep_target_last"] = float(new_keep)
+
+            frozen["force_dense"] = False
             frozen["rho_token"] = float(rho_hold)
             frozen["token_temperature"] = float(temp_prev)
+            frozen["ch_keep_target"] = float(new_keep)
+
+            # Optional last-resort safety (off by default): hard force-dense if too many rollbacks.
+            if sr_fallback_force_dense and sr_max > 0 and int(rollbacks) >= int(sr_max) and int(outer) >= int(hold_until):
+                frozen["force_dense"] = True
+                frozen["rho_token"] = 1.0
+                frozen["token_temperature"] = float(temp_prev)
+                frozen["ch_keep_target"] = 1.0
+        else:
+            # Legacy behavior: optionally hard force-dense on VIOLATE/RECOVERY.
+            force_dense_on_violate = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.force_dense_on_violate", False))
+            if force_dense_on_violate and guard_mode in ("VIOLATE", "RECOVERY"):
+                frozen["force_dense"] = True
+                frozen["rho_token"] = 1.0
+                frozen["token_temperature"] = float(temp_prev)
+                frozen["ch_keep_target"] = 1.0
+                stable_state["ch_keep_target_last"] = 1.0
+            else:
+                frozen["force_dense"] = bool(frozen.get("force_dense", False))
+                frozen["rho_token"] = float(rho_hold)
+                frozen["token_temperature"] = float(temp_prev)
 
         # Disable AST auxiliary loss during recovery to reduce extra instability.
         frozen["lambda_ast"] = 0.0
@@ -353,6 +414,22 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
     ast_sched = compute_ast_schedule_effective(cfg, ast_epoch_used)
     if not isinstance(ast_sched, dict):
         ast_sched = {"phase": "disabled"}
+
+    # Apply trust-region to ch_keep_target to prevent abrupt pruning jumps.
+    if isinstance(ast_sched, dict) and ("ch_keep_target" in ast_sched) and (ast_sched.get("ch_keep_target") is not None):
+        base_keep = float(ast_sched.get("ch_keep_target", 1.0) or 1.0)
+        prev_keep = float(stable_state.get("ch_keep_target_last", base_keep) or base_keep)
+        lo = float(prev_keep) - float(tr_delta_down)
+        hi = float(prev_keep) + float(tr_delta_up)
+        keep_eff = float(max(lo, min(hi, float(base_keep))))
+        keep_eff = float(max(0.0, min(1.0, keep_eff)))
+        ast_sched["ch_keep_target"] = float(keep_eff)
+        stable_state["ch_keep_target_last"] = float(keep_eff)
+
+    # Leaving recovery: clear soft-recovery counters (schedule backoff already handled above).
+    stable_state.pop("soft_recovery_hold_until", None)
+    stable_state.pop("soft_recovery_desired", None)
+    stable_state["soft_recovery_rollbacks"] = 0
     stable_state["ast_sched_last_applied"] = dict(ast_sched)
     stable_state["ast_sched_last_epoch"] = int(ast_epoch_used)
     stable_state["ast_sched_virtual_epoch"] = int(ast_epoch_used) + 1
@@ -2902,6 +2979,10 @@ def train_version_c(
                             "acho_lambda": float(stable_hw_state.get("acho_lambda", 0.0)) if stable_hw_enabled else 0.0,
                             "acho_action": str(stable_hw_state.get("acho_action", "")) if stable_hw_enabled else "",
                             "roi_cd_until": int(stable_hw_state.get("roi_cooldown_until", -1) or -1) if stable_hw_enabled else -1,
+                            "guard_mode": str(stable_hw_state.get("guard_mode", "")) if stable_hw_enabled else "",
+                            "freeze_schedule": bool(stable_hw_state.get("freeze_schedule", False)) if stable_hw_enabled else False,
+                            "sr_rollbacks": int(stable_hw_state.get("soft_recovery_rollbacks", 0) or 0) if stable_hw_enabled else 0,
+                            "sr_hold_until": int(stable_hw_state.get("soft_recovery_hold_until", -1) or -1) if stable_hw_enabled else -1,
                             "allow_discrete_updates": bool(allow_discrete),
                             "mapping_updated": step_mapping_updated,
                             "layout_updated": step_layout_updated,

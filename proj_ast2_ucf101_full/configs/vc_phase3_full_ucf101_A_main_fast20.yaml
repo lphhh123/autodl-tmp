@@ -50,7 +50,8 @@ ast:
 
     # MorphNet-style controlled channel pruning: target keep ratio slowly decreases.
     ch_keep_start: 1.0
-    ch_keep_end: 0.85
+    # Start conservative to avoid "pruning-start collapse"; tighten later for final runs.
+    ch_keep_end: 0.95
     ch_ramp_epochs: 20
 
   # Gentle sparsity: focus on channel only.
@@ -64,15 +65,39 @@ ast:
     ch_reg_power: 2.0
     # Avoid "every layer shrinks a bit": prune mostly in later layers.
     ch_layer_policy: "late_only"
-    ch_freeze_prefix_ratio: 0.33
+    ch_freeze_prefix_ratio: 0.50
 
   channel_prune:
     # Also hard-protect early layers in forward (common practice)
-    freeze_prefix_ratio: 0.33
+    freeze_prefix_ratio: 0.50
 
 # IMPORTANT:
 # FAST protocol uses self-ref lock at pruning boundary (no external A1 curve required).
 stable_hw:
+  # Override guard for fast-iteration stability: relax eps + add soft recovery + trust region.
+  accuracy_guard:
+    controller:
+      epsilon_drop: 0.03
+      hysteresis: 0.002
+      lock_grace_epochs: 3
+      k_enter: 2
+      k_exit: 2
+      margin_exit: 0.002
+      # Use soft recovery instead of hard force-dense.
+      force_dense_on_violate: false
+      trust_region:
+        # Max change of ch_keep_target per epoch.
+        delta_down: 0.01
+        delta_up: 0.02
+      soft_recovery:
+        enabled: true
+        # Raise target keep by this step when violating; repeat after hold if still violating.
+        rollback_step: 0.03
+        hold_epochs: 2
+        max_rollbacks: 3
+        # Keep as a last-resort safety only (default off).
+        fallback_force_dense: false
+
   locked_acc_ref:
     source: "self_val_lock"
     self_ref_window: 3

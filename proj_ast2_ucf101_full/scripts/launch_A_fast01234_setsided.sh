@@ -126,8 +126,12 @@ run_exp() {
   } >"${log_file}" 2>&1
 }
 
-run_exp "${EXP_DENSE}" "${GPU0}" "${LOG_DIR}/A_fast01234_g0.log" &
-wait_for_baseline
+if [[ "${NO_BASELINE}" != "1" ]]; then
+  run_exp "${EXP_DENSE}" "${GPU0}" "${LOG_DIR}/A_fast01234_g0.log" &
+  wait_for_baseline
+else
+  echo "[OK] NO_BASELINE=1: skip baseline run/wait"
+fi
 run_exp "${EXP_PRUNE}" "${GPU1}" "${LOG_DIR}/A_fast01234_g1.log" &
 run_exp "${EXP_JOINT}" "${GPU2}" "${LOG_DIR}/A_fast01234_g2.log" &
 run_exp "${EXP_ACHO}" "${GPU3}" "${LOG_DIR}/A_fast01234_g3.log" &
