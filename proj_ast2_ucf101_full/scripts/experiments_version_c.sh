@@ -402,6 +402,9 @@ case "$EXP_ID" in
   EXP-A4-fast)
     run_vc configs/vc_phase3_full_ucf101_A_main_fast20.yaml "$(odir EXP-A4-fast)"
     ;;
+  EXP-A4-roi-fast)
+    run_vc configs/vc_phase3_full_ucf101_A_roi_fast20.yaml "$(odir EXP-A4-roi-fast)"
+    ;;
   EXP-A4-acho-fast)
     run_vc configs/vc_phase3_full_ucf101_A_acho_fast20.yaml "$(odir EXP-A4-acho-fast)"
     ;;
@@ -410,6 +413,7 @@ case "$EXP_ID" in
     ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
+  EXP-A4-roi) run_vc configs/vc_phase3_full_ucf101_A_roi.yaml "$(odir EXP-A4-roi)" ;;
   # A4 + ACHO (same lambda_hw_max as A4 for fair comparison)
   EXP-A4-acho) run_vc configs/vc_phase3_full_ucf101_A_acho.yaml "$(odir EXP-A4-acho)" ;;
   # A4 + ACHO + ROI-Commit
