@@ -89,6 +89,7 @@ echo "[B-grid] RUN_CTL_EVIDENCE=${RUN_CTL_EVIDENCE}"
 PROBE_CALLS_MODE="${PROBE_CALLS_MODE:-}"
 PROBE_CALLS_MODES="${PROBE_CALLS_MODES:-}"
 EFF_CALLS_ALPHA_OVERRIDE="${EFF_CALLS_ALPHA_OVERRIDE:-}"
+VARIANT_TAG="${VARIANT_TAG:-}"
 
 if [[ -n "${PROBE_CALLS_MODES}" ]]; then
   echo "[B-grid] PROBE_CALLS_MODES=${PROBE_CALLS_MODES} (sweeping calls_mode)"
@@ -157,6 +158,7 @@ emit_task() {
   local budget="$4"
   local wpair="$5"   # therm,comm
   local cmode="${6:-}"  # miss/eff/empty
+  local vtag="${7:-}"   # optional variant tag
   local wt="${wpair%,*}"
   local wc="${wpair#*,}"
   local tag="b${budget}_wT$(fmt_tag "${wt}")_wC$(fmt_tag "${wc}")"
@@ -170,12 +172,24 @@ emit_task() {
     local cm="$(printf '%s' "${cmode}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
     tag="${tag}_cm${cm}"
   fi
+  if [[ -n "${vtag}" ]]; then
+    local vv
+    vv="$(printf '%s' "${vtag}" | tr -c 'A-Za-z0-9_' '_')"
+    tag="${tag}_${vv}"
+  fi
   # We pass both: SCALAR_WEIGHTS_OVERRIDE for convenience, and tag for unique out dirs.
   local env_prefix=""
   if [[ -n "${cmode}" ]]; then
     env_prefix="PROBE_CALLS_MODE='${cmode}'"
     if [[ -n "${EFF_CALLS_ALPHA_OVERRIDE}" ]]; then
       env_prefix="${env_prefix} EFF_CALLS_ALPHA_OVERRIDE='${EFF_CALLS_ALPHA_OVERRIDE}'"
+    fi
+  fi
+  if [[ -n "${vtag}" ]]; then
+    if [[ -n "${env_prefix}" ]]; then
+      env_prefix="${env_prefix} VARIANT_TAG='${vtag}'"
+    else
+      env_prefix="VARIANT_TAG='${vtag}'"
     fi
   fi
   echo "${env_prefix} RUN_TAG='${tag}' INSTANCE='${inst}' BUDGET='${budget}' SCALAR_WEIGHTS_OVERRIDE='${wt},${wc}' bash scripts/experiments_version_c.sh '${exp}' '${seed}'" >> "${tmp_cmds}"
@@ -209,7 +223,7 @@ for budget in ${BUDGETS}; do
         fi
         for seed in ${seeds_for_exp}; do
           for cmode in "${_cm_list[@]}"; do
-            emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}"
+            emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}" "${VARIANT_TAG}"
           done
         done
       done
@@ -225,7 +239,7 @@ if [[ "${RUN_ABLATIONS}" == "1" ]]; then
         for inst in ${INSTANCES}; do
           for exp in ${EXPS_ABL}; do
             for cmode in "${_cm_list[@]}"; do
-              emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}"
+              emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}" "${VARIANT_TAG}"
             done
           done
         done
@@ -242,7 +256,7 @@ if [[ "${RUN_HEADROOM}" == "1" ]]; then
         for inst in ${INSTANCES_HEADROOM}; do
           for exp in ${EXPS_HEADROOM}; do
             for cmode in "${_cm_list[@]}"; do
-              emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}"
+              emit_task "${exp}" "${seed}" "${inst}" "${budget}" "${wpair}" "${cmode}" "${VARIANT_TAG}"
             done
           done
         done

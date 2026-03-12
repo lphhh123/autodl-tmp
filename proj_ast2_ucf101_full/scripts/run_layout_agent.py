@@ -1173,63 +1173,160 @@ def main():
         except Exception:
             pass
 
-    # ---- Probe CF call-accounting override (sweep axis) ----
+    # ------------------------------------------------------------------
+    # Variant / sweep overrides (B grid)
+    #
+    # IMPORTANT:
+    #   The canonical MPVS probe config path is:
+    #     detailed_place.mpvs.macros.probe.*
+    #   (NOT cfg.mpvs.probe.*).
+    #
     # Supported env:
-    #   PROBE_CALLS_MODE="miss" | "eff"   (eff also accepts: effective/attempts/unique)
-    #   EFF_CALLS_ALPHA_OVERRIDE="3.0"    (alpha in eff_calls=min(attempts, alpha*unique_keys))
-    probe_calls_mode = os.environ.get("PROBE_CALLS_MODE", "").strip().lower()
-    eff_alpha_env = os.environ.get("EFF_CALLS_ALPHA_OVERRIDE", "").strip()
+    #   - VARIANT_TAG="V_E{0-3}_C{0-1}_D{0-3}_S{0-2}_K{0-1}_M{0-1}"
+    #   - PROBE_CALLS_MODE="miss"|"eff"  (override M)
+    #   - EFF_CALLS_ALPHA_OVERRIDE="3.0"
+    #
+    # Override errors MUST be fatal to avoid silent "tag changed but cfg didn't".
+    # ------------------------------------------------------------------
 
-    if probe_calls_mode:
+    def _ensure_overrides_list() -> list:
+        ov0 = get_nested(cfg, "_contract.overrides", None)
+        if ov0 is None:
+            try:
+                cfg._contract.overrides = []
+            except Exception:
+                pass
+            ov0 = get_nested(cfg, "_contract.overrides", [])
+        return list(ov0 or [])
+
+    def _apply_override(path: str, value: Any, reason: str) -> None:
+        old = get_nested(cfg, path, None)
         try:
-            if probe_calls_mode in {"eff", "effective", "attempts", "unique", "uniq"}:
-                eff_mode = "eff"
-            else:
-                eff_mode = "miss"
+            OmegaConf.update(cfg, path, value, merge=True)
+        except Exception as e:
+            raise RuntimeError(f"[v5.4][EnvOverrideError] failed to set '{path}' to '{value}' ({reason}): {e}") from e
+        ov = _ensure_overrides_list()
+        ov.append({"path": str(path), "requested": old, "effective": value, "reason": str(reason)})
+        cfg._contract.overrides = ov
 
-            if not hasattr(cfg, "mpvs") or cfg.mpvs is None:
-                cfg.mpvs = OmegaConf.create({})
-            if not hasattr(cfg.mpvs, "probe") or cfg.mpvs.probe is None:
-                cfg.mpvs.probe = OmegaConf.create({})
+    def _parse_variant_tag(tag: str) -> dict:
+        s = str(tag or "").strip()
+        m = re.fullmatch(r"V_E([0-3])_C([0-1])_D([0-3])_S([0-2])_K([0-1])_M([0-1])", s)
+        if not m:
+            return {}
+        return {"E": int(m.group(1)), "C": int(m.group(2)), "D": int(m.group(3)), "S": int(m.group(4)), "K": int(m.group(5)), "M": int(m.group(6))}
 
-            old_mode = get_nested(cfg, "mpvs.probe.calls_mode", None)
-            cfg.mpvs.probe.calls_mode = str(eff_mode)
+    def _apply_axes(axes: dict, *, reason: str) -> None:
+        P_PROBE = "detailed_place.mpvs.macros.probe"
+        P_MACRO = "detailed_place.mpvs.macros"
+        P_DEC = "detailed_place.mpvs.macros.decision"
+        P_CEC = "detailed_place.mpvs.controller.cec"
+        P_AOS = "detailed_place.mpvs.controller.cec.aos"
+        P_SAFE = "detailed_place.mpvs.controller.cec.safety"
 
-            ov = list(get_nested(cfg, "_contract.overrides", []) or [])
-            ov.append(
-                {
-                    "path": "mpvs.probe.calls_mode",
-                    "requested": old_mode,
-                    "effective": str(eff_mode),
-                    "reason": "env:PROBE_CALLS_MODE",
-                }
-            )
-            cfg._contract.overrides = ov
-        except Exception:
-            pass
+        e = int(axes.get("E", 0)); c = int(axes.get("C", 0)); d = int(axes.get("D", 0))
+        s = int(axes.get("S", 0)); k = int(axes.get("K", 0)); m = int(axes.get("M", 0))
 
+        _apply_override(f"{P_PROBE}.calls_mode", "eff" if m == 1 else "miss", reason + ":M")
+
+        if e == 0:
+            _apply_override(f"{P_PROBE}.weight_metric", "raw", reason + ":E0")
+            _apply_override(f"{P_PROBE}.cf_discount", 0.0, reason + ":E0")
+            _apply_override(f"{P_PROBE}.min_atomic_calls_for_cf", 10**9, reason + ":E0")
+            _apply_override(f"{P_PROBE}.cf_reliability_tau", 0.0, reason + ":E0")
+            _apply_override(f"{P_PROBE}.shrinkage.enabled", False, reason + ":E0")
+        elif e == 1:
+            _apply_override(f"{P_PROBE}.weight_metric", "cf", reason + ":E1")
+            _apply_override(f"{P_PROBE}.cf_discount", 1.0, reason + ":E1")
+            _apply_override(f"{P_PROBE}.min_atomic_calls_for_cf", 0, reason + ":E1")
+            _apply_override(f"{P_PROBE}.cf_cap_mult", 2.5, reason + ":E1")
+            _apply_override(f"{P_PROBE}.cf_reliability_tau", 0.0, reason + ":E1")
+            _apply_override(f"{P_PROBE}.cf_one_sided_update", False, reason + ":E1")
+            _apply_override(f"{P_PROBE}.shrinkage.enabled", False, reason + ":E1")
+        elif e == 2:
+            _apply_override(f"{P_PROBE}.weight_metric", "cf", reason + ":E2")
+            _apply_override(f"{P_PROBE}.cf_discount", 0.65, reason + ":E2")
+            _apply_override(f"{P_PROBE}.min_atomic_calls_for_cf", 50, reason + ":E2")
+            _apply_override(f"{P_PROBE}.cf_cap_mult", 1.5, reason + ":E2")
+            _apply_override(f"{P_PROBE}.cf_reliability_tau", 800.0, reason + ":E2")
+            _apply_override(f"{P_PROBE}.cf_one_sided_update", True, reason + ":E2")
+            _apply_override(f"{P_PROBE}.cf_one_sided_penalty_mode", "raw", reason + ":E2")
+            _apply_override(f"{P_PROBE}.shrinkage.enabled", False, reason + ":E2")
+        else:
+            _apply_override(f"{P_PROBE}.weight_metric", "cf", reason + ":E3")
+            _apply_override(f"{P_PROBE}.cf_discount", 0.65, reason + ":E3")
+            _apply_override(f"{P_PROBE}.min_atomic_calls_for_cf", 50, reason + ":E3")
+            _apply_override(f"{P_PROBE}.cf_cap_mult", 1.5, reason + ":E3")
+            _apply_override(f"{P_PROBE}.cf_reliability_tau", 800.0, reason + ":E3")
+            _apply_override(f"{P_PROBE}.cf_one_sided_update", True, reason + ":E3")
+            _apply_override(f"{P_PROBE}.cf_one_sided_penalty_mode", "raw", reason + ":E3")
+            _apply_override(f"{P_PROBE}.shrinkage.enabled", True, reason + ":E3")
+            _apply_override(f"{P_PROBE}.shrinkage.lambda_calls", 300.0, reason + ":E3")
+            _apply_override(f"{P_PROBE}.shrinkage.prior_alpha", 0.08, reason + ":E3")
+            _apply_override(f"{P_PROBE}.shrinkage.prior_mode", "global", reason + ":E3")
+
+        if c == 0:
+            _apply_override(f"{P_AOS}.probe_feed.enabled", False, reason + ":C0")
+        else:
+            _apply_override(f"{P_AOS}.probe_feed.enabled", True, reason + ":C1")
+            _apply_override(f"{P_AOS}.probe_feed.gain_scale", 0.25, reason + ":C1")
+            _apply_override(f"{P_AOS}.probe_feed.use_margin", "heur", reason + ":C1")
+            _apply_override(f"{P_AOS}.probe_feed.require_pass_heur", True, reason + ":C1")
+            _apply_override(f"{P_AOS}.probe_feed.calls_cap", 1200, reason + ":C1")
+
+        if d == 0:
+            _apply_override(f"{P_DEC}.mode", "mix", reason + ":D0")
+            _apply_override(f"{P_MACRO}.max_macros", 3, reason + ":D0")
+        elif d == 1:
+            _apply_override(f"{P_DEC}.mode", "top1_diag", reason + ":D1")
+            _apply_override(f"{P_MACRO}.max_macros", 1, reason + ":D1")
+        elif d == 2:
+            _apply_override(f"{P_DEC}.mode", "burst", reason + ":D2")
+            _apply_override(f"{P_DEC}.burst_calls_frac", 0.06, reason + ":D2")
+            _apply_override(f"{P_DEC}.burst_calls_min", 1200, reason + ":D2")
+            _apply_override(f"{P_DEC}.burst_calls_late_cap", 2400, reason + ":D2")
+        else:
+            _apply_override(f"{P_DEC}.mode", "racing_burst", reason + ":D3")
+            _apply_override(f"{P_DEC}.racing_rounds", 3, reason + ":D3")
+            _apply_override(f"{P_DEC}.racing_keep_ratio", 0.5, reason + ":D3")
+            _apply_override(f"{P_DEC}.burst_calls_frac", 0.06, reason + ":D3")
+            _apply_override(f"{P_DEC}.burst_calls_min", 1200, reason + ":D3")
+            _apply_override(f"{P_DEC}.burst_calls_late_cap", 2400, reason + ":D3")
+
+        if s == 0:
+            _apply_override(f"{P_SAFE}.mode", "none", reason + ":S0")
+        elif s == 1:
+            _apply_override(f"{P_SAFE}.mode", "conservative", reason + ":S1")
+        else:
+            _apply_override(f"{P_SAFE}.mode", "conservative_dgate", reason + ":S2")
+        _apply_override(f"{P_SAFE}.lcb_z", 1.0, reason + ":S")
+        _apply_override(f"{P_SAFE}.min_samples", 3, reason + ":S")
+        _apply_override(f"{P_SAFE}.lcb_floor", 0.0, reason + ":S")
+
+        if k == 0:
+            _apply_override(f"{P_CEC}.credit_metric", "gain_cf", reason + ":K0")
+            _apply_override(f"{P_CEC}.counterfactual_credit", True, reason + ":K0")
+        else:
+            _apply_override(f"{P_CEC}.credit_metric", "gain_long", reason + ":K1")
+            _apply_override(f"{P_CEC}.counterfactual_credit", False, reason + ":K1")
+
+    variant_tag = os.environ.get("VARIANT_TAG", "").strip()
+    axes = _parse_variant_tag(variant_tag) if variant_tag else {}
+    if axes:
+        _apply_axes(axes, reason=f"env:VARIANT_TAG:{variant_tag}")
+
+    probe_calls_mode = os.environ.get("PROBE_CALLS_MODE", "").strip().lower()
+    if probe_calls_mode:
+        eff_mode = "eff" if probe_calls_mode in {"eff", "effective", "attempts", "unique", "uniq"} else "miss"
+        _apply_override("detailed_place.mpvs.macros.probe.calls_mode", str(eff_mode), "env:PROBE_CALLS_MODE")
+
+    eff_alpha_env = os.environ.get("EFF_CALLS_ALPHA_OVERRIDE", "").strip()
     if eff_alpha_env:
         try:
             a = float(eff_alpha_env)
-            if not hasattr(cfg, "mpvs") or cfg.mpvs is None:
-                cfg.mpvs = OmegaConf.create({})
-            if not hasattr(cfg.mpvs, "probe") or cfg.mpvs.probe is None:
-                cfg.mpvs.probe = OmegaConf.create({})
-            old_a = get_nested(cfg, "mpvs.probe.eff_calls_alpha", None)
-            cfg.mpvs.probe.eff_calls_alpha = float(a)
-
-            ov = list(get_nested(cfg, "_contract.overrides", []) or [])
-            ov.append(
-                {
-                    "path": "mpvs.probe.eff_calls_alpha",
-                    "requested": old_a,
-                    "effective": float(a),
-                    "reason": "env:EFF_CALLS_ALPHA_OVERRIDE",
-                }
-            )
-            cfg._contract.overrides = ov
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"[v5.4][EnvOverrideError] invalid EFF_CALLS_ALPHA_OVERRIDE='{eff_alpha_env}': {e}") from e
+        _apply_override("detailed_place.mpvs.macros.probe.eff_calls_alpha", float(a), "env:EFF_CALLS_ALPHA_OVERRIDE")
 
     # NOW seal + fill defaults (seal_digest matches final cfg)
     cfg = validate_and_fill_defaults(cfg, mode="layout")
