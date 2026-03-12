@@ -100,6 +100,47 @@ class _CallWindowAgg:
 
 
 @dataclass
+class _BurstState:
+    family: str = ""
+    until_calls: int = 0
+    chosen_calls: int = 0
+    stage: str = ""
+    reason: str = ""
+
+
+@dataclass
+class _Moments:
+    n: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+
+    def add(self, x: float) -> None:
+        x = float(x)
+        self.n += 1
+        if self.n <= 1:
+            self.mean = float(x)
+            self.m2 = 0.0
+            return
+        d = float(x) - float(self.mean)
+        self.mean += d / float(self.n)
+        d2 = float(x) - float(self.mean)
+        self.m2 += d * d2
+
+    @property
+    def var(self) -> float:
+        if self.n <= 1:
+            return 0.0
+        return float(self.m2) / float(max(1, self.n - 1))
+
+    def lcb(self, z: float) -> float:
+        if self.n <= 1:
+            return float(self.mean)
+        v = float(max(0.0, self.var))
+        se = math.sqrt(v / float(max(1, self.n)))
+        return float(self.mean) - float(z) * float(se)
+
+
+@dataclass
 class _HeurAgg:
     gain: float = 0.0
     calls: float = 0.0
@@ -386,6 +427,37 @@ class MPVSController:
         self._real_last: Dict[Tuple[str, str], Tuple[int, float]] = {}
         self._aos_tickets: List[_AosTicket] = []
 
+        self._burst = _BurstState()
+
+        safe = (cec.get("safety") or {}) if isinstance(cec, dict) else {}
+        self.safety_mode = str(safe.get("mode", "none") or "none").strip().lower()
+        if self.safety_mode not in {"none", "conservative", "conservative_dgate"}:
+            self.safety_mode = "none"
+        try:
+            self.safety_lcb_z = float(safe.get("lcb_z", 1.0))
+        except Exception:
+            self.safety_lcb_z = 1.0
+        self.safety_lcb_z = float(max(0.0, min(3.0, self.safety_lcb_z)))
+        self.safety_min_samples = int(max(1, min(50, int(safe.get("min_samples", 3)))))
+        try:
+            self.safety_lcb_floor = float(safe.get("lcb_floor", 0.0))
+        except Exception:
+            self.safety_lcb_floor = 0.0
+        self._probe_mom: Dict[Tuple[str, str], _Moments] = {}
+
+        pf = (aos.get("probe_feed") or {}) if isinstance(aos, dict) else {}
+        self.aos_probe_feed_enabled = bool(pf.get("enabled", False))
+        try:
+            self.aos_probe_gain_scale = float(pf.get("gain_scale", 0.25))
+        except Exception:
+            self.aos_probe_gain_scale = 0.25
+        self.aos_probe_gain_scale = float(max(0.0, min(2.0, self.aos_probe_gain_scale)))
+        self.aos_probe_use_margin = str(pf.get("use_margin", "heur") or "heur").strip().lower()
+        if self.aos_probe_use_margin not in {"heur", "cur"}:
+            self.aos_probe_use_margin = "heur"
+        self.aos_probe_require_pass_heur = bool(pf.get("require_pass_heur", True))
+        self.aos_probe_calls_cap = int(max(50, min(20000, int(pf.get("calls_cap", 1200)))))
+
         # Debounce for on_progress to avoid double-processing at the same used_calls
         self._last_progress_calls = -1
         # v2.6: realized (diminishing-returns-aware) progress rate of best_total_seen, per ctx_key.
@@ -670,6 +742,19 @@ class MPVSController:
         if stage not in {"early", "mid", "late"}:
             return fams
 
+        try:
+            used_calls = int(ctx0.get("used_calls", -1))
+        except Exception:
+            used_calls = -1
+        if used_calls >= 0:
+            bf = self.get_burst_family(int(used_calls))
+            if bf and bf in fams:
+                return [bf]
+
+        fams = self.filter_families_conservative(fams, stage)
+        if len(fams) <= 1:
+            return fams
+
         t = int(self._aos_stage_total_n.get(stage, 0))
         scored: List[Tuple[float, int, str]] = []
         for i, f in enumerate(fams):
@@ -780,6 +865,96 @@ class MPVSController:
             asg.probe_margin_heur = (1.0 - ew) * float(asg.probe_margin_heur) + ew * float(margin_heur)
             asg.probe_margin_cur = (1.0 - ew) * float(asg.probe_margin_cur) + ew * float(margin_cur)
             asg.probe_calls = (1.0 - ew) * float(asg.probe_calls) + ew * float(max(1, int(calls)))
+
+        try:
+            denom = float(max(1, int(calls)))
+            u = float(margin_heur) / denom
+            key = (str(stage or ""), str(family or ""))
+            if key[0] in {"early", "mid", "late"} and key[1]:
+                mm = self._probe_mom.get(key)
+                if mm is None:
+                    mm = _Moments()
+                    self._probe_mom[key] = mm
+                mm.add(float(u))
+        except Exception:
+            pass
+
+    def burst_active(self, used_calls: int) -> bool:
+        try:
+            return bool(self._burst.family) and int(used_calls) < int(self._burst.until_calls)
+        except Exception:
+            return False
+
+    def get_burst_family(self, used_calls: int) -> str:
+        if self.burst_active(int(used_calls)):
+            return str(self._burst.family or "")
+        return ""
+
+    def set_burst_family(self, family: str, used_calls: int, burst_calls: int, *, stage: str = "", reason: str = "") -> None:
+        fam = str(family or "").strip()
+        if not fam:
+            return
+        used_calls = int(max(0, int(used_calls)))
+        burst_calls = int(max(50, int(burst_calls)))
+        self._burst.family = fam
+        self._burst.chosen_calls = used_calls
+        self._burst.until_calls = used_calls + burst_calls
+        self._burst.stage = str(stage or "")
+        self._burst.reason = str(reason or "")
+
+    def _conservative_keep(self, family: str, stage: str) -> bool:
+        if str(self.safety_mode) not in {"conservative", "conservative_dgate"}:
+            return True
+        st = str(stage or "").strip().lower()
+        fam = str(family or "").strip()
+        if st not in {"early", "mid", "late"} or not fam:
+            return True
+        mm = self._probe_mom.get((st, fam))
+        if mm is None or int(mm.n) < int(self.safety_min_samples):
+            return True
+        lcb = float(mm.lcb(float(self.safety_lcb_z)))
+        return bool(lcb >= float(self.safety_lcb_floor))
+
+    def filter_families_conservative(self, families: List[str], stage: str) -> List[str]:
+        fams = [str(x or "").strip() for x in (families or []) if str(x or "").strip()]
+        if not fams:
+            return []
+        if str(self.safety_mode) not in {"conservative", "conservative_dgate"}:
+            return fams
+        kept = [f for f in fams if self._conservative_keep(f, stage)]
+        return kept if kept else fams
+
+    def observe_probe_credit_to_aos(
+        self,
+        *,
+        family: str,
+        stage: str,
+        used_calls: int,
+        margin_heur: float,
+        margin_cur: float,
+        calls: int,
+        pass_heur: bool = True,
+        source: str = "probe",
+    ) -> None:
+        _ = source
+        if not bool(self.aos_enabled) or not bool(self.aos_probe_feed_enabled):
+            return
+        if self.aos_probe_require_pass_heur and not bool(pass_heur):
+            return
+        st = str(stage or "").strip().lower()
+        fam = str(family or "").strip()
+        if st not in {"early", "mid", "late"} or not fam:
+            return
+        u = int(max(0, int(used_calls)))
+        c = int(min(max(1, int(calls)), int(self.aos_probe_calls_cap)))
+        g_raw = float(margin_heur) if self.aos_probe_use_margin == "heur" else float(margin_cur)
+        g = float(max(0.0, float(g_raw)))
+        g = float(self.aos_probe_gain_scale) * float(g)
+        w = self._aos_fam_win.get((st, fam))
+        if w is None:
+            w = _CallWindowAgg(int(self.aos_window_calls))
+            self._aos_fam_win[(st, fam)] = w
+        w.add(now_calls=u, gain=float(g), calls=int(c))
 
     def _probe_utility_from(self, margin_heur: float, calls: float) -> float:
         return float(margin_heur) - float(self.heur_agg.rate) * float(calls)

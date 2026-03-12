@@ -707,15 +707,25 @@ def run_detailed_place(
     probe_fired: set = set()
     probe_events: List[Dict[str, Any]] = []
 
+    decision_cfg: Dict[str, Any] = {}
+    decision_mode: str = "mix"
+
     if mpvs_enabled:
         try:
             _macro_cfg0 = _cfg_get(mpvs_cfg, "macros", {}) or {}
             _probe_cfg0 = _cfg_get(_macro_cfg0, "probe", {}) or {}
             probe_cfg = _cfg_to_dict(_probe_cfg0) if _probe_cfg0 else {}
             probe_enabled = bool(_cfg_get(probe_cfg, "enabled", False)) and (macro_engine is not None) and (total_eval_budget > 0)
+            _dec_cfg0 = _cfg_get(_macro_cfg0, "decision", {}) or {}
+            decision_cfg = _cfg_to_dict(_dec_cfg0) if _dec_cfg0 else {}
+            decision_mode = str(_cfg_get(decision_cfg, "mode", "mix") or "mix").strip().lower()
+            if decision_mode not in {"mix", "top1_diag", "burst", "racing_burst"}:
+                decision_mode = "mix"
         except Exception:
             probe_cfg = {}
             probe_enabled = False
+            decision_cfg = {}
+            decision_mode = "mix"
 
     if probe_enabled:
         try:
@@ -1003,17 +1013,11 @@ def run_detailed_place(
         if _budget_remaining() < min_rem:
             return
 
-        # ----------------------------
-        # Budget-aware probe budgets (fraction-of-total support)
-        # Priority: *_call_budget_frac (if >0) -> *_call_budget -> auto split
-        # ----------------------------
         def _cap_from_cfg(key_calls: str, key_frac: str, default_calls: int) -> int:
-            # clip bounds
             min_cap = int(_cfg_get(probe_cfg, "min_probe_calls", 50))
             max_cap = int(_cfg_get(probe_cfg, "max_probe_calls", int(total_eval_budget)))
             min_cap = max(1, min_cap)
             max_cap = max(min_cap, max_cap)
-
             frac = _cfg_get(probe_cfg, key_frac, 0.0)
             try:
                 frac = float(frac)
@@ -1029,8 +1033,6 @@ def run_detailed_place(
         stage_cap = _cap_from_cfg("stage_call_budget", "stage_call_budget_frac", 1200)
         per_op_cap = int(_cfg_get(probe_cfg, "per_op_call_budget", 0))
         atomic_cap = int(_cfg_get(probe_cfg, "atomic_call_budget", 0))
-        # Allow explicit frac caps for atomic/per-op; if set, override absolute values.
-        # (0 => keep existing absolute value / auto split)
         try:
             _a_frac = float(_cfg_get(probe_cfg, "atomic_call_budget_frac", 0.0))
         except Exception:
@@ -1049,8 +1051,6 @@ def run_detailed_place(
         if not ops:
             return
 
-        # Auto-split remaining stage cap if per-op/atomic caps are not explicitly provided.
-        # Keep them >= min_probe_calls to avoid "no-signal" probes.
         min_cap = int(_cfg_get(probe_cfg, "min_probe_calls", 50))
         min_cap = max(1, min_cap)
         if atomic_cap <= 0:
@@ -1059,7 +1059,6 @@ def run_detailed_place(
             per_op_cap = max(min_cap, stage_cap // max(1, (len(ops) + 1)))
 
         stage = _probe_budget_stage(used_calls)
-
         atomic_gain, atomic_calls_eff, atomic_calls_detail = _run_atomic_probe(assign0, eval0, cap_calls=atomic_cap)
 
         rec: Dict[str, Any] = {
@@ -1071,9 +1070,11 @@ def run_detailed_place(
             "atomic_gain": float(atomic_gain),
             "atomic_calls": int(atomic_calls_eff),
             "atomic_calls_detail": dict(atomic_calls_detail or {}),
+            "decision_mode": str(decision_mode),
             "ops": [],
         }
 
+        op_rows: List[Dict[str, Any]] = []
         for op in ops:
             if _budget_remaining() < min_rem:
                 break
@@ -1085,6 +1086,19 @@ def run_detailed_place(
             else:
                 raw_calls_fb = float(max(1, int((c_detail or {}).get("miss_calls", c_eff))))
                 atomic_calls_fb = float(max(1, int((atomic_calls_detail or {}).get("miss_calls", atomic_calls_eff))))
+            margin_heur = float(g) - float(atomic_gain)
+            margin_cur = float(g)
+            row: Dict[str, Any] = {
+                "name": str(op),
+                "gain": float(g),
+                "calls_eff": int(c_eff),
+                "calls_detail": dict(c_detail or {}),
+                "info": info,
+                "margin_heur": float(margin_heur),
+                "margin_cur": float(margin_cur),
+                "pass_heur": bool(margin_heur > 0.0),
+                "pass_cur": bool(margin_cur > 0.0),
+            }
             try:
                 fb = macro_engine.apply_probe_feedback(
                     name=str(op),
@@ -1098,8 +1112,89 @@ def run_detailed_place(
                 )
             except Exception:
                 fb = {"name": str(op), "error": "apply_probe_feedback_failed"}
-            fb["info"] = info
-            fb["calls_detail"] = dict(c_detail or {})
+            row["feedback"] = fb
+            op_rows.append(row)
+
+            if mpvs_ctrl is not None:
+                try:
+                    mpvs_ctrl.observe_probe(
+                        comp="macro",
+                        family=str(op),
+                        ctx_key=f"{stage}|stage_probe",
+                        margin_heur=float(margin_heur),
+                        margin_cur=float(margin_cur),
+                        calls=int(max(1, c_eff)),
+                        pass_heur=bool(margin_heur > 0.0),
+                        pass_cur=bool(margin_cur > 0.0),
+                    )
+                    mpvs_ctrl.observe_probe_credit_to_aos(
+                        family=str(op),
+                        stage=str(stage),
+                        used_calls=int(used_calls),
+                        margin_heur=float(margin_heur),
+                        margin_cur=float(margin_cur),
+                        calls=int(max(1, c_eff)),
+                        pass_heur=bool(margin_heur > 0.0),
+                        source="stage_probe",
+                    )
+                except Exception:
+                    pass
+
+        if not op_rows:
+            return
+
+        def _pick_top1(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not rows:
+                return None
+            return sorted(rows, key=lambda x: float(x.get("margin_heur", 0.0)), reverse=True)[0]
+
+        chosen = None
+        dmode = str(decision_mode)
+        if dmode == "top1_diag":
+            chosen = _pick_top1(op_rows)
+        elif dmode == "racing_burst":
+            rr = int(max(1, int(_cfg_get(decision_cfg, "racing_rounds", 3))))
+            keep_ratio = float(_cfg_get(decision_cfg, "racing_keep_ratio", 0.5))
+            keep_ratio = float(max(0.2, min(0.9, keep_ratio)))
+            alive = list(op_rows)
+            for _ in range(rr):
+                if len(alive) <= 1:
+                    break
+                alive = sorted(alive, key=lambda x: float(x.get("margin_heur", 0.0)), reverse=True)
+                k = max(1, int(round(len(alive) * keep_ratio)))
+                alive = alive[:k]
+            chosen = _pick_top1(alive)
+        else:
+            chosen = _pick_top1(op_rows)
+
+        if chosen is not None:
+            rec["decision_top1"] = str(chosen.get("name", ""))
+            if dmode in {"burst", "racing_burst"} and mpvs_ctrl is not None:
+                try:
+                    burst_frac = float(_cfg_get(decision_cfg, "burst_calls_frac", 0.06))
+                except Exception:
+                    burst_frac = 0.06
+                burst_min = int(_cfg_get(decision_cfg, "burst_calls_min", 1200))
+                burst_late_cap = int(_cfg_get(decision_cfg, "burst_calls_late_cap", 2400))
+                b_calls = max(burst_min, int(round(float(total_eval_budget) * float(max(0.0, burst_frac)))))
+                if str(stage) == "late":
+                    b_calls = min(b_calls, burst_late_cap)
+                if str(getattr(mpvs_ctrl, "safety_mode", "")) == "conservative_dgate":
+                    allowed = mpvs_ctrl.filter_families_conservative([str(chosen.get("name", ""))], str(stage))
+                    if allowed:
+                        mpvs_ctrl.set_burst_family(str(chosen.get("name", "")), int(used_calls), int(b_calls), stage=str(stage), reason=str(dmode))
+                        rec["burst_set"] = str(chosen.get("name", ""))
+                    else:
+                        rec["burst_set"] = ""
+                        rec["burst_blocked"] = 1
+                else:
+                    mpvs_ctrl.set_burst_family(str(chosen.get("name", "")), int(used_calls), int(b_calls), stage=str(stage), reason=str(dmode))
+                    rec["burst_set"] = str(chosen.get("name", ""))
+
+        for row in op_rows:
+            fb = dict(row.get("feedback", {}) or {})
+            fb["info"] = row.get("info", {})
+            fb["calls_detail"] = row.get("calls_detail", {})
             rec["ops"].append(fb)
 
         probe_events.append(rec)
@@ -2019,6 +2114,11 @@ def run_detailed_place(
                                 )
                             except Exception:
                                 pass
+                        try:
+                            step_ctx["used_calls"] = int(eval_calls_cum)
+                            step_ctx["budget_total"] = int(budget_total_calls)
+                        except Exception:
+                            pass
 
                         explore_cfg = _cfg_get(mpvs_cfg, "explore", {}) or {}
                         explore_every = int(_cfg_get(explore_cfg, "every_n_steps", 10))
@@ -2261,6 +2361,15 @@ def run_detailed_place(
                             try:
                                 if mpvs_ctrl is not None and macro_enabled and macro_names:
                                     macro_names = list(mpvs_ctrl.rank_macro_families(list(macro_names), ctx=step_ctx) or [])
+                            except Exception:
+                                pass
+
+                            try:
+                                if mpvs_ctrl is not None and macro_enabled:
+                                    bf = str(mpvs_ctrl.get_burst_family(int(eval_calls_cum)) or "")
+                                    if bf:
+                                        if bf not in (macro_names or []) and (macro_engine is None or macro_engine.available(bf)):
+                                            macro_names = [bf] + list(macro_names or [])
                             except Exception:
                                 pass
 

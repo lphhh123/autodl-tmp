@@ -258,6 +258,11 @@ class MacroEngine:
         self.tabu_steps = int(tb_cfg.get("steps", 12))
         self.tabu_tenure = int(tb_cfg.get("tenure", 8))
         self.tabu_cand_k = int(tb_cfg.get("cand_k", 80))
+
+        # DR-lite / shrinkage priors for probe feedback (E3 axis)
+        self._shrink_prior_raw_rate = 0.0
+        self._shrink_prior_cf_rate = 0.0
+        self._shrink_prior_inited = False
         self.tabu_eval_topk = int(tb_cfg.get("eval_topk", 6))
         self.tabu_allow_worsen = bool(tb_cfg.get("allow_worsen", True))
         self.tabu_aspire_eps = float(tb_cfg.get("aspire_eps", 1e-4))
@@ -374,6 +379,46 @@ class MacroEngine:
         rate_cf = float(rate_op) - float(w_cf) * float(cf_discount) * float(rate_atomic_eff)
         cf_gain = float(rate_cf) * float(raw_calls)
 
+        # DR-lite / shrinkage (optional)
+        sh_cfg = cfg.get("shrinkage", {}) if isinstance(cfg.get("shrinkage", {}), dict) else {}
+        sh_enabled = bool(sh_cfg.get("enabled", False))
+        try:
+            sh_lambda = float(sh_cfg.get("lambda_calls", 0.0))
+        except Exception:
+            sh_lambda = 0.0
+        try:
+            sh_alpha = float(sh_cfg.get("prior_alpha", 0.08))
+        except Exception:
+            sh_alpha = 0.08
+        prior_mode = str(sh_cfg.get("prior_mode", "global") or "global").strip().lower()
+        if prior_mode not in {"global", "zero"}:
+            prior_mode = "global"
+        sh_lambda = float(max(0.0, min(5000.0, sh_lambda)))
+        sh_alpha = float(max(0.0, min(0.5, sh_alpha)))
+
+        if sh_enabled and prior_mode == "global":
+            if not bool(getattr(self, "_shrink_prior_inited", False)):
+                self._shrink_prior_raw_rate = float(rate_op)
+                self._shrink_prior_cf_rate = float(rate_cf)
+                self._shrink_prior_inited = True
+            else:
+                a0 = float(sh_alpha)
+                self._shrink_prior_raw_rate = (1.0 - a0) * float(self._shrink_prior_raw_rate) + a0 * float(rate_op)
+                self._shrink_prior_cf_rate = (1.0 - a0) * float(self._shrink_prior_cf_rate) + a0 * float(rate_cf)
+
+        prior_raw = 0.0
+        prior_cf = 0.0
+        if sh_enabled and prior_mode == "global" and bool(getattr(self, "_shrink_prior_inited", False)):
+            prior_raw = float(getattr(self, "_shrink_prior_raw_rate", 0.0))
+            prior_cf = float(getattr(self, "_shrink_prior_cf_rate", 0.0))
+        denom = float(raw_calls) + float(max(0.0, sh_lambda))
+        if sh_enabled and denom > 0.0 and sh_lambda > 0.0:
+            rate_op_sh = (float(raw_calls) * float(rate_op) + float(sh_lambda) * float(prior_raw)) / float(denom)
+            rate_cf_sh = (float(raw_calls) * float(rate_cf) + float(sh_lambda) * float(prior_cf)) / float(denom)
+        else:
+            rate_op_sh = float(rate_op)
+            rate_cf_sh = float(rate_cf)
+
         a = float(cfg.get("ewma_alpha", getattr(self, "alpha", 0.2)))
         a = float(max(0.01, min(0.95, a)))
         # Update raw EWMA too (stabilizes weight updates when CF is noisy/disabled).
@@ -392,9 +437,9 @@ class MacroEngine:
         min_gain_per_call = float(cfg.get("min_gain_per_call", 0.0))
         use_ewma = bool(cfg.get("weight_use_ewma", True))
         if weight_metric in {"cf", "gain_cf", "counterfactual"}:
-            metric = float(st.ewma_cf_gain_per_call) if use_ewma else float(rate_cf)
+            metric = float(st.ewma_cf_gain_per_call) if use_ewma else float(rate_cf_sh)
         else:
-            metric = float(st.ewma_gain_per_call) if use_ewma else float(rate_op)
+            metric = float(st.ewma_gain_per_call) if use_ewma else float(rate_op_sh)
 
         boost_scale = float(cfg.get("success_boost_scale", 0.5))
         pen_scale = float(cfg.get("fail_penalty_scale", 0.5))
@@ -445,6 +490,8 @@ class MacroEngine:
             "rate_atomic": float(rate_atomic),
             "rate_atomic_eff": float(rate_atomic_eff),
             "rate_cf": float(rate_cf),
+            "rate_op_shrunk": float(rate_op_sh),
+            "rate_cf_shrunk": float(rate_cf_sh),
             "cf_discount": float(cf_discount),
             "cf_cap_mult": float(cf_cap_mult),
             "use_cf": int(bool(use_cf)),
@@ -452,6 +499,9 @@ class MacroEngine:
             "cf_one_sided": int(bool(one_sided)),
             "cf_pen_mode": str(pen_mode),
             "metric_used": float(metric),
+            "shrink_enabled": int(bool(sh_enabled)),
+            "shrink_lambda_calls": float(sh_lambda),
+            "shrink_prior_mode": str(prior_mode),
             "weight": float(st.weight),
         }
 
