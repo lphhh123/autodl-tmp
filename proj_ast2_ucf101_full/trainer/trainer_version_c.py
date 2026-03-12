@@ -3525,7 +3525,8 @@ def train_version_c(
                     after = {k: stable_hw_state.get(k) for k in ["ref_T", "ref_E", "ref_M", "ref_C"]}
                     # v5.4 contract: NoDrift requested => never allow ref_update
                     if before != after:
-                        if stable_hw_state.get("no_drift_enabled", False):
+                        allow_self_hw_lock_once = bool(stable_hw_state.get("hw_ref_just_locked", False))
+                        if stable_hw_state.get("no_drift_enabled", False) and (not allow_self_hw_lock_once):
                             raise RuntimeError(
                                 "[SPEC v5.4] NoDrift violation: ref changed while no_drift.enabled=True. "
                                 "This must not happen (no silent fallback)."
@@ -3551,14 +3552,16 @@ def train_version_c(
                                         "old_value": _maybe_float(before.get(ref_name)),
                                         "new_value": _maybe_float(after.get(ref_name)),
                                         "update_type": "hw_ref_update",
-                                        "allowed_by_no_drift": (not no_drift_enabled),
+                                        "allowed_by_no_drift": ((not no_drift_enabled) or allow_self_hw_lock_once),
                                         "requested_mode": requested_mode,
                                         "effective_mode": effective_mode,
-                                        "reason": "hw_ref_update",
+                                        "reason": ("self_hw_lock" if allow_self_hw_lock_once else "hw_ref_update"),
                                     },
                                     run_id=run_id,
                                     step=int(outer),
                                 )
+                        if stable_hw_state.get("hw_ref_just_locked", False):
+                            stable_hw_state["hw_ref_just_locked"] = False
                 guard_mode = str(stable_hw_state.get("guard_mode", "HW_OPT")) if stable_hw_enabled else "disabled"
                 allow_discrete = (
                     bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
