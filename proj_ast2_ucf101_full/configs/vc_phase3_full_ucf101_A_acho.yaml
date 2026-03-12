@@ -8,6 +8,13 @@ stable_hw:
     # scale-free controller (fractions of lambda_hw_max)
     step_up_frac: 0.12
     step_down_frac: 0.25
+    margin_adaptive: true
+    full_margin_frac: 0.75
+    margin_ref_floor: 1.0e-4
+    margin_up_power: 2.0
+    margin_down_power: 1.5
+    step_up_max_mul: 1.35
+    step_down_max_mul: 1.50
     hysteresis_frac: 0.25
     # harmless defaults; ROI is disabled in this config
     post_commit_lambda_mul: 0.5

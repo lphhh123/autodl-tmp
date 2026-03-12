@@ -820,6 +820,42 @@ def _acho_step_size(max_lambda_cap: float, frac: float) -> float:
     return cap * f
 
 
+def _acho_margin_scaled_mul(
+    margin_excess: float,
+    margin_ref: float,
+    *,
+    power: float = 2.0,
+    max_mul: float = 1.0,
+) -> float:
+    """
+    Smooth margin-aware multiplier for ACHO step sizing.
+
+    - margin_excess <= 0  -> 0
+    - margin_excess grows -> multiplier grows smoothly
+    - saturates at max_mul when margin_excess reaches margin_ref
+
+    This gives:
+      * near-boundary margin => almost no increase
+      * larger safety margin => larger step
+    """
+    try:
+        x = float(margin_excess)
+        ref = float(margin_ref)
+        p = float(power)
+        mm = float(max_mul)
+    except Exception:
+        return 0.0
+
+    if (not math.isfinite(x)) or (not math.isfinite(ref)) or (not math.isfinite(p)) or (not math.isfinite(mm)):
+        return 0.0
+    if x <= 0.0 or ref <= 0.0 or mm <= 0.0:
+        return 0.0
+
+    z = max(0.0, min(1.0, x / ref))
+    p = max(0.1, p)
+    return float(mm * (z ** p))
+
+
 def _apply_acho_controller(
     *,
     epoch: int,
@@ -872,6 +908,20 @@ def _apply_acho_controller(
     step_up = float(_cfg_get(acho_cfg, "step_up_frac", 0.12) or 0.12)
     step_dn = float(_cfg_get(acho_cfg, "step_down_frac", 0.25) or 0.25)
 
+    # Margin-aware step shaping:
+    # - near boundary: almost no increase
+    # - larger safe margin: slightly larger step
+    # - larger violation: stronger step-down
+    margin_adaptive = bool(_cfg_get(acho_cfg, "margin_adaptive", True))
+    full_margin_frac = float(_cfg_get(acho_cfg, "full_margin_frac", 0.75) or 0.75)
+    margin_ref_floor = float(_cfg_get(acho_cfg, "margin_ref_floor", 1e-4) or 1e-4)
+
+    up_power = float(_cfg_get(acho_cfg, "margin_up_power", 2.0) or 2.0)
+    down_power = float(_cfg_get(acho_cfg, "margin_down_power", 1.5) or 1.5)
+
+    step_up_max_mul = float(_cfg_get(acho_cfg, "step_up_max_mul", 1.35) or 1.35)
+    step_down_max_mul = float(_cfg_get(acho_cfg, "step_down_max_mul", 1.50) or 1.50)
+
     # ROI feedback: if ROI rejects often, be more conservative with lambda increases.
     rr = st.get("roi_reject_rate", None)
     if rr is None:
@@ -890,8 +940,35 @@ def _apply_acho_controller(
             step_up = float(step_up) * max(0.0, float(step_up_mul))
             cap = min(float(cap), float(base_cap) * max(0.0, float(cap_mul)))
             lam = min(lam, cap)
-    d_up = _acho_step_size(max_cap, step_up)
-    d_dn = _acho_step_size(max_cap, step_dn)
+    # Base reference scale for margin shaping.
+    # We intentionally normalize by epsilon-scale so the controller stays roughly scale-free.
+    margin_ref = max(float(margin_ref_floor), float(eps_used) * max(1e-6, float(full_margin_frac)))
+
+    # Excess margin after hysteresis:
+    #   pos_excess > 0 => safe room above boundary
+    #   neg_excess > 0 => how deep we are into violation-side pressure
+    pos_excess = max(0.0, float(margin) - float(hyst))
+    neg_excess = max(0.0, float(-margin) - float(hyst))
+
+    if margin_adaptive:
+        up_mul = _acho_margin_scaled_mul(
+            pos_excess,
+            margin_ref,
+            power=up_power,
+            max_mul=step_up_max_mul,
+        )
+        dn_mul = _acho_margin_scaled_mul(
+            neg_excess,
+            margin_ref,
+            power=down_power,
+            max_mul=step_down_max_mul,
+        )
+    else:
+        up_mul = 1.0
+        dn_mul = 1.0
+
+    d_up = _acho_step_size(max_cap, float(step_up) * float(up_mul))
+    d_dn = _acho_step_size(max_cap, float(step_dn) * float(dn_mul))
 
     # Optional: after a discrete commit, temporarily cap lambda to let the model adapt.
     # ROI-Commit (trainer) sets st['roi_cooldown_until']=outer+K.
@@ -931,6 +1008,16 @@ def _apply_acho_controller(
     st["acho_cap"] = float(cap)
     st["acho_max_cap"] = float(max_cap)
     st["acho_hysteresis"] = float(hyst)
+    st["acho_margin_adaptive"] = bool(margin_adaptive)
+    st["acho_margin_ref"] = float(margin_ref)
+    st["acho_pos_excess"] = float(pos_excess)
+    st["acho_neg_excess"] = float(neg_excess)
+    st["acho_step_up_frac_cfg"] = float(step_up)
+    st["acho_step_down_frac_cfg"] = float(step_dn)
+    st["acho_step_up_mul"] = float(up_mul)
+    st["acho_step_down_mul"] = float(dn_mul)
+    st["acho_step_up_effective"] = float(d_up)
+    st["acho_step_down_effective"] = float(d_dn)
 
     return float(lam)
 
