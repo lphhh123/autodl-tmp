@@ -1,0 +1,25 @@
+# A4-fast + ROI-Commit only (no ACHO)
+#
+# Purpose:
+#   - isolate the contribution of ROI-Commit without the continuous ACHO controller
+#   - keep everything else identical to A4-fast for a fair ablation
+
+_base_: configs/vc_phase3_full_ucf101_A_main_fast20.yaml
+
+stable_hw:
+  acho:
+    enabled: false
+
+  discrete_isolation:
+    roi_commit:
+      enabled: true
+      # Use the same normalized HW objective as the training loss.
+      metric: L_hw_total
+      min_rel_improve: 0.01
+      min_abs_improve: 0.0
+      min_margin: 0.003
+      cooldown_epochs: 2
+      keep_ema_alpha: 0.2
+      cooldown_scale: 6
+      cooldown_max_extra: 6
+      require_hw_active: true
