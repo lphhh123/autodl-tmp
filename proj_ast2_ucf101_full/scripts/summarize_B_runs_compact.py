@@ -97,7 +97,7 @@ def infer_exp_key(exp_dir_name: str) -> Tuple[str, str]:
 
 _GRID_RE = re.compile(r"__b(?P<b>[^_]+)_wT(?P<wT>[^_]+)_wC(?P<wC>[^_]+)")
 _INST_RE = re.compile(r"-(chain_skip_randw|chain_skip|cluster4)$")
-_CM_RE = re.compile(r"(?:^|_)cm(?P<cm>[A-Z0-9_]+)(?:_|$)")
+_CM_RE = re.compile(r"(?:^|_)cm(?P<cm>[A-Z0-9_]+)(?:_|-|$)")
 _V_RE = re.compile(r"V_E[0-3]_C[0-1]_D[0-3]_S[0-2]_K[0-1]_M[0-1]")
 
 
@@ -125,6 +125,13 @@ def parse_exp_dir_meta(exp_dir_name: str) -> Dict[str, Any]:
     m_v = _V_RE.search(str(exp_dir_name))
     if m_v:
         vtag = str(m_v.group(0) or "")
+
+    # If calls_mode isn't explicitly tagged as _cmEFF/_cmMISS, derive from VARIANT_TAG M-axis.
+    if not cmode and vtag:
+        if vtag.endswith("_M1"):
+            cmode = "eff"
+        elif vtag.endswith("_M0"):
+            cmode = "miss"
     bstr_norm, b_calls = _parse_budget_str(budget_str)
     return {
         "exp_key": exp_key,

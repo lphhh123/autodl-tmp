@@ -1086,6 +1086,8 @@ def run_detailed_place(
             else:
                 raw_calls_fb = float(max(1, int((c_detail or {}).get("miss_calls", c_eff))))
                 atomic_calls_fb = float(max(1, int((atomic_calls_detail or {}).get("miss_calls", atomic_calls_eff))))
+            # IMPORTANT: keep controller-side probe accounting consistent with feedback accounting.
+            calls_for_ctrl = int(max(1, int(raw_calls_fb)))
             margin_heur = float(g) - float(atomic_gain)
             margin_cur = float(g)
             row: Dict[str, Any] = {
@@ -1123,7 +1125,7 @@ def run_detailed_place(
                         ctx_key=f"{stage}|stage_probe",
                         margin_heur=float(margin_heur),
                         margin_cur=float(margin_cur),
-                        calls=int(max(1, c_eff)),
+                        calls=int(calls_for_ctrl),
                         pass_heur=bool(margin_heur > 0.0),
                         pass_cur=bool(margin_cur > 0.0),
                     )
@@ -1133,7 +1135,7 @@ def run_detailed_place(
                         used_calls=int(used_calls),
                         margin_heur=float(margin_heur),
                         margin_cur=float(margin_cur),
-                        calls=int(max(1, c_eff)),
+                        calls=int(calls_for_ctrl),
                         pass_heur=bool(margin_heur > 0.0),
                         source="stage_probe",
                     )
