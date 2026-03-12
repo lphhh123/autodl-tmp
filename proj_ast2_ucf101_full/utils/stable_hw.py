@@ -1506,6 +1506,89 @@ def init_hw_refs_from_baseline_stats(cfg: Any, stable_hw_state: Dict[str, Any], 
     if stable_hw_cfg is not None:
         hw_ref_source = str(getattr(stable_hw_cfg, "hw_ref_source", "") or "").strip()
 
+    if hw_ref_source == "self_hw_lock":
+        # self-hw-lock:
+        #   - 不依赖外部 baseline_stats
+        #   - 先用 cfg.hw 默认 refs 占位，保证 compute_hw_loss() 在 dense warmup 期间可运行
+        #   - 在当前 run 的 dense warmup 期累计 HW stats
+        #   - 当 acc_ref 被锁定时，一次性把 refs 锁成当前 run 的 dense 参考值，然后保持 frozen
+        stable_hw_state["no_drift_enabled"] = bool(requested_no_drift)
+        stable_hw_state["_force_ref_update_mode"] = "frozen"
+        stable_hw_state["no_drift_effective"] = bool(requested_no_drift)
+
+        stable_hw_state.setdefault("hw_refs", {})
+
+        hw_cfg = getattr(cfg, "hw", None)
+
+        def _get_float(attr: str, default: float) -> float:
+            v = getattr(hw_cfg, attr, default) if hw_cfg is not None else default
+            try:
+                v = float(default if v is None else v)
+            except Exception:
+                v = float(default)
+            return v
+
+        latency_ref = _get_float("latency_ref_ms", 1.0)
+        energy_ref = _get_float("energy_ref_mj", 1.0)
+
+        if hw_cfg is not None:
+            mem_v = getattr(hw_cfg, "memory_ref_mb", None)
+            if mem_v is None:
+                mem_v = getattr(hw_cfg, "mem_ref_mb", None)
+        else:
+            mem_v = None
+        try:
+            mem_ref = float(1.0 if mem_v is None else mem_v)
+        except Exception:
+            mem_ref = 1.0
+
+        if hw_cfg is not None:
+            comm_v = getattr(hw_cfg, "comm_ref_ms", None)
+            if comm_v is None:
+                comm_v = getattr(hw_cfg, "comm_ref", None)
+        else:
+            comm_v = None
+        try:
+            comm_ref = float(1.0 if comm_v is None else comm_v)
+        except Exception:
+            comm_ref = 1.0
+
+        stable_hw_state["hw_refs"]["latency_ref_ms"] = latency_ref
+        stable_hw_state["hw_refs"]["energy_ref_mj"] = energy_ref
+        stable_hw_state["hw_refs"]["mem_ref_mb"] = mem_ref
+        stable_hw_state["hw_refs"]["comm_ref"] = comm_ref
+
+        stable_hw_state["ref_T"] = latency_ref
+        stable_hw_state["ref_E"] = energy_ref
+        stable_hw_state["ref_M"] = mem_ref
+        stable_hw_state["ref_C"] = comm_ref
+
+        # NoDrift 模式下，A/B/P 也必须先有合法占位 reference
+        stable_hw_state["ref_A"] = _get_float("area_ref_mm2", 1.0)
+        stable_hw_state["ref_B"] = _get_float("bw_ref_gbps", 1.0)
+        stable_hw_state["ref_P"] = _get_float("power_ref_w", 1.0)
+
+        sh_cfg = _get_self_hw_lock_cfg(stable_hw_cfg if stable_hw_cfg is not None else cfg)
+        k = int(_cfg_get(sh_cfg, "window", 3) or 3)
+        agg = str(_cfg_get(sh_cfg, "agg", "median") or "median").lower().strip()
+        lock_epoch = int(_cfg_get(sh_cfg, "lock_epoch", 0) or 0)
+        if lock_epoch <= 0:
+            locked = _get_locked_cfg(stable_hw_cfg if stable_hw_cfg is not None else cfg) or {}
+            lock_epoch = int(_cfg_get(locked, "freeze_epoch", 0) or 0)
+
+        stable_hw_state["hw_ref_source"] = "self_hw_lock_pending"
+        stable_hw_state["hw_ref_lock_mode"] = "self_hw_lock"
+        stable_hw_state["hw_ref_locked"] = False
+        stable_hw_state["hw_ref_locked_epoch"] = None
+        stable_hw_state["hw_ref_just_locked"] = False
+
+        stable_hw_state["self_hw_ref_window"] = max(1, int(k))
+        stable_hw_state["self_hw_ref_agg"] = str(agg)
+        stable_hw_state["self_hw_ref_target_lock_epoch"] = int(lock_epoch)
+        stable_hw_state.setdefault("self_hw_ref_hist", [])
+
+        return
+
     if hw_ref_source == "baseline_stats":
         if not baseline_path:
             if getattr(stable_hw_cfg, "strict", True):
@@ -1764,6 +1847,66 @@ def init_hw_refs_for_no_drift(cfg: Any, stable_hw_state: Dict[str, Any], stable_
     init_hw_refs_from_baseline_stats(cfg, stable_hw_state, stable_hw_cfg=stable_hw_cfg)
 
 
+def _get_self_hw_lock_cfg(cfg_or_stable: Any) -> Any:
+    root, stable = _get_root_and_stable(cfg_or_stable)
+    if stable is None:
+        return {}
+    return _cfg_get(stable, "self_hw_lock", {}) or {}
+
+
+def _safe_pos_float(v: Any) -> Optional[float]:
+    try:
+        x = float(v)
+    except Exception:
+        return None
+    if (not math.isfinite(x)) or x <= 0.0:
+        return None
+    return float(x)
+
+
+def _extract_self_hw_lock_obs(stats: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    if not isinstance(stats, dict) or len(stats) == 0:
+        return None
+
+    lat = _safe_pos_float(stats.get("latency_ms", stats.get("proxy_used_latency_ms", stats.get("lat_ms", None))))
+    ene = _safe_pos_float(stats.get("energy_mj", stats.get("proxy_used_energy_mj", None)))
+    mem = _safe_pos_float(stats.get("mem_mb", stats.get("proxy_used_mem_mb", stats.get("memory_mb", None))))
+    com = _safe_pos_float(stats.get("comm_ms", stats.get("proxy_used_comm_ms", stats.get("comm_norm", None))))
+
+    if lat is None or ene is None or mem is None or com is None:
+        return None
+
+    return {
+        "latency_ref_ms": float(lat),
+        "energy_ref_mj": float(ene),
+        "mem_ref_mb": float(mem),
+        "comm_ref": float(com),
+    }
+
+
+def _aggregate_self_hw_lock_vals(vals: list[float], agg: str) -> Optional[float]:
+    xs = []
+    for v in vals:
+        vv = _safe_pos_float(v)
+        if vv is not None:
+            xs.append(float(vv))
+    if len(xs) == 0:
+        return None
+
+    agg = str(agg or "median").lower().strip()
+    if agg == "mean":
+        return float(sum(xs) / float(len(xs)))
+    if agg == "last":
+        return float(xs[-1])
+
+    # default: median
+    xs = sorted(xs)
+    mid = len(xs) // 2
+    if len(xs) % 2 == 1:
+        return float(xs[mid])
+    return float(0.5 * (xs[mid - 1] + xs[mid]))
+
+
 def _update_hw_refs_when_allowed(stable_hw_state: dict, stats: dict, cfg: dict) -> dict:
     # ====== Original update_hw_refs_from_stats logic moved here ======
     # Only update hardware refs; do NOT update locked_acc_ref / acc_ref here.
@@ -1812,6 +1955,106 @@ def update_hw_refs_from_stats(
             f"[SPEC v5.4] no_drift.enabled=True requires ref_update_mode='frozen'. "
             f"Got ref_update_mode='{ref_update_mode}'. Ref updates would violate NoDrift."
         )
+
+    src_cfg = ""
+    if stable_hw_cfg is not None:
+        src_cfg = str(getattr(stable_hw_cfg, "hw_ref_source", "") or "").strip().lower()
+    src_state = str(stable_hw_state.get("hw_ref_source", "") or "").strip().lower()
+    src = src_state or src_cfg
+
+    # clear edge-trigger flag; if we lock in this call we will set it back to True
+    stable_hw_state["hw_ref_just_locked"] = False
+
+    # ------------------------------------------------------------
+    # Explicit audited exception for NoDrift:
+    # self_hw_lock may collect dense-phase HW stats and perform exactly
+    # one lock step when acc_ref gets locked. After that refs remain frozen.
+    # ------------------------------------------------------------
+    if src.startswith("self_hw_lock"):
+        stable_hw_state["no_drift_enabled"] = bool(no_drift_enabled)
+        stable_hw_state["no_drift_effective"] = bool(no_drift_enabled)
+
+        hist = stable_hw_state.get("self_hw_ref_hist", None)
+        if not isinstance(hist, list):
+            hist = []
+
+        obs = _extract_self_hw_lock_obs(latest_hw_stats or {})
+        if obs is not None:
+            hist.append(dict(obs))
+            keep = max(8, int(stable_hw_state.get("self_hw_ref_window", 3) or 3) + 4)
+            if len(hist) > keep:
+                hist = hist[-keep:]
+        stable_hw_state["self_hw_ref_hist"] = hist
+
+        if bool(stable_hw_state.get("hw_ref_locked", False)):
+            # already locked once -> stay frozen forever
+            if src == "self_hw_lock_pending":
+                stable_hw_state["hw_ref_source"] = "self_hw_lock_locked"
+            return
+
+        acc_locked_epoch = stable_hw_state.get("acc_ref_locked_epoch", None)
+        if acc_locked_epoch is None:
+            stable_hw_state["hw_ref_source"] = "self_hw_lock_pending"
+            return
+
+        k = max(1, int(stable_hw_state.get("self_hw_ref_window", 3) or 3))
+        agg = str(stable_hw_state.get("self_hw_ref_agg", "median") or "median").lower().strip()
+
+        tail = hist[-k:] if len(hist) >= 1 else []
+
+        t_ref = _aggregate_self_hw_lock_vals([row.get("latency_ref_ms") for row in tail], agg)
+        e_ref = _aggregate_self_hw_lock_vals([row.get("energy_ref_mj") for row in tail], agg)
+        m_ref = _aggregate_self_hw_lock_vals([row.get("mem_ref_mb") for row in tail], agg)
+        c_ref = _aggregate_self_hw_lock_vals([row.get("comm_ref") for row in tail], agg)
+
+        if t_ref is None or e_ref is None or m_ref is None or c_ref is None:
+            stable_hw_state["hw_ref_source"] = "self_hw_lock_pending"
+            logger.warning(
+                "[StableHW] self_hw_lock pending: acc_ref already locked but dense HW history is still insufficient/invalid."
+            )
+            return
+
+        refs = stable_hw_state.get("hw_refs", {}) or {}
+        refs["latency_ref_ms"] = float(t_ref)
+        refs["energy_ref_mj"] = float(e_ref)
+        refs["mem_ref_mb"] = float(m_ref)
+        refs["comm_ref"] = float(c_ref)
+        stable_hw_state["hw_refs"] = refs
+
+        stable_hw_state["ref_T"] = float(t_ref)
+        stable_hw_state["ref_E"] = float(e_ref)
+        stable_hw_state["ref_M"] = float(m_ref)
+        stable_hw_state["ref_C"] = float(c_ref)
+
+        stable_hw_state["latency_ref_ms"] = float(t_ref)
+        stable_hw_state["energy_ref_mj"] = float(e_ref)
+        stable_hw_state["mem_ref_mb"] = float(m_ref)
+        stable_hw_state["comm_ref"] = float(c_ref)
+
+        stable_hw_state["hw_ref_source"] = f"self_hw_lock(window={k},agg={agg})"
+        stable_hw_state["hw_ref_locked"] = True
+        stable_hw_state["hw_ref_locked_epoch"] = int(acc_locked_epoch)
+        stable_hw_state["hw_ref_just_locked"] = True
+        stable_hw_state["self_hw_ref_lock_value"] = {
+            "latency_ref_ms": float(t_ref),
+            "energy_ref_mj": float(e_ref),
+            "mem_ref_mb": float(m_ref),
+            "comm_ref": float(c_ref),
+        }
+
+        logger.info(
+            "[StableHW] self_hw_lock locked refs at epoch=%s: "
+            "T=%.6f E=%.6f M=%.6f C=%.6f (window=%d, agg=%s, hist=%d)",
+            int(acc_locked_epoch),
+            float(t_ref),
+            float(e_ref),
+            float(m_ref),
+            float(c_ref),
+            int(k),
+            str(agg),
+            int(len(hist)),
+        )
+        return
 
     effective_no_drift = bool(no_drift_enabled)  # once requested, it's effectively enforced (or we crash above)
 

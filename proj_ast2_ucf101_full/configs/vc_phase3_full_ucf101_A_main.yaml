@@ -104,3 +104,16 @@ ast:
 
   channel_prune:
     freeze_prefix_ratio: 0.33
+
+stable_hw:
+  # Do not depend on an external dense baseline for HW refs.
+  # Instead, calibrate HW refs from the current run's dense warmup and lock once at the same boundary as acc_ref.
+  hw_ref_source: "self_hw_lock"
+  baseline_stats_path: ""
+
+  self_hw_lock:
+    enabled: true
+    window: 3
+    agg: "median"
+    # 0 => automatically align with stable_hw.locked_acc_ref.freeze_epoch
+    lock_epoch: 0
