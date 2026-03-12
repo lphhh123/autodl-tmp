@@ -95,22 +95,36 @@ def infer_exp_key(exp_dir_name: str) -> Tuple[str, str]:
     return exp_key, rest
 
 
-_GRID_RE = re.compile(r"__b(?P<b>[^_]+)_wT(?P<wT>[^_]+)_wC(?P<wC>[^_]+)_(?:-|_)?(?P<inst>.+)$")
+_GRID_RE = re.compile(r"__b(?P<b>[^_]+)_wT(?P<wT>[^_]+)_wC(?P<wC>[^_]+)")
+_INST_RE = re.compile(r"-(chain_skip_randw|chain_skip|cluster4)$")
+_CM_RE = re.compile(r"(?:^|_)cm(?P<cm>[A-Z0-9_]+)(?:_|$)")
+_V_RE = re.compile(r"V_E[0-3]_C[0-1]_D[0-3]_S[0-2]_K[0-1]_M[0-1]")
 
 
 def parse_exp_dir_meta(exp_dir_name: str) -> Dict[str, Any]:
     exp_key, run_tag = infer_exp_key(exp_dir_name)
     name = str(exp_dir_name)
+    inst = ""
+    m_inst = _INST_RE.search(name)
+    if m_inst:
+        inst = str(m_inst.group(1) or "")
+        name = name[: m_inst.start()]
     budget_str = ""
     wT = 0.0
     wC = 0.0
-    inst = ""
     m = _GRID_RE.search(name)
     if m:
         budget_str = m.group("b")
         wT = _parse_w_tag(m.group("wT"))
         wC = _parse_w_tag(m.group("wC"))
-        inst = str(m.group("inst") or "").lstrip("-_")
+    cmode = ""
+    m_cm = _CM_RE.search(str(exp_dir_name))
+    if m_cm:
+        cmode = str(m_cm.group("cm") or "").strip().lower()
+    vtag = ""
+    m_v = _V_RE.search(str(exp_dir_name))
+    if m_v:
+        vtag = str(m_v.group(0) or "")
     bstr_norm, b_calls = _parse_budget_str(budget_str)
     return {
         "exp_key": exp_key,
@@ -120,6 +134,8 @@ def parse_exp_dir_meta(exp_dir_name: str) -> Dict[str, Any]:
         "wT": float(wT),
         "wC": float(wC),
         "instance": inst,
+        "calls_mode": cmode,
+        "variant_tag": vtag,
     }
 
 
@@ -266,6 +282,8 @@ def build_row(run_dir: Path) -> Dict[str, Any]:
         "wT": float(meta["wT"]),
         "wC": float(meta["wC"]),
         "instance": meta["instance"],
+        "calls_mode": str(meta.get("calls_mode", "") or ""),
+        "variant_tag": str(meta.get("variant_tag", "") or ""),
         "seed": int(seed),
         "run_id": str(run_id),
         "selected_total_scalar": _to_float(rs.get("selected_total_scalar", 0.0), 0.0),
