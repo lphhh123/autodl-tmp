@@ -1,19 +1,23 @@
-# Fast-iteration config (20% data, 10 dense + 20 prune epochs) for Innovation-A channel-pruning mainline.
+# Fast-iteration config (20% train, 100% eval, 10 dense + 20 prune epochs)
+# for Innovation-A channel-pruning mainline.
 #
 # Intent:
+#   - Keep fast iteration on train subset while making validation full / stable.
+#   - Stabilize the first 10 dense epochs: freeze backbone first, then unfreeze with smaller backbone LR.
+#   - Reduce early stochasticity (no mixup, no train jitter, deterministic train sampling).
 #   - Turn OFF token pruning (token_gating_policy=off)
 #   - Keep pruning gentle (gates init near 1; only channel sparsity regularized)
-#   - Reduce training volume for rapid iteration (subset_ratio_train=0.2, epochs=30)
 #   - Pruning protocol: dense warmup=10, pruning ramp=20
 
 _base_: configs/vc_phase3_full_ucf101_A_main.yaml
 
 data:
-  # Use full train + full eval to reduce late-stage drift and stabilize
-  # self-ref / guard decisions.
-  subset_ratio_train: 1.00
+  subset_ratio_train: 0.20
   subset_ratio_eval:  1.00
   subset_seed: 0
+  runtime_tstart_jitter: 0
+  frame_sampling_train: "linspace"
+  frame_sampling_eval: "linspace"
 
 training:
   # Protocol: 10 dense + 20 prune
@@ -21,6 +25,22 @@ training:
   # Keep eval protocol aligned across fast experiments (full eval each epoch on the same eval subset).
   stable_hw_eval_max_batches: 0
   compute_hw_when_lambda0: true
+
+train:
+  # Keep head learning reasonably fast, but slow down pretrained backbone updates.
+  lr: 3e-4
+  warmup_epochs: 10
+  backbone_lr_scale: 0.10
+  freeze_backbone_epochs: 5
+  # Reduce early supervision / augmentation noise.
+  label_smoothing: 0.0
+  mixup_alpha: 0.0
+  mixup_prob: 0.0
+
+model:
+  drop_rate: 0.1
+  attn_drop: 0.1
+  drop_path_rate: 0.05
 
 ast:
   # Disable token pruning entirely; channel pruning is the main structural lever.
