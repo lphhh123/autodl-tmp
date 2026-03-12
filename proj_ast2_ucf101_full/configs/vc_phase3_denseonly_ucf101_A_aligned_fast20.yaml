@@ -1,6 +1,8 @@
 # Fast-iteration Version-C dense baseline (A1p-fast):
 # - SAME trainer path / AMP dtype as A4 (version_c, bf16)
 # - No pruning (dense), no StableHW, no HW optimization
+# - Keep fast iteration on 20% train while using 100% eval for a stable validation curve.
+# - Use the same early-stage stabilization recipe as A4-fast for fair diagnosis.
 # - Still computes HW proxy stats so it can export outputs/dense_baseline/metrics.json
 #   (via BASELINE_STATS_EXPORT) for downstream StableHW normalization.
 
@@ -8,8 +10,11 @@ _base_: configs/vc_phase3_denseonly_ucf101_A_aligned.yaml
 
 data:
   subset_ratio_train: 0.20
-  subset_ratio_eval:  0.20
+  subset_ratio_eval:  1.00
   subset_seed: 0
+  runtime_tstart_jitter: 0
+  frame_sampling_train: "linspace"
+  frame_sampling_eval: "linspace"
 
 training:
   outer_epochs: 35
@@ -18,6 +23,20 @@ training:
   compute_hw_when_lambda0: true
   # Make validation FULL each epoch to reduce reference curve noise.
   stable_hw_eval_max_batches: 0
+
+train:
+  lr: 3e-4
+  warmup_epochs: 10
+  backbone_lr_scale: 0.10
+  freeze_backbone_epochs: 5
+  label_smoothing: 0.0
+  mixup_alpha: 0.0
+  mixup_prob: 0.0
+
+model:
+  drop_rate: 0.1
+  attn_drop: 0.1
+  drop_path_rate: 0.05
 
 test:
   run_final_test: false

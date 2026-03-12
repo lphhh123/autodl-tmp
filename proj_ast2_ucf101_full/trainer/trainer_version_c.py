@@ -100,6 +100,73 @@ def _optimizer_has_any_grad(opt: torch.optim.Optimizer) -> bool:
     return False
 
 
+_BACKBONE_PARAM_PREFIXES = (
+    "patch_embed.",
+    "blocks.",
+    "norm.",
+    "pos_embed",
+    "cls_token",
+)
+
+
+def _is_backbone_param_name(name: str) -> bool:
+    name = str(name or "")
+    return any(name.startswith(prefix) for prefix in _BACKBONE_PARAM_PREFIXES)
+
+
+def _build_model_param_groups(model: torch.nn.Module, lr: float, backbone_lr_scale: float) -> tuple[list[dict], dict]:
+    backbone_params = []
+    head_params = []
+    seen = set()
+    for name, param in model.named_parameters():
+        if param is None:
+            continue
+        pid = id(param)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if _is_backbone_param_name(name):
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    groups = []
+    if backbone_params:
+        groups.append({
+            "params": backbone_params,
+            "lr": float(lr) * float(backbone_lr_scale),
+            "lr_scale": float(backbone_lr_scale),
+            "group_name": "backbone",
+        })
+    if head_params:
+        groups.append({
+            "params": head_params,
+            "lr": float(lr),
+            "lr_scale": 1.0,
+            "group_name": "head",
+        })
+
+    meta = {
+        "backbone_tensors": int(len(backbone_params)),
+        "head_tensors": int(len(head_params)),
+        "backbone_params": int(sum(int(p.numel()) for p in backbone_params)),
+        "head_params": int(sum(int(p.numel()) for p in head_params)),
+    }
+    return groups, meta
+
+
+def _set_backbone_trainable(model: torch.nn.Module, trainable: bool) -> dict:
+    tensors = 0
+    params = 0
+    for name, param in model.named_parameters():
+        if param is None or (not _is_backbone_param_name(name)):
+            continue
+        param.requires_grad = bool(trainable)
+        tensors += 1
+        params += int(param.numel())
+    return {"tensors": int(tensors), "params": int(params), "trainable": bool(trainable)}
+
+
 def _ast_interp(a: float, b: float, t: float, curve: str = "linear") -> float:
     t = float(max(0.0, min(1.0, t)))
     curve = str(curve or "linear").lower()
@@ -1564,7 +1631,24 @@ def train_version_c(
 
         lr = _as_float(cfg.train.lr, "cfg.train.lr")
         weight_decay = _as_float(cfg.train.weight_decay, "cfg.train.weight_decay")
-        optimizer_model = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        backbone_lr_scale = float(getattr(cfg.train, "backbone_lr_scale", 1.0) or 1.0)
+        freeze_backbone_epochs = int(getattr(cfg.train, "freeze_backbone_epochs", 0) or 0)
+        model_param_groups, model_param_group_meta = _build_model_param_groups(
+            model=model,
+            lr=lr,
+            backbone_lr_scale=backbone_lr_scale,
+        )
+        optimizer_model = torch.optim.AdamW(model_param_groups, lr=lr, weight_decay=weight_decay)
+        logger.info(
+            "[OPT] model_lr=%.6g backbone_lr_scale=%.4f freeze_backbone_epochs=%d backbone_tensors=%d head_tensors=%d backbone_params=%d head_params=%d",
+            float(lr),
+            float(backbone_lr_scale),
+            int(freeze_backbone_epochs),
+            int(model_param_group_meta.get("backbone_tensors", 0)),
+            int(model_param_group_meta.get("head_tensors", 0)),
+            int(model_param_group_meta.get("backbone_params", 0)),
+            int(model_param_group_meta.get("head_params", 0)),
+        )
         # ------------------------------------------------------------------
         # v5.4 hotfix:
         # Version-C trainer historically used a single variable name `optimizer`
@@ -1909,6 +1993,19 @@ def train_version_c(
             global_step = int(start_outer) * int(steps_per_outer)
             for outer in range(start_outer, cfg.training.outer_epochs):
                 assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=outer)
+                backbone_trainable_now = bool(int(outer) >= int(freeze_backbone_epochs))
+                freeze_state = _set_backbone_trainable(model, trainable=backbone_trainable_now)
+                if run_state.get("_backbone_trainable_last") is None or bool(run_state.get("_backbone_trainable_last")) != bool(backbone_trainable_now):
+                    logger.info(
+                        "[FT] outer=%d backbone_trainable=%s freeze_backbone_epochs=%d affected_tensors=%d affected_params=%d",
+                        int(outer),
+                        bool(backbone_trainable_now),
+                        int(freeze_backbone_epochs),
+                        int(freeze_state.get("tensors", 0)),
+                        int(freeze_state.get("params", 0)),
+                    )
+                    run_state["_backbone_trainable_last"] = bool(backbone_trainable_now)
+                run_state["backbone_trainable"] = bool(backbone_trainable_now)
                 ran_epochs += 1
                 total_epochs += 1
                 # Per-outer warning deltas (keeps stdout small but still auditable).
@@ -2496,7 +2593,7 @@ def train_version_c(
                     if lr_schedule == "cosine":
                         lr_cur = _compute_lr(global_step)
                         for pg in optimizer_model.param_groups:
-                            pg["lr"] = lr_cur
+                            pg["lr"] = lr_cur * float(pg.get("lr_scale", 1.0) or 1.0)
                         for pg in optimizer_alpha.param_groups:
                             pg["lr"] = lr_cur
                     optimizer_model.zero_grad()
