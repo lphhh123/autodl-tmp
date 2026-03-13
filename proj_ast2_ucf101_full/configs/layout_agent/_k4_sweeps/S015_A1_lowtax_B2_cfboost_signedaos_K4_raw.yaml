@@ -1,7 +1,8 @@
 _base_: S015_A1_lowtax_B2_cfboost_signedaos_K4_bc2cec.yaml
 
-# Ablation: keep the stronger transmission path identical,
-# but switch probe estimator from CF to RAW.
+# Pure probe-CF ablation:
+# keep the repaired transmission path identical,
+# only remove probe-side CF estimation itself.
 detailed_place:
   mpvs:
     macros:
@@ -10,5 +11,4 @@ detailed_place:
         cf_reliability_tau: 0.0
         weight_metric: raw
         cf_one_sided_update: false
-        shrinkage:
-          enabled: false
+        # IMPORTANT: keep shrinkage ON so this remains a clean CF-only ablation
