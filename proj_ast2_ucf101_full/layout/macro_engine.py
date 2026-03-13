@@ -458,6 +458,19 @@ class MacroEngine:
         except Exception:
             pen_scale_os = 1.0
         pen_scale_os = float(max(0.0, min(2.0, pen_scale_os)))
+        # Allow clearly counterfactual-negative families to be softly demoted even when
+        # RAW gain remains non-negative. This preserves one-sided safety for noisy border
+        # cases while preventing persistent overweight on "worse-than-atomic" operators.
+        try:
+            strong_neg_floor = float(cfg.get("cf_strong_negative_floor", float("-inf")))
+        except Exception:
+            strong_neg_floor = float("-inf")
+        try:
+            strong_neg_pen_scale = float(cfg.get("cf_strong_negative_penalty_scale", 0.0))
+        except Exception:
+            strong_neg_pen_scale = 0.0
+        strong_neg_pen_scale = float(max(0.0, min(2.0, strong_neg_pen_scale)))
+        strong_neg_penalized = False
 
         if update_weight and bool(getattr(self, "adapt_enabled", True)):
             if metric > float(min_gain_per_call):
@@ -474,6 +487,14 @@ class MacroEngine:
                         if raw_metric <= float(min_gain_per_call):
                             st.weight = max(self.weight_floor, float(st.weight) * (1.0 - float(self.fail_penalty) * pen_scale * pen_scale_os))
                             st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
+                        elif float(metric) <= float(strong_neg_floor) and float(strong_neg_pen_scale) > 0.0:
+                            st.weight = max(
+                                self.weight_floor,
+                                float(st.weight)
+                                * (1.0 - float(self.fail_penalty) * pen_scale * pen_scale_os * strong_neg_pen_scale),
+                            )
+                            st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
+                            strong_neg_penalized = True
                 else:
                     st.weight = max(self.weight_floor, float(st.weight) * (1.0 - float(self.fail_penalty) * pen_scale))
                     st.cooldown = max(int(st.cooldown), int(self.fail_cooldown))
@@ -498,6 +519,7 @@ class MacroEngine:
             "cf_weight": float(w_cf),
             "cf_one_sided": int(bool(one_sided)),
             "cf_pen_mode": str(pen_mode),
+            "cf_strong_negative_penalized": int(bool(strong_neg_penalized)),
             "metric_used": float(metric),
             "shrink_enabled": int(bool(sh_enabled)),
             "shrink_lambda_calls": float(sh_lambda),

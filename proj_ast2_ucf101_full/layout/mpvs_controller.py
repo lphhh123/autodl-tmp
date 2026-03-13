@@ -457,6 +457,17 @@ class MPVSController:
             self.aos_probe_use_margin = "heur"
         self.aos_probe_require_pass_heur = bool(pf.get("require_pass_heur", True))
         self.aos_probe_calls_cap = int(max(50, min(20000, int(pf.get("calls_cap", 1200)))))
+        self.aos_probe_signed_gain = bool(pf.get("signed_gain", False))
+        try:
+            self.aos_probe_neg_gain_scale = float(pf.get("neg_gain_scale", 0.5))
+        except Exception:
+            self.aos_probe_neg_gain_scale = 0.5
+        self.aos_probe_neg_gain_scale = float(max(0.0, min(1.0, self.aos_probe_neg_gain_scale)))
+        try:
+            self.aos_probe_neg_gain_floor_per_call = float(pf.get("neg_gain_floor_per_call", 0.0))
+        except Exception:
+            self.aos_probe_neg_gain_floor_per_call = 0.0
+        self.aos_probe_neg_gain_floor_per_call = float(min(0.0, max(-10.0, self.aos_probe_neg_gain_floor_per_call)))
 
         # Debounce for on_progress to avoid double-processing at the same used_calls
         self._last_progress_calls = -1
@@ -948,8 +959,16 @@ class MPVSController:
         u = int(max(0, int(used_calls)))
         c = int(min(max(1, int(calls)), int(self.aos_probe_calls_cap)))
         g_raw = float(margin_heur) if self.aos_probe_use_margin == "heur" else float(margin_cur)
-        g = float(max(0.0, float(g_raw)))
-        g = float(self.aos_probe_gain_scale) * float(g)
+        if bool(self.aos_probe_signed_gain):
+            if float(g_raw) >= 0.0:
+                g = float(self.aos_probe_gain_scale) * float(g_raw)
+            else:
+                g = float(self.aos_probe_gain_scale) * float(self.aos_probe_neg_gain_scale) * float(g_raw)
+                g_floor = float(self.aos_probe_gain_scale) * float(self.aos_probe_neg_gain_floor_per_call) * float(max(1, c))
+                g = max(float(g), float(g_floor))
+        else:
+            g = float(max(0.0, float(g_raw)))
+            g = float(self.aos_probe_gain_scale) * float(g)
         w = self._aos_fam_win.get((st, fam))
         if w is None:
             w = _CallWindowAgg(int(self.aos_window_calls))
