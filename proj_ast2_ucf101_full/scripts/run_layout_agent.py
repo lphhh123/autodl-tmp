@@ -959,6 +959,11 @@ def run_layout_agent(
                 "mpvs": mpvs,
                 "variant": {
                     "variant_tag": str(os.environ.get("VARIANT_TAG", "") or ""),
+                    "cfg_file": get_nested(cfg, "_contract.cfg_file", None),
+                    "is_probe_raw_cfg": get_nested(cfg, "_contract.is_probe_raw_cfg", None),
+                    "probe_raw_e_clamped": get_nested(cfg, "_contract.probe_raw_e_clamped", None),
+                    "variant_axes_requested": get_nested(cfg, "_contract.variant_axes_requested", None),
+                    "variant_axes_effective": get_nested(cfg, "_contract.variant_axes_effective", None),
                     "probe_calls_mode": get_nested(cfg, "detailed_place.mpvs.macros.probe.calls_mode", None),
                     "eff_calls_alpha": get_nested(cfg, "detailed_place.mpvs.macros.probe.eff_calls_alpha", None),
                     "probe_weight_metric": get_nested(cfg, "detailed_place.mpvs.macros.probe.weight_metric", None),
@@ -1326,10 +1331,62 @@ def main():
             _apply_override(f"{P_CEC}.credit_metric", "gain_long", reason + ":K1")
             _apply_override(f"{P_CEC}.counterfactual_credit", False, reason + ":K1")
 
+    # ------------------------------------------------------------------
+    # VARIANT_TAG sweep (E/C/D/S/K/M axes)
+    #
+    # IMPORTANT ABLACTION GUARANTEE:
+    #   For the probe-raw ablation config (bc2cec_probe_raw_*), we must keep the
+    #   probe estimator on RAW (no atomic subtraction). Otherwise any VARIANT_TAG
+    #   would overwrite the ablation and make EXP-B2-bc2cec and
+    #   EXP-B2-bc2cec-probe-raw identical.
+    #
+    #   Therefore we clamp the E-axis to E0 for configs whose filename/stem
+    #   contains "probe_raw", while still allowing other axes (C/D/S/K/M) to vary.
+    #
+    #   You can disable this clamp for debugging by setting:
+    #     ALLOW_PROBE_RAW_E_AXIS=1
+    # ------------------------------------------------------------------
+
+    _cfg_stem_lower = str(Path(args.cfg).stem).lower()
+    _is_probe_raw_cfg = bool(re.search(r"probe[_-]?raw", _cfg_stem_lower))
+    _allow_probe_raw_e = os.environ.get("ALLOW_PROBE_RAW_E_AXIS", "0").strip() == "1"
+    variant_axes_requested: dict = {}
+    variant_axes_effective: dict = {}
+    probe_raw_e_clamped = False
+
     variant_tag = os.environ.get("VARIANT_TAG", "").strip()
     axes = _parse_variant_tag(variant_tag) if variant_tag else {}
     if axes:
+        variant_axes_requested = dict(axes)
+        if _is_probe_raw_cfg and (not _allow_probe_raw_e) and int(axes.get("E", 0)) != 0:
+            # Clamp E -> 0 (RAW) to preserve "probe-raw" ablation semantics.
+            req_e = int(axes.get("E", 0))
+            axes["E"] = 0
+            probe_raw_e_clamped = True
+            # Record the clamp so it is visible in run_summary/_contract.overrides.
+            ov = _ensure_overrides_list()
+            ov.append(
+                {
+                    "path": "VARIANT_TAG.E",
+                    "requested": req_e,
+                    "effective": 0,
+                    "reason": f"probe_raw_clamp(cfg={Path(args.cfg).name})",
+                }
+            )
+            cfg._contract.overrides = ov
+        variant_axes_effective = dict(axes)
         _apply_axes(axes, reason=f"env:VARIANT_TAG:{variant_tag}")
+
+    # Persist variant/debug metadata into cfg for downstream run_summary (run_layout_agent()).
+    # This avoids relying on environment variables when comparing runs.
+    try:
+        OmegaConf.update(cfg, "_contract.cfg_file", str(Path(args.cfg).name), merge=True)
+        OmegaConf.update(cfg, "_contract.is_probe_raw_cfg", bool(_is_probe_raw_cfg), merge=True)
+        OmegaConf.update(cfg, "_contract.probe_raw_e_clamped", bool(probe_raw_e_clamped), merge=True)
+        OmegaConf.update(cfg, "_contract.variant_axes_requested", dict(variant_axes_requested or {}), merge=True)
+        OmegaConf.update(cfg, "_contract.variant_axes_effective", dict(variant_axes_effective or {}), merge=True)
+    except Exception:
+        pass
 
     probe_calls_mode = os.environ.get("PROBE_CALLS_MODE", "").strip().lower()
     if probe_calls_mode:
