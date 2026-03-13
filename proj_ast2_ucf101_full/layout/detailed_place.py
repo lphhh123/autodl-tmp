@@ -730,7 +730,41 @@ def run_detailed_place(
     if probe_enabled:
         try:
             # triggers can be defined as fractions of total budget and/or absolute call counts
-            fracs = list(_cfg_get(probe_cfg, "trigger_fracs", [0.20, 0.60, 0.85]) or [])
+            fracs_raw = _cfg_get(probe_cfg, "trigger_fracs", [0.20, 0.60, 0.85])
+            # Support rule-generated schedule to avoid hand-picked insertion points.
+            # Use: trigger_fracs: auto_k4  (or probe_cfg.trigger_schedule: auto_k4)
+            if isinstance(fracs_raw, str):
+                key = str(fracs_raw).strip().lower()
+            else:
+                key = str(_cfg_get(probe_cfg, "trigger_schedule", "") or "").strip().lower()
+
+            if key in {"auto_k4", "auto"}:
+                try:
+                    st_cfg = _cfg_get(_cfg_get(mpvs_cfg, "controller", {}) or {}, "budget_stage", {}) or {}
+                    early_frac = float(st_cfg.get("early_frac", 0.20))
+                    late_frac = float(st_cfg.get("late_frac", 0.55))
+                except Exception:
+                    early_frac, late_frac = 0.20, 0.55
+                try:
+                    grid = float(_cfg_get(probe_cfg, "schedule_grid", 0.05))
+                except Exception:
+                    grid = 0.05
+                grid = float(max(0.01, min(0.25, grid)))
+                min_rem = int(_cfg_get(probe_cfg, "min_remaining_calls", 1500))
+                B = int(max(1, int(total_eval_budget)))
+                f4 = min(0.90, 1.0 - float(min_rem) / float(B))
+                f4 = float(max(0.55, min(0.95, f4)))
+                f1 = max(0.30, float(early_frac) + 0.10)
+                f2 = float(late_frac)
+                f3_raw = 0.5 * (float(f2) + float(f4))
+                f3 = round(float(f3_raw) / float(grid)) * float(grid)
+                fracs = [float(f1), float(f2), float(f3), float(f4)]
+                fracs = sorted({float(min(0.99, max(0.01, x))) for x in fracs})
+                probe_cfg["trigger_fracs"] = fracs
+                mpvs_stats["probe_trigger_fracs"] = fracs
+                mpvs_stats["probe_trigger_mode"] = "auto_k4"
+            else:
+                fracs = list(fracs_raw or [])
             calls_abs = list(_cfg_get(probe_cfg, "trigger_calls", []) or [])
             trig = []
             for x in fracs:
@@ -1115,6 +1149,31 @@ def run_detailed_place(
             except Exception:
                 fb = {"name": str(op), "error": "apply_probe_feedback_failed"}
             row["feedback"] = fb
+
+            score_u = None
+            try:
+                wmetric = str(_cfg_get(probe_cfg, "weight_metric", "cf") or "cf").strip().lower()
+                use_cf = int((fb or {}).get("use_cf", 0)) if isinstance(fb, dict) else 0
+                if (wmetric in {"cf", "gain_cf", "counterfactual"}) and use_cf == 1:
+                    score_u = float((fb or {}).get("rate_cf_shrunk", (fb or {}).get("rate_cf", 0.0)))
+                else:
+                    score_u = float((fb or {}).get("rate_op_shrunk", (fb or {}).get("rate_op", 0.0)))
+            except Exception:
+                score_u = None
+            if score_u is None:
+                score_u = float(margin_heur) / float(max(1, int(calls_for_ctrl)))
+
+            score_u = float(score_u)
+            score_gain = float(score_u) * float(max(1, int(calls_for_ctrl)))
+            row["score_u"] = float(score_u)
+            row["score_gain"] = float(score_gain)
+            try:
+                if isinstance(fb, dict):
+                    fb["score_u"] = float(score_u)
+                    fb["score_gain"] = float(score_gain)
+                    row["feedback"] = fb
+            except Exception:
+                pass
             op_rows.append(row)
 
             if mpvs_ctrl is not None:
@@ -1123,20 +1182,20 @@ def run_detailed_place(
                         comp="macro",
                         family=str(op),
                         ctx_key=f"{stage}|stage_probe",
-                        margin_heur=float(margin_heur),
-                        margin_cur=float(margin_cur),
+                        margin_heur=float(score_gain),
+                        margin_cur=float(score_gain),
                         calls=int(calls_for_ctrl),
-                        pass_heur=bool(margin_heur > 0.0),
-                        pass_cur=bool(margin_cur > 0.0),
+                        pass_heur=bool(float(score_u) > 0.0),
+                        pass_cur=bool(float(score_u) > 0.0),
                     )
                     mpvs_ctrl.observe_probe_credit_to_aos(
                         family=str(op),
                         stage=str(stage),
                         used_calls=int(used_calls),
-                        margin_heur=float(margin_heur),
-                        margin_cur=float(margin_cur),
+                        margin_heur=float(score_gain),
+                        margin_cur=float(score_gain),
                         calls=int(calls_for_ctrl),
-                        pass_heur=bool(margin_heur > 0.0),
+                        pass_heur=bool(float(score_u) > 0.0),
                         source="stage_probe",
                     )
                 except Exception:
@@ -1148,7 +1207,7 @@ def run_detailed_place(
         def _pick_top1(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             if not rows:
                 return None
-            return sorted(rows, key=lambda x: float(x.get("margin_heur", 0.0)), reverse=True)[0]
+            return sorted(rows, key=lambda x: float(x.get("score_u", 0.0)), reverse=True)[0]
 
         chosen = None
         dmode = str(decision_mode)
@@ -1162,7 +1221,7 @@ def run_detailed_place(
             for _ in range(rr):
                 if len(alive) <= 1:
                     break
-                alive = sorted(alive, key=lambda x: float(x.get("margin_heur", 0.0)), reverse=True)
+                alive = sorted(alive, key=lambda x: float(x.get("score_u", 0.0)), reverse=True)
                 k = max(1, int(round(len(alive) * keep_ratio)))
                 alive = alive[:k]
             chosen = _pick_top1(alive)
@@ -1171,27 +1230,42 @@ def run_detailed_place(
 
         if chosen is not None:
             rec["decision_top1"] = str(chosen.get("name", ""))
+            rec["decision_score_u"] = float(chosen.get("score_u", 0.0))
             if dmode in {"burst", "racing_burst"} and mpvs_ctrl is not None:
-                try:
-                    burst_frac = float(_cfg_get(decision_cfg, "burst_calls_frac", 0.06))
-                except Exception:
-                    burst_frac = 0.06
-                burst_min = int(_cfg_get(decision_cfg, "burst_calls_min", 1200))
-                burst_late_cap = int(_cfg_get(decision_cfg, "burst_calls_late_cap", 2400))
-                b_calls = max(burst_min, int(round(float(total_eval_budget) * float(max(0.0, burst_frac)))))
-                if str(stage) == "late":
-                    b_calls = min(b_calls, burst_late_cap)
-                if str(getattr(mpvs_ctrl, "safety_mode", "")) == "conservative_dgate":
-                    allowed = mpvs_ctrl.filter_families_conservative([str(chosen.get("name", ""))], str(stage))
-                    if allowed:
+                chosen_name = str(chosen.get("name", ""))
+                if float(chosen.get("score_u", 0.0)) <= 0.0:
+                    rec["burst_set"] = ""
+                    rec["burst_blocked"] = 1
+                    rec["burst_blocked_reason"] = "nonpos_score"
+                elif str(stage) == "early" and chosen_name != "shake":
+                    rec["burst_set"] = ""
+                    rec["burst_blocked"] = 1
+                    rec["burst_blocked_reason"] = "early_only_shake"
+                elif str(instance_tag) == "randw" and str(stage) != "late":
+                    rec["burst_set"] = ""
+                    rec["burst_blocked"] = 1
+                    rec["burst_blocked_reason"] = "randw_only_late"
+                else:
+                    try:
+                        burst_frac = float(_cfg_get(decision_cfg, "burst_calls_frac", 0.06))
+                    except Exception:
+                        burst_frac = 0.06
+                    burst_min = int(_cfg_get(decision_cfg, "burst_calls_min", 1200))
+                    burst_late_cap = int(_cfg_get(decision_cfg, "burst_calls_late_cap", 2400))
+                    b_calls = max(burst_min, int(round(float(total_eval_budget) * float(max(0.0, burst_frac)))))
+                    if str(stage) == "late":
+                        b_calls = min(b_calls, burst_late_cap)
+                    if str(getattr(mpvs_ctrl, "safety_mode", "")) == "conservative_dgate":
+                        allowed = mpvs_ctrl.filter_families_conservative([str(chosen.get("name", ""))], str(stage))
+                        if allowed:
+                            mpvs_ctrl.set_burst_family(str(chosen.get("name", "")), int(used_calls), int(b_calls), stage=str(stage), reason=str(dmode))
+                            rec["burst_set"] = str(chosen.get("name", ""))
+                        else:
+                            rec["burst_set"] = ""
+                            rec["burst_blocked"] = 1
+                    else:
                         mpvs_ctrl.set_burst_family(str(chosen.get("name", "")), int(used_calls), int(b_calls), stage=str(stage), reason=str(dmode))
                         rec["burst_set"] = str(chosen.get("name", ""))
-                    else:
-                        rec["burst_set"] = ""
-                        rec["burst_blocked"] = 1
-                else:
-                    mpvs_ctrl.set_burst_family(str(chosen.get("name", "")), int(used_calls), int(b_calls), stage=str(stage), reason=str(dmode))
-                    rec["burst_set"] = str(chosen.get("name", ""))
 
         for row in op_rows:
             fb = dict(row.get("feedback", {}) or {})

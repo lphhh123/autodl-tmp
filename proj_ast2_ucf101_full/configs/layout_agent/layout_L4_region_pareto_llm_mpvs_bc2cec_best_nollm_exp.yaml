@@ -1,0 +1,60 @@
+_base_: layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml
+
+# BEST mainline (single path, no sweep):
+# - auto_k4 probe schedule (rule-generated, not hand-picked)
+# - decision score uses MacroEngine feedback (cf/raw shrunk rate)
+# - racing+burst + conservative_dgate for stability (esp. low budget / randw)
+# - probe CF-stable + shrinkage to reduce variance
+# - controller long CF OFF to isolate probe-CF contribution (clean ablation)
+detailed_place:
+  mpvs:
+    macros:
+      # make macro proposal less noisy
+      max_macros: 1
+      decision:
+        mode: racing_burst
+        racing_rounds: 2
+        racing_keep_ratio: 0.5
+        burst_calls_frac: 0.06
+        burst_calls_min: 1200
+        burst_calls_late_cap: 2400
+      probe:
+        # --- schedule (rule-generated) ---
+        trigger_fracs: auto_k4
+        schedule_grid: 0.05
+        # --- calls accounting ---
+        calls_mode: eff
+        eff_calls_alpha: 3.0
+        # --- CF-stable estimator ---
+        weight_metric: cf
+        cf_discount: 0.35
+        cf_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
+        cf_cap_mult: 1.5
+        cf_reliability_tau: 800
+        min_atomic_calls_for_cf: 120
+        # --- safe updates ---
+        cf_one_sided_update: true
+        cf_one_sided_penalty_mode: raw
+        cf_one_sided_penalty_scale: 1.0
+        shrinkage:
+          enabled: true
+          lambda_calls: 300.0
+          prior_alpha: 0.08
+          prior_mode: global
+    controller:
+      cec:
+        # Disable controller-side CF to keep ablation responsibility clean.
+        credit_metric: gain_long
+        counterfactual_credit: false
+        safety:
+          mode: conservative_dgate
+          # mildly conservative; relies on score_u already being CF-stable
+          lcb_z: 1.0
+          min_samples: 3
+          lcb_floor: 0.0
+        aos:
+          probe_feed:
+            enabled: true
+            # keep it conservative (probe signal is noisy)
+            gain_scale: 0.25
+            calls_cap: 1200
