@@ -1,0 +1,14 @@
+_base_: S015_A1_lowtax_B2_cfboost_signedaos_K4_bc2cec.yaml
+
+# Ablation: keep the stronger transmission path identical,
+# but switch probe estimator from CF to RAW.
+detailed_place:
+  mpvs:
+    macros:
+      probe:
+        cf_discount: 0.0
+        cf_reliability_tau: 0.0
+        weight_metric: raw
+        cf_one_sided_update: false
+        shrinkage:
+          enabled: false

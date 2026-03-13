@@ -1,0 +1,83 @@
+_base_: S015_A1_lowtax_B2_safe_soft_C0_default_K4_bc2cec.yaml
+
+# CF-boosted mainline:
+# - keep fixed K4 schedule
+# - make probe ranking actionable
+# - use effective calls for probe-CF accounting
+# - stabilize CF by reliability + shrinkage
+# - allow signed probe feed into AOS
+# - isolate probe-CF by disabling controller-side long CF for this round
+
+detailed_place:
+  mpvs:
+    macros:
+      max_macros: 1
+      decision:
+        mode: racing_burst
+        racing_rounds: 2
+        racing_keep_ratio: 0.5
+        burst_calls_frac: 0.06
+        burst_calls_min: 1200
+        burst_calls_late_cap: 2400
+
+      probe:
+        # keep fixed K4 trigger points from recovered cqecc line
+        trigger_fracs: [0.30, 0.55, 0.75, 0.90]
+
+        # strengthen CF denominator / gate robustness
+        calls_mode: eff
+        eff_calls_alpha: 3.0
+
+        # CF-stable probe estimator
+        cf_discount: 0.35
+        cf_discount_by_stage: {early: 0.20, mid: 0.35, late: 0.50}
+        cf_cap_mult: 1.5
+        min_atomic_calls_for_cf: 120
+        cf_reliability_tau: 600.0
+
+        # keep safe update, but do not let strongly CF-negative families stay overweight forever
+        weight_metric: cf
+        update_weight: true
+        weight_use_ewma: true
+        ewma_alpha: 0.2
+        min_gain_per_call: 0.0
+
+        success_boost_scale: 0.60
+        fail_penalty_scale: 0.20
+
+        cf_one_sided_update: true
+        cf_one_sided_penalty_mode: raw
+        cf_one_sided_penalty_scale: 1.0
+        cf_strong_negative_floor: 0.0
+        cf_strong_negative_penalty_scale: 0.35
+
+        shrinkage:
+          enabled: true
+          lambda_calls: 250.0
+          prior_alpha: 0.08
+          prior_mode: global
+
+    controller:
+      cec:
+        # make bc2cec vs probe-raw responsibility cleaner in this round
+        credit_metric: gain_long
+        counterfactual_credit: false
+
+        safety:
+          mode: conservative_dgate
+          lcb_z: 1.0
+          min_samples: 3
+          lcb_floor: 0.0
+
+        aos:
+          probe_feed:
+            enabled: true
+            use_margin: heur
+            gain_scale: 0.30
+            require_pass_heur: false
+            calls_cap: 1200
+
+            # NEW: let negative probe-CF softly demote family priors
+            signed_gain: true
+            neg_gain_scale: 0.35
+            neg_gain_floor_per_call: -1.0e-5
