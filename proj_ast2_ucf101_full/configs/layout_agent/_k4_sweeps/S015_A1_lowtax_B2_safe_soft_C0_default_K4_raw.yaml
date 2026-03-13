@@ -1,0 +1,13 @@
+_base_: S015_A1_lowtax_B2_safe_soft_C0_default_K4_bc2cec.yaml
+
+# Ablation: probe enabled, but probe-CF disabled (raw credit update)
+detailed_place:
+  mpvs:
+    macros:
+      probe:
+        cf_discount: 0.0
+        # keep stage discounts present (matches cqecc snapshot)
+        cf_discount_by_stage: {early: 0.10, mid: 0.30, late: 0.45}
+        cf_reliability_tau: 0.0
+        cf_one_sided_update: false
+        weight_metric: raw
