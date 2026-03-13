@@ -505,7 +505,7 @@ case "$EXP_ID" in
   # Allow overriding configs per sweep without editing code:
   #   BC2CEC_CFG=... BC2CEC_RAW_CFG=... BC2CEC_NOPROBE_CFG=... RUN_TAG_PREFIX=... bash scripts/launch_B_grid_parallel.sh
   EXP-B2-bc2cec)
-    _CFG="${BC2CEC_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_nollm_exp.yaml}"
+    _CFG="${BC2CEC_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_nollm_exp.yaml}"
     run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec
     ;;
   # Ablations to keep story clean (run only when needed)
@@ -514,7 +514,7 @@ case "$EXP_ID" in
     run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-noprobe
     ;;
   EXP-B2-bc2cec-probe-raw)
-    _CFG="${BC2CEC_RAW_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_probe_raw_nollm_exp.yaml}"
+    _CFG="${BC2CEC_RAW_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_probe_raw_nollm_exp.yaml}"
     run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-probe-raw
     ;;
 

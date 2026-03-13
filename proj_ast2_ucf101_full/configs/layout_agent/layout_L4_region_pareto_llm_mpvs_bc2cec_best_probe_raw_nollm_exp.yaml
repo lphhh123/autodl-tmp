@@ -1,0 +1,15 @@
+_base_: layout_L4_region_pareto_llm_mpvs_bc2cec_best_nollm_exp.yaml
+
+# Ablation: keep everything identical to BEST, except:
+# - probe estimator uses RAW rate (no atomic subtraction, no shrinkage),
+# so bc2cec(best) > probe-raw(best) is a meaningful CF/probe ablation.
+detailed_place:
+  mpvs:
+    macros:
+      probe:
+        cf_discount: 0.0
+        weight_metric: raw
+        cf_one_sided_update: false
+        cf_reliability_tau: 0.0
+        shrinkage:
+          enabled: false
