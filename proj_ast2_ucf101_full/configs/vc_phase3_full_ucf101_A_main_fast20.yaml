@@ -98,7 +98,7 @@ stable_hw:
   # Override guard for fast-iteration stability: relax eps + add soft recovery + trust region.
   accuracy_guard:
     controller:
-      epsilon_drop: 0.03
+      epsilon_drop: 0.01
       hysteresis: 0.002
       lock_grace_epochs: 3
       k_enter: 2
@@ -109,13 +109,13 @@ stable_hw:
       trust_region:
         # Max change of ch_keep_target per epoch.
         delta_down: 0.01
-        delta_up: 0.02
+        delta_up: 0.05
       soft_recovery:
         enabled: true
         # Raise target keep by this step when violating; repeat after hold if still violating.
-        rollback_step: 0.03
+        rollback_step: 0.05
         hold_epochs: 2
-        max_rollbacks: 3
+        max_rollbacks: 6
         # Keep as a last-resort safety only (default off).
         fallback_force_dense: false
 
