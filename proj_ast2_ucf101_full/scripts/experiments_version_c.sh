@@ -399,17 +399,32 @@ case "$EXP_ID" in
   EXP-A2p-fast)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20.yaml "$(odir EXP-A2p-fast)"
     ;;
+  EXP-A2p-fast-k90e02)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20_k90_eps002.yaml "$(odir EXP-A2p-fast-k90e02)"
+    ;;
   EXP-A4-fast)
     run_vc configs/vc_phase3_full_ucf101_A_main_fast20.yaml "$(odir EXP-A4-fast)"
+    ;;
+  EXP-A4-fast-k90e02)
+    run_vc configs/vc_phase3_full_ucf101_A_main_fast20_k90_eps002.yaml "$(odir EXP-A4-fast-k90e02)"
     ;;
   EXP-A4-roi-fast)
     run_vc configs/vc_phase3_full_ucf101_A_roi_fast20.yaml "$(odir EXP-A4-roi-fast)"
     ;;
+  EXP-A4-roi-fast-k90e02)
+    run_vc configs/vc_phase3_full_ucf101_A_roi_fast20_k90_eps002.yaml "$(odir EXP-A4-roi-fast-k90e02)"
+    ;;
   EXP-A4-acho-fast)
     run_vc configs/vc_phase3_full_ucf101_A_acho_fast20.yaml "$(odir EXP-A4-acho-fast)"
     ;;
+  EXP-A4-acho-fast-k90e02)
+    run_vc configs/vc_phase3_full_ucf101_A_acho_fast20_k90_eps002.yaml "$(odir EXP-A4-acho-fast-k90e02)"
+    ;;
   EXP-A4-acho-roi-fast)
     run_vc configs/vc_phase3_full_ucf101_A_acho_roi_fast20.yaml "$(odir EXP-A4-acho-roi-fast)"
+    ;;
+  EXP-A4-acho-roi-fast-k90e02)
+    run_vc configs/vc_phase3_full_ucf101_A_acho_roi_fast20_k90_eps002.yaml "$(odir EXP-A4-acho-roi-fast-k90e02)"
     ;;
   EXP-A3) run_ast configs/ast2_ucf101_ast_hw_A_main.yaml         "$(odir EXP-A3)" ;;
   EXP-A4) run_vc  configs/vc_phase3_full_ucf101_A_main.yaml      "$(odir EXP-A4)" ;;
