@@ -1,0 +1,23 @@
+# A4-fast + ACHO, stronger pruning version
+
+_base_: configs/vc_phase3_full_ucf101_A_main_fast20_k90_eps002.yaml
+
+stable_hw:
+  acho:
+    enabled: true
+    step_up_frac: 0.12
+    step_down_frac: 0.25
+    margin_adaptive: true
+    full_margin_frac: 0.75
+    margin_ref_floor: 1.0e-4
+    margin_up_power: 2.0
+    margin_down_power: 1.5
+    step_up_max_mul: 1.35
+    step_down_max_mul: 1.50
+    hysteresis_frac: 0.25
+    post_commit_lambda_mul: 0.5
+    post_commit_block_increase: true
+
+  discrete_isolation:
+    roi_commit:
+      enabled: false

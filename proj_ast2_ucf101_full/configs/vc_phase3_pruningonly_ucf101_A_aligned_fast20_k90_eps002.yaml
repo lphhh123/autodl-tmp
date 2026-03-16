@@ -1,0 +1,30 @@
+# A2p stronger fast config:
+# same pruning-only semantics as A2p-fast,
+# but inherit the stronger fast base (eps=0.02, ch_keep_end=0.90).
+
+_base_: configs/vc_phase3_full_ucf101_A_main_fast20_k90_eps002.yaml
+
+stable_hw:
+  enabled: true
+  force_disable_ok: false
+  lambda_hw_schedule:
+    enabled: true
+    warmup_epochs: 1000000
+    ramp_epochs: 1
+    lambda_hw_min: 0.0
+    lambda_hw_max: 0.08
+  discrete_isolation:
+    mapping_update_every_epochs: 1000000000
+    layout_update_every_epochs:  1000000000
+    roi_commit:
+      enabled: false
+
+training:
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+
+loss:
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0

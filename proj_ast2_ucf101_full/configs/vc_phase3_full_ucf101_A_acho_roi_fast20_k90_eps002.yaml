@@ -1,0 +1,37 @@
+# A4-fast + ACHO + ROI, stronger pruning version
+
+_base_: configs/vc_phase3_full_ucf101_A_main_fast20_k90_eps002.yaml
+
+stable_hw:
+  acho:
+    enabled: true
+    step_up_frac: 0.12
+    step_down_frac: 0.25
+    margin_adaptive: true
+    full_margin_frac: 0.75
+    margin_ref_floor: 1.0e-4
+    margin_up_power: 2.0
+    margin_down_power: 1.5
+    step_up_max_mul: 1.35
+    step_down_max_mul: 1.50
+    hysteresis_frac: 0.25
+    post_commit_lambda_mul: 0.5
+    post_commit_block_increase: true
+    roi_reject_high: 0.6
+    roi_step_up_mul_high_reject: 0.5
+    roi_cap_mul_high_reject: 0.8
+    roi_big_commit_rel: 0.03
+    roi_post_commit_lambda_mul_big: 0.3
+
+  discrete_isolation:
+    roi_commit:
+      enabled: true
+      metric: L_hw_total
+      min_rel_improve: 0.01
+      min_abs_improve: 0.0
+      min_margin: 0.003
+      cooldown_epochs: 2
+      keep_ema_alpha: 0.2
+      cooldown_scale: 6
+      cooldown_max_extra: 6
+      require_hw_active: true
