@@ -108,20 +108,35 @@ def apply_env_overrides_vc(cfg):
 
     # DP auto scaling (opt-in)
     use_dp = _env_truthy("USE_DP", "0")
-    ng = _count_visible_gpus()
-    if use_dp and ng > 1:
+    ng_env = _count_visible_gpus()
+    ng_eff = ng_env
+    if use_dp and ng_env > 1:
+        # Prefer torch.cuda.device_count() as the source of truth when available.
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                ng_eff = int(torch.cuda.device_count())
+        except Exception:
+            ng_eff = ng_env
+
+    if use_dp and ng_eff > 1:
         if _env_truthy("DP_SCALE_BATCH", "0"):
             old = int(OmegaConf.select(cfg, "train.batch_size") or 0)
             if old > 0:
-                cfg.train.batch_size = int(old) * int(ng)
-                print(f"[DP] scaled batch_size: {old} -> {cfg.train.batch_size} (x{ng})")
+                cfg.train.batch_size = int(old) * int(ng_eff)
+                print(f"[DP] scaled batch_size: {old} -> {cfg.train.batch_size} (x{ng_eff}) [env={ng_env}]")
         lr_mode = str(os.environ.get("DP_SCALE_LR", "")).strip().lower()
         if lr_mode in ("linear", "sqrt"):
             old_lr = float(OmegaConf.select(cfg, "train.lr") or 0.0)
             if old_lr > 0:
-                mult = float(ng) if lr_mode == "linear" else math.sqrt(float(ng))
+                mult = float(ng_eff) if lr_mode == "linear" else math.sqrt(float(ng_eff))
                 cfg.train.lr = float(old_lr) * float(mult)
-                print(f"[DP] scaled lr({lr_mode}): {old_lr} -> {cfg.train.lr} (x{mult:.4g})")
+                print(f"[DP] scaled lr({lr_mode}): {old_lr} -> {cfg.train.lr} (x{mult:.4g}) [env={ng_env}]")
+    elif use_dp and ng_env > 1 and ng_eff <= 1:
+        # This happens when CUDA_VISIBLE_DEVICES lists multiple ids but torch only sees 1 GPU.
+        # In that case, do NOT scale batch/lr to avoid single-GPU OOM.
+        print(f"[DP] WARNING: env shows {ng_env} GPUs but torch sees {ng_eff}; skip DP_SCALE_* to avoid single-GPU OOM")
     return cfg
 
 
