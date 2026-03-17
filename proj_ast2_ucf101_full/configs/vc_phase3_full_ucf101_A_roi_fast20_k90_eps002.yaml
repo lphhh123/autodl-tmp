@@ -18,3 +18,9 @@ stable_hw:
       cooldown_scale: 6
       cooldown_max_extra: 6
       require_hw_active: true
+      lagrangian:
+        enabled: true
+        lambda_scale: 30
+        risk_weight: 1.5
+        margin0: 0.01
+        margin_scale: 6.0
