@@ -1265,6 +1265,34 @@ def _roi_should_commit(
     return (abs_impr >= float(min_abs_improve)) and (rel >= float(min_rel_improve))
 
 
+def _roi_mapping_change_frac(old_mapping_res: Optional[Dict[str, Any]], new_mapping_res: Optional[Dict[str, Any]]) -> float:
+    """Cheap, candidate-specific risk proxy: fraction of mapping assignments that change.
+
+    This is intentionally simple and deterministic: it forces ROI decisions to depend on the candidate mapping,
+    enabling ACHO (via lambda_hw_effective) to influence commit/reject in a measurable way.
+    """
+    try:
+        if not old_mapping_res or not new_mapping_res:
+            return 0.0
+        old_map = old_mapping_res.get("mapping", None)
+        new_map = new_mapping_res.get("mapping", None)
+        if not isinstance(old_map, (list, tuple)) or not isinstance(new_map, (list, tuple)):
+            return 0.0
+        n = max(len(old_map), len(new_map))
+        if n <= 0:
+            return 0.0
+        m = min(len(old_map), len(new_map))
+        diff = 0
+        for i in range(m):
+            if int(old_map[i]) != int(new_map[i]):
+                diff += 1
+        # Count length mismatch as changed assignments.
+        diff += (n - m)
+        return float(diff) / float(n)
+    except Exception:
+        return 0.0
+
+
 def _roi_extract_keep_factors(model_info: Optional[Dict[str, Any]], depth: int) -> Dict[str, List[float]]:
     """Extract per-layer keep signals as lists to stabilize discrete planning."""
     if not model_info:
@@ -2435,6 +2463,21 @@ def train_version_c(
                                         stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
                                         mapping_res=cand_mapping_res, metric_key=metric_key,
                                     )
+                                # ROI commit criterion: optionally use Lagrangian net score (hardware + lambda * risk_proxy)
+                                lag_enabled = bool(
+                                    _cfg_get(roi_cfg_local, "lagrangian.enabled", None)
+                                    if _cfg_get(roi_cfg_local, "lagrangian.enabled", None) is not None
+                                    else _cfg_get(roi_cfg_local, "lagrangian_enabled", False)
+                                )
+                                # Make lambda influence intentionally strong to avoid identical trajectories.
+                                lambda_scale = float(_cfg_get(roi_cfg_local, "lagrangian.lambda_scale", 30.0) or 30.0)
+                                lambda_min = float(_cfg_get(roi_cfg_local, "lagrangian.lambda_min", 0.0) or 0.0)
+                                lambda_max = float(_cfg_get(roi_cfg_local, "lagrangian.lambda_max", 1e9) or 1e9)
+                                risk_weight = float(_cfg_get(roi_cfg_local, "lagrangian.risk_weight", 1.5) or 1.5)
+                                margin0 = float(_cfg_get(roi_cfg_local, "lagrangian.margin0", 0.01) or 0.01)
+                                margin_scale = float(_cfg_get(roi_cfg_local, "lagrangian.margin_scale", 6.0) or 6.0)
+
+                                # Baseline: compare pure hardware metric.
                                 rel = float(_roi_rel_improve(om, nm))
                                 commit = _roi_should_commit(
                                     old_metric=om,
@@ -2443,17 +2486,99 @@ def train_version_c(
                                     min_abs_improve=min_abs,
                                 )
                                 abs_impr = float(om) - float(nm)
-                                roi_reason = (
-                                    f"metric={metric_key} old={om:.6g} new={nm:.6g} "
-                                    f"abs={abs_impr:.6g} rel={rel:.4f} min_abs={min_abs:.6g} min_rel={min_rel:.4f} strategy={cand_strategy}"
-                                )
-                                stable_hw_state["roi_last_eval"] = {
-                                    "outer": int(outer), "metric": metric_key,
-                                    "old": float(om), "new": float(nm),
-                                    "abs_improve": float(abs_impr), "min_abs": float(min_abs),
-                                    "rel_improve": float(rel), "min_rel": float(min_rel),
-                                    "commit": bool(commit),
-                                }
+
+                                # Lagrangian mode: score = metric + lambda_use * penalty(candidate)
+                                # penalty uses a cheap candidate-specific proxy (mapping change fraction) amplified near the accuracy boundary.
+                                if lag_enabled:
+                                    try:
+                                        lam_eff = float(stable_hw_state.get("lambda_hw_effective", 0.0) or 0.0)
+                                        lam_use = float(lam_eff) * float(lambda_scale)
+                                        lam_use = max(float(lambda_min), min(float(lam_use), float(lambda_max)))
+
+                                        acc_drop_now = float(stable_hw_state.get("acc_drop", 0.0) or 0.0)
+                                        eps_drop = float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0)
+                                        margin = float(eps_drop) - float(acc_drop_now)
+                                        margin_risk = 0.0
+                                        if float(margin0) > 0.0:
+                                            margin_risk = max(0.0, (float(margin0) - float(margin)) / float(margin0))
+
+                                        chg = float(_roi_mapping_change_frac(old_mapping_res, cand_mapping_res))
+                                        # Scale penalty to the same unit as the metric (hardware loss) to make lambda effect visible.
+                                        base_unit = float(om) if (om is not None and float(om) > 0.0) else 1.0
+                                        penalty = float(risk_weight) * float(base_unit) * float(chg) * (1.0 + float(margin_scale) * float(margin_risk))
+
+                                        old_score = float(om)  # old mapping vs itself has 0 change-penalty
+                                        new_score = float(nm) + float(lam_use) * float(penalty)
+
+                                        abs_impr = float(old_score) - float(new_score)
+                                        rel = float(_roi_rel_improve(old_score, new_score))
+                                        commit = _roi_should_commit(
+                                            old_metric=float(old_score),
+                                            new_metric=float(new_score),
+                                            min_rel_improve=min_rel,
+                                            min_abs_improve=min_abs,
+                                        )
+                                        roi_reason = (
+                                            f"metric={metric_key} old={om:.6g} new={nm:.6g} "
+                                            f"score_old={old_score:.6g} score_new={new_score:.6g} "
+                                            f"abs={abs_impr:.6g} rel={rel:.4f} "
+                                            f"lam_eff={lam_eff:.6g} lam_use={lam_use:.6g} chg={chg:.4f} "
+                                            f"margin={margin:.6g} pen={penalty:.6g} "
+                                            f"min_abs={min_abs:.6g} min_rel={min_rel:.4f} strategy={cand_strategy}"
+                                        )
+                                        stable_hw_state["roi_last_eval"] = {
+                                            "outer": int(outer),
+                                            "metric": metric_key,
+                                            "old": float(om),
+                                            "new": float(nm),
+                                            "old_score": float(old_score),
+                                            "new_score": float(new_score),
+                                            "penalty": float(penalty),
+                                            "chg_frac": float(chg),
+                                            "margin": float(margin),
+                                            "lam_eff": float(lam_eff),
+                                            "lam_use": float(lam_use),
+                                            "abs_improve": float(abs_impr),
+                                            "min_abs": float(min_abs),
+                                            "rel_improve": float(rel),
+                                            "min_rel": float(min_rel),
+                                            "commit": bool(commit),
+                                        }
+                                    except Exception as _exc_lag:
+                                        # Fallback to metric-only decision if anything goes wrong.
+                                        roi_reason = (
+                                            f"metric={metric_key} old={om:.6g} new={nm:.6g} "
+                                            f"abs={abs_impr:.6g} rel={rel:.4f} "
+                                            f"min_abs={min_abs:.6g} min_rel={min_rel:.4f} "
+                                            f"strategy={cand_strategy} lag_err={_exc_lag}"
+                                        )
+                                        stable_hw_state["roi_last_eval"] = {
+                                            "outer": int(outer),
+                                            "metric": metric_key,
+                                            "old": float(om),
+                                            "new": float(nm),
+                                            "abs_improve": float(abs_impr),
+                                            "min_abs": float(min_abs),
+                                            "rel_improve": float(rel),
+                                            "min_rel": float(min_rel),
+                                            "commit": bool(commit),
+                                        }
+                                else:
+                                    roi_reason = (
+                                        f"metric={metric_key} old={om:.6g} new={nm:.6g} "
+                                        f"abs={abs_impr:.6g} rel={rel:.4f} min_abs={min_abs:.6g} min_rel={min_rel:.4f} strategy={cand_strategy}"
+                                    )
+                                    stable_hw_state["roi_last_eval"] = {
+                                        "outer": int(outer),
+                                        "metric": metric_key,
+                                        "old": float(om),
+                                        "new": float(nm),
+                                        "abs_improve": float(abs_impr),
+                                        "min_abs": float(min_abs),
+                                        "rel_improve": float(rel),
+                                        "min_rel": float(min_rel),
+                                        "commit": bool(commit),
+                                    }
                                 # Record a short decision window for ACHO feedback.
                                 w = int(_cfg_get(roi_cfg_local, "window_size", 10) or 10)
                                 win = stable_hw_state.get("roi_decisions_window", [])
