@@ -39,6 +39,11 @@ from utils.stable_hash import stable_hash
 from utils.safe_json import safe_dump, safe_dumps
 
 
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap DataParallel/DDP wrappers."""
+    return getattr(model, "module", model)
+
+
 def _oc_select(cfg, key: str, default=None):
     """OmegaConf-safe nested key access with a plain default."""
     try:
@@ -111,6 +116,9 @@ _BACKBONE_PARAM_PREFIXES = (
 
 def _is_backbone_param_name(name: str) -> bool:
     name = str(name or "")
+    # DataParallel prefixes param names with "module.".
+    if name.startswith("module."):
+        name = name[len("module."):]
     return any(name.startswith(prefix) for prefix in _BACKBONE_PARAM_PREFIXES)
 
 
@@ -523,13 +531,13 @@ def _atomic_torch_save(obj, dst: Path) -> None:
 class ModelEMA:
     def __init__(self, model: nn.Module, decay: float = 0.9999):
         self.decay = float(decay)
-        self.ema = deepcopy(model).eval()
+        self.ema = deepcopy(unwrap_model(model)).eval()
         for p in self.ema.parameters():
             p.requires_grad_(False)
 
     def update(self, model: nn.Module) -> None:
         with torch.no_grad():
-            msd = model.state_dict()
+            msd = unwrap_model(model).state_dict()
             for k, v in self.ema.state_dict().items():
                 if k in msd:
                     v.copy_(v * self.decay + msd[k] * (1.0 - self.decay))
@@ -561,7 +569,7 @@ def save_checkpoint_version_c(
         "best_acc1": (float(best_acc1) if best_acc1 is not None else None),
         "seal_digest": str(seal_digest),
         "run_id": str(run_id),
-        "model": model.state_dict(),
+        "model": unwrap_model(model).state_dict(),
         "ema": (ema_model.ema.state_dict() if ema_model is not None else None),
         "optimizer": optimizer.state_dict(),
         "scaler": (scaler.state_dict() if scaler is not None else None),
@@ -581,7 +589,7 @@ def maybe_auto_resume_version_c(out_dir: Path, model, ema_model, optimizer, scal
         ckpt = torch.load(ckpt_path, map_location="cpu")
         model_state = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
         if isinstance(model_state, dict):
-            model.load_state_dict(model_state, strict=True)
+            unwrap_model(model).load_state_dict(model_state, strict=True)
         if isinstance(ckpt, dict) and ckpt.get("optimizer", None) is not None:
             optimizer.load_state_dict(ckpt["optimizer"])
         if scaler is not None and isinstance(ckpt, dict) and ckpt.get("scaler", None) is not None:
@@ -1649,6 +1657,21 @@ def train_version_c(
         # If pretrain.enabled=true and weights are missing/incompatible, we fail loudly
         # to avoid accidental "training from scratch".
         maybe_load_pretrained(cfg=cfg, model=model, logger=logger)
+
+        # ---- Optional multi-GPU (single-process) via torch.nn.DataParallel ----
+        # Enable with: USE_DP=1 and CUDA_VISIBLE_DEVICES=0,1,2 (or any N GPUs).
+        use_dp = str(os.environ.get("USE_DP", "0")).strip().lower() in ("1", "true", "yes", "y", "on")
+        if use_dp and device.type == "cuda":
+            n = int(torch.cuda.device_count())
+            if n > 1:
+                try:
+                    torch.cuda.set_device(0)
+                except Exception:
+                    pass
+                logger.info("[DP] enabling DataParallel with %d visible GPUs", n)
+                model = torch.nn.DataParallel(model, device_ids=list(range(n)), output_device=0)
+            else:
+                logger.info("[DP] USE_DP=1 but only 1 visible GPU; running single-GPU")
 
         ema_cfg = getattr(cfg.train, "ema", None)
         ema_enabled = bool(getattr(ema_cfg, "enabled", False))
