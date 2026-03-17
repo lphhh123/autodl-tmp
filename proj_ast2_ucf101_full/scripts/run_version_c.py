@@ -1,6 +1,7 @@
 """Entry for Version-C full training."""
 # --- bootstrap sys.path for both invocation styles ---
 import os
+import math
 import sys
 from pathlib import Path
 
@@ -63,6 +64,65 @@ def _cfg_get_path(cfg, keypath: str, default="__MISSING__"):
 def _is_smoke() -> bool:
     v = str(os.environ.get("SMOKE", "0")).strip().lower()
     return v in ("1", "true", "yes", "y", "on")
+
+
+def _env_truthy(key: str, default: str = "0") -> bool:
+    v = str(os.environ.get(key, default)).strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def _count_visible_gpus() -> int:
+    vis = str(os.environ.get("CUDA_VISIBLE_DEVICES", "")).strip()
+    if not vis:
+        return 1
+    ids = [x.strip() for x in vis.split(",") if x.strip() != ""]
+    return max(1, len(ids))
+
+
+def apply_env_overrides_vc(cfg):
+    """
+    Allow per-run hyperparam overrides without editing yaml.
+    Supported env vars:
+      - TRAIN_BATCH_SIZE / BATCH_SIZE : set cfg.train.batch_size
+      - TRAIN_LR / LR                 : set cfg.train.lr
+      - USE_DP=1 with DP_SCALE_BATCH=1 : batch *= #visible_gpus
+      - USE_DP=1 with DP_SCALE_LR=linear|sqrt : lr *= (#gpus) or sqrt(#gpus)
+    """
+    try:
+        OmegaConf.set_struct(cfg, False)
+    except Exception:
+        pass
+
+    # explicit overrides first
+    bs_raw = os.environ.get("TRAIN_BATCH_SIZE", os.environ.get("BATCH_SIZE", "")).strip()
+    if bs_raw:
+        old = OmegaConf.select(cfg, "train.batch_size")
+        cfg.train.batch_size = int(bs_raw)
+        print(f"[ENV] train.batch_size: {old} -> {cfg.train.batch_size}")
+
+    lr_raw = os.environ.get("TRAIN_LR", os.environ.get("LR", "")).strip()
+    if lr_raw:
+        old = OmegaConf.select(cfg, "train.lr")
+        cfg.train.lr = float(lr_raw)
+        print(f"[ENV] train.lr: {old} -> {cfg.train.lr}")
+
+    # DP auto scaling (opt-in)
+    use_dp = _env_truthy("USE_DP", "0")
+    ng = _count_visible_gpus()
+    if use_dp and ng > 1:
+        if _env_truthy("DP_SCALE_BATCH", "0"):
+            old = int(OmegaConf.select(cfg, "train.batch_size") or 0)
+            if old > 0:
+                cfg.train.batch_size = int(old) * int(ng)
+                print(f"[DP] scaled batch_size: {old} -> {cfg.train.batch_size} (x{ng})")
+        lr_mode = str(os.environ.get("DP_SCALE_LR", "")).strip().lower()
+        if lr_mode in ("linear", "sqrt"):
+            old_lr = float(OmegaConf.select(cfg, "train.lr") or 0.0)
+            if old_lr > 0:
+                mult = float(ng) if lr_mode == "linear" else math.sqrt(float(ng))
+                cfg.train.lr = float(old_lr) * float(mult)
+                print(f"[DP] scaled lr({lr_mode}): {old_lr} -> {cfg.train.lr} (x{mult:.4g})")
+    return cfg
 
 
 def apply_smoke_overrides_vc(cfg):
@@ -217,6 +277,7 @@ def main():
         cfg.training.seed = int(args.seed)
     if args.baseline_stats:
         cfg = _inject_baseline_stats_path(cfg, args.baseline_stats)
+    cfg = apply_env_overrides_vc(cfg)
     # IMPORTANT: apply SMOKE overrides BEFORE validation/contract stamping,
     # otherwise cfg.contract.seal_digest will mismatch computed seal.
     cfg = apply_smoke_overrides_vc(cfg)
