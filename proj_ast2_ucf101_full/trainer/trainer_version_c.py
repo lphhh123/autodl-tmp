@@ -1315,11 +1315,22 @@ def _roi_extract_keep_factors(model_info: Optional[Dict[str, Any]], depth: int) 
     kf = None
     if isinstance(mi, dict) and mi.get("keep_factors") is not None:
         kf = mi.get("keep_factors")
+    elif isinstance(mi, dict) and mi.get("keep_factors_t") is not None:
+        kf = mi.get("keep_factors_t")
     elif isinstance(mi, dict):
         kf = mi
 
     def _as_list(x, n: int, default: float = 1.0) -> List[float]:
         if x is None:
+            return [default] * n
+        if torch.is_tensor(x):
+            xx = x.detach().float().reshape(-1)
+            if int(xx.numel()) == 1:
+                return [float(xx.item())] * n
+            if int(xx.numel()) == n:
+                return [float(v) for v in xx.tolist()]
+            if int(xx.numel()) > 0:
+                return [float(xx[0].item())] * n
             return [default] * n
         if isinstance(x, (int, float)):
             return [float(x)] * n
@@ -1345,12 +1356,15 @@ def _roi_update_keep_ema(stable_hw_state: Dict[str, Any], model_info: Optional[D
     """Update EMA of keep_factors; used for stable discrete planning + ROI evaluation."""
     if not isinstance(stable_hw_state, dict) or (not isinstance(model_info, dict)):
         return
-    depth = 0
-    arch = model_info.get("arch")
-    if arch is None and isinstance(model_info.get("model_info"), dict):
-        arch = model_info["model_info"].get("arch")
-    if isinstance(arch, dict):
-        depth = int(arch.get("depth", 0) or 0)
+    depth = int(stable_hw_state.get("arch_depth", 0) or 0)
+    if depth <= 0:
+        mi = model_info.get("model_info", model_info)
+        if isinstance(mi, dict):
+            kft = mi.get("keep_factors_t", None)
+            if isinstance(kft, dict):
+                tk = kft.get("token_keep", None)
+                if torch.is_tensor(tk) and tk.ndim == 1:
+                    depth = int(tk.numel())
     if depth <= 0:
         return
 
@@ -1840,6 +1854,12 @@ def train_version_c(
         stable_hw_state["run_signature"] = signature
         stable_hw_state["out_dir"] = str(out_dir)
         stable_hw_state["stable_hw_enabled"] = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+        try:
+            mu = unwrap_model(model)
+            if hasattr(mu, "cfg") and getattr(mu.cfg, "depth", None) is not None:
+                stable_hw_state["arch_depth"] = int(mu.cfg.depth)
+        except Exception:
+            pass
 
         hw_ratio_cap = float(getattr(cfg.training, "hw_term_ratio_cap", 0.1) or 0.1)
         hw_norm_enabled = bool(getattr(cfg.training, "hw_loss_norm_enabled", True))

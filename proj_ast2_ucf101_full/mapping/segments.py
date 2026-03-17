@@ -99,6 +99,15 @@ def _extract_keep_factors(model_info: Optional[Dict[str, torch.Tensor]], depth: 
         def _as_list(x, n: int, default: float = 1.0) -> List[float]:
             if x is None:
                 return [default] * n
+            if torch.is_tensor(x):
+                xx = x.detach().float().reshape(-1)
+                if int(xx.numel()) == 1:
+                    return [float(xx.item())] * n
+                if int(xx.numel()) == n:
+                    return [float(v) for v in xx.tolist()]
+                if int(xx.numel()) > 0:
+                    return [float(xx[0].item())] * n
+                return [default] * n
             if isinstance(x, (int, float)):
                 return [float(x)] * n
             if isinstance(x, (list, tuple)):
