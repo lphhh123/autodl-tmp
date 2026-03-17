@@ -2790,6 +2790,44 @@ def train_version_c(
                             logits, info = model(x, audio, return_intermediate=True)
                         else:
                             logits, info = model(x, return_intermediate=True)
+                        # DP gather: reduce stacked per-GPU scalars/vectors in info/model_info back to expected shapes.
+                        if isinstance(info, dict) and torch.cuda.is_available() and int(torch.cuda.device_count()) > 1:
+                            try:
+                                ng = int(torch.cuda.device_count())
+
+                                def _reduce_dp(v):
+                                    if torch.is_tensor(v) and v.numel() > 1:
+                                        if v.ndim >= 1 and int(v.shape[0]) == ng:
+                                            return v.mean(dim=0)
+                                        return v.float().mean()
+                                    return v
+
+                                if torch.is_tensor(info.get("L_AST", None)):
+                                    info["L_AST"] = _reduce_dp(info["L_AST"])
+
+                                mi = info.get("model_info", None)
+                                if isinstance(mi, dict):
+                                    for k in (
+                                        "token_keep",
+                                        "head_keep",
+                                        "ch_keep",
+                                        "block_keep",
+                                        "seq_len_total",
+                                        "seq_len_effective",
+                                        "est_attn_flops_ratio",
+                                        "est_token_linear_flops_ratio",
+                                    ):
+                                        if k in mi:
+                                            mi[k] = _reduce_dp(mi[k])
+
+                                    for kk in ("keep_factors_t", "keep_factors"):
+                                        kfd = mi.get(kk, None)
+                                        if isinstance(kfd, dict):
+                                            for name in ("token_keep", "head_keep", "ch_keep", "block_keep"):
+                                                if name in kfd:
+                                                    kfd[name] = _reduce_dp(kfd[name])
+                            except Exception:
+                                pass
                         run_state["last_model_info"] = info
                         if stable_hw_enabled:
                             # Stabilize discrete planning with EMA keep signals.
@@ -3106,6 +3144,9 @@ def train_version_c(
                             optimizer_alpha.zero_grad(set_to_none=True)
                             continue
                         loss = acc_part_t + hw_term
+                        # DP: if any term was gathered as a vector (e.g., shape [ngpu]), loss becomes non-scalar.
+                        if torch.is_tensor(loss) and loss.numel() > 1:
+                            loss = loss.mean()
                         # ---- v5.4 audit: capture the exact loss components used ----
                         try:
                             ast_loss_val = info["L_AST"]
