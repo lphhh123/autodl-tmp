@@ -3113,6 +3113,13 @@ def train_version_c(
                             ast_loss_val = 0.0
 
                         def _to_f(x):
+                            if torch.is_tensor(x):
+                                # DataParallel gather may turn scalar tensors into vectors
+                                # (e.g. shape [num_gpus]); reduce before item().
+                                xd = x.detach()
+                                if xd.numel() > 1:
+                                    xd = xd.float().mean()
+                                return float(xd.cpu().item())
                             if hasattr(x, "detach"):
                                 return float(x.detach().cpu().item())
                             return float(x)
