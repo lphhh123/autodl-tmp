@@ -294,7 +294,8 @@ def _stablehw_freeze_ast_now(stable_state: Dict[str, Any]) -> bool:
 
 def _apply_ast_runtime_overrides_to_model(model: torch.nn.Module, cfg, ast_sched: dict) -> Optional[dict]:
     """Apply AST schedule to a model's pruner (if present) without mutating cfg."""
-    pruner = getattr(model, "ast_pruner", None)
+    model_u = unwrap_model(model)
+    pruner = getattr(model_u, "ast_pruner", None)
     if pruner is None or not hasattr(pruner, "set_runtime_overrides"):
         return None
 
@@ -1664,10 +1665,25 @@ def train_version_c(
         if use_dp and device.type == "cuda":
             n = int(torch.cuda.device_count())
             if n > 1:
+                # DataParallel requires the *base* module + input tensors to live on device_ids[0].
+                # If cfg.train.device was set to cuda:1 (or similar), hard-pin to cuda:0 within the visible set.
+                primary = torch.device("cuda:0")
+                if device != primary:
+                    logger.info("[DP] overriding device %s -> %s (DataParallel primary)", str(device), str(primary))
+                    device = primary
+                    model = model.to(device)
+
                 try:
                     torch.cuda.set_device(0)
                 except Exception:
                     pass
+
+                logger.info(
+                    "[DP] env CUDA_VISIBLE_DEVICES=%s torch.cuda.device_count()=%d primary=%s",
+                    str(os.environ.get("CUDA_VISIBLE_DEVICES", "")),
+                    int(n),
+                    str(device),
+                )
                 logger.info("[DP] enabling DataParallel with %d visible GPUs", n)
                 model = torch.nn.DataParallel(model, device_ids=list(range(n)), output_device=0)
             else:
