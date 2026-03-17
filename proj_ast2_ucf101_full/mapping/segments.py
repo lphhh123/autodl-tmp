@@ -9,6 +9,11 @@ import torch
 from models.video_vit import VideoViT
 
 
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Support wrappers like DataParallel / DistributedDataParallel."""
+    return getattr(model, "module", model)
+
+
 @dataclass
 class LayerNode:
     id: int
@@ -231,6 +236,7 @@ def build_segments_from_model(model: VideoViT, cfg, model_info: Optional[Dict[st
 
 
 def build_layer_nodes_from_model(model: VideoViT, model_info: Optional[Dict[str, torch.Tensor]] = None, precision: int = 1) -> List[LayerNode]:
+    model = unwrap_model(model)
     depth = model.cfg.depth
     seq_len = model.num_tokens
     embed_dim = model.cfg.embed_dim
