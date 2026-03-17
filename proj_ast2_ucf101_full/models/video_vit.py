@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -268,11 +269,23 @@ class VideoViT(nn.Module):
 
         if not return_intermediate:
             return logits
+        # DataParallel gather() cannot handle Python floats/ints inside nested outputs.
+        # When USE_DP=1 and multiple visible GPUs, return DP-safe tensors in the info dict.
+        dp_safe = (
+            str(os.environ.get("USE_DP", "0")).strip().lower() in ("1", "true", "yes", "y", "on")
+            and tokens.device.type == "cuda"
+            and int(torch.cuda.device_count()) > 1
+        )
         L_ast_val = ast_out.L_AST if ast_out is not None else L_AST
         token_keep = 1.0
         head_keep = 1.0
         ch_keep = 1.0
         block_keep = 1.0
+        token_keep_s = tokens.new_tensor(1.0)
+        head_keep_s = tokens.new_tensor(1.0)
+        ch_keep_s = tokens.new_tensor(1.0)
+        block_keep_s = tokens.new_tensor(1.0)
+
         def _safe_float(v) -> float:
             if v is None:
                 return 0.0
@@ -285,6 +298,13 @@ class VideoViT(nn.Module):
             head_keep = 1.0 - _safe_float(sparsity.get("head", 0.0))
             ch_keep = 1.0 - _safe_float(sparsity.get("ch", 0.0))
             block_keep = 1.0 - _safe_float(sparsity.get("block", 0.0))
+            try:
+                token_keep_s = (tokens.new_tensor(1.0) - sparsity.get("token", tokens.new_tensor(0.0)).float()).clamp(0.0, 1.0)
+                head_keep_s = (tokens.new_tensor(1.0) - sparsity.get("head", tokens.new_tensor(0.0)).float()).clamp(0.0, 1.0)
+                ch_keep_s = (tokens.new_tensor(1.0) - sparsity.get("ch", tokens.new_tensor(0.0)).float()).clamp(0.0, 1.0)
+                block_keep_s = (tokens.new_tensor(1.0) - sparsity.get("block", tokens.new_tensor(0.0)).float()).clamp(0.0, 1.0)
+            except Exception:
+                pass
 
         depth = int(self.cfg.depth)
 
@@ -321,43 +341,64 @@ class VideoViT(nn.Module):
         token_keep_list = [float(token_keep)] * depth
         token_keep_t = torch.full((depth,), float(token_keep), device=x.device, dtype=torch.float32)
 
-        keep_factors = {
-            "token_keep": token_keep_list,
-            "head_keep": head_keep_list,
-            "ch_keep": ch_keep_list,
-            "block_keep": block_keep_list,
-        }
+        if dp_safe:
+            keep_factors = {
+                "token_keep": token_keep_t,
+                "head_keep": head_keep_t,
+                "ch_keep": ch_keep_t,
+                "block_keep": block_keep_t,
+            }
+        else:
+            keep_factors = {
+                "token_keep": token_keep_list,
+                "head_keep": head_keep_list,
+                "ch_keep": ch_keep_list,
+                "block_keep": block_keep_list,
+            }
         keep_factors_t = {
             "token_keep": token_keep_t,
             "head_keep": head_keep_t,
             "ch_keep": ch_keep_t,
             "block_keep": block_keep_t,
         }
-        arch = {
-            "depth": int(depth),
-            "embed_dim": int(self.cfg.embed_dim),
-            "num_heads": int(self.cfg.num_heads),
-            "mlp_ratio": float(self.cfg.mlp_ratio),
-            "num_tokens": int(self.num_tokens),
-            "precision": 1,
-        }
+        arch = None
+        if not dp_safe:
+            arch = {
+                "depth": int(depth),
+                "embed_dim": int(self.cfg.embed_dim),
+                "num_heads": int(self.cfg.num_heads),
+                "mlp_ratio": float(self.cfg.mlp_ratio),
+                "num_tokens": int(self.num_tokens),
+                "precision": 1,
+            }
+
+        if dp_safe:
+            seq_len_total = tokens.new_tensor(float(self.num_tokens + 1))
+            seq_len_effective = tokens.new_tensor(1.0) + token_keep_s * float(self.num_tokens)
+            est_attn_flops_ratio = (seq_len_effective / seq_len_total).pow(2)
+            est_token_linear_flops_ratio = (seq_len_effective / seq_len_total)
+        else:
+            seq_len_total = float(self.num_tokens + 1)
+            seq_len_effective = float(1.0 + token_keep * self.num_tokens)
+            est_attn_flops_ratio = float(((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)) ** 2)
+            est_token_linear_flops_ratio = float((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1))
         info = {
             "L_AST": L_ast_val,
             "token_feat": tokens,
             "model_info": {
-                "token_keep": token_keep,
-                "head_keep": head_keep,
-                "ch_keep": ch_keep,
-                "block_keep": block_keep,
+                "token_keep": (token_keep_s if dp_safe else token_keep),
+                "head_keep": (head_keep_s if dp_safe else head_keep),
+                "ch_keep": (ch_keep_s if dp_safe else ch_keep),
+                "block_keep": (block_keep_s if dp_safe else block_keep),
                 "keep_factors": keep_factors,
                 "keep_factors_t": keep_factors_t,
-                "arch": arch,
+                **({"arch": arch} if arch is not None else {}),
                 # Estimated compute ratios if token pruning were implemented as true token dropping/packing.
                 # Attention scales ~O(L^2) and MLP scales ~O(L) in sequence length L.
-                "seq_len_total": float(self.num_tokens + 1),
-                "seq_len_effective": float(1.0 + token_keep * self.num_tokens),
-                "est_attn_flops_ratio": float(((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)) ** 2),
-                "est_token_linear_flops_ratio": float((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)),
+                "seq_len_total": seq_len_total,
+                "seq_len_effective": seq_len_effective,
+                "est_attn_flops_ratio": est_attn_flops_ratio,
+                "est_token_linear_flops_ratio": est_token_linear_flops_ratio,
             },
             "gates": {
                 "token_mask": ast_out.token_mask if ast_out is not None else torch.ones(b, t, self.num_tokens, device=x.device),
