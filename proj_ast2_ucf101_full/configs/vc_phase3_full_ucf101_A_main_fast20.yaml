@@ -29,10 +29,13 @@ training:
   #   <=0 : full val
   stable_hw_eval_max_batches: 200
   compute_hw_when_lambda0: true
+  # Shorten HW stabilize window so discrete updates/alpha are not disabled for too long after HW enables.
+  # Default (from base) is 2; use 1 for faster divergence diagnosis.
+  hw_stabilize_epochs: 1
 
 train:
   # Full-model fine-tuning from the start.
-  lr: 3e-4
+  lr: 4e-4
   warmup_epochs: 10
   backbone_lr_scale: 1.00
   freeze_backbone_epochs: 0
@@ -74,7 +77,8 @@ ast:
     lambda_ast_end: 0.2
 
     # MorphNet-style controlled channel pruning: target keep ratio slowly decreases.
-    ch_keep_start: 1.0
+    # Start slightly below 1.0 so the first pruning epoch is not a "zero-prune" epoch.
+    ch_keep_start: 0.995
     # Start conservative to avoid "pruning-start collapse"; tighten later for final runs.
     ch_keep_end: 0.95
     ch_ramp_epochs: 20
