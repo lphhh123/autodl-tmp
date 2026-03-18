@@ -692,9 +692,41 @@ def _get_iso_cfg_value(iso_cfg, key: str, default=None):
 def _cfg_get(obj, key: str, default=None):
     if obj is None:
         return default
+
+    # Fast path: non-string key keeps old behavior.
+    if not isinstance(key, str):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    # Preserve old behavior first for exact flat keys / attrs.
     if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+        if key in obj:
+            return obj.get(key, default)
+    else:
+        if hasattr(obj, key):
+            return getattr(obj, key, default)
+
+    # Support dotted path lookup like "a.b.c".
+    if "." not in key:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    cur = obj
+    for part in key.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, dict):
+            if part not in cur:
+                return default
+            cur = cur.get(part)
+        else:
+            if not hasattr(cur, part):
+                return default
+            cur = getattr(cur, part)
+
+    return default if cur is None else cur
 
 
 @torch.no_grad()
@@ -2522,19 +2554,43 @@ def train_version_c(
                                         stable_hw_cfg=stable_hw_cfg, stable_hw_state=stable_hw_state, slot_out=slot_out,
                                         mapping_res=cand_mapping_res, metric_key=metric_key,
                                     )
-                                # ROI commit criterion: optionally use Lagrangian net score (hardware + lambda * risk_proxy)
+                                # ROI commit criterion: optionally use Lagrangian net score
+                                # (hardware metric + lambda * candidate risk proxy).
+                                # Read nested lagrangian config explicitly to avoid silent misses.
+                                lag_cfg = _cfg_get(roi_cfg_local, "lagrangian", {}) or {}
+                                if not isinstance(lag_cfg, dict):
+                                    try:
+                                        lag_cfg = dict(lag_cfg)
+                                    except Exception:
+                                        lag_cfg = {}
+
                                 lag_enabled = bool(
-                                    _cfg_get(roi_cfg_local, "lagrangian.enabled", None)
-                                    if _cfg_get(roi_cfg_local, "lagrangian.enabled", None) is not None
+                                    _cfg_get(lag_cfg, "enabled", None)
+                                    if _cfg_get(lag_cfg, "enabled", None) is not None
                                     else _cfg_get(roi_cfg_local, "lagrangian_enabled", False)
                                 )
+
                                 # Make lambda influence intentionally strong to avoid identical trajectories.
-                                lambda_scale = float(_cfg_get(roi_cfg_local, "lagrangian.lambda_scale", 30.0) or 30.0)
-                                lambda_min = float(_cfg_get(roi_cfg_local, "lagrangian.lambda_min", 0.0) or 0.0)
-                                lambda_max = float(_cfg_get(roi_cfg_local, "lagrangian.lambda_max", 1e9) or 1e9)
-                                risk_weight = float(_cfg_get(roi_cfg_local, "lagrangian.risk_weight", 1.5) or 1.5)
-                                margin0 = float(_cfg_get(roi_cfg_local, "lagrangian.margin0", 0.01) or 0.01)
-                                margin_scale = float(_cfg_get(roi_cfg_local, "lagrangian.margin_scale", 6.0) or 6.0)
+                                lambda_scale = float(_cfg_get(lag_cfg, "lambda_scale", 30.0) or 30.0)
+                                lambda_min = float(_cfg_get(lag_cfg, "lambda_min", 0.0) or 0.0)
+                                lambda_max = float(_cfg_get(lag_cfg, "lambda_max", 1e9) or 1e9)
+                                risk_weight = float(_cfg_get(lag_cfg, "risk_weight", 1.5) or 1.5)
+                                margin0 = float(_cfg_get(lag_cfg, "margin0", 0.01) or 0.01)
+                                margin_scale = float(_cfg_get(lag_cfg, "margin_scale", 6.0) or 6.0)
+
+                                if lag_enabled and (not bool(stable_hw_state.get("_roi_lagrangian_cfg_logged", False))):
+                                    logger.info(
+                                        "[ROICommit] lagrangian enabled metric=%s lambda_scale=%.6g lambda_min=%.6g "
+                                        "lambda_max=%.6g risk_weight=%.6g margin0=%.6g margin_scale=%.6g",
+                                        str(metric_key),
+                                        float(lambda_scale),
+                                        float(lambda_min),
+                                        float(lambda_max),
+                                        float(risk_weight),
+                                        float(margin0),
+                                        float(margin_scale),
+                                    )
+                                    stable_hw_state["_roi_lagrangian_cfg_logged"] = True
 
                                 # Baseline: compare pure hardware metric.
                                 rel = float(_roi_rel_improve(om, nm))
