@@ -2,6 +2,19 @@ _base_: configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20_k90_eps002.yaml
 
 stable_hw:
   enabled: false
+  force_disable_ok: true
+  normalize:
+    enabled: false
+  lambda_hw_schedule:
+    enabled: false
+  accuracy_guard:
+    enabled: false
+  locked_acc_ref:
+    enabled: false
+  no_drift:
+    enabled: false
+  no_double_scale:
+    enabled: false
 
 ast:
   schedule:
