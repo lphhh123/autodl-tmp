@@ -1,14 +1,13 @@
-# Fast-iteration config (10% train, 100% eval, 10 dense + 20 prune epochs)
-# Fast-iteration config (20% train, 100% eval, 8 dense + 22 prune epochs)
+# Fast-iteration config (10% train, fast eval, 10 dense + 20 prune epochs)
 # for Innovation-A channel-pruning mainline.
 #
 # Intent:
-#   - Keep fast iteration on train subset while making validation full / stable.
+#   - Keep fast iteration on train subset while making validation quick / stable.
 #   - Full fine-tuning from the start (no backbone freeze / no feature-only stage).
 #   - Reduce early stochasticity (no mixup, no train jitter, deterministic train sampling).
 #   - Turn OFF token pruning (token_gating_policy=off)
 #   - Keep pruning gentle (gates init near 1; only channel sparsity regularized)
-#   - Pruning protocol: dense warmup=8, pruning ramp=22
+#   - Pruning protocol: dense warmup=10, pruning ramp=20
 
 _base_: configs/vc_phase3_full_ucf101_A_main.yaml
 
@@ -23,16 +22,18 @@ data:
   frame_sampling_eval: "linspace"
 
 training:
-  # Protocol: 8 dense + 22 prune
+  # Protocol: 10 dense + 20 prune
   outer_epochs: 30
-  # Keep eval protocol aligned across fast experiments (full eval each epoch on the same eval subset).
-  stable_hw_eval_max_batches: 0
+  # Fast eval each epoch for quick iteration:
+  #   >0  : evaluate at most N val batches
+  #   <=0 : full val
+  stable_hw_eval_max_batches: 200
   compute_hw_when_lambda0: true
 
 train:
   # Full-model fine-tuning from the start.
   lr: 3e-4
-  warmup_epochs: 8
+  warmup_epochs: 10
   backbone_lr_scale: 1.00
   freeze_backbone_epochs: 0
   # Reduce early supervision / augmentation noise.
@@ -61,11 +62,11 @@ ast:
     enabled: true
     # Keep the model fully dense (incl. channel/head/block gates) until LockedAccRef is ready.
     # This prevents "early pruning" from causing large accuracy drops before the guard becomes active.
-    # 8 epochs dense (outer=0..7), start pruning from outer=8
-    warmup_epochs: 8
-    force_dense_epochs: 8
-    # 22 epochs pruning ramp
-    ramp_epochs: 22
+    # 10 epochs dense (outer=0..9), start pruning from outer=10
+    warmup_epochs: 10
+    force_dense_epochs: 10
+    # 20 epochs pruning ramp
+    ramp_epochs: 20
     curve: "cosine"
     rho_start: 1.0
     temp_start: 1.0
@@ -76,7 +77,7 @@ ast:
     ch_keep_start: 1.0
     # Start conservative to avoid "pruning-start collapse"; tighten later for final runs.
     ch_keep_end: 0.95
-    ch_ramp_epochs: 22
+    ch_ramp_epochs: 20
 
   # Gentle sparsity: focus on channel only.
   loss:
@@ -126,10 +127,10 @@ stable_hw:
     source: "self_val_lock"
     self_ref_window: 1
     self_ref_agg: "last"
-    # lock ref exactly at the pruning boundary (end of dense epoch 7)
-    freeze_epoch: 8
+    # lock ref at the pruning boundary (end of dense epoch 9)
+    freeze_epoch: 10
     strict: true
   lambda_hw_schedule:
     # keep HW pressure off during dense stage, ramp during pruning stage
-    warmup_epochs: 8
-    ramp_epochs: 22
+    warmup_epochs: 10
+    ramp_epochs: 20
