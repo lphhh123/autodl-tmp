@@ -19,5 +19,11 @@ stable_hw:
   accuracy_guard:
     controller:
       # relaxed to eps=0.03 for diagnostic runs and better policy separation.
-      epsilon_drop: 0.03
+      epsilon_drop: 0.04
 
+
+  locked_acc_ref:
+    self_ref_agg: "last"
+
+  lambda_hw_schedule:
+    warmup_epochs: 10
