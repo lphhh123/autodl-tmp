@@ -1,0 +1,22 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20_k90_eps002.yaml
+
+stable_hw:
+  enabled: false
+
+ast:
+  schedule:
+    ch_keep_end: 0.80
+
+training:
+  compute_hw_when_lambda0: false
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+
+loss:
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0
+
+alloc_search:
+  enabled: false

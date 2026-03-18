@@ -1,0 +1,14 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_plain_fast20_k80.yaml
+
+alloc_search:
+  enabled: true
+  search_threads: 20
+  sens_ema_alpha: 0.8
+  keep_unit: 0.01
+  min_keep_floor: 0.25
+  pool_size: 6
+  max_candidates: 60
+  acc_risk_weight: 0.2
+  gate_apply_blend: 1.0
+  min_remain_budget: 0.005
+  min_rel_hw_improve: 0.0
