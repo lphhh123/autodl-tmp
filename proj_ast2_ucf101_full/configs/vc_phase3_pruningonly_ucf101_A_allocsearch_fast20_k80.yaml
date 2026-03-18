@@ -12,3 +12,19 @@ alloc_search:
   gate_apply_blend: 1.0
   min_remain_budget: 0.005
   min_rel_hw_improve: 0.0
+
+stable_hw:
+  enabled: false
+  force_disable_ok: true
+  normalize:
+    enabled: false
+  lambda_hw_schedule:
+    enabled: false
+  accuracy_guard:
+    enabled: false
+  locked_acc_ref:
+    enabled: false
+  no_drift:
+    enabled: false
+  no_double_scale:
+    enabled: false
