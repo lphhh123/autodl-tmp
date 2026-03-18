@@ -1,3 +1,4 @@
+# Fast-iteration config (10% train, 100% eval, 10 dense + 20 prune epochs)
 # Fast-iteration config (20% train, 100% eval, 8 dense + 22 prune epochs)
 # for Innovation-A channel-pruning mainline.
 #
@@ -12,7 +13,9 @@
 _base_: configs/vc_phase3_full_ucf101_A_main.yaml
 
 data:
-  subset_ratio_train: 0.20
+  # Use smaller training subset for rapid iteration.
+  # NOTE: keep eval full to preserve stability of guard/ref.
+  subset_ratio_train: 0.10
   subset_ratio_eval:  1.00
   subset_seed: 0
   runtime_tstart_jitter: 0
