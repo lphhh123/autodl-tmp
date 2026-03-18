@@ -31,7 +31,7 @@ training:
   # Perf: when lambda_hw_eff==0, skip HW proxy forward (does not change gradients).
   # Keep evaluation (val_acc1) unchanged.
   compute_hw_when_lambda0: true
-  hw_term_ratio_cap: 0.5
+  hw_term_ratio_cap: 0.8
   hw_loss_norm_enabled: true
   hw_loss_norm_ema_alpha: 0.98
   hw_loss_norm_min_denom: 1e-3

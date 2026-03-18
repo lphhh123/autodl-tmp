@@ -2464,6 +2464,7 @@ def train_version_c(
                     cand_sig = None
                     cand_strategy = None
                     cand_metric = None
+                    cand_rank_score = None
 
                     # Pre-compute the old metric once (if ROI is active and we have a previous mapping).
                     old_metric = None
@@ -2479,6 +2480,36 @@ def train_version_c(
                                 )
                             except Exception:
                                 old_metric = None
+
+                    rank_use_score = False
+                    rank_lambda_scale = 1.0
+                    rank_lambda_min = 0.0
+                    rank_lambda_max = 1.0e9
+                    rank_risk_weight = 1.5
+                    rank_margin0 = 0.01
+                    rank_margin_scale = 6.0
+
+                    if roi_enabled_local and (old_metric is not None):
+                        try:
+                            lag_cfg_rank = _cfg_get(roi_cfg_local, "lagrangian", {}) or {}
+                            if not isinstance(lag_cfg_rank, dict):
+                                try:
+                                    lag_cfg_rank = dict(lag_cfg_rank)
+                                except Exception:
+                                    lag_cfg_rank = {}
+                            rank_use_score = bool(
+                                _cfg_get(lag_cfg_rank, "enabled", None)
+                                if _cfg_get(lag_cfg_rank, "enabled", None) is not None
+                                else _cfg_get(roi_cfg_local, "lagrangian_enabled", False)
+                            )
+                            rank_lambda_scale = float(_cfg_get(lag_cfg_rank, "rank_lambda_scale", _cfg_get(lag_cfg_rank, "lambda_scale", 30.0)) or 30.0)
+                            rank_lambda_min = float(_cfg_get(lag_cfg_rank, "rank_lambda_min", _cfg_get(lag_cfg_rank, "lambda_min", 0.0)) or 0.0)
+                            rank_lambda_max = float(_cfg_get(lag_cfg_rank, "rank_lambda_max", _cfg_get(lag_cfg_rank, "lambda_max", 1e9)) or 1e9)
+                            rank_risk_weight = float(_cfg_get(lag_cfg_rank, "rank_risk_weight", _cfg_get(lag_cfg_rank, "risk_weight", 1.5)) or 1.5)
+                            rank_margin0 = float(_cfg_get(lag_cfg_rank, "rank_margin0", _cfg_get(lag_cfg_rank, "margin0", 0.01)) or 0.01)
+                            rank_margin_scale = float(_cfg_get(lag_cfg_rank, "rank_margin_scale", _cfg_get(lag_cfg_rank, "margin_scale", 6.0)) or 6.0)
+                        except Exception:
+                            rank_use_score = False
 
                     for stg in strategies:
                         cand = _solve_mapping_for_cache(
@@ -2503,14 +2534,66 @@ def train_version_c(
                             except Exception:
                                 mval = None
 
+                        cand_rank_score_this = None
+                        if rank_use_score and (mval is not None) and (old_mapping_res is not None):
+                            try:
+                                lam_eff_rank = float(stable_hw_state.get("lambda_hw_effective", 0.0) or 0.0)
+                                lam_rank_use = float(lam_eff_rank) * float(rank_lambda_scale)
+                                lam_rank_use = max(float(rank_lambda_min), min(float(lam_rank_use), float(rank_lambda_max)))
+
+                                acc_drop_now_rank = float(stable_hw_state.get("acc_drop", 0.0) or 0.0)
+                                eps_drop_rank = float(stable_hw_state.get("epsilon_drop", 0.0) or 0.0)
+                                margin_rank = float(eps_drop_rank) - float(acc_drop_now_rank)
+                                margin_risk_rank = 0.0
+                                if float(rank_margin0) > 0.0:
+                                    margin_risk_rank = max(0.0, (float(rank_margin0) - float(margin_rank)) / float(rank_margin0))
+
+                                chg_rank = float(_roi_mapping_change_frac(old_mapping_res, cand))
+                                base_unit_rank = float(old_metric) if (old_metric is not None and float(old_metric) > 0.0) else 1.0
+                                penalty_rank = (
+                                    float(rank_risk_weight)
+                                    * float(base_unit_rank)
+                                    * float(chg_rank)
+                                    * (1.0 + float(rank_margin_scale) * float(margin_risk_rank))
+                                )
+                                cand_rank_score_this = float(mval) + float(lam_rank_use) * float(penalty_rank)
+
+                                logger.info(
+                                    "[ROICommit][rank] outer=%d strategy=%s metric=%s mval=%.6g rank_score=%.6g "
+                                    "lam_eff=%.6g lam_rank_use=%.6g chg=%.4f margin=%.6g pen=%.6g",
+                                    int(outer),
+                                    str(stg) if stg is not None else str(getattr(cfg.hw, "mapping_strategy", "greedy_local")),
+                                    str(metric_key),
+                                    float(mval),
+                                    float(cand_rank_score_this),
+                                    float(lam_eff_rank),
+                                    float(lam_rank_use),
+                                    float(chg_rank),
+                                    float(margin_rank),
+                                    float(penalty_rank),
+                                )
+                            except Exception as _exc_rank:
+                                cand_rank_score_this = None
+
                         if cand_mapping_res is None:
                             cand_mapping_res = cand
                             cand_metric = mval
+                            cand_rank_score = cand_rank_score_this
                             cand_strategy = (str(stg) if stg is not None else str(getattr(cfg.hw, "mapping_strategy", "greedy_local")))
-                        elif (mval is not None) and (cand_metric is not None) and (float(mval) < float(cand_metric)):
-                            cand_mapping_res = cand
-                            cand_metric = mval
-                            cand_strategy = (str(stg) if stg is not None else str(getattr(cfg.hw, "mapping_strategy", "greedy_local")))
+                        else:
+                            use_replace = False
+                            if rank_use_score and (cand_rank_score_this is not None) and (cand_rank_score is not None):
+                                use_replace = (float(cand_rank_score_this) < float(cand_rank_score))
+                            elif rank_use_score and (cand_rank_score_this is not None) and (cand_rank_score is None):
+                                use_replace = True
+                            elif (mval is not None) and (cand_metric is not None):
+                                use_replace = (float(mval) < float(cand_metric))
+
+                            if use_replace:
+                                cand_mapping_res = cand
+                                cand_metric = mval
+                                cand_rank_score = cand_rank_score_this
+                                cand_strategy = (str(stg) if stg is not None else str(getattr(cfg.hw, "mapping_strategy", "greedy_local")))
 
                         # If ROI isn't active yet, don't waste time scoring more candidates.
                         if (not roi_enabled_local) or (old_metric is None):
@@ -2639,7 +2722,8 @@ def train_version_c(
                                             f"abs={abs_impr:.6g} rel={rel:.4f} "
                                             f"lam_eff={lam_eff:.6g} lam_use={lam_use:.6g} chg={chg:.4f} "
                                             f"margin={margin:.6g} pen={penalty:.6g} "
-                                            f"min_abs={min_abs:.6g} min_rel={min_rel:.4f} strategy={cand_strategy}"
+                                            f"min_abs={min_abs:.6g} min_rel={min_rel:.4f} strategy={cand_strategy} "
+                                            f"rank_score={(cand_rank_score if cand_rank_score is not None else float('nan')):.6g}"
                                         )
                                         stable_hw_state["roi_last_eval"] = {
                                             "outer": int(outer),

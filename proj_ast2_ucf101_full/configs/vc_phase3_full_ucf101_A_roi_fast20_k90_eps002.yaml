@@ -20,7 +20,11 @@ stable_hw:
       require_hw_active: true
       lagrangian:
         enabled: true
-        lambda_scale: 50
-        risk_weight: 2.0
-        margin0: 0.015
-        margin_scale: 8.0
+        lambda_scale: 80
+        rank_lambda_scale: 80
+        risk_weight: 1.2
+        rank_risk_weight: 1.2
+        margin0: 0.02
+        rank_margin0: 0.02
+        margin_scale: 3.0
+        rank_margin_scale: 3.0

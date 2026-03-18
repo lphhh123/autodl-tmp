@@ -15,13 +15,13 @@ stable_hw:
     step_up_max_mul: 1.35
     step_down_max_mul: 1.50
     hysteresis_frac: 0.25
-    post_commit_lambda_mul: 0.5
+    post_commit_lambda_mul: 0.35
     post_commit_block_increase: true
-    roi_reject_high: 0.6
-    roi_step_up_mul_high_reject: 0.5
-    roi_cap_mul_high_reject: 0.8
-    roi_big_commit_rel: 0.03
-    roi_post_commit_lambda_mul_big: 0.3
+    roi_reject_high: 0.45
+    roi_step_up_mul_high_reject: 0.35
+    roi_cap_mul_high_reject: 0.65
+    roi_big_commit_rel: 0.02
+    roi_post_commit_lambda_mul_big: 0.2
 
   discrete_isolation:
     roi_commit:
@@ -37,7 +37,11 @@ stable_hw:
       require_hw_active: true
       lagrangian:
         enabled: true
-        lambda_scale: 50
-        risk_weight: 2.0
-        margin0: 0.015
-        margin_scale: 8.0
+        lambda_scale: 35
+        rank_lambda_scale: 35
+        risk_weight: 1.0
+        rank_risk_weight: 1.0
+        margin0: 0.02
+        rank_margin0: 0.02
+        margin_scale: 2.5
+        rank_margin_scale: 2.5
