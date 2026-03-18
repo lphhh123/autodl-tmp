@@ -1,11 +1,11 @@
 # Stronger fast-iteration config for Innovation-A
 # Key changes relative to vc_phase3_full_ucf101_A_main_fast20.yaml:
 #   - stronger channel pruning target: ch_keep_end 0.95 -> 0.90
-#   - stricter accuracy guard: epsilon_drop 0.03 -> 0.01
+#   - relaxed accuracy guard for diagnosis: epsilon_drop 0.01 -> 0.03
 #
 # Intent:
 #   - push methods further apart than the very conservative fast20 baseline
-#   - still remain significantly safer than eps=0.01 experiments
+#   - allow more diagnostic headroom than the stricter eps=0.01 setting
 #   - isolate the effect of stronger pruning without changing warmup / prefix protection / trainer logic
 
 _base_: configs/vc_phase3_full_ucf101_A_main_fast20.yaml
@@ -18,6 +18,6 @@ ast:
 stable_hw:
   accuracy_guard:
     controller:
-      # aligned with eps=0.01 for stronger stress.
-      epsilon_drop: 0.01
+      # relaxed to eps=0.03 for diagnostic runs and better policy separation.
+      epsilon_drop: 0.03
 
