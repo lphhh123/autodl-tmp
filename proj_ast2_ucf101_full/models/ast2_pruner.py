@@ -244,6 +244,25 @@ class ASTPruner(nn.Module):
         else:
             self._runtime_ch_keep_target = None
 
+    def get_layer_ch_keep(self) -> torch.Tensor:
+        """
+        Return per-layer mean channel keep ratio, shape [depth].
+        Frozen prefix layers (if configured) are reported as 1.0, consistent with forward().
+        """
+        with torch.no_grad():
+            ch_weights = torch.sigmoid(self.g_ch)
+            try:
+                pr_cfg = self.cfg.get("channel_prune", self.cfg)
+                front_ratio = float(pr_cfg.get("freeze_prefix_ratio", self.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+                front_ratio = float(max(0.0, min(1.0, front_ratio)))
+                k = int(round(float(self.depth) * front_ratio))
+                if k > 0 and ch_weights.dim() == 2 and ch_weights.shape[0] >= k:
+                    ch_weights = ch_weights.clone()
+                    ch_weights[:k, :] = 1.0
+            except Exception:
+                pass
+            return ch_weights.mean(dim=1)
+
     def _normalize(self, H: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         return minmax_norm_per_batch(H)
 

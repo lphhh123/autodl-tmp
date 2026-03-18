@@ -5,6 +5,8 @@ import json
 import math
 import random
 import os
+import itertools
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -1417,6 +1419,435 @@ def _roi_update_keep_ema(stable_hw_state: Dict[str, Any], model_info: Optional[D
     stable_hw_state["roi_keep_ema"] = out
 
 
+def _get_ast_pruner(model: torch.nn.Module):
+    core = unwrap_model(model)
+    pruner = getattr(core, "ast_pruner", None)
+    if pruner is None:
+        return None
+    if not hasattr(pruner, "g_ch"):
+        return None
+    return pruner
+
+
+def _get_layer_ch_keep_now(model: torch.nn.Module) -> Optional[torch.Tensor]:
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return None
+    if hasattr(pruner, "get_layer_ch_keep"):
+        try:
+            return pruner.get_layer_ch_keep().detach().float().cpu()
+        except Exception:
+            pass
+    with torch.no_grad():
+        return torch.sigmoid(pruner.g_ch.detach()).mean(dim=1).float().cpu()
+
+
+def _update_alloc_layer_sens_ema(
+    model: torch.nn.Module,
+    run_state: Dict[str, Any],
+    ema_alpha: float = 0.8,
+) -> Optional[torch.Tensor]:
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return None
+    grad = getattr(pruner.g_ch, "grad", None)
+    if grad is None:
+        return None
+    sens = grad.detach().abs().mean(dim=1).float().cpu()
+    prev = run_state.get("alloc_layer_sens_ema", None)
+    if isinstance(prev, torch.Tensor) and prev.shape == sens.shape:
+        sens = float(ema_alpha) * prev + (1.0 - float(ema_alpha)) * sens
+    run_state["alloc_layer_sens_ema"] = sens.clone()
+    return sens
+
+
+def _build_eval_model_info_with_ch_override(
+    last_info: Optional[Dict[str, Any]],
+    depth: int,
+    ch_keep_override: List[float],
+) -> Dict[str, Any]:
+    keep = _roi_extract_keep_factors(last_info, depth)
+    keep["ch_keep"] = [float(x) for x in ch_keep_override]
+    return {"keep_factors": keep}
+
+
+def _safe_logit_scalar(p: float, eps: float = 1e-4) -> float:
+    p = float(max(eps, min(1.0 - eps, p)))
+    return float(math.log(p / (1.0 - p)))
+
+
+def _apply_layerwise_keep_candidate_to_gates(
+    model: torch.nn.Module,
+    keep_target: torch.Tensor,
+    *,
+    gate_apply_blend: float = 1.0,
+) -> None:
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return
+    with torch.no_grad():
+        keep_now = torch.sigmoid(pruner.g_ch).mean(dim=1)
+        depth = int(keep_now.numel())
+
+        try:
+            pr_cfg = pruner.cfg.get("channel_prune", pruner.cfg)
+            front_ratio = float(pr_cfg.get("freeze_prefix_ratio", pruner.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+            front_ratio = float(max(0.0, min(1.0, front_ratio)))
+        except Exception:
+            front_ratio = 0.0
+        k_freeze = int(round(float(depth) * float(front_ratio)))
+
+        tgt = keep_target.to(keep_now.device, dtype=keep_now.dtype).clone()
+        if k_freeze > 0:
+            tgt[:k_freeze] = 1.0
+
+        blend = float(max(0.0, min(1.0, gate_apply_blend)))
+        for i in range(k_freeze, depth):
+            cur_i = float(keep_now[i].item())
+            tgt_i = float(tgt[i].item())
+            delta = (_safe_logit_scalar(tgt_i) - _safe_logit_scalar(cur_i)) * blend
+            pruner.g_ch.data[i].add_(float(delta))
+
+
+def _build_alloc_candidates_from_remaining_budget(
+    keep_now: torch.Tensor,
+    sens: torch.Tensor,
+    *,
+    freeze_prefix_ratio: float,
+    remain_budget: float,
+    keep_unit: float,
+    min_keep_floor: float,
+    pool_size: int,
+    max_candidates: int,
+) -> List[torch.Tensor]:
+    depth = int(keep_now.numel())
+    k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
+    prunable = list(range(k_freeze, depth))
+    if not prunable:
+        return []
+
+    sens = sens.clone().float()
+    sens = sens / (float(sens.mean().item()) + 1e-6)
+
+    prunable_sorted = sorted(prunable, key=lambda i: float(sens[i].item()))
+    pool = prunable_sorted[: min(int(pool_size), len(prunable_sorted))]
+    if not pool:
+        return []
+
+    budget = float(max(0.0, remain_budget))
+    if budget <= 1e-8:
+        return []
+
+    u = float(max(1e-4, keep_unit))
+    floor = float(max(0.05, min(0.95, min_keep_floor)))
+
+    cands: List[torch.Tensor] = []
+
+    for i in pool:
+        cand = keep_now.clone()
+        di = min(float(budget), float(max(0.0, cand[i].item() - floor)))
+        cand[i] = cand[i] - di
+        cands.append(cand)
+
+    pair_ratios = [(0.75, 0.25), (0.5, 0.5), (0.25, 0.75)]
+    for i, j in itertools.combinations(pool, 2):
+        for r1, r2 in pair_ratios:
+            cand = keep_now.clone()
+            di = min(float(budget * r1), float(max(0.0, cand[i].item() - floor)))
+            dj = min(float(budget * r2), float(max(0.0, cand[j].item() - floor)))
+            total = di + dj
+            if total <= 1e-8:
+                continue
+            cand[i] = cand[i] - di
+            cand[j] = cand[j] - dj
+            cands.append(cand)
+
+    tri_ratios = [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.34, 0.33, 0.33)]
+    for combo in itertools.combinations(pool, 3):
+        for rs in tri_ratios:
+            cand = keep_now.clone()
+            used = 0.0
+            for idx, rr in zip(combo, rs):
+                d = min(float(budget * rr), float(max(0.0, cand[idx].item() - floor)))
+                cand[idx] = cand[idx] - d
+                used += d
+            if used > 1e-8:
+                cands.append(cand)
+
+    uniq = []
+    seen = set()
+    for cand in cands:
+        q = cand.clone()
+        for i in range(k_freeze, depth):
+            q[i] = round(float(q[i].item()) / u) * u
+            q[i] = float(max(floor, min(1.0, q[i].item())))
+        key = tuple(round(float(x), 4) for x in q.tolist())
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(q)
+        if len(uniq) >= int(max_candidates):
+            break
+    return uniq
+
+
+def _to_cpu_tensor_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    out = {}
+    for k, v in d.items():
+        if torch.is_tensor(v):
+            out[k] = v.detach().cpu()
+        else:
+            out[k] = v
+    return out
+
+
+def _eval_single_alloc_candidate(
+    keep_cand: torch.Tensor,
+    *,
+    model: torch.nn.Module,
+    last_info: Optional[Dict[str, Any]],
+    cfg,
+    hw_proxy,
+    wafer_layout,
+    eff_specs,
+    alpha,
+) -> Dict[str, Any]:
+    try:
+        depth = int(keep_cand.numel())
+        eval_info = _build_eval_model_info_with_ch_override(
+            last_info=last_info,
+            depth=depth,
+            ch_keep_override=[float(x) for x in keep_cand.tolist()],
+        )
+
+        mapping_solver_local = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
+        partitioner_local = PartitionPlanner(mapping_solver_local, wafer_layout, hw_proxy, cfg.partition)
+
+        part_res = partitioner_local.plan(
+            model,
+            eff_specs,
+            alpha=alpha,
+            model_info=eval_info,
+            use_fine_split=bool(getattr(cfg.hw, "use_fine_split", True)),
+        )
+        obj = float(part_res.get("objective", 1.0e18))
+        mapping_sig = part_res.get("mapping_sig", None)
+        return {
+            "ok": True,
+            "objective": obj,
+            "mapping_sig": mapping_sig,
+            "part_res": part_res,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "objective": 1.0e18,
+            "error": str(exc),
+        }
+
+
+def _run_alloc_candidate_search(
+    *,
+    model: torch.nn.Module,
+    cfg,
+    hw_proxy,
+    wafer_layout,
+    eff_specs,
+    alpha,
+    last_info: Optional[Dict[str, Any]],
+    keep_now: torch.Tensor,
+    sens: torch.Tensor,
+    remain_budget: float,
+    search_threads: int,
+    freeze_prefix_ratio: float,
+    keep_unit: float,
+    min_keep_floor: float,
+    pool_size: int,
+    max_candidates: int,
+    acc_risk_weight: float,
+) -> Optional[Dict[str, Any]]:
+    cands = _build_alloc_candidates_from_remaining_budget(
+        keep_now=keep_now,
+        sens=sens,
+        freeze_prefix_ratio=freeze_prefix_ratio,
+        remain_budget=remain_budget,
+        keep_unit=keep_unit,
+        min_keep_floor=min_keep_floor,
+        pool_size=pool_size,
+        max_candidates=max_candidates,
+    )
+    if not cands:
+        return None
+
+    eff_specs_cpu = _to_cpu_tensor_dict(eff_specs)
+    alpha_cpu = alpha.detach().cpu() if torch.is_tensor(alpha) else alpha
+
+    base_eval = _eval_single_alloc_candidate(
+        keep_now,
+        model=model,
+        last_info=last_info,
+        cfg=cfg,
+        hw_proxy=hw_proxy,
+        wafer_layout=wafer_layout,
+        eff_specs=eff_specs_cpu,
+        alpha=alpha_cpu,
+    )
+    base_obj = float(base_eval.get("objective", 1.0e18))
+
+    sens_norm = sens.clone().float()
+    sens_norm = sens_norm / (float(sens_norm.mean().item()) + 1e-6)
+
+    best = None
+    with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
+        futs = [
+            ex.submit(
+                _eval_single_alloc_candidate,
+                cand,
+                model=model,
+                last_info=last_info,
+                cfg=cfg,
+                hw_proxy=hw_proxy,
+                wafer_layout=wafer_layout,
+                eff_specs=eff_specs_cpu,
+                alpha=alpha_cpu,
+            )
+            for cand in cands
+        ]
+
+        for cand, fut in zip(cands, futs):
+            out = fut.result()
+            obj = float(out.get("objective", 1.0e18))
+            rel_hw_gain = (float(base_obj) - float(obj)) / max(1.0e-6, abs(float(base_obj)))
+            acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, remain_budget))
+            total_score = float(rel_hw_gain) - float(acc_risk_weight) * float(acc_risk)
+            item = {
+                "keep_cand": cand,
+                "objective": obj,
+                "base_objective": base_obj,
+                "rel_hw_gain": rel_hw_gain,
+                "acc_risk": acc_risk,
+                "total_score": total_score,
+                "raw": out,
+            }
+            if best is None or float(item["total_score"]) > float(best["total_score"]):
+                best = item
+    return best
+
+
+def _maybe_run_alloc_search_and_apply(
+    *,
+    model: torch.nn.Module,
+    cfg,
+    run_state: Dict[str, Any],
+    outer: int,
+    ast_sched: Dict[str, Any],
+    hw_proxy,
+    wafer_layout,
+    chiplet_slots,
+    logger,
+) -> None:
+    alloc_cfg = getattr(cfg, "alloc_search", None)
+    if alloc_cfg is None or not bool(getattr(alloc_cfg, "enabled", False)):
+        return
+
+    last_info = run_state.get("last_model_info", None)
+    sens = run_state.get("alloc_layer_sens_ema", None)
+    if last_info is None or sens is None:
+        return
+
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return
+
+    keep_now = _get_layer_ch_keep_now(model)
+    if keep_now is None:
+        return
+
+    try:
+        pr_cfg = pruner.cfg.get("channel_prune", pruner.cfg)
+        freeze_prefix_ratio = float(pr_cfg.get("freeze_prefix_ratio", pruner.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+        freeze_prefix_ratio = float(max(0.0, min(1.0, freeze_prefix_ratio)))
+    except Exception:
+        freeze_prefix_ratio = 0.0
+
+    depth = int(keep_now.numel())
+    k_freeze = int(round(float(depth) * float(freeze_prefix_ratio)))
+    if k_freeze >= depth:
+        return
+
+    keep_mean_prunable = float(keep_now[k_freeze:].mean().item())
+    target_global_keep = float(ast_sched.get("ch_keep_target", keep_mean_prunable))
+    remain_budget = max(0.0, keep_mean_prunable - target_global_keep)
+    if remain_budget <= float(getattr(alloc_cfg, "min_remain_budget", 0.005)):
+        return
+
+    slot_out = chiplet_slots(hard=False)
+    eff_specs = slot_out["eff_specs"]
+    alpha = slot_out["alpha"]
+
+    best = _run_alloc_candidate_search(
+        model=model,
+        cfg=cfg,
+        hw_proxy=hw_proxy,
+        wafer_layout=wafer_layout,
+        eff_specs=eff_specs,
+        alpha=alpha,
+        last_info=last_info,
+        keep_now=keep_now,
+        sens=sens,
+        remain_budget=remain_budget,
+        search_threads=int(getattr(alloc_cfg, "search_threads", 20)),
+        freeze_prefix_ratio=freeze_prefix_ratio,
+        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+        pool_size=int(getattr(alloc_cfg, "pool_size", 6)),
+        max_candidates=int(getattr(alloc_cfg, "max_candidates", 60)),
+        acc_risk_weight=float(getattr(alloc_cfg, "acc_risk_weight", 0.2)),
+    )
+    if best is None:
+        return
+
+    min_rel_hw_improve = float(getattr(alloc_cfg, "min_rel_hw_improve", 0.0))
+    if float(best["rel_hw_gain"]) < float(min_rel_hw_improve):
+        logger.info(
+            "[AllocSearch] outer=%d skipped apply: rel_hw_gain=%.6g < min_rel_hw_improve=%.6g",
+            int(outer), float(best["rel_hw_gain"]), float(min_rel_hw_improve),
+        )
+        return
+
+    _apply_layerwise_keep_candidate_to_gates(
+        model,
+        best["keep_cand"],
+        gate_apply_blend=float(getattr(alloc_cfg, "gate_apply_blend", 1.0)),
+    )
+
+    run_state["alloc_last_keep_applied"] = best["keep_cand"].clone()
+    run_state["alloc_last_search"] = {
+        "outer": int(outer),
+        "base_objective": float(best["base_objective"]),
+        "best_objective": float(best["objective"]),
+        "rel_hw_gain": float(best["rel_hw_gain"]),
+        "acc_risk": float(best["acc_risk"]),
+        "total_score": float(best["total_score"]),
+        "remain_budget": float(remain_budget),
+        "target_global_keep": float(target_global_keep),
+        "keep_mean_prunable": float(keep_mean_prunable),
+    }
+
+    logger.info(
+        "[AllocSearch] outer=%d applied remain_budget=%.6g keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g",
+        int(outer),
+        float(remain_budget),
+        float(keep_mean_prunable),
+        float(target_global_keep),
+        float(best["base_objective"]),
+        float(best["objective"]),
+        float(best["rel_hw_gain"]),
+        float(best["acc_risk"]),
+        float(best["total_score"]),
+    )
+
+
 def train_version_c(
     cfg,
     out_dir: Optional[str] = None,
@@ -2093,7 +2524,12 @@ def train_version_c(
             step=0,
         )
         trace_header_written = True
-        run_state: Dict[str, Any] = {"last_model_info": None}
+        run_state: Dict[str, Any] = {
+            "last_model_info": None,
+            "alloc_layer_sens_ema": None,
+            "alloc_last_keep_applied": None,
+            "alloc_last_search": None,
+        }
         last_acc1: Optional[float] = None
         best_acc1: Optional[float] = None
         last_hw_stats = None
@@ -2250,6 +2686,21 @@ def train_version_c(
                     _apply_ast_runtime_overrides_to_model(model, cfg, ast_sched)
                     if ema_model is not None:
                         _apply_ast_runtime_overrides_to_model(ema_model.ema, cfg, ast_sched)
+
+                    try:
+                        _maybe_run_alloc_search_and_apply(
+                            model=model,
+                            cfg=cfg,
+                            run_state=run_state,
+                            outer=int(outer),
+                            ast_sched=ast_sched,
+                            hw_proxy=hw_proxy,
+                            wafer_layout=wafer_layout,
+                            chiplet_slots=chiplet_slots,
+                            logger=logger,
+                        )
+                    except Exception as _alloc_exc:
+                        logger.warning("[AllocSearch] outer=%d failed with error: %s", int(outer), str(_alloc_exc))
 
                     # Log at key transition points and whenever we freeze/unfreeze (prevents blind 3-day runs).
                     sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
@@ -3340,6 +3791,16 @@ def train_version_c(
                         continue
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer_model)
+                    try:
+                        alloc_cfg = getattr(cfg, "alloc_search", None)
+                        if alloc_cfg is not None and bool(getattr(alloc_cfg, "enabled", False)):
+                            _update_alloc_layer_sens_ema(
+                                model,
+                                run_state,
+                                ema_alpha=float(getattr(alloc_cfg, "sens_ema_alpha", 0.8)),
+                            )
+                    except Exception:
+                        pass
                     bad_grad = False
                     for p in model.parameters():
                         if p.grad is not None and (not torch.isfinite(p.grad).all()):
@@ -3460,6 +3921,11 @@ def train_version_c(
                             "mapping_signature": cache["mapping_signature"],
                             "layout_signature": cache["layout_signature"],
                         }
+                        alloc_last = run_state.get("alloc_last_search", None)
+                        if isinstance(alloc_last, dict):
+                            stats["alloc_rel_hw_gain"] = float(alloc_last.get("rel_hw_gain", 0.0))
+                            stats["alloc_acc_risk"] = float(alloc_last.get("acc_risk", 0.0))
+                            stats["alloc_total_score"] = float(alloc_last.get("total_score", 0.0))
                         if (not log_slim) and hw_stats:
                             stats.update(hw_stats)
                         elif hw_stats:
