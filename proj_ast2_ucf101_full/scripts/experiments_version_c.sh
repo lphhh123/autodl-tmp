@@ -408,6 +408,17 @@ case "$EXP_ID" in
   EXP-A2p-alloc-fast-k80)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k80.yaml "$(odir EXP-A2p-alloc-fast-k80)"
     ;;
+
+  # ---- FAST ITERATION (20% data) / HW-audit oriented keep_end=0.92 ----
+  EXP-A2p-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_plain_fast20_k92.yaml "$(odir EXP-A2p-fast-k92)"
+    ;;
+  EXP-A2p-alloc-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k92.yaml "$(odir EXP-A2p-alloc-fast-k92)"
+    ;;
+  EXP-A2p-hwloss-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_hwloss_fast20_k92.yaml "$(odir EXP-A2p-hwloss-fast-k92)"
+    ;;
   EXP-A4-fast)
     run_vc configs/vc_phase3_full_ucf101_A_main_fast20.yaml "$(odir EXP-A4-fast)"
     ;;

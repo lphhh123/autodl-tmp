@@ -1,0 +1,19 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_plain_fast20_k92.yaml
+
+stable_hw:
+  enabled: false
+  force_disable_ok: true
+
+hw:
+  lambda_hw: 0.30
+
+loss:
+  lambda_hw: 0.0
+
+alloc_search:
+  enabled: false
+
+training:
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+  hw_term_ratio_cap: 0.10

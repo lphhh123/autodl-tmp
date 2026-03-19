@@ -21,12 +21,34 @@ class GraphRewritePlan:
 
 
 def _mapping_signature(segments: List[Segment], mapping: List[int], graph_rewrite_plan: Dict[str, Any]) -> str:
+    """Stable signature for caching/audit.
+
+    IMPORTANT: keep_factors must be included so pruning changes invalidate cache.
+    """
+
+    def _r(x: float, nd: int = 8) -> float:
+        try:
+            return float(round(float(x), nd))
+        except Exception:
+            return 0.0
+
     seg_ids = []
     for s in segments:
+        kf = getattr(s, "keep_factors", None) or {}
         seg_ids.append(
             {
                 "sid": int(getattr(s, "segment_id", getattr(s, "id", -1))),
                 "layers": list(getattr(s, "layer_ids", [])),
+                "kind": str(getattr(s, "kind", "other")),
+                "seq": int(getattr(s, "seq_len", 0) or 0),
+                "flops": _r(getattr(s, "flops", 0.0)),
+                "bytes": _r(getattr(s, "bytes", 0.0)),
+                "kf": {
+                    "token": _r(kf.get("token_keep", 1.0)),
+                    "head": _r(kf.get("head_keep", 1.0)),
+                    "ch": _r(kf.get("ch_keep", 1.0)),
+                    "blk": _r(kf.get("block_keep", 1.0)),
+                },
             }
         )
     payload = {
@@ -53,18 +75,45 @@ class PartitionPlanner:
 
     # SPEC v4 §10.2
     def _compute_objective(self, segments: List[Segment], mapping_obj: Dict, cost: Dict[str, torch.Tensor]) -> Tuple[float, Dict[str, float]]:
-        lat_ms = mapping_obj.get("total_latency_ms", 0.0)
-        comm_ms = mapping_obj.get("comm_ms", 0.0)
-        per_slot_time = mapping_obj.get("per_slot_time_ms", {})
+        lat_ms = float(mapping_obj.get("total_latency_ms", 0.0) or 0.0)
+        comm_ms = float(mapping_obj.get("comm_ms", 0.0) or 0.0)
+        per_slot_time = mapping_obj.get("per_slot_time_ms", {}) or {}
         w_lat = getattr(self.cfg, "w_latency", 1.0)
         w_comm = getattr(self.cfg, "w_comm", 1e-3)
         w_balance = getattr(self.cfg, "w_balance", 0.0)
         times = torch.tensor(list(per_slot_time.values())) if per_slot_time else torch.tensor([lat_ms])
         imbalance = (times.max() / (times.mean() + 1e-6)).item()
+
+        mem_mb = 0.0
+        energy_mj = 0.0
+        try:
+            mapping = list(mapping_obj.get("mapping", []) or [])
+            mem_mat = cost.get("mem_mb", None)
+            lat_mat = cost.get("lat_ms", None)
+            pow_mat = cost.get("power_w", None)
+            if torch.is_tensor(mem_mat) and torch.is_tensor(lat_mat) and len(mapping) == int(mem_mat.shape[0]):
+                slots = int(mem_mat.shape[1])
+                slot_mem = [0.0 for _ in range(slots)]
+                for i, slot in enumerate(mapping):
+                    ss = int(slot)
+                    if ss < 0 or ss >= slots:
+                        continue
+                    slot_mem[ss] += float(mem_mat[i, ss].detach().cpu().item())
+                    if torch.is_tensor(pow_mat):
+                        p = float(pow_mat[i, ss].detach().cpu().item())
+                        t_ms = float(lat_mat[i, ss].detach().cpu().item())
+                        energy_mj += p * t_ms
+                mem_mb = float(max(slot_mem) if slot_mem else 0.0)
+        except Exception:
+            mem_mb = 0.0
+            energy_mj = 0.0
+
         objective = w_lat * float(lat_ms) + w_comm * float(comm_ms) + w_balance * float(imbalance)
         stats = {
-            "lat_ms": float(lat_ms),
+            "latency_ms": float(lat_ms),
             "comm_ms": float(comm_ms),
+            "mem_mb": float(mem_mb),
+            "energy_mj": float(energy_mj),
             "imbalance": float(imbalance),
         }
         return objective, stats
@@ -99,7 +148,7 @@ class PartitionPlanner:
         segments: List[Segment],
         eff_specs: Dict[str, torch.Tensor],
         alpha: Optional[torch.Tensor] = None,
-    ) -> Tuple[float, Dict[str, torch.Tensor], Dict]:
+    ) -> Tuple[float, Dict[str, torch.Tensor], Dict, Dict[str, float]]:
         cost = self.mapping_solver.build_cost_matrix(segments, eff_specs, self.hw_proxy, alpha=alpha)
         mapping_obj = self.mapping_solver.solve_mapping(
             segments,
@@ -109,7 +158,11 @@ class PartitionPlanner:
             alpha=alpha,
         )
         objective, hw_stats = self._compute_objective(segments, mapping_obj, cost)
-        return objective, cost, mapping_obj
+        try:
+            mapping_obj["hw_stats"] = dict(hw_stats)
+        except Exception:
+            pass
+        return objective, cost, mapping_obj, hw_stats
 
     # SPEC v4 §10.6 simulate split
     def _simulate_split_for_layer(
@@ -174,10 +227,10 @@ class PartitionPlanner:
         # objective_base is invariant across split trials for the same base segments.
         # If provided by the caller, avoid recomputing it for every candidate.
         if objective_base is None:
-            obj_base, _, _ = self._evaluate(segments, eff_specs, alpha=alpha)
+            obj_base, _, _, _ = self._evaluate(segments, eff_specs, alpha=alpha)
         else:
             obj_base = float(objective_base)
-        obj_split, cost_split, map_split = self._evaluate(segments_split, eff_specs, alpha=alpha)
+        obj_split, _, map_split, _ = self._evaluate(segments_split, eff_specs, alpha=alpha)
         gain_ratio = (obj_base - obj_split) / max(1e-6, obj_base)
         local_plan["group_to_slot"] = map_split.get("mapping", [])[:2] if map_split.get("mapping") else []
         return True, gain_ratio, segments_split, map_split, local_plan
@@ -215,7 +268,7 @@ class PartitionPlanner:
     ) -> Dict[str, Any]:
         layer_nodes = build_layer_nodes_from_model(model, model_info=model_info)
         segments_base = self._build_coarse(layer_nodes, alpha)
-        objective_base, cost_base, mapping_base = self._evaluate(segments_base, eff_specs, alpha=alpha)
+        objective_base, cost_base, mapping_base, hw_base = self._evaluate(segments_base, eff_specs, alpha=alpha)
         if not use_fine_split:
             graph_rewrite_plan = {"splits": []}
             mapping_sig = _mapping_signature(segments_base, mapping_base.get("mapping", []), graph_rewrite_plan)
@@ -225,7 +278,11 @@ class PartitionPlanner:
                 "graph_rewrite_plan": graph_rewrite_plan,
                 "rewire_meta": {},
                 "objective": objective_base,
-                "hw_stats": {},
+                "hw_stats": dict(hw_base or {}),
+                "latency_ms": float((hw_base or {}).get("latency_ms", 0.0)),
+                "comm_ms": float((hw_base or {}).get("comm_ms", 0.0)),
+                "mem_mb": float((hw_base or {}).get("mem_mb", 0.0)),
+                "energy_mj": float((hw_base or {}).get("energy_mj", 0.0)),
                 "mapping_sig": mapping_sig,
             }
         candidates = self._select_split_candidates(
@@ -267,7 +324,7 @@ class PartitionPlanner:
                     split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
         accepted = self._select_accepted_splits(split_trials)
         segments_final, graph_rewrite = self._apply_split_plans(segments_base, accepted, layer_nodes)
-        objective_final, _, mapping_final = self._evaluate(segments_final, eff_specs, alpha=alpha)
+        objective_final, _, mapping_final, hw_final = self._evaluate(segments_final, eff_specs, alpha=alpha)
         graph_rewrite_plan = {"splits": graph_rewrite.splits}
         mapping_sig = _mapping_signature(segments_final, mapping_final.get("mapping", []), graph_rewrite_plan)
         return {
@@ -276,6 +333,10 @@ class PartitionPlanner:
             "graph_rewrite_plan": graph_rewrite_plan,
             "rewire_meta": {},
             "objective": objective_final,
-            "hw_stats": {},
+            "hw_stats": dict(hw_final or {}),
+            "latency_ms": float((hw_final or {}).get("latency_ms", 0.0)),
+            "comm_ms": float((hw_final or {}).get("comm_ms", 0.0)),
+            "mem_mb": float((hw_final or {}).get("mem_mb", 0.0)),
+            "energy_mj": float((hw_final or {}).get("energy_mj", 0.0)),
             "mapping_sig": mapping_sig,
         }
