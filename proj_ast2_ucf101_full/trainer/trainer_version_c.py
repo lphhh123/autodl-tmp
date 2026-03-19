@@ -1665,6 +1665,17 @@ def _to_cpu_tensor_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _ast_warm_eff_from_cfg(cfg) -> int:
+    """Effective warmup epochs used by AST schedule (dense warmup length)."""
+    ast = getattr(cfg, "ast", None)
+    sched = getattr(ast, "schedule", None) if ast is not None else None
+    if sched is None:
+        return 0
+    warm = int(getattr(sched, "warmup_epochs", 0) or 0)
+    force_dense = int(getattr(sched, "force_dense_epochs", warm) or warm)
+    return int(max(0, max(warm, force_dense)))
+
+
 def _eval_single_alloc_candidate(
     keep_cand: torch.Tensor,
     *,
@@ -1772,6 +1783,8 @@ def _run_alloc_candidate_search(
     pool_size: int,
     max_candidates: int,
     acc_risk_weight: float,
+    max_acc_risk: float,
+    pick_policy: str,
 ) -> Optional[Dict[str, Any]]:
     cands = _build_alloc_candidates_from_remaining_budget(
         keep_now=keep_now,
@@ -1806,6 +1819,8 @@ def _run_alloc_candidate_search(
     sens_norm = sens_norm / (float(sens_norm.mean().item()) + 1e-6)
 
     best = None
+    max_acc_risk = float(max_acc_risk)
+    pick_policy = str(pick_policy or "total_score").lower().strip()
     with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
         futs = [
             ex.submit(
@@ -1829,6 +1844,11 @@ def _run_alloc_candidate_search(
             rel_hw_gain = (float(base_obj) - float(obj)) / max(1.0e-6, abs(float(base_obj)))
             acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, usable_budget))
             total_score = float(rel_hw_gain) - float(acc_risk_weight) * float(acc_risk)
+
+            if max_acc_risk > 0.0 and math.isfinite(max_acc_risk):
+                if float(acc_risk) > float(max_acc_risk):
+                    continue
+
             item = {
                 "keep_cand": cand,
                 "objective": obj,
@@ -1838,8 +1858,19 @@ def _run_alloc_candidate_search(
                 "total_score": total_score,
                 "raw": out,
             }
-            if best is None or float(item["total_score"]) > float(best["total_score"]):
+            if best is None:
                 best = item
+                continue
+
+            if pick_policy in ("hw", "hw_then_risk", "rel_hw_gain"):
+                if float(item["rel_hw_gain"]) > float(best["rel_hw_gain"]) + 1e-12:
+                    best = item
+                elif abs(float(item["rel_hw_gain"]) - float(best["rel_hw_gain"])) <= 1e-12:
+                    if float(item["acc_risk"]) < float(best["acc_risk"]) - 1e-12:
+                        best = item
+            else:
+                if float(item["total_score"]) > float(best["total_score"]) + 1e-12:
+                    best = item
     return best
 
 
@@ -1857,6 +1888,15 @@ def _maybe_run_alloc_search_and_apply(
 ) -> None:
     alloc_cfg = getattr(cfg, "alloc_search", None)
     if alloc_cfg is None or not bool(getattr(alloc_cfg, "enabled", False)):
+        return
+
+    if bool(run_state.get("user_recovery_active", False)):
+        run_state["alloc_last_search"] = {
+            "outer": int(outer),
+            "enabled": False,
+            "reason": "user_recovery",
+            "alloc_enabled_this_outer": False,
+        }
         return
 
     start_after_prune_epochs = int(getattr(alloc_cfg, "start_after_prune_epochs", 5))
@@ -1892,7 +1932,7 @@ def _maybe_run_alloc_search_and_apply(
     keep_mean_prunable = float(keep_now[k_freeze:].mean().item())
     target_global_keep = float(ast_sched.get("ch_keep_target", keep_mean_prunable))
     remain_budget = max(0.0, keep_mean_prunable - target_global_keep)
-    warm_eff = _ast_warm_eff(cfg)
+    warm_eff = _ast_warm_eff_from_cfg(cfg)
     phase_state = _compute_alloc_phase_state(
         outer=int(outer),
         ast_sched=ast_sched,
@@ -1965,6 +2005,9 @@ def _maybe_run_alloc_search_and_apply(
         )
     )
 
+    max_acc_risk = float(getattr(alloc_cfg, "max_acc_risk", float("inf")) or float("inf"))
+    pick_policy = str(getattr(alloc_cfg, "pick_policy", "hw_then_risk") or "hw_then_risk")
+
     best = _run_alloc_candidate_search(
         model=model,
         cfg=cfg,
@@ -1984,6 +2027,8 @@ def _maybe_run_alloc_search_and_apply(
         pool_size=int(getattr(alloc_cfg, "pool_size", 6)),
         max_candidates=int(getattr(alloc_cfg, "max_candidates", 60)),
         acc_risk_weight=float(getattr(alloc_cfg, "acc_risk_weight", 0.2)),
+        max_acc_risk=float(max_acc_risk),
+        pick_policy=str(pick_policy),
     )
     if best is None:
         run_state["alloc_last_search"] = {
@@ -2041,6 +2086,33 @@ def _maybe_run_alloc_search_and_apply(
         )
         return
 
+    min_total_score = float(getattr(alloc_cfg, "min_total_score", float("-inf")) or float("-inf"))
+    if float(best.get("total_score", -1.0e18)) < float(min_total_score):
+        run_state["alloc_last_search"] = {
+            "outer": int(outer),
+            "enabled": True,
+            "reason": "below_min_total_score",
+            "alloc_enabled_this_outer": True,
+            "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
+            "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
+            "alloc_budget_frac": float(alloc_phase_budget_frac),
+            "alloc_remain_budget": float(remain_budget),
+            "alloc_usable_budget": float(usable_budget),
+            "prune_epoch": int(phase_state.get("prune_epoch", -1)),
+            "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
+            "base_objective": float(best["base_objective"]),
+            "best_objective": float(best["objective"]),
+            "rel_hw_gain": float(best["rel_hw_gain"]),
+            "acc_risk": float(best["acc_risk"]),
+            "total_score": float(best["total_score"]),
+            "min_total_score": float(min_total_score),
+        }
+        logger.info(
+            "[AllocSearch] outer=%d skipped apply: total_score=%.6g < min_total_score=%.6g",
+            int(outer), float(best.get("total_score", 0.0)), float(min_total_score)
+        )
+        return
+
     _apply_layerwise_keep_candidate_to_gates(
         model,
         best["keep_cand"],
@@ -2075,7 +2147,7 @@ def _maybe_run_alloc_search_and_apply(
     }
 
     logger.info(
-        "[AllocSearch] outer=%d applied remain_budget=%.6g usable_budget=%.6g alloc_frac=%.3f prune_epoch=%d alloc_epoch=%d keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g",
+        "[AllocSearch] outer=%d applied remain_budget=%.6g usable_budget=%.6g alloc_frac=%.3f prune_epoch=%d alloc_epoch=%d keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g threads=%d/%d",
         int(outer),
         float(remain_budget),
         float(usable_budget),
@@ -2089,6 +2161,133 @@ def _maybe_run_alloc_search_and_apply(
         float(best["rel_hw_gain"]),
         float(best["acc_risk"]),
         float(best["total_score"]),
+        int(outer_threads),
+        int(inner_threads),
+    )
+
+
+def _maybe_light_project_ch_keep(
+    *,
+    model: torch.nn.Module,
+    cfg,
+    ast_sched: Dict[str, Any],
+    outer: int,
+    run_state: Dict[str, Any],
+    logger,
+) -> None:
+    """Light projection: make mean(prunable keep) actually track ch_keep_target."""
+    if bool(run_state.get("user_recovery_active", False)):
+        return
+    proj_cfg = getattr(getattr(cfg, "ast", None), "projection", None)
+    if proj_cfg is None or not bool(getattr(proj_cfg, "enabled", False)):
+        return
+    if bool(ast_sched.get("force_dense", False)):
+        return
+    target = ast_sched.get("ch_keep_target", None)
+    if target is None:
+        return
+    target = float(max(0.0, min(1.0, float(target))))
+    pruner = _get_ast_pruner(model)
+    if pruner is None or (not hasattr(pruner, "g_ch")):
+        return
+    try:
+        pr_cfg = pruner.cfg.get("channel_prune", pruner.cfg)
+        front_ratio = float(pr_cfg.get("freeze_prefix_ratio", pruner.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+        front_ratio = float(max(0.0, min(1.0, front_ratio)))
+    except Exception:
+        front_ratio = 0.0
+    tol = float(getattr(proj_cfg, "tol", 0.002) or 0.002)
+    blend = float(getattr(proj_cfg, "blend", 0.5) or 0.5)
+    max_offset = float(getattr(proj_cfg, "max_offset", 8.0) or 8.0)
+    iters = int(getattr(proj_cfg, "iters", 25) or 25)
+    with torch.no_grad():
+        ch_keep_layer = torch.sigmoid(pruner.g_ch).mean(dim=1)
+        depth = int(ch_keep_layer.numel())
+        k_freeze = int(round(float(depth) * float(front_ratio)))
+        if k_freeze >= depth:
+            return
+        cur = float(ch_keep_layer[k_freeze:].mean().item())
+        if cur <= target + tol:
+            run_state["proj_last"] = {"outer": int(outer), "applied": False, "cur": cur, "target": target}
+            return
+        g = pruner.g_ch[k_freeze:].detach()
+        lo, hi = 0.0, float(max_offset)
+        for _ in range(max(8, iters)):
+            mid = 0.5 * (lo + hi)
+            m = float(torch.sigmoid(g - mid).mean().item())
+            if m > target:
+                lo = mid
+            else:
+                hi = mid
+        off = float(hi)
+        step = float(max(0.0, min(1.0, blend))) * off
+        if step <= 0.0:
+            return
+        pruner.g_ch.data[k_freeze:].sub_(step)
+        new_keep = float(torch.sigmoid(pruner.g_ch).mean(dim=1)[k_freeze:].mean().item())
+        run_state["proj_last"] = {
+            "outer": int(outer),
+            "applied": True,
+            "cur": float(cur),
+            "target": float(target),
+            "offset": float(off),
+            "step": float(step),
+            "new": float(new_keep),
+        }
+        logger.info(
+            "[ProjKeep] outer=%d prunable_keep %.6f -> %.6f (target=%.6f, off=%.3f, step=%.3f)",
+            int(outer), float(cur), float(new_keep), float(target), float(off), float(step)
+        )
+
+
+def _set_structural_gates_trainable(model: torch.nn.Module, trainable: bool) -> Dict[str, Any]:
+    """Freeze/unfreeze structural gates so recovery epochs do NOT change hardware."""
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return {"ok": False, "trainable": bool(trainable)}
+    changed = []
+    for name in ("g_head", "g_ch", "g_block"):
+        if hasattr(pruner, name):
+            p = getattr(pruner, name)
+            try:
+                p.requires_grad_(bool(trainable))
+                changed.append(name)
+            except Exception:
+                pass
+    return {"ok": True, "trainable": bool(trainable), "params": changed}
+
+
+def _maybe_start_user_recovery_after_val(
+    *,
+    cfg,
+    run_state: Dict[str, Any],
+    ast_sched: Dict[str, Any],
+    outer: int,
+    prunable_keep: float,
+    logger,
+) -> None:
+    rec_cfg = getattr(getattr(cfg, "ast", None), "recovery", None)
+    if rec_cfg is None or not bool(getattr(rec_cfg, "enabled", False)):
+        return
+    if bool(run_state.get("user_recovery_started", False)):
+        return
+    sched = getattr(getattr(cfg, "ast", None), "schedule", None)
+    keep_end = float(getattr(sched, "ch_keep_end", 1.0) or 1.0) if sched is not None else 1.0
+    tol = float(getattr(rec_cfg, "tol", 0.003) or 0.003)
+    epochs = max(0, int(getattr(rec_cfg, "epochs", 2) or 2))
+    if epochs <= 0:
+        return
+    tgt = float(ast_sched.get("ch_keep_target", keep_end) or keep_end)
+    if float(tgt) > float(keep_end) + 1e-6:
+        return
+    if float(prunable_keep) > float(keep_end) + float(tol):
+        return
+    run_state["user_recovery_started"] = True
+    run_state["user_recovery_start_outer"] = int(outer) + 1
+    run_state["user_recovery_remaining"] = int(epochs)
+    logger.info(
+        "[UserRecovery] scheduled: start_outer=%d epochs=%d (keep_end=%.4f tol=%.4f prunable_keep=%.4f)",
+        int(run_state["user_recovery_start_outer"]), int(epochs), float(keep_end), float(tol), float(prunable_keep)
     )
 
 
@@ -2978,6 +3177,22 @@ def train_version_c(
                 # ---- use effective lambda ONLY (already gated) ----
                 stable_hw_state["lambda_hw_effective"] = float(lambda_hw_eff)
                 stable_hw_state.setdefault("lambda_hw_base", float(stable_hw_state.get("lambda_hw_base", 0.0)))
+
+                start_rec = int(run_state.get("user_recovery_start_outer", 10**9))
+                rem_rec = int(run_state.get("user_recovery_remaining", 0) or 0)
+                user_rec_active = (rem_rec > 0) and (int(outer) >= int(start_rec))
+                run_state["user_recovery_active"] = bool(user_rec_active)
+                if user_rec_active:
+                    stable_hw_state["freeze_schedule"] = True
+                    stable_hw_state["in_recovery"] = True
+                    stable_hw_state["guard_mode"] = "USER_RECOVERY"
+                    _set_structural_gates_trainable(model, trainable=False)
+                else:
+                    if str(stable_hw_state.get("guard_mode", "")) == "USER_RECOVERY":
+                        _set_structural_gates_trainable(model, trainable=True)
+                        stable_hw_state.pop("in_recovery", None)
+                        stable_hw_state.pop("freeze_schedule", None)
+                        stable_hw_state.pop("guard_mode", None)
                 # -------------------------
                 # AST schedule (dense warmup -> ramp -> stabilize)
                 # This affects token gating (rho/temperature) and lambda_AST multiplier only.
@@ -3012,6 +3227,18 @@ def train_version_c(
                         )
                     except Exception as _alloc_exc:
                         logger.warning("[AllocSearch] outer=%d failed with error: %s", int(outer), str(_alloc_exc))
+
+                    try:
+                        _maybe_light_project_ch_keep(
+                            model=model,
+                            cfg=cfg,
+                            ast_sched=ast_sched,
+                            outer=int(outer),
+                            run_state=run_state,
+                            logger=logger,
+                        )
+                    except Exception as _proj_exc:
+                        logger.warning("[ProjKeep] outer=%d failed with error: %s", int(outer), str(_proj_exc))
 
                     # Log at key transition points and whenever we freeze/unfreeze (prevents blind 3-day runs).
                     sched0 = getattr(getattr(cfg, "ast", None), "schedule", None)
@@ -4615,6 +4842,25 @@ def train_version_c(
                         str(val_agg),
                         "ema" if (ema_model is not None and ema_eval) else "raw",
                     )
+
+                try:
+                    _maybe_start_user_recovery_after_val(
+                        cfg=cfg,
+                        run_state=run_state,
+                        ast_sched=ast_sched if isinstance(ast_sched, dict) else {},
+                        outer=int(outer),
+                        prunable_keep=float(keep_summary_eval.get("ch_keep_prunable_mean", 1.0)),
+                        logger=logger,
+                    )
+                except Exception as _rec_exc:
+                    logger.warning("[UserRecovery] failed to schedule: %s", str(_rec_exc))
+
+                if bool(run_state.get("user_recovery_active", False)):
+                    rem = int(run_state.get("user_recovery_remaining", 0) or 0)
+                    if rem > 0:
+                        run_state["user_recovery_remaining"] = int(rem - 1)
+                        if int(rem - 1) == 0:
+                            logger.info("[UserRecovery] finished at outer=%d", int(outer))
                 if stable_hw_enabled:
                     stable_decision, _ = apply_accuracy_guard(
                         epoch=outer,

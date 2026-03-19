@@ -1,0 +1,45 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20_k90_eps002.yaml
+
+stable_hw:
+  enabled: false
+  force_disable_ok: true
+  normalize:
+    enabled: false
+  lambda_hw_schedule:
+    enabled: false
+  accuracy_guard:
+    enabled: false
+  locked_acc_ref:
+    enabled: false
+  no_drift:
+    enabled: false
+  no_double_scale:
+    enabled: false
+
+ast:
+  schedule:
+    ch_keep_end: 0.92
+  projection:
+    enabled: true
+    blend: 0.5
+    tol: 0.002
+    max_offset: 8.0
+    iters: 25
+  recovery:
+    enabled: true
+    epochs: 2
+    tol: 0.003
+
+training:
+  compute_hw_when_lambda0: false
+  inner_steps_alpha: 0
+  inner_steps_layout: 0
+
+loss:
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0
+
+alloc_search:
+  enabled: false
