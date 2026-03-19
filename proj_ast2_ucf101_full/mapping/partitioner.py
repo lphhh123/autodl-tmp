@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -117,6 +118,7 @@ class PartitionPlanner:
         segments: List[Segment],
         eff_specs: Dict[str, torch.Tensor],
         alpha: Optional[torch.Tensor],
+        objective_base: Optional[float] = None,
     ) -> Tuple[bool, float, List[Segment], Dict, Dict[str, Any]]:
         segments_split = []
         split_applied = False
@@ -169,7 +171,12 @@ class PartitionPlanner:
             }
         if not split_applied:
             return False, 0.0, segments, {}, {}
-        obj_base, cost_base, map_base = self._evaluate(segments, eff_specs, alpha=alpha)
+        # objective_base is invariant across split trials for the same base segments.
+        # If provided by the caller, avoid recomputing it for every candidate.
+        if objective_base is None:
+            obj_base, _, _ = self._evaluate(segments, eff_specs, alpha=alpha)
+        else:
+            obj_base = float(objective_base)
         obj_split, cost_split, map_split = self._evaluate(segments_split, eff_specs, alpha=alpha)
         gain_ratio = (obj_base - obj_split) / max(1e-6, obj_base)
         local_plan["group_to_slot"] = map_split.get("mapping", [])[:2] if map_split.get("mapping") else []
@@ -204,6 +211,7 @@ class PartitionPlanner:
         alpha: torch.Tensor,
         model_info: Optional[Dict[str, torch.Tensor]] = None,
         use_fine_split: bool = True,
+        fine_split_threads: int = 1,
     ) -> Dict[str, Any]:
         layer_nodes = build_layer_nodes_from_model(model, model_info=model_info)
         segments_base = self._build_coarse(layer_nodes, alpha)
@@ -228,15 +236,35 @@ class PartitionPlanner:
             eff_specs,
         )
         split_trials = []
-        for ln in candidates:
-            ok, gain_ratio, segments_split, mapping_split, local_plan = self._simulate_split_for_layer(
-                ln,
-                segments_base,
-                eff_specs,
-                alpha=alpha,
-            )
-            if ok:
-                split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
+        n_threads = int(max(1, int(fine_split_threads or 1)))
+        if n_threads > 1 and len(candidates) > 1:
+            with ThreadPoolExecutor(max_workers=n_threads) as ex:
+                futs = [
+                    ex.submit(
+                        self._simulate_split_for_layer,
+                        ln,
+                        segments_base,
+                        eff_specs,
+                        alpha,
+                        float(objective_base),
+                    )
+                    for ln in candidates
+                ]
+                for ln, fut in zip(candidates, futs):
+                    ok, gain_ratio, segments_split, mapping_split, local_plan = fut.result()
+                    if ok:
+                        split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
+        else:
+            for ln in candidates:
+                ok, gain_ratio, segments_split, mapping_split, local_plan = self._simulate_split_for_layer(
+                    ln,
+                    segments_base,
+                    eff_specs,
+                    alpha=alpha,
+                    objective_base=float(objective_base),
+                )
+                if ok:
+                    split_trials.append((ln.id, gain_ratio, local_plan, segments_split, mapping_split))
         accepted = self._select_accepted_splits(split_trials)
         segments_final, graph_rewrite = self._apply_split_plans(segments_base, accepted, layer_nodes)
         objective_final, _, mapping_final = self._evaluate(segments_final, eff_specs, alpha=alpha)
