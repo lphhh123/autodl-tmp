@@ -12,6 +12,10 @@ alloc_search:
   gate_apply_blend: 1.0
   min_remain_budget: 0.005
   min_rel_hw_improve: 0.0
+  start_after_prune_epochs: 5
+  budget_frac_start: 0.5
+  budget_frac_max: 0.8
+  budget_frac_ramp_epochs: 10
 
 stable_hw:
   enabled: false
