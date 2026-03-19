@@ -1442,6 +1442,36 @@ def _get_layer_ch_keep_now(model: torch.nn.Module) -> Optional[torch.Tensor]:
         return torch.sigmoid(pruner.g_ch.detach()).mean(dim=1).float().cpu()
 
 
+def _summarize_layer_ch_keep(
+    keep_now: Optional[torch.Tensor],
+    freeze_prefix_ratio: float = 0.0,
+) -> Dict[str, Any]:
+    if keep_now is None:
+        return {
+            "ch_keep_real_mean": 1.0,
+            "ch_keep_real_min": 1.0,
+            "ch_keep_real_max": 1.0,
+            "ch_keep_prunable_mean": 1.0,
+            "ch_keep_layerwise": [],
+        }
+
+    keep_cpu = keep_now.detach().float().cpu()
+    depth = int(keep_cpu.numel())
+    k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
+    if k_freeze < depth:
+        prunable = keep_cpu[k_freeze:]
+    else:
+        prunable = keep_cpu
+
+    return {
+        "ch_keep_real_mean": float(keep_cpu.mean().item()),
+        "ch_keep_real_min": float(keep_cpu.min().item()),
+        "ch_keep_real_max": float(keep_cpu.max().item()),
+        "ch_keep_prunable_mean": float(prunable.mean().item()),
+        "ch_keep_layerwise": keep_cpu.tolist(),
+    }
+
+
 def _update_alloc_layer_sens_ema(
     model: torch.nn.Module,
     run_state: Dict[str, Any],
@@ -1646,6 +1676,40 @@ def _eval_single_alloc_candidate(
         }
 
 
+def _compute_alloc_phase_state(
+    *,
+    outer: int,
+    ast_sched: Dict[str, Any],
+    start_after_prune_epochs: int,
+    budget_frac_start: float,
+    budget_frac_max: float,
+    budget_frac_ramp_epochs: int,
+) -> Dict[str, Any]:
+    warmup_epochs = int(ast_sched.get("warmup_epochs", 0))
+    prune_epoch = int(outer) - int(warmup_epochs)
+    if prune_epoch < int(start_after_prune_epochs):
+        return {
+            "prune_epoch": int(prune_epoch),
+            "alloc_epoch": -1,
+            "alloc_enabled_this_outer": False,
+            "alloc_phase_progress": 0.0,
+            "alloc_budget_frac": 0.0,
+        }
+
+    alloc_epoch = int(prune_epoch) - int(start_after_prune_epochs)
+    progress = float(alloc_epoch) / float(max(1, int(budget_frac_ramp_epochs) - 1))
+    progress = max(0.0, min(1.0, progress))
+    alloc_budget_frac = float(budget_frac_start) + progress * (float(budget_frac_max) - float(budget_frac_start))
+    alloc_budget_frac = max(float(budget_frac_start), min(float(budget_frac_max), alloc_budget_frac))
+    return {
+        "prune_epoch": int(prune_epoch),
+        "alloc_epoch": int(alloc_epoch),
+        "alloc_enabled_this_outer": True,
+        "alloc_phase_progress": float(progress),
+        "alloc_budget_frac": float(alloc_budget_frac),
+    }
+
+
 def _run_alloc_candidate_search(
     *,
     model: torch.nn.Module,
@@ -1657,7 +1721,7 @@ def _run_alloc_candidate_search(
     last_info: Optional[Dict[str, Any]],
     keep_now: torch.Tensor,
     sens: torch.Tensor,
-    remain_budget: float,
+    usable_budget: float,
     search_threads: int,
     freeze_prefix_ratio: float,
     keep_unit: float,
@@ -1670,7 +1734,7 @@ def _run_alloc_candidate_search(
         keep_now=keep_now,
         sens=sens,
         freeze_prefix_ratio=freeze_prefix_ratio,
-        remain_budget=remain_budget,
+        remain_budget=usable_budget,
         keep_unit=keep_unit,
         min_keep_floor=min_keep_floor,
         pool_size=pool_size,
@@ -1718,7 +1782,7 @@ def _run_alloc_candidate_search(
             out = fut.result()
             obj = float(out.get("objective", 1.0e18))
             rel_hw_gain = (float(base_obj) - float(obj)) / max(1.0e-6, abs(float(base_obj)))
-            acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, remain_budget))
+            acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, usable_budget))
             total_score = float(rel_hw_gain) - float(acc_risk_weight) * float(acc_risk)
             item = {
                 "keep_cand": cand,
@@ -1750,6 +1814,11 @@ def _maybe_run_alloc_search_and_apply(
     if alloc_cfg is None or not bool(getattr(alloc_cfg, "enabled", False)):
         return
 
+    start_after_prune_epochs = int(getattr(alloc_cfg, "start_after_prune_epochs", 5))
+    budget_frac_start = float(getattr(alloc_cfg, "budget_frac_start", 0.5))
+    budget_frac_max = float(getattr(alloc_cfg, "budget_frac_max", 0.8))
+    budget_frac_ramp_epochs = int(getattr(alloc_cfg, "budget_frac_ramp_epochs", 10))
+
     last_info = run_state.get("last_model_info", None)
     sens = run_state.get("alloc_layer_sens_ema", None)
     if last_info is None or sens is None:
@@ -1778,7 +1847,53 @@ def _maybe_run_alloc_search_and_apply(
     keep_mean_prunable = float(keep_now[k_freeze:].mean().item())
     target_global_keep = float(ast_sched.get("ch_keep_target", keep_mean_prunable))
     remain_budget = max(0.0, keep_mean_prunable - target_global_keep)
-    if remain_budget <= float(getattr(alloc_cfg, "min_remain_budget", 0.005)):
+    phase_state = _compute_alloc_phase_state(
+        outer=int(outer),
+        ast_sched=ast_sched,
+        start_after_prune_epochs=int(start_after_prune_epochs),
+        budget_frac_start=float(budget_frac_start),
+        budget_frac_max=float(budget_frac_max),
+        budget_frac_ramp_epochs=int(budget_frac_ramp_epochs),
+    )
+    if not bool(phase_state.get("alloc_enabled_this_outer", False)):
+        run_state["alloc_last_search"] = {
+            "outer": int(outer),
+            "enabled": False,
+            "reason": "before_alloc_phase",
+            "alloc_enabled_this_outer": False,
+            "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
+            "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
+            "alloc_budget_frac": float(phase_state.get("alloc_budget_frac", 0.0)),
+            "alloc_remain_budget": float(remain_budget),
+            "alloc_usable_budget": 0.0,
+            "prune_epoch": int(phase_state.get("prune_epoch", -1)),
+            "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
+            "target_global_keep": float(target_global_keep),
+            "keep_mean_prunable": float(keep_mean_prunable),
+        }
+        return
+
+    alloc_budget_frac = float(phase_state.get("alloc_budget_frac", 0.0))
+    usable_budget = float(alloc_budget_frac) * float(remain_budget)
+    usable_budget = max(0.0, min(float(remain_budget), float(usable_budget)))
+
+    min_remain_budget = float(getattr(alloc_cfg, "min_remain_budget", 0.005))
+    if usable_budget <= min_remain_budget:
+        run_state["alloc_last_search"] = {
+            "outer": int(outer),
+            "enabled": True,
+            "reason": "usable_budget_too_small",
+            "alloc_enabled_this_outer": True,
+            "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
+            "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
+            "alloc_budget_frac": float(alloc_budget_frac),
+            "alloc_remain_budget": float(remain_budget),
+            "alloc_usable_budget": float(usable_budget),
+            "prune_epoch": int(phase_state.get("prune_epoch", -1)),
+            "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
+            "target_global_keep": float(target_global_keep),
+            "keep_mean_prunable": float(keep_mean_prunable),
+        }
         return
 
     slot_out = chiplet_slots(hard=False)
@@ -1795,7 +1910,7 @@ def _maybe_run_alloc_search_and_apply(
         last_info=last_info,
         keep_now=keep_now,
         sens=sens,
-        remain_budget=remain_budget,
+        usable_budget=usable_budget,
         search_threads=int(getattr(alloc_cfg, "search_threads", 20)),
         freeze_prefix_ratio=freeze_prefix_ratio,
         keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
@@ -1805,10 +1920,45 @@ def _maybe_run_alloc_search_and_apply(
         acc_risk_weight=float(getattr(alloc_cfg, "acc_risk_weight", 0.2)),
     )
     if best is None:
+        run_state["alloc_last_search"] = {
+            "outer": int(outer),
+            "enabled": True,
+            "reason": "no_candidate",
+            "alloc_enabled_this_outer": True,
+            "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
+            "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
+            "alloc_budget_frac": float(alloc_budget_frac),
+            "alloc_remain_budget": float(remain_budget),
+            "alloc_usable_budget": float(usable_budget),
+            "prune_epoch": int(phase_state.get("prune_epoch", -1)),
+            "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
+            "target_global_keep": float(target_global_keep),
+            "keep_mean_prunable": float(keep_mean_prunable),
+        }
         return
 
     min_rel_hw_improve = float(getattr(alloc_cfg, "min_rel_hw_improve", 0.0))
     if float(best["rel_hw_gain"]) < float(min_rel_hw_improve):
+        run_state["alloc_last_search"] = {
+            "outer": int(outer),
+            "enabled": True,
+            "reason": "below_min_rel_hw_improve",
+            "alloc_enabled_this_outer": True,
+            "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
+            "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
+            "alloc_budget_frac": float(alloc_budget_frac),
+            "alloc_remain_budget": float(remain_budget),
+            "alloc_usable_budget": float(usable_budget),
+            "prune_epoch": int(phase_state.get("prune_epoch", -1)),
+            "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
+            "base_objective": float(best["base_objective"]),
+            "best_objective": float(best["objective"]),
+            "rel_hw_gain": float(best["rel_hw_gain"]),
+            "acc_risk": float(best["acc_risk"]),
+            "total_score": float(best["total_score"]),
+            "target_global_keep": float(target_global_keep),
+            "keep_mean_prunable": float(keep_mean_prunable),
+        }
         logger.info(
             "[AllocSearch] outer=%d skipped apply: rel_hw_gain=%.6g < min_rel_hw_improve=%.6g",
             int(outer), float(best["rel_hw_gain"]), float(min_rel_hw_improve),
@@ -1824,20 +1974,33 @@ def _maybe_run_alloc_search_and_apply(
     run_state["alloc_last_keep_applied"] = best["keep_cand"].clone()
     run_state["alloc_last_search"] = {
         "outer": int(outer),
+        "enabled": True,
+        "reason": "applied",
+        "alloc_enabled_this_outer": True,
+        "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
+        "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
+        "alloc_budget_frac": float(alloc_budget_frac),
+        "alloc_remain_budget": float(remain_budget),
+        "alloc_usable_budget": float(usable_budget),
+        "prune_epoch": int(phase_state.get("prune_epoch", -1)),
+        "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
         "base_objective": float(best["base_objective"]),
         "best_objective": float(best["objective"]),
         "rel_hw_gain": float(best["rel_hw_gain"]),
         "acc_risk": float(best["acc_risk"]),
         "total_score": float(best["total_score"]),
-        "remain_budget": float(remain_budget),
         "target_global_keep": float(target_global_keep),
         "keep_mean_prunable": float(keep_mean_prunable),
     }
 
     logger.info(
-        "[AllocSearch] outer=%d applied remain_budget=%.6g keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g",
+        "[AllocSearch] outer=%d applied remain_budget=%.6g usable_budget=%.6g alloc_frac=%.3f prune_epoch=%d alloc_epoch=%d keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g",
         int(outer),
         float(remain_budget),
+        float(usable_budget),
+        float(alloc_budget_frac),
+        int(phase_state.get("prune_epoch", -1)),
+        int(phase_state.get("alloc_epoch", -1)),
         float(keep_mean_prunable),
         float(target_global_keep),
         float(best["base_objective"]),
@@ -1846,6 +2009,70 @@ def _maybe_run_alloc_search_and_apply(
         float(best["acc_risk"]),
         float(best["total_score"]),
     )
+
+
+def _eval_epoch_end_hw_snapshot(
+    *,
+    model: torch.nn.Module,
+    cfg,
+    run_state: Dict[str, Any],
+    hw_proxy,
+    wafer_layout,
+    chiplet_slots,
+) -> Dict[str, Any]:
+    try:
+        keep_now = _get_layer_ch_keep_now(model)
+        if keep_now is None:
+            return {
+                "ok": False,
+                "error": "keep_now is None",
+            }
+
+        last_info = run_state.get("last_model_info", None)
+        if last_info is None:
+            return {
+                "ok": False,
+                "error": "last_model_info is None",
+            }
+
+        eval_info = _build_eval_model_info_with_ch_override(
+            last_info=last_info,
+            depth=int(keep_now.numel()),
+            ch_keep_override=[float(x) for x in keep_now.tolist()],
+        )
+
+        slot_out = chiplet_slots(hard=False)
+        eff_specs = slot_out["eff_specs"]
+        alpha = slot_out["alpha"]
+
+        mapping_solver_local = MappingSolver(cfg.mapping.strategy, cfg.mapping.mem_limit_factor)
+        partitioner_local = PartitionPlanner(mapping_solver_local, wafer_layout, hw_proxy, cfg.partition)
+
+        part_res = partitioner_local.plan(
+            model,
+            eff_specs,
+            alpha=alpha,
+            model_info=eval_info,
+            use_fine_split=bool(getattr(cfg.hw, "use_fine_split", True)),
+        )
+        return {
+            "ok": True,
+            "objective": float(part_res.get("objective", 1.0e18)),
+            "mapping_sig": part_res.get("mapping_sig", None),
+            "latency_ms": float(part_res.get("latency_ms", part_res.get("raw_latency_ms", 0.0)) or 0.0),
+            "energy_mj": float(part_res.get("energy_mj", part_res.get("raw_energy_mj", 0.0)) or 0.0),
+            "mem_mb": float(part_res.get("mem_mb", part_res.get("raw_mem_mb", 0.0)) or 0.0),
+            "comm_ms": float(part_res.get("comm_ms", part_res.get("raw_comm_ms", 0.0)) or 0.0),
+            "raw_latency_ms": float(part_res.get("raw_latency_ms", 0.0) or 0.0),
+            "raw_energy_mj": float(part_res.get("raw_energy_mj", 0.0) or 0.0),
+            "raw_mem_mb": float(part_res.get("raw_mem_mb", 0.0) or 0.0),
+            "raw_comm_ms": float(part_res.get("raw_comm_ms", 0.0) or 0.0),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+        }
 
 
 def train_version_c(
@@ -1952,6 +2179,7 @@ def train_version_c(
         if layout_export_dir is not None:
             layout_export_dir.mkdir(parents=True, exist_ok=True)
         log_path = out_dir / "logs" / "version_c_stats.jsonl"
+        epoch_audit_path = out_dir / "logs" / "epoch_end_audit.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_slim = bool(int(os.environ.get("LOG_SLIM", "1")))
         log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
@@ -3889,6 +4117,23 @@ def train_version_c(
                             if metric in ("train_acc1_ema", "train_ema"):
                                 update_train_acc1_ema(stable_hw_cfg, stable_hw_state, float(acc1))
                         model_info = info.get("model_info", {}) if isinstance(info, dict) else {}
+                        pruner = _get_ast_pruner(model)
+                        if pruner is not None:
+                            try:
+                                pr_cfg = pruner.cfg.get("channel_prune", pruner.cfg)
+                                freeze_prefix_ratio = float(pr_cfg.get("freeze_prefix_ratio", pruner.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+                                freeze_prefix_ratio = float(max(0.0, min(1.0, freeze_prefix_ratio)))
+                            except Exception:
+                                freeze_prefix_ratio = 0.0
+                        else:
+                            freeze_prefix_ratio = 0.0
+
+                        keep_now_real = _get_layer_ch_keep_now(model)
+                        keep_summary = _summarize_layer_ch_keep(keep_now_real, freeze_prefix_ratio=freeze_prefix_ratio)
+                        alloc_last = run_state.get("alloc_last_search", None)
+                        if not isinstance(alloc_last, dict):
+                            alloc_last = {}
+
                         stats = {
                             "outer": outer,
                             "step": step,
@@ -3898,6 +4143,11 @@ def train_version_c(
                             "token_keep": float(model_info.get("token_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "head_keep": float(model_info.get("head_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "ch_keep": float(model_info.get("ch_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
+                            "ch_keep_real_mean": float(keep_summary.get("ch_keep_real_mean", 1.0)),
+                            "ch_keep_real_min": float(keep_summary.get("ch_keep_real_min", 1.0)),
+                            "ch_keep_real_max": float(keep_summary.get("ch_keep_real_max", 1.0)),
+                            "ch_keep_prunable_mean": float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
+                            "ch_prune_ratio_logged": float(model_info.get("ch_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "block_keep": float(model_info.get("block_keep", 1.0)) if isinstance(model_info, dict) else 1.0,
                             "ch_keep_target": float(ast_sched.get("ch_keep_target", 1.0)) if isinstance(ast_sched, dict) else 1.0,
                             "force_dense": bool(ast_sched.get("force_dense", False)) if isinstance(ast_sched, dict) else False,
@@ -3920,12 +4170,18 @@ def train_version_c(
                             "layout_cache_hit": not step_layout_updated,
                             "mapping_signature": cache["mapping_signature"],
                             "layout_signature": cache["layout_signature"],
+                            "alloc_enabled_this_outer": bool(alloc_last.get("alloc_enabled_this_outer", False)),
+                            "alloc_start_after_prune_epochs": int(alloc_last.get("alloc_start_after_prune_epochs", -1)),
+                            "alloc_phase_progress": float(alloc_last.get("alloc_phase_progress", 0.0)),
+                            "alloc_budget_frac": float(alloc_last.get("alloc_budget_frac", 0.0)),
+                            "alloc_usable_budget": float(alloc_last.get("alloc_usable_budget", 0.0)),
+                            "alloc_remain_budget": float(alloc_last.get("alloc_remain_budget", 0.0)),
+                            "alloc_base_objective": float(alloc_last.get("base_objective", 0.0)),
+                            "alloc_best_objective": float(alloc_last.get("best_objective", 0.0)),
+                            "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
+                            "alloc_acc_risk": float(alloc_last.get("acc_risk", 0.0)),
+                            "alloc_total_score": float(alloc_last.get("total_score", 0.0)),
                         }
-                        alloc_last = run_state.get("alloc_last_search", None)
-                        if isinstance(alloc_last, dict):
-                            stats["alloc_rel_hw_gain"] = float(alloc_last.get("rel_hw_gain", 0.0))
-                            stats["alloc_acc_risk"] = float(alloc_last.get("acc_risk", 0.0))
-                            stats["alloc_total_score"] = float(alloc_last.get("total_score", 0.0))
                         if (not log_slim) and hw_stats:
                             stats.update(hw_stats)
                         elif hw_stats:
@@ -3968,6 +4224,12 @@ def train_version_c(
                                             "hw_loss": float(hw_stats.get("L_hw_total", 0.0) if hw_stats else 0.0),
                                             "mapping_cache_hit": (not step_mapping_updated),
                                             "layout_cache_hit": (not step_layout_updated),
+                                            "ch_keep_real_mean": float(keep_summary.get("ch_keep_real_mean", 1.0)),
+                                            "ch_keep_prunable_mean": float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
+                                            "alloc_budget_frac": float(alloc_last.get("alloc_budget_frac", 0.0)),
+                                            "alloc_usable_budget": float(alloc_last.get("alloc_usable_budget", 0.0)),
+                                            "alloc_remain_budget": float(alloc_last.get("alloc_remain_budget", 0.0)),
+                                            "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
                                         }
                                     )
                                     + "\n"
@@ -3995,6 +4257,21 @@ def train_version_c(
                                             "layout_cache_hit": (not step_layout_updated),
                                             "mapping_signature": cache["mapping_signature"],
                                             "layout_signature": cache["layout_signature"],
+                                            "ch_keep_real_mean": float(keep_summary.get("ch_keep_real_mean", 1.0)),
+                                            "ch_keep_real_min": float(keep_summary.get("ch_keep_real_min", 1.0)),
+                                            "ch_keep_real_max": float(keep_summary.get("ch_keep_real_max", 1.0)),
+                                            "ch_keep_prunable_mean": float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
+                                            "alloc_enabled_this_outer": bool(alloc_last.get("alloc_enabled_this_outer", False)),
+                                            "alloc_start_after_prune_epochs": int(alloc_last.get("alloc_start_after_prune_epochs", -1)),
+                                            "alloc_phase_progress": float(alloc_last.get("alloc_phase_progress", 0.0)),
+                                            "alloc_budget_frac": float(alloc_last.get("alloc_budget_frac", 0.0)),
+                                            "alloc_usable_budget": float(alloc_last.get("alloc_usable_budget", 0.0)),
+                                            "alloc_remain_budget": float(alloc_last.get("alloc_remain_budget", 0.0)),
+                                            "alloc_base_objective": float(alloc_last.get("base_objective", 0.0)),
+                                            "alloc_best_objective": float(alloc_last.get("best_objective", 0.0)),
+                                            "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
+                                            "alloc_acc_risk": float(alloc_last.get("acc_risk", 0.0)),
+                                            "alloc_total_score": float(alloc_last.get("total_score", 0.0)),
                                         }
                                     )
                                     + "\n"
@@ -4160,6 +4437,67 @@ def train_version_c(
                     max_batches=max_eval_batches_for_eval,
                     aggregate=val_agg,
                 )
+                pruner_eval = _get_ast_pruner(model)
+                if pruner_eval is not None:
+                    try:
+                        pr_cfg_eval = pruner_eval.cfg.get("channel_prune", pruner_eval.cfg)
+                        freeze_prefix_ratio_eval = float(pr_cfg_eval.get("freeze_prefix_ratio", pruner_eval.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+                        freeze_prefix_ratio_eval = float(max(0.0, min(1.0, freeze_prefix_ratio_eval)))
+                    except Exception:
+                        freeze_prefix_ratio_eval = 0.0
+                else:
+                    freeze_prefix_ratio_eval = 0.0
+
+                keep_now_eval = _get_layer_ch_keep_now(model)
+                keep_summary_eval = _summarize_layer_ch_keep(
+                    keep_now_eval,
+                    freeze_prefix_ratio=freeze_prefix_ratio_eval,
+                )
+
+                epoch_end_hw = _eval_epoch_end_hw_snapshot(
+                    model=model,
+                    cfg=cfg,
+                    run_state=run_state,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
+                    chiplet_slots=chiplet_slots,
+                )
+
+                alloc_last_eval = run_state.get("alloc_last_search", None)
+                if not isinstance(alloc_last_eval, dict):
+                    alloc_last_eval = {}
+
+                epoch_audit_record = {
+                    "outer": int(outer),
+                    "eval_mode": "ema" if (ema_model is not None and ema_eval) else "raw",
+                    "val_acc1": float(val_acc1) if val_acc1 is not None else None,
+                    "ch_keep_real_mean": float(keep_summary_eval.get("ch_keep_real_mean", 1.0)),
+                    "ch_keep_real_min": float(keep_summary_eval.get("ch_keep_real_min", 1.0)),
+                    "ch_keep_real_max": float(keep_summary_eval.get("ch_keep_real_max", 1.0)),
+                    "ch_keep_prunable_mean": float(keep_summary_eval.get("ch_keep_prunable_mean", 1.0)),
+                    "ch_keep_layerwise": keep_summary_eval.get("ch_keep_layerwise", []),
+                    "epoch_end_hw_ok": bool(epoch_end_hw.get("ok", False)),
+                    "epoch_end_hw_objective": float(epoch_end_hw.get("objective", 0.0)) if epoch_end_hw.get("ok", False) else None,
+                    "epoch_end_hw_mapping_sig": epoch_end_hw.get("mapping_sig", None),
+                    "epoch_end_hw_latency_ms": float(epoch_end_hw.get("latency_ms", 0.0)) if epoch_end_hw.get("ok", False) else None,
+                    "epoch_end_hw_energy_mj": float(epoch_end_hw.get("energy_mj", 0.0)) if epoch_end_hw.get("ok", False) else None,
+                    "epoch_end_hw_mem_mb": float(epoch_end_hw.get("mem_mb", 0.0)) if epoch_end_hw.get("ok", False) else None,
+                    "epoch_end_hw_comm_ms": float(epoch_end_hw.get("comm_ms", 0.0)) if epoch_end_hw.get("ok", False) else None,
+                    "epoch_end_hw_error": epoch_end_hw.get("error", None),
+                    "alloc_enabled_this_outer": bool(alloc_last_eval.get("alloc_enabled_this_outer", False)),
+                    "alloc_start_after_prune_epochs": int(alloc_last_eval.get("alloc_start_after_prune_epochs", -1)),
+                    "alloc_phase_progress": float(alloc_last_eval.get("alloc_phase_progress", 0.0)),
+                    "alloc_budget_frac": float(alloc_last_eval.get("alloc_budget_frac", 0.0)),
+                    "alloc_remain_budget": float(alloc_last_eval.get("alloc_remain_budget", 0.0)),
+                    "alloc_usable_budget": float(alloc_last_eval.get("alloc_usable_budget", 0.0)),
+                    "alloc_base_objective": float(alloc_last_eval.get("base_objective", 0.0)),
+                    "alloc_best_objective": float(alloc_last_eval.get("best_objective", 0.0)),
+                    "alloc_rel_hw_gain": float(alloc_last_eval.get("rel_hw_gain", 0.0)),
+                    "alloc_acc_risk": float(alloc_last_eval.get("acc_risk", 0.0)),
+                    "alloc_total_score": float(alloc_last_eval.get("total_score", 0.0)),
+                }
+                with epoch_audit_path.open("a", encoding="utf-8") as f:
+                    f.write(safe_dumps(epoch_audit_record) + "\n")
                 # ---- audit-friendly [val] line (used by LockedAccRef curve parser) ----
                 try:
                     n_val = len(val_loader)
@@ -4171,11 +4509,18 @@ def train_version_c(
                     val_mode = "fast"
                 if val_acc1 is not None:
                     logger.info(
-                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f (pref=%s eval_model=%s)",
+                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f real_ch_keep=%.4f prunable_ch_keep=%.4f end_hw_obj=%.6g end_lat=%.4f end_mem=%.4f end_comm=%.4f alloc_frac=%.3f (pref=%s eval_model=%s)",
                         int(outer),
                         str(val_mode),
                         float(val_acc1),
                         float(val_acc1),
+                        float(keep_summary_eval.get("ch_keep_real_mean", 1.0)),
+                        float(keep_summary_eval.get("ch_keep_prunable_mean", 1.0)),
+                        float(epoch_end_hw.get("objective", 0.0)) if epoch_end_hw.get("ok", False) else 0.0,
+                        float(epoch_end_hw.get("latency_ms", 0.0)) if epoch_end_hw.get("ok", False) else 0.0,
+                        float(epoch_end_hw.get("mem_mb", 0.0)) if epoch_end_hw.get("ok", False) else 0.0,
+                        float(epoch_end_hw.get("comm_ms", 0.0)) if epoch_end_hw.get("ok", False) else 0.0,
+                        float(alloc_last_eval.get("alloc_budget_frac", 0.0)),
                         str(val_agg),
                         "ema" if (ema_model is not None and ema_eval) else "raw",
                     )
