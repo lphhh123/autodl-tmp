@@ -11,12 +11,31 @@ stable_hw:
   # [SPEC v5.4] required when stable_hw.enabled=True
   no_double_scale:
     enabled: true
+  normalize:
+    enabled: true
   accuracy_guard:
-    enabled: false
+    enabled: true
+    # Make the guard almost never trigger by allowing an extreme drop and
+    # requiring an absurd number of consecutive violations.
+    acc_drop_max: 1.0
+    controller:
+      mode: hard
+      metric: val_acc1
+      epsilon_drop: 1.0
+      hysteresis: 0.0
+      k_enter: 999
+      lock_grace_epochs: 999
+      recovery_min_epochs: 0
+      cut_hw_loss_on_violate: false
+      freeze_discrete_updates: false
+      freeze_schedule_in_recovery: false
+      stop_on_violation: false
+      k_exit: 1
+      margin_exit: 0.0
   locked_acc_ref:
-    enabled: false
+    enabled: true
   no_drift:
-    enabled: false
+    enabled: true
   lambda_hw_schedule:
     enabled: true
     warmup_epochs: 0
@@ -28,5 +47,7 @@ alloc_search:
   enabled: false
 
 training:
+  # Keep the training-side guard threshold aligned with the StableHW controller.
+  acc_drop_max: 1.0
   inner_steps_alpha: 0
   inner_steps_layout: 0
