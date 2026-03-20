@@ -40,8 +40,9 @@ stable_hw:
     enabled: true
     warmup_epochs: 0
     ramp_epochs: 1
-    lambda_hw_min: 0.30
-    lambda_hw_max: 0.30
+    # stronger HW regularization for clearer separation vs BASE
+    lambda_hw_min: 0.60
+    lambda_hw_max: 0.60
 
 alloc_search:
   enabled: false
@@ -51,3 +52,19 @@ training:
   acc_drop_max: 1.0
   inner_steps_alpha: 0
   inner_steps_layout: 0
+  # Increase HW term influence (default is 0.1 in version_c_ucf101.yaml).
+  hw_term_ratio_cap: 0.50
+
+# Ensure pruning progress is pushed to target (align with BASE/OURS).
+ast:
+  projection:
+    enabled: true
+    blend: 0.5
+    tol: 0.002
+    max_offset: 8.0
+    iters: 25
+
+# Make HWLOSS a pure continuous-regularization baseline: NO surrogate straight-through gradients.
+hw:
+  surrogate_grad:
+    enabled: false

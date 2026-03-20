@@ -271,12 +271,38 @@ def compute_hw_loss(
             kft = model_info.get("keep_factors_t", None)
             arch = model_info.get("arch", None)
             if isinstance(kft, dict) and isinstance(arch, dict):
-                depth = int(arch.get("depth", 0) or 0)
-                embed_dim = int(arch.get("embed_dim", 0) or 0)
-                num_heads = int(arch.get("num_heads", 1) or 1)
-                mlp_ratio = float(arch.get("mlp_ratio", 4.0) or 4.0)
-                num_tokens = int(arch.get("num_tokens", 0) or 0)
-                precision_flag = float(arch.get("precision", 1) or 1)
+                def _to_int(v, default: int = 0) -> int:
+                    if v is None:
+                        return int(default)
+                    if torch.is_tensor(v):
+                        try:
+                            return int(v.detach().cpu().item())
+                        except Exception:
+                            return int(default)
+                    try:
+                        return int(v)
+                    except Exception:
+                        return int(default)
+
+                def _to_float(v, default: float = 0.0) -> float:
+                    if v is None:
+                        return float(default)
+                    if torch.is_tensor(v):
+                        try:
+                            return float(v.detach().cpu().item())
+                        except Exception:
+                            return float(default)
+                    try:
+                        return float(v)
+                    except Exception:
+                        return float(default)
+
+                depth = _to_int(arch.get("depth", 0), 0)
+                embed_dim = _to_int(arch.get("embed_dim", 0), 0)
+                num_heads = _to_int(arch.get("num_heads", 1), 1)
+                mlp_ratio = _to_float(arch.get("mlp_ratio", 4.0), 4.0)
+                num_tokens = _to_int(arch.get("num_tokens", 0), 0)
+                precision_flag = _to_float(arch.get("precision", 1), 1.0)
 
                 def _as_vec(x, n: int, default: float = 1.0):
                     if x is None:
@@ -621,6 +647,21 @@ def compute_hw_loss(
         "proxy_used": proxy_used,
         "proxy_extra_penalty": float(extra_penalty),  # backward compat
     }
+
+    # Expose surrogate-grad status for debugging / paper evidence.
+    # NOTE: straight-through surrogate changes gradients only; without this flag you cannot tell if it is active.
+    try:
+        sur_last = stable_hw_state.get("surrogate_last", None) if isinstance(stable_hw_state, dict) else None
+        if isinstance(sur_last, dict):
+            hw_stats["surrogate_grad_enabled"] = 1.0
+            hw_stats["surrogate_latency_ms"] = float(sur_last.get("surrogate_latency_ms", 0.0))
+            hw_stats["surrogate_mem_mb"] = float(sur_last.get("surrogate_mem_mb", 0.0))
+            hw_stats["surrogate_energy_mj"] = float(sur_last.get("surrogate_energy_mj", 0.0))
+            hw_stats["surrogate_weight"] = float(sur_last.get("surrogate_weight", 1.0))
+        else:
+            hw_stats["surrogate_grad_enabled"] = 0.0
+    except Exception:
+        pass
 
     lambda_chip = float(getattr(cfg.hw, "lambda_chip", 0.0))
     L_chip = torch.zeros((), device=device)

@@ -362,7 +362,17 @@ class VideoViT(nn.Module):
             "block_keep": block_keep_t,
         }
         arch = None
-        if not dp_safe:
+        if dp_safe:
+            # DP-safe: use 0-d tensors so DataParallel can gather dict outputs reliably.
+            arch = {
+                "depth": torch.tensor(int(depth), device=x.device, dtype=torch.int32),
+                "embed_dim": torch.tensor(int(self.cfg.embed_dim), device=x.device, dtype=torch.int32),
+                "num_heads": torch.tensor(int(self.cfg.num_heads), device=x.device, dtype=torch.int32),
+                "mlp_ratio": torch.tensor(float(self.cfg.mlp_ratio), device=x.device, dtype=torch.float32),
+                "num_tokens": torch.tensor(int(self.num_tokens), device=x.device, dtype=torch.int32),
+                "precision": torch.tensor(1, device=x.device, dtype=torch.int32),
+            }
+        else:
             arch = {
                 "depth": int(depth),
                 "embed_dim": int(self.cfg.embed_dim),
