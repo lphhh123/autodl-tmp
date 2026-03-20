@@ -19,6 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch.amp import GradScaler, autocast
+from torch.distributions import Dirichlet
 from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
@@ -1824,6 +1825,139 @@ def _run_alloc_candidate_search(
     except Exception:
         max_acc_risk = float("inf")
 
+    # ------------------------------------------------------------
+    # CEM/ES baseline (gradient-free black-box search)
+    # Budget-matched: total candidate evals == len(cands)
+    # Total evals per outer == 1 (base) + len(cands) (same as ours)
+    # ------------------------------------------------------------
+    if pick_policy in ("cem", "es"):
+        depth = int(keep_now.numel())
+        k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
+        prunable = list(range(k_freeze, depth))
+        if not prunable:
+            return None
+
+        prunable_sorted = sorted(prunable, key=lambda i: float(sens_norm[i].item()))
+        pool = prunable_sorted[: min(int(pool_size), len(prunable_sorted))]
+        if not pool:
+            return None
+
+        budget = float(max(0.0, usable_budget))
+        if budget <= 1e-8:
+            return None
+
+        u = float(max(1e-4, keep_unit))
+        floor = float(max(0.05, min(0.95, min_keep_floor)))
+
+        cem_cfg = getattr(cfg, "alloc_search", None)
+        cem_iters = int(getattr(cem_cfg, "cem_iters", 2) if cem_cfg is not None else 2)
+        cem_iters = max(1, cem_iters)
+        elite_frac = float(getattr(cem_cfg, "cem_elite_frac", 0.25) if cem_cfg is not None else 0.25)
+        elite_frac = float(max(0.05, min(0.8, elite_frac)))
+        alpha_strength = float(getattr(cem_cfg, "cem_alpha_strength", 20.0) if cem_cfg is not None else 20.0)
+        alpha_strength = float(max(1.0, alpha_strength))
+        smooth = float(getattr(cem_cfg, "cem_smooth", 0.7) if cem_cfg is not None else 0.7)
+        smooth = float(max(0.0, min(0.99, smooth)))
+
+        total_samples = int(len(cands))
+        per_iter = [total_samples // cem_iters] * cem_iters
+        for r in range(total_samples - sum(per_iter)):
+            per_iter[r] += 1
+
+        p_dim = int(len(pool))
+        alpha_dir = torch.ones(p_dim, dtype=torch.float32)
+
+        best = None
+        used_evals = 0
+
+        def _make_cand_from_w(w: torch.Tensor) -> torch.Tensor:
+            cand = keep_now.clone()
+            for jj, li in enumerate(pool):
+                d = float(budget * float(w[jj].item()))
+                maxd = float(max(0.0, float(cand[li].item()) - floor))
+                if d > maxd:
+                    d = maxd
+                if d > 0.0:
+                    cand[li] = cand[li] - d
+            q = cand.clone()
+            for ii in range(k_freeze, depth):
+                q[ii] = round(float(q[ii].item()) / u) * u
+                q[ii] = float(max(floor, min(1.0, q[ii].item())))
+            return q
+
+        for it in range(cem_iters):
+            n_samp = int(per_iter[it])
+            if n_samp <= 0:
+                continue
+            dist = Dirichlet(alpha_dir)
+            w_samples = dist.sample((n_samp,))
+
+            with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
+                futs = []
+                cand_ws = []
+                for s in range(n_samp):
+                    w = w_samples[s]
+                    cand = _make_cand_from_w(w)
+                    cand_ws.append((cand, w))
+                    futs.append(
+                        ex.submit(
+                            _eval_single_alloc_candidate,
+                            cand,
+                            model=model,
+                            last_info=last_info,
+                            cfg=cfg,
+                            hw_proxy=hw_proxy,
+                            wafer_layout=wafer_layout,
+                            eff_specs=eff_specs_cpu,
+                            alpha=alpha_cpu,
+                            fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+                        )
+                    )
+
+                used_evals += len(futs)
+
+                scored = []
+                for (cand, w), fut in zip(cand_ws, futs):
+                    out = fut.result()
+                    obj = float(out.get("objective", 1.0e18))
+                    rel_hw_gain = (float(base_obj) - float(obj)) / max(1.0e-6, abs(float(base_obj)))
+                    acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, usable_budget))
+                    if max_acc_risk > 0.0 and math.isfinite(max_acc_risk):
+                        if float(acc_risk) > float(max_acc_risk):
+                            continue
+                    total_score = float(rel_hw_gain) - float(acc_risk_weight) * float(acc_risk)
+                    item = {
+                        "keep_cand": cand,
+                        "objective": obj,
+                        "base_objective": float(base_obj),
+                        "rel_hw_gain": float(rel_hw_gain),
+                        "acc_risk": float(acc_risk),
+                        "total_score": float(total_score),
+                        "raw": out,
+                        "w": w.detach().cpu(),
+                    }
+                    scored.append(item)
+                    if best is None or float(item["total_score"]) > float(best["total_score"]) + 1e-12:
+                        best = item
+
+            if scored:
+                scored.sort(key=lambda x: float(x["total_score"]), reverse=True)
+                n_elite = max(1, int(round(len(scored) * elite_frac)))
+                elite_w = torch.stack([scored[i]["w"] for i in range(n_elite)], dim=0)
+                elite_mean = elite_w.mean(dim=0).clamp(min=1e-6)
+                elite_mean = elite_mean / elite_mean.sum()
+                alpha_target = elite_mean * float(alpha_strength)
+                alpha_dir = smooth * alpha_dir + (1.0 - smooth) * alpha_target
+
+        if best is None:
+            return None
+
+        best["eval_budget_total"] = int(1 + used_evals)
+        best["eval_budget_candidates"] = int(used_evals)
+        best["policy"] = str(pick_policy)
+        best["cem_iters"] = int(cem_iters)
+        return best
+
     if pick_policy in ("risk_only", "sens_only", "acc_risk_only"):
         best_cand = None
         best_risk = None
@@ -2184,6 +2318,8 @@ def _maybe_run_alloc_search_and_apply(
         "rel_hw_gain": float(best["rel_hw_gain"]),
         "acc_risk": float(best["acc_risk"]),
         "total_score": float(best["total_score"]),
+        "alloc_policy": str(best.get("policy", "heuristic")),
+        "alloc_eval_budget_total": int(best.get("eval_budget_total", 0) or 0),
         "target_global_keep": float(target_global_keep),
         "keep_mean_prunable": float(keep_mean_prunable),
     }
