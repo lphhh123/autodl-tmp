@@ -422,6 +422,9 @@ case "$EXP_ID" in
   EXP-A2p-cem-fast-k92)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_cem_fast20_k92.yaml "$(odir EXP-A2p-cem-fast-k92)"
     ;;
+  EXP-A2p-cem15-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_cem15_fast20_k92.yaml "$(odir EXP-A2p-cem15-fast-k92)"
+    ;;
   EXP-A2p-hwloss-fast-k92)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_hwloss_fast20_k92.yaml "$(odir EXP-A2p-hwloss-fast-k92)"
     ;;

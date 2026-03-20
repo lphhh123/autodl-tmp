@@ -1,0 +1,7 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_cem_fast20_k92.yaml
+
+# CEM baseline with 1.5x evaluation budget vs ours:
+# ours max_candidates=60 -> this sets max_candidates=90.
+
+alloc_search:
+  max_candidates: 90
