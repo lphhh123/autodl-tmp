@@ -1,0 +1,11 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_hwloss_fast20_k92.yaml
+
+# HW-surrogate baseline (discrete -> continuous):
+# - uses the same StableHW contract + lambda schedule as HW-loss
+# - BUT enables surrogate_grad to provide usable gradients wrt keep_factors
+#   even when discrete mapping/layout does not change smoothly.
+
+hw:
+  surrogate_grad:
+    enabled: true
+    weight: 1.0
