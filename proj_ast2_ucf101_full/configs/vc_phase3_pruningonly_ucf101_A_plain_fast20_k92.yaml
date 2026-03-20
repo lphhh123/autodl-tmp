@@ -23,6 +23,13 @@ stable_hw:
 ast:
   schedule:
     ch_keep_end: 0.92
+  # Light projection to make global pruning target reachable (critical for fair comparison).
+  projection:
+    enabled: true
+    blend: 0.5
+    tol: 0.002
+    max_offset: 8.0
+    iters: 25
 
 training:
   compute_hw_when_lambda0: false
