@@ -8,6 +8,9 @@ _base_: configs/vc_phase3_pruningonly_ucf101_A_plain_fast20_k92.yaml
 stable_hw:
   enabled: true
   force_disable_ok: false
+  # [SPEC v5.4] required when stable_hw.enabled=True
+  no_double_scale:
+    enabled: true
   accuracy_guard:
     enabled: false
   locked_acc_ref:
