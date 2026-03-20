@@ -1783,8 +1783,8 @@ def _run_alloc_candidate_search(
     pool_size: int,
     max_candidates: int,
     acc_risk_weight: float,
-    max_acc_risk: float,
-    pick_policy: str,
+    pick_policy: str = "total_score",
+    max_acc_risk: float = float("inf"),
 ) -> Optional[Dict[str, Any]]:
     cands = _build_alloc_candidates_from_remaining_budget(
         keep_now=keep_now,
@@ -1818,9 +1818,51 @@ def _run_alloc_candidate_search(
     sens_norm = sens.clone().float()
     sens_norm = sens_norm / (float(sens_norm.mean().item()) + 1e-6)
 
-    best = None
-    max_acc_risk = float(max_acc_risk)
     pick_policy = str(pick_policy or "total_score").lower().strip()
+    try:
+        max_acc_risk = float(max_acc_risk)
+    except Exception:
+        max_acc_risk = float("inf")
+
+    if pick_policy in ("risk_only", "sens_only", "acc_risk_only"):
+        best_cand = None
+        best_risk = None
+        for cand in cands:
+            acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, usable_budget))
+            if math.isfinite(max_acc_risk) and acc_risk > float(max_acc_risk):
+                continue
+            if best_risk is None or acc_risk < best_risk:
+                best_risk = float(acc_risk)
+                best_cand = cand
+
+        if best_cand is None:
+            return None
+
+        out = _eval_single_alloc_candidate(
+            best_cand,
+            model=model,
+            last_info=last_info,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs=eff_specs_cpu,
+            alpha=alpha_cpu,
+            fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+        )
+        obj = float(out.get("objective", 1.0e18))
+        rel_hw_gain = (float(base_obj) - float(obj)) / max(1.0e-6, abs(float(base_obj)))
+        total_score = float(rel_hw_gain) - float(acc_risk_weight) * float(best_risk if best_risk is not None else 0.0)
+        return {
+            "keep_cand": best_cand,
+            "objective": obj,
+            "base_objective": float(base_obj),
+            "rel_hw_gain": float(rel_hw_gain),
+            "acc_risk": float(best_risk if best_risk is not None else 0.0),
+            "total_score": float(total_score),
+            "raw": out,
+        }
+
+    best = None
     with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
         futs = [
             ex.submit(

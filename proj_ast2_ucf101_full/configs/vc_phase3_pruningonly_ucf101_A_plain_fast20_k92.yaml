@@ -1,5 +1,9 @@
 _base_: configs/vc_phase3_pruningonly_ucf101_A_aligned_fast20_k90_eps002.yaml
 
+# Pruning-only baseline (fast20) with a mild pruning target:
+#   ch_keep_end = 0.92  (≈8% channel pruning on prunable part)
+# StableHW is fully disabled here to keep the run "pure pruning" and fast.
+
 stable_hw:
   enabled: false
   force_disable_ok: true
@@ -19,16 +23,6 @@ stable_hw:
 ast:
   schedule:
     ch_keep_end: 0.92
-  projection:
-    enabled: true
-    blend: 0.5
-    tol: 0.002
-    max_offset: 8.0
-    iters: 25
-  recovery:
-    enabled: true
-    epochs: 2
-    tol: 0.003
 
 training:
   compute_hw_when_lambda0: false

@@ -1,14 +1,25 @@
 _base_: configs/vc_phase3_pruningonly_ucf101_A_plain_fast20_k92.yaml
 
+# Differentiable hardware baseline (HW-loss):
+# Enable StableHW (required by v5.4 contract) and set a constant lambda_hw_effective.
+# NOTE: Under v5.4 NoDoubleScale, legacy hw.lambda_hw / loss.lambda_hw will be overridden to 0.
+#       Training will use stable_hw_state["lambda_hw_effective"] instead.
+
 stable_hw:
-  enabled: false
-  force_disable_ok: true
-
-hw:
-  lambda_hw: 0.30
-
-loss:
-  lambda_hw: 0.0
+  enabled: true
+  force_disable_ok: false
+  accuracy_guard:
+    enabled: false
+  locked_acc_ref:
+    enabled: false
+  no_drift:
+    enabled: false
+  lambda_hw_schedule:
+    enabled: true
+    warmup_epochs: 0
+    ramp_epochs: 1
+    lambda_hw_min: 0.30
+    lambda_hw_max: 0.30
 
 alloc_search:
   enabled: false
@@ -16,4 +27,3 @@ alloc_search:
 training:
   inner_steps_alpha: 0
   inner_steps_layout: 0
-  hw_term_ratio_cap: 0.10
