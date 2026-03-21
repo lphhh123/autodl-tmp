@@ -1,0 +1,7 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_cem_fast20_k92.yaml
+
+# CEM baseline with 2.0x evaluation budget vs ours:
+# ours total eval budget per alloc-search outer: 60 -> total_samples ~ 120
+
+alloc_search:
+  cem_budget_mult: 2.0

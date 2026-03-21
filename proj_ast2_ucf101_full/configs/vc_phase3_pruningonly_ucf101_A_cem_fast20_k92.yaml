@@ -22,16 +22,24 @@ alloc_search:
   pool_size: 0
   max_candidates: 60
   acc_risk_weight: 0.2
-  # For CEM: max_acc_risk is re-used as a generic task_proxy threshold (L2(delta)/budget).
-  # Set high to avoid filtering unless you want a constraint.
-  max_acc_risk: 1.0
+  # Accuracy-risk constraint per gate change (<=1% drop budget, shared with OURS)
+  max_acc_risk: 0.01
 
   # Budget multiplier: x1 => total_samples=ceil(max_candidates*1.0)=60
   cem_budget_mult: 1.0
 
   # Optional generic "task proxy" weight (no sensitivity): penalize concentrated pruning.
   # Set to 0.0 to optimize HW-only.
-  cem_task_beta: 0.10
+  cem_task_beta: 0.0
+
+  # Direction sampling granularity for CEM (multinomial units over layers)
+  cem_dir_units: 16
+
+  # long-range 3-point probing (directional probe on final range, stage-limited apply)
+  probe_points: 3
+  probe_alphas: [0.3333333333, 0.6666666667, 1.0]
+  probe_use_final_range: true
+  probe_apply_check: true
 
   # CEM hyperparams (keep small; budget is fixed by max_candidates)
   cem_iters: 2

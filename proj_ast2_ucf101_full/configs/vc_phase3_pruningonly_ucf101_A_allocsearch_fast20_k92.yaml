@@ -12,7 +12,7 @@ alloc_search:
   max_candidates: 60
 
   pick_policy: hw_then_risk
-  max_acc_risk: 0.12
+  max_acc_risk: 0.01
   min_total_score: 0.0
   min_rel_hw_improve: 0.0001
 
@@ -22,3 +22,9 @@ alloc_search:
   budget_frac_start: 0.5
   budget_frac_max: 0.8
   budget_frac_ramp_epochs: 10
+
+  # long-range 3-point probing (directional probe on final range, stage-limited apply)
+  probe_points: 3
+  probe_alphas: [0.3333333333, 0.6666666667, 1.0]
+  probe_use_final_range: true
+  probe_apply_check: true

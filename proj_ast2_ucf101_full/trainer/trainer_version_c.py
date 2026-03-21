@@ -1665,6 +1665,466 @@ def _to_cpu_tensor_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _quantize_keep_vec(q: torch.Tensor, *, k_freeze: int, u: float, floor: float) -> torch.Tensor:
+    """Quantize prunable keep values to keep_unit grid and clamp to [floor, 1]."""
+    depth = int(q.numel())
+    out = q.clone()
+    for i in range(int(k_freeze), depth):
+        out[i] = round(float(out[i].item()) / float(u)) * float(u)
+        out[i] = float(max(float(floor), min(1.0, float(out[i].item()))))
+    return out
+
+
+def _apply_sparse_direction(
+    keep_now: torch.Tensor,
+    *,
+    items: List[Tuple[int, float]],
+    delta_mag: float,
+    k_freeze: int,
+    u: float,
+    floor: float,
+) -> torch.Tensor:
+    """Apply a sparse direction (layer_idx, weight) with total magnitude delta_mag to produce a probe keep vector."""
+    cand = keep_now.clone()
+    dm = float(max(0.0, delta_mag))
+    if dm <= 0.0:
+        return _quantize_keep_vec(cand, k_freeze=int(k_freeze), u=float(u), floor=float(floor))
+    for li, w in items:
+        ww = float(max(0.0, w))
+        if ww <= 0.0:
+            continue
+        d = dm * ww
+        maxd = float(max(0.0, float(cand[li].item()) - float(floor)))
+        if d > maxd:
+            d = maxd
+        if d > 0.0:
+            cand[li] = cand[li] - float(d)
+    return _quantize_keep_vec(cand, k_freeze=int(k_freeze), u=float(u), floor=float(floor))
+
+
+def _interp_keep_scaled(
+    keep_now: torch.Tensor,
+    *,
+    keep_probe: torch.Tensor,
+    scale: float,
+    k_freeze: int,
+    u: float,
+    floor: float,
+) -> torch.Tensor:
+    """Interpolate from keep_now toward keep_probe by scale in [0,1], then quantize."""
+    s = float(max(0.0, min(1.0, scale)))
+    cand = keep_now + s * (keep_probe - keep_now)
+    return _quantize_keep_vec(cand, k_freeze=int(k_freeze), u=float(u), floor=float(floor))
+
+
+def _run_alloc_candidate_search_probe(
+    *,
+    model: torch.nn.Module,
+    cfg,
+    hw_proxy,
+    wafer_layout,
+    eff_specs,
+    alpha,
+    last_info: Optional[Dict[str, Any]],
+    keep_now: torch.Tensor,
+    sens: torch.Tensor,
+    base_obj: float,
+    usable_budget: float,
+    search_threads: int,
+    fine_split_threads: int,
+    freeze_prefix_ratio: float,
+    keep_unit: float,
+    min_keep_floor: float,
+    pool_size: int,
+    max_candidates: int,
+    acc_risk_weight: float,
+    pick_policy: str,
+    max_acc_risk: float,
+) -> Optional[Dict[str, Any]]:
+    """Directional long-range probing (N points on final range) + stage-limited apply.
+    Shared probe logic for OURS and CEM; only direction generation differs.
+    """
+    eff_specs_cpu = _to_cpu_tensor_dict(eff_specs)
+    alpha_cpu = alpha.detach().cpu() if torch.is_tensor(alpha) else alpha
+
+    alloc_cfg = getattr(cfg, "alloc_search", None)
+    probe_points = int(getattr(alloc_cfg, "probe_points", 0) or 0) if alloc_cfg is not None else 0
+    probe_alphas = getattr(alloc_cfg, "probe_alphas", None) if alloc_cfg is not None else None
+    if probe_alphas is None:
+        probe_alphas = [0.3333333333, 0.6666666667, 1.0]
+    probe_alphas = [float(x) for x in list(probe_alphas)[: max(1, probe_points)]]
+
+    probe_apply_check = bool(getattr(alloc_cfg, "probe_apply_check", True)) if alloc_cfg is not None else True
+
+    depth = int(keep_now.numel())
+    k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
+    prunable = list(range(k_freeze, depth))
+    if not prunable:
+        return None
+
+    keep_mean_prunable = float(keep_now[k_freeze:].mean().item())
+
+    keep_end = 1.0
+    try:
+        sched = getattr(getattr(cfg, "ast", None), "schedule", None)
+        keep_end = float(getattr(sched, "ch_keep_end", 1.0) or 1.0)
+    except Exception:
+        keep_end = 1.0
+
+    lookahead_budget = float(max(0.0, keep_mean_prunable - float(keep_end)))
+    exec_budget = float(max(0.0, usable_budget))
+    if lookahead_budget <= 1e-8 or exec_budget <= 1e-8:
+        return None
+
+    sens_norm = sens.clone().float()
+    sens_norm = sens_norm / (float(sens_norm.mean().item()) + 1e-6)
+
+    u = float(max(1e-4, keep_unit))
+    floor = float(max(0.05, min(0.95, min_keep_floor)))
+
+    reserve_apply = 1 if probe_apply_check else 0
+    k_total = int(max(1, int(max_candidates)))
+    dirs_total = int(max(1, (k_total - reserve_apply) // int(max(1, probe_points))))
+    used_probe = 0
+
+    def _acc_risk_for_apply(keep_apply: torch.Tensor) -> float:
+        return float((sens_norm * (keep_now - keep_apply).abs()).sum().item() / max(1.0e-6, float(exec_budget)))
+
+    def _dir_score(obj_probe: float, acc_risk: float) -> float:
+        rel_hw_gain_probe = (float(base_obj) - float(obj_probe)) / max(1.0e-6, abs(float(base_obj)))
+        return float(rel_hw_gain_probe) - float(acc_risk_weight) * float(acc_risk)
+
+    def _probe_direction(items: List[Tuple[int, float]]) -> Optional[Dict[str, Any]]:
+        probes = []
+        apply_keeps = []
+        apply_risks = []
+        for a in probe_alphas:
+            delta_mag = float(a) * float(lookahead_budget)
+            keep_probe = _apply_sparse_direction(
+                keep_now,
+                items=items,
+                delta_mag=float(delta_mag),
+                k_freeze=int(k_freeze),
+                u=float(u),
+                floor=float(floor),
+            )
+            scale = 1.0 if delta_mag <= 1e-12 else min(1.0, float(exec_budget) / float(delta_mag))
+            keep_apply = _interp_keep_scaled(
+                keep_now,
+                keep_probe=keep_probe,
+                scale=float(scale),
+                k_freeze=int(k_freeze),
+                u=float(u),
+                floor=float(floor),
+            )
+            r = _acc_risk_for_apply(keep_apply)
+            probes.append(keep_probe)
+            apply_keeps.append(keep_apply)
+            apply_risks.append(float(r))
+
+        with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
+            futs = [
+                ex.submit(
+                    _eval_single_alloc_candidate,
+                    kp,
+                    model=model,
+                    last_info=last_info,
+                    cfg=cfg,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
+                    eff_specs=eff_specs_cpu,
+                    alpha=alpha_cpu,
+                    fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+                )
+                for kp in probes
+            ]
+            outs = [f.result() for f in futs]
+
+        best_local = None
+        for idx, (a, out, keep_apply, r) in enumerate(zip(probe_alphas, outs, apply_keeps, apply_risks)):
+            if max_acc_risk > 0.0 and math.isfinite(max_acc_risk) and float(r) > float(max_acc_risk):
+                continue
+            obj_probe = float(out.get("objective", 1.0e18))
+            score = _dir_score(obj_probe, float(r))
+            item = {
+                "probe_alpha": float(a),
+                "probe_objective": float(obj_probe),
+                "probe_raw": out,
+                "keep_probe": probes[int(idx)],
+                "keep_apply": keep_apply,
+                "acc_risk": float(r),
+                "total_score": float(score),
+            }
+            if best_local is None or float(item["total_score"]) > float(best_local["total_score"]) + 1e-12:
+                best_local = item
+        return best_local
+
+    if pick_policy in ("cem", "es"):
+        pool = list(prunable)
+        p_size = int(len(pool))
+        if p_size <= 0:
+            return None
+
+        cem_iters = int(getattr(alloc_cfg, "cem_iters", 2) if alloc_cfg is not None else 2)
+        cem_iters = max(1, cem_iters)
+        elite_frac = float(getattr(alloc_cfg, "cem_elite_frac", 0.25) if alloc_cfg is not None else 0.25)
+        elite_frac = float(max(0.05, min(0.8, elite_frac)))
+        smooth = float(getattr(alloc_cfg, "cem_smooth", 0.7) if alloc_cfg is not None else 0.7)
+        smooth = float(max(0.0, min(0.99, smooth)))
+
+        cem_budget_mult = float(getattr(alloc_cfg, "cem_budget_mult", 1.0) if alloc_cfg is not None else 1.0)
+        cem_budget_mult = float(max(0.1, cem_budget_mult))
+        total_samples = int(math.ceil(float(max_candidates) * float(cem_budget_mult)))
+        total_samples = int(max(1, total_samples))
+
+        reserve_apply2 = 1 if probe_apply_check else 0
+        dirs_total2 = int(max(1, (total_samples - reserve_apply2) // int(max(1, probe_points))))
+        per_iter = [dirs_total2 // cem_iters] * cem_iters
+        for r in range(dirs_total2 - sum(per_iter)):
+            per_iter[r] += 1
+
+        units_dir = int(getattr(alloc_cfg, "cem_dir_units", 16) if alloc_cfg is not None else 16)
+        units_dir = int(max(1, units_dir))
+
+        p = torch.ones(p_size, dtype=torch.float32) / float(max(1, p_size))
+        best = None
+        uniq_prop = 0
+
+        for it in range(cem_iters):
+            n_dir = int(per_iter[it])
+            if n_dir <= 0:
+                continue
+
+            try:
+                seed_hex = stable_hash([float(base_obj), float(exec_budget), float(lookahead_budget), float(it), float(total_samples)])
+                seed_int = int(seed_hex[:8], 16)
+            except Exception:
+                seed_int = 0
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(int(seed_int))
+
+            counts_list: List[torch.Tensor] = []
+            items_list: List[List[Tuple[int, float]]] = []
+            seen = set()
+            attempts = 0
+            max_attempts = int(max(50, n_dir * 20))
+            while len(items_list) < n_dir and attempts < max_attempts:
+                attempts += 1
+                draws = torch.multinomial(p, num_samples=int(units_dir), replacement=True, generator=gen)
+                counts = torch.bincount(draws, minlength=p_size).to(dtype=torch.int32)
+                key = tuple(counts.tolist())
+                if key in seen:
+                    continue
+                seen.add(key)
+                items = []
+                for jj, li in enumerate(pool):
+                    c = int(counts[jj].item())
+                    if c <= 0:
+                        continue
+                    items.append((int(li), float(c) / float(max(1, units_dir))))
+                if not items:
+                    continue
+                counts_list.append(counts)
+                items_list.append(items)
+            uniq_prop += len(seen)
+
+            while len(items_list) < n_dir:
+                draws = torch.multinomial(p, num_samples=int(units_dir), replacement=True, generator=gen)
+                counts = torch.bincount(draws, minlength=p_size).to(dtype=torch.int32)
+                items = []
+                for jj, li in enumerate(pool):
+                    c = int(counts[jj].item())
+                    if c <= 0:
+                        continue
+                    items.append((int(li), float(c) / float(max(1, units_dir))))
+                if not items:
+                    continue
+                counts_list.append(counts)
+                items_list.append(items)
+
+            scored = []
+            for items, counts in zip(items_list, counts_list):
+                res = _probe_direction(items)
+                used_probe += int(max(1, probe_points))
+                if res is None:
+                    continue
+                res["counts"] = counts.detach().cpu()
+                scored.append(res)
+                if best is None or float(res["total_score"]) > float(best["total_score"]) + 1e-12:
+                    best = dict(res)
+
+            if scored:
+                scored.sort(key=lambda x: float(x["total_score"]), reverse=True)
+                n_elite = max(1, int(round(len(scored) * elite_frac)))
+                elite_counts = torch.stack([scored[i]["counts"] for i in range(n_elite)], dim=0).float()
+                elite_mean = elite_counts.mean(dim=0)
+                elite_p = (elite_mean / float(max(1, units_dir))).clamp(min=1e-6)
+                elite_p = elite_p / elite_p.sum()
+                p = smooth * p + (1.0 - smooth) * elite_p
+                p = p.clamp(min=1e-4)
+                p = p / p.sum()
+
+        if best is None:
+            return None
+
+        keep_apply = best["keep_apply"]
+        apply_out = _eval_single_alloc_candidate(
+            keep_apply,
+            model=model,
+            last_info=last_info,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs=eff_specs_cpu,
+            alpha=alpha_cpu,
+            fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+        )
+        apply_obj = float(apply_out.get("objective", 1.0e18))
+        rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
+        total_score_apply = float(rel_hw_gain_apply) - float(acc_risk_weight) * float(best["acc_risk"])
+
+        best.update(
+            {
+                "keep_cand": keep_apply,
+                "objective": float(apply_obj),
+                "base_objective": float(base_obj),
+                "rel_hw_gain": float(rel_hw_gain_apply),
+                "total_score": float(total_score_apply),
+                "raw": apply_out,
+                "policy": str(pick_policy),
+                "eval_budget_total": int(1 + used_probe + (1 if probe_apply_check else 0)),
+                "eval_budget_candidates": int(used_probe + (1 if probe_apply_check else 0)),
+                "cem_iters": int(cem_iters),
+                "cem_total_samples": int(total_samples),
+                "cem_pool_size": int(len(pool)),
+                "cem_dir_units": int(units_dir),
+                "cem_units": int(units_dir),
+                "cem_budget_mult": float(cem_budget_mult),
+                "cem_unique_proposals": int(uniq_prop),
+                "probe_points": int(probe_points),
+                "probe_dirs": int(dirs_total2),
+            }
+        )
+        return best
+
+    prunable_sorted = sorted(prunable, key=lambda i: float(sens_norm[i].item()))
+    pool = prunable_sorted[: min(int(pool_size), len(prunable_sorted))]
+    if not pool:
+        return None
+
+    dirs: List[List[Tuple[int, float]]] = []
+    seen_dir = set()
+
+    def _push_dir(items: List[Tuple[int, float]]):
+        items2 = [(int(i), float(w)) for i, w in items if float(w) > 0.0]
+        s = sum(w for _, w in items2)
+        if s <= 1e-12:
+            return
+        items2 = [(i, float(w) / float(s)) for i, w in items2]
+        key = tuple((i, round(w, 4)) for i, w in sorted(items2))
+        if key in seen_dir:
+            return
+        seen_dir.add(key)
+        dirs.append(items2)
+
+    for i in pool:
+        _push_dir([(int(i), 1.0)])
+        if len(dirs) >= dirs_total:
+            break
+
+    if len(dirs) < dirs_total:
+        pair_ratios = [(0.75, 0.25), (0.5, 0.5), (0.25, 0.75)]
+        for i, j in itertools.combinations(pool, 2):
+            for r1, r2 in pair_ratios:
+                _push_dir([(int(i), float(r1)), (int(j), float(r2))])
+                if len(dirs) >= dirs_total:
+                    break
+            if len(dirs) >= dirs_total:
+                break
+
+    if len(dirs) < dirs_total:
+        tri_ratios = [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.34, 0.33, 0.33)]
+        for combo in itertools.combinations(pool, 3):
+            for rs in tri_ratios:
+                _push_dir(
+                    [
+                        (int(combo[0]), float(rs[0])),
+                        (int(combo[1]), float(rs[1])),
+                        (int(combo[2]), float(rs[2])),
+                    ]
+                )
+                if len(dirs) >= dirs_total:
+                    break
+            if len(dirs) >= dirs_total:
+                break
+
+    if not dirs:
+        return None
+
+    best = None
+    best_probe_obj = None
+
+    for items in dirs:
+        res = _probe_direction(items)
+        used_probe += int(max(1, probe_points))
+        if res is None:
+            continue
+        if best is None:
+            best = dict(res)
+            best_probe_obj = float(res["probe_objective"])
+            continue
+
+        if pick_policy in ("hw", "hw_then_risk", "rel_hw_gain"):
+            rel_best = (float(base_obj) - float(best_probe_obj)) / max(1.0e-6, abs(float(base_obj)))
+            rel_cur = (float(base_obj) - float(res["probe_objective"])) / max(1.0e-6, abs(float(base_obj)))
+            if float(rel_cur) > float(rel_best) + 1e-12:
+                best = dict(res)
+                best_probe_obj = float(res["probe_objective"])
+            elif abs(float(rel_cur) - float(rel_best)) <= 1e-12 and float(res["acc_risk"]) < float(best["acc_risk"]) - 1e-12:
+                best = dict(res)
+                best_probe_obj = float(res["probe_objective"])
+        else:
+            if float(res["total_score"]) > float(best["total_score"]) + 1e-12:
+                best = dict(res)
+                best_probe_obj = float(res["probe_objective"])
+
+    if best is None:
+        return None
+
+    keep_apply = best["keep_apply"]
+    apply_out = _eval_single_alloc_candidate(
+        keep_apply,
+        model=model,
+        last_info=last_info,
+        cfg=cfg,
+        hw_proxy=hw_proxy,
+        wafer_layout=wafer_layout,
+        eff_specs=eff_specs_cpu,
+        alpha=alpha_cpu,
+        fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+    )
+    apply_obj = float(apply_out.get("objective", 1.0e18))
+    rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
+    total_score_apply = float(rel_hw_gain_apply) - float(acc_risk_weight) * float(best["acc_risk"])
+
+    best.update(
+        {
+            "keep_cand": keep_apply,
+            "objective": float(apply_obj),
+            "base_objective": float(base_obj),
+            "rel_hw_gain": float(rel_hw_gain_apply),
+            "total_score": float(total_score_apply),
+            "raw": apply_out,
+            "policy": "heuristic_probe",
+            "eval_budget_total": int(1 + used_probe + (1 if probe_apply_check else 0)),
+            "eval_budget_candidates": int(used_probe + (1 if probe_apply_check else 0)),
+            "probe_points": int(probe_points),
+            "probe_dirs": int(len(dirs)),
+        }
+    )
+    return best
+
+
 def _ast_warm_eff_from_cfg(cfg) -> int:
     """Effective warmup epochs used by AST schedule (dense warmup length)."""
     ast = getattr(cfg, "ast", None)
@@ -1810,6 +2270,34 @@ def _run_alloc_candidate_search(
         max_acc_risk = float(max_acc_risk)
     except Exception:
         max_acc_risk = float("inf")
+
+    alloc_cfg = getattr(cfg, "alloc_search", None)
+    probe_points = int(getattr(alloc_cfg, "probe_points", 0) or 0) if alloc_cfg is not None else 0
+    probe_use_final = bool(getattr(alloc_cfg, "probe_use_final_range", False)) if alloc_cfg is not None else False
+    if probe_points >= 2 and probe_use_final:
+        return _run_alloc_candidate_search_probe(
+            model=model,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs=eff_specs,
+            alpha=alpha,
+            last_info=last_info,
+            keep_now=keep_now,
+            sens=sens,
+            base_obj=float(base_obj),
+            usable_budget=float(usable_budget),
+            search_threads=int(search_threads),
+            fine_split_threads=int(fine_split_threads),
+            freeze_prefix_ratio=float(freeze_prefix_ratio),
+            keep_unit=float(keep_unit),
+            min_keep_floor=float(min_keep_floor),
+            pool_size=int(pool_size),
+            max_candidates=int(max_candidates),
+            acc_risk_weight=float(acc_risk_weight),
+            pick_policy=str(pick_policy),
+            max_acc_risk=float(max_acc_risk),
+        )
 
     # ------------------------------------------------------------
     # CEM/ES baseline (standard, discrete-unit version)
@@ -2393,12 +2881,17 @@ def _maybe_run_alloc_search_and_apply(
         "cem_budget_mult": float(best.get("cem_budget_mult", 0.0) or 0.0),
         "cem_unique_proposals": int(best.get("cem_unique_proposals", 0) or 0),
         "cem_task_beta": float(best.get("cem_task_beta", 0.0) or 0.0),
+        "cem_dir_units": int(best.get("cem_dir_units", 0) or 0),
+        "probe_points": int(best.get("probe_points", 0) or 0),
+        "probe_dirs": int(best.get("probe_dirs", 0) or 0),
+        "probe_alpha": float(best.get("probe_alpha", 0.0) or 0.0),
+        "probe_objective": float(best.get("probe_objective", 0.0) or 0.0),
         "target_global_keep": float(target_global_keep),
         "keep_mean_prunable": float(keep_mean_prunable),
     }
 
     logger.info(
-        "[AllocSearch] outer=%d applied remain_budget=%.6g usable_budget=%.6g alloc_frac=%.3f prune_epoch=%d alloc_epoch=%d keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g threads=%d/%d",
+        "[AllocSearch] outer=%d applied remain_budget=%.6g usable_budget=%.6g alloc_frac=%.3f prune_epoch=%d alloc_epoch=%d keep_mean_prunable=%.6g target_global_keep=%.6g base_obj=%.6g best_obj=%.6g rel_hw_gain=%.6g acc_risk=%.6g total=%.6g probeN=%d dirs=%d alpha*=%.2f cem_total=%d threads=%d/%d",
         int(outer),
         float(remain_budget),
         float(usable_budget),
@@ -2412,6 +2905,10 @@ def _maybe_run_alloc_search_and_apply(
         float(best["rel_hw_gain"]),
         float(best["acc_risk"]),
         float(best["total_score"]),
+        int(best.get("probe_points", 0) or 0),
+        int(best.get("probe_dirs", 0) or 0),
+        float(best.get("probe_alpha", 0.0) or 0.0),
+        int(best.get("cem_total_samples", 0) or 0),
         int(outer_threads),
         int(inner_threads),
     )
