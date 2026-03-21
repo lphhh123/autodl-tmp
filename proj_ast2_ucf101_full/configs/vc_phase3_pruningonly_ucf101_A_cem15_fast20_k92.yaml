@@ -1,7 +1,7 @@
 _base_: configs/vc_phase3_pruningonly_ucf101_A_cem_fast20_k92.yaml
 
-# CEM baseline with 1.5x evaluation budget vs ours:
-# ours max_candidates=60 -> this sets max_candidates=90.
+# CEM baseline with 1.5x probe-evaluation budget vs ours:
+# ours max_candidates=60 -> this sets total_samples=90 probes.
 
 alloc_search:
   # 1.5x budget: total_samples=ceil(max_candidates*1.5)=90
