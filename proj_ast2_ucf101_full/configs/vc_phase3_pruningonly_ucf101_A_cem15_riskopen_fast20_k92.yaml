@@ -1,0 +1,9 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_cem15_fast20_k92.yaml
+
+# CEM baseline (1.5x eval budget vs ours) with relaxed task-proxy hard gate.
+# Goal: avoid "no_candidate" due to max_acc_risk filtering when pool is high-D.
+
+alloc_search:
+  # NOTE: In CEM mode, max_acc_risk is used as a generic task_proxy threshold
+  # (L2(delta_pool)/budget). Set very high to effectively disable hard filtering.
+  max_acc_risk: 1000000000.0
