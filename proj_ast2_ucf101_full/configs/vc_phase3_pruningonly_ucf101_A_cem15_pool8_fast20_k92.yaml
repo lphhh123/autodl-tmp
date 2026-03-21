@@ -1,0 +1,9 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_cem15_fast20_k92.yaml
+
+# CEM baseline (1.5x eval budget vs ours) with a random subset pool.
+# Goal: reduce high-D L2(delta) inflation and increase chance of feasible candidates.
+
+alloc_search:
+  # Random subset of prunable layers (still NO sensitivity guidance).
+  # The trainer uses a local, deterministic RNG seed so runs are reproducible.
+  pool_size: 8
