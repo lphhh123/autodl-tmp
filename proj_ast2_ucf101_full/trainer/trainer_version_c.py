@@ -1782,17 +1782,20 @@ def _run_alloc_candidate_search_probe(
     u = float(max(1e-4, keep_unit))
     floor = float(max(0.05, min(0.95, min_keep_floor)))
 
-    reserve_apply = 1 if probe_apply_check else 0
     k_total = int(max(1, int(max_candidates)))
-    dirs_total = int(max(1, (k_total - reserve_apply) // int(max(1, probe_points))))
+    # Use the full probe budget for directional probing. Any optional apply-check
+    # is treated as an extra constant-cost evaluation outside the probe budget.
+    dirs_total = int(max(1, k_total // int(max(1, probe_points))))
     used_probe = 0
 
     def _acc_risk_for_apply(keep_apply: torch.Tensor) -> float:
         return float((sens_norm * (keep_now - keep_apply).abs()).sum().item() / max(1.0e-6, float(exec_budget)))
 
-    def _dir_score(obj_probe: float, acc_risk: float) -> float:
+    def _dir_score(obj_probe: float) -> float:
+        # Rank feasible candidates by hardware gain only; accuracy risk is a hard
+        # feasibility constraint enforced before scoring.
         rel_hw_gain_probe = (float(base_obj) - float(obj_probe)) / max(1.0e-6, abs(float(base_obj)))
-        return float(rel_hw_gain_probe) - float(acc_risk_weight) * float(acc_risk)
+        return float(rel_hw_gain_probe)
 
     def _probe_direction(items: List[Tuple[int, float]]) -> Optional[Dict[str, Any]]:
         probes = []
@@ -1845,7 +1848,7 @@ def _run_alloc_candidate_search_probe(
             if max_acc_risk > 0.0 and math.isfinite(max_acc_risk) and float(r) > float(max_acc_risk):
                 continue
             obj_probe = float(out.get("objective", 1.0e18))
-            score = _dir_score(obj_probe, float(r))
+            score = _dir_score(obj_probe)
             item = {
                 "probe_alpha": float(a),
                 "probe_objective": float(obj_probe),
@@ -1857,6 +1860,9 @@ def _run_alloc_candidate_search_probe(
             }
             if best_local is None or float(item["total_score"]) > float(best_local["total_score"]) + 1e-12:
                 best_local = item
+            elif best_local is not None and abs(float(item["total_score"]) - float(best_local["total_score"])) <= 1e-12:
+                if float(item["acc_risk"]) < float(best_local["acc_risk"]) - 1e-12:
+                    best_local = item
         return best_local
 
     if pick_policy in ("cem", "es"):
@@ -1877,8 +1883,8 @@ def _run_alloc_candidate_search_probe(
         total_samples = int(math.ceil(float(max_candidates) * float(cem_budget_mult)))
         total_samples = int(max(1, total_samples))
 
-        reserve_apply2 = 1 if probe_apply_check else 0
-        dirs_total2 = int(max(1, (total_samples - reserve_apply2) // int(max(1, probe_points))))
+        # Same budgeting rule for CEM: total_samples counts probe evaluations only.
+        dirs_total2 = int(max(1, int(total_samples) // int(max(1, probe_points))))
         per_iter = [dirs_total2 // cem_iters] * cem_iters
         for r in range(dirs_total2 - sum(per_iter)):
             per_iter[r] += 1
@@ -1981,7 +1987,7 @@ def _run_alloc_candidate_search_probe(
         )
         apply_obj = float(apply_out.get("objective", 1.0e18))
         rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
-        total_score_apply = float(rel_hw_gain_apply) - float(acc_risk_weight) * float(best["acc_risk"])
+        total_score_apply = float(rel_hw_gain_apply)
 
         best.update(
             {
@@ -2105,7 +2111,7 @@ def _run_alloc_candidate_search_probe(
     )
     apply_obj = float(apply_out.get("objective", 1.0e18))
     rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
-    total_score_apply = float(rel_hw_gain_apply) - float(acc_risk_weight) * float(best["acc_risk"])
+    total_score_apply = float(rel_hw_gain_apply)
 
     best.update(
         {
