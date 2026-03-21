@@ -19,7 +19,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch.amp import GradScaler, autocast
-from torch.distributions import Dirichlet
 from torch.utils.data import DataLoader
 
 from chiplet.chiplet_lib import ChipletLibrary, ChipletSlots
@@ -1787,19 +1786,6 @@ def _run_alloc_candidate_search(
     pick_policy: str = "total_score",
     max_acc_risk: float = float("inf"),
 ) -> Optional[Dict[str, Any]]:
-    cands = _build_alloc_candidates_from_remaining_budget(
-        keep_now=keep_now,
-        sens=sens,
-        freeze_prefix_ratio=freeze_prefix_ratio,
-        remain_budget=usable_budget,
-        keep_unit=keep_unit,
-        min_keep_floor=min_keep_floor,
-        pool_size=pool_size,
-        max_candidates=max_candidates,
-    )
-    if not cands:
-        return None
-
     eff_specs_cpu = _to_cpu_tensor_dict(eff_specs)
     alpha_cpu = alpha.detach().cpu() if torch.is_tensor(alpha) else alpha
 
@@ -1826,9 +1812,12 @@ def _run_alloc_candidate_search(
         max_acc_risk = float("inf")
 
     # ------------------------------------------------------------
-    # CEM/ES baseline (gradient-free black-box search)
-    # Budget-matched: total candidate evals == len(cands)
-    # Total evals per outer == 1 (base) + len(cands) (same as ours)
+    # CEM/ES baseline (standard, discrete-unit version)
+    # - does NOT use sensitivity to pick pool
+    # - does NOT use sens-EMA risk proxy
+    # - uses discrete unit allocation (Multinomial) so small budgets still change keep
+    # - evaluation budget: total_samples = ceil(max_candidates * cem_budget_mult)
+    #   (so x1 / x1.5 MUST differ and cannot be clipped by len(cands)/dedup)
     # ------------------------------------------------------------
     if pick_policy in ("cem", "es"):
         depth = int(keep_now.numel())
@@ -1837,8 +1826,20 @@ def _run_alloc_candidate_search(
         if not prunable:
             return None
 
-        prunable_sorted = sorted(prunable, key=lambda i: float(sens_norm[i].item()))
-        pool = prunable_sorted[: min(int(pool_size), len(prunable_sorted))]
+        # Pool: do NOT use sensitivity; use all prunable by default.
+        pool_size_eff = int(pool_size)
+        if pool_size_eff <= 0 or pool_size_eff >= len(prunable):
+            pool = list(prunable)
+        else:
+            # DP/seed-safe local RNG (does not touch global random state)
+            try:
+                seed_hex = stable_hash([float(base_obj), float(usable_budget), float(keep_now.float().mean().item())])
+                seed_int = int(seed_hex[:8], 16)
+            except Exception:
+                seed_int = 0
+            rng = random.Random(int(seed_int))
+            pool = rng.sample(prunable, pool_size_eff)
+            pool = sorted(pool)
         if not pool:
             return None
 
@@ -1854,26 +1855,38 @@ def _run_alloc_candidate_search(
         cem_iters = max(1, cem_iters)
         elite_frac = float(getattr(cem_cfg, "cem_elite_frac", 0.25) if cem_cfg is not None else 0.25)
         elite_frac = float(max(0.05, min(0.8, elite_frac)))
-        alpha_strength = float(getattr(cem_cfg, "cem_alpha_strength", 20.0) if cem_cfg is not None else 20.0)
-        alpha_strength = float(max(1.0, alpha_strength))
         smooth = float(getattr(cem_cfg, "cem_smooth", 0.7) if cem_cfg is not None else 0.7)
         smooth = float(max(0.0, min(0.99, smooth)))
+        cem_budget_mult = float(getattr(cem_cfg, "cem_budget_mult", 1.0) if cem_cfg is not None else 1.0)
+        cem_budget_mult = float(max(0.1, cem_budget_mult))
+        total_samples = int(math.ceil(float(max_candidates) * float(cem_budget_mult)))
+        total_samples = int(max(1, total_samples))
 
-        total_samples = int(len(cands))
+        # optional "task" proxy: penalize concentrated pruning (no sensitivity)
+        cem_task_beta = float(getattr(cem_cfg, "cem_task_beta", 0.0) if cem_cfg is not None else 0.0)
+        cem_task_beta = float(max(0.0, cem_task_beta))
+
         per_iter = [total_samples // cem_iters] * cem_iters
         for r in range(total_samples - sum(per_iter)):
             per_iter[r] += 1
 
-        p_dim = int(len(pool))
-        alpha_dir = torch.ones(p_dim, dtype=torch.float32)
+        P = int(len(pool))
+        # CEM maintains a categorical prob vector p over pool dims
+        p = torch.ones(P, dtype=torch.float32) / float(max(1, P))
 
         best = None
         used_evals = 0
+        uniq_prop = 0
+        units = int(round(float(budget) / float(u)))
+        units = int(max(1, units))
 
-        def _make_cand_from_w(w: torch.Tensor) -> torch.Tensor:
+        def _make_cand_from_counts(counts_i: torch.Tensor) -> torch.Tensor:
             cand = keep_now.clone()
             for jj, li in enumerate(pool):
-                d = float(budget * float(w[jj].item()))
+                du = int(counts_i[jj].item())
+                if du <= 0:
+                    continue
+                d = float(du) * float(u)
                 maxd = float(max(0.0, float(cand[li].item()) - floor))
                 if d > maxd:
                     d = maxd
@@ -1889,65 +1902,98 @@ def _run_alloc_candidate_search(
             n_samp = int(per_iter[it])
             if n_samp <= 0:
                 continue
-            dist = Dirichlet(alpha_dir)
-            w_samples = dist.sample((n_samp,))
+            # local torch generator (does not touch global RNG state)
+            try:
+                seed_hex = stable_hash([float(base_obj), float(budget), float(it), float(total_samples)])
+                seed_int = int(seed_hex[:8], 16)
+            except Exception:
+                seed_int = 0
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(int(seed_int))
+
+            # propose unique count-vectors via multinomial unit sampling
+            counts_list: List[torch.Tensor] = []
+            cand_list: List[torch.Tensor] = []
+            seen = set()
+            attempts = 0
+            max_attempts = int(max(20, n_samp * 10))
+            while len(cand_list) < n_samp and attempts < max_attempts:
+                attempts += 1
+                draws = torch.multinomial(p, num_samples=int(units), replacement=True, generator=gen)
+                counts = torch.bincount(draws, minlength=P).to(dtype=torch.int32)
+                key = tuple(counts.tolist())
+                if key in seen:
+                    continue
+                seen.add(key)
+                cand = _make_cand_from_counts(counts)
+                counts_list.append(counts)
+                cand_list.append(cand)
+            uniq_prop += len(seen)
+
+            # If not enough unique proposals, fill remaining with duplicates (still consumes budget).
+            while len(cand_list) < n_samp:
+                draws = torch.multinomial(p, num_samples=int(units), replacement=True, generator=gen)
+                counts = torch.bincount(draws, minlength=P).to(dtype=torch.int32)
+                cand = _make_cand_from_counts(counts)
+                counts_list.append(counts)
+                cand_list.append(cand)
 
             with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
-                futs = []
-                cand_ws = []
-                for s in range(n_samp):
-                    w = w_samples[s]
-                    cand = _make_cand_from_w(w)
-                    cand_ws.append((cand, w))
-                    futs.append(
-                        ex.submit(
-                            _eval_single_alloc_candidate,
-                            cand,
-                            model=model,
-                            last_info=last_info,
-                            cfg=cfg,
-                            hw_proxy=hw_proxy,
-                            wafer_layout=wafer_layout,
-                            eff_specs=eff_specs_cpu,
-                            alpha=alpha_cpu,
-                            fine_split_threads=int(max(1, int(fine_split_threads or 1))),
-                        )
+                futs = [
+                    ex.submit(
+                        _eval_single_alloc_candidate,
+                        cand,
+                        model=model,
+                        last_info=last_info,
+                        cfg=cfg,
+                        hw_proxy=hw_proxy,
+                        wafer_layout=wafer_layout,
+                        eff_specs=eff_specs_cpu,
+                        alpha=alpha_cpu,
+                        fine_split_threads=int(max(1, int(fine_split_threads or 1))),
                     )
+                    for cand in cand_list
+                ]
 
                 used_evals += len(futs)
 
                 scored = []
-                for (cand, w), fut in zip(cand_ws, futs):
+                for cand, counts, fut in zip(cand_list, counts_list, futs):
                     out = fut.result()
                     obj = float(out.get("objective", 1.0e18))
                     rel_hw_gain = (float(base_obj) - float(obj)) / max(1.0e-6, abs(float(base_obj)))
-                    acc_risk = float((sens_norm * (keep_now - cand).abs()).sum().item() / max(1.0e-6, usable_budget))
-                    if max_acc_risk > 0.0 and math.isfinite(max_acc_risk):
-                        if float(acc_risk) > float(max_acc_risk):
-                            continue
-                    total_score = float(rel_hw_gain) - float(acc_risk_weight) * float(acc_risk)
+                    # generic "task proxy" (no sensitivity): penalize concentrated pruning via L2(delta)
+                    delta = (keep_now - cand).clamp(min=0.0)
+                    delta_pool = delta[pool].float()
+                    task_proxy = float(torch.sqrt((delta_pool * delta_pool).sum()).item() / max(1.0e-6, float(budget)))
+                    if math.isfinite(max_acc_risk) and float(task_proxy) > float(max_acc_risk):
+                        continue
+                    total_score = float(rel_hw_gain) - float(cem_task_beta) * float(task_proxy)
                     item = {
                         "keep_cand": cand,
                         "objective": obj,
                         "base_objective": float(base_obj),
                         "rel_hw_gain": float(rel_hw_gain),
-                        "acc_risk": float(acc_risk),
+                        "acc_risk": float(task_proxy),
                         "total_score": float(total_score),
                         "raw": out,
-                        "w": w.detach().cpu(),
+                        "counts": counts.detach().cpu(),
                     }
                     scored.append(item)
                     if best is None or float(item["total_score"]) > float(best["total_score"]) + 1e-12:
                         best = item
 
+            # CEM update: p <- smooth*p + (1-smooth)*mean(elite_counts)/units
             if scored:
                 scored.sort(key=lambda x: float(x["total_score"]), reverse=True)
                 n_elite = max(1, int(round(len(scored) * elite_frac)))
-                elite_w = torch.stack([scored[i]["w"] for i in range(n_elite)], dim=0)
-                elite_mean = elite_w.mean(dim=0).clamp(min=1e-6)
-                elite_mean = elite_mean / elite_mean.sum()
-                alpha_target = elite_mean * float(alpha_strength)
-                alpha_dir = smooth * alpha_dir + (1.0 - smooth) * alpha_target
+                elite_counts = torch.stack([scored[i]["counts"] for i in range(n_elite)], dim=0).float()
+                elite_mean = elite_counts.mean(dim=0)
+                elite_p = (elite_mean / max(1.0, float(units))).clamp(min=1e-6)
+                elite_p = elite_p / elite_p.sum()
+                p = smooth * p + (1.0 - smooth) * elite_p
+                p = p.clamp(min=1e-4)
+                p = p / p.sum()
 
         if best is None:
             return None
@@ -1956,7 +2002,27 @@ def _run_alloc_candidate_search(
         best["eval_budget_candidates"] = int(used_evals)
         best["policy"] = str(pick_policy)
         best["cem_iters"] = int(cem_iters)
+        best["cem_total_samples"] = int(total_samples)
+        best["cem_pool_size"] = int(len(pool))
+        best["cem_units"] = int(units)
+        best["cem_budget_mult"] = float(cem_budget_mult)
+        best["cem_unique_proposals"] = int(uniq_prop)
+        best["cem_task_beta"] = float(cem_task_beta)
         return best
+
+    # --------- default heuristic candidates (ours / hw_then_risk / total_score / risk_only) ----------
+    cands = _build_alloc_candidates_from_remaining_budget(
+        keep_now=keep_now,
+        sens=sens,
+        freeze_prefix_ratio=freeze_prefix_ratio,
+        remain_budget=usable_budget,
+        keep_unit=keep_unit,
+        min_keep_floor=min_keep_floor,
+        pool_size=pool_size,
+        max_candidates=max_candidates,
+    )
+    if not cands:
+        return None
 
     if pick_policy in ("risk_only", "sens_only", "acc_risk_only"):
         best_cand = None
@@ -2320,6 +2386,13 @@ def _maybe_run_alloc_search_and_apply(
         "total_score": float(best["total_score"]),
         "alloc_policy": str(best.get("policy", "heuristic")),
         "alloc_eval_budget_total": int(best.get("eval_budget_total", 0) or 0),
+        "alloc_eval_budget_candidates": int(best.get("eval_budget_candidates", 0) or 0),
+        "cem_total_samples": int(best.get("cem_total_samples", 0) or 0),
+        "cem_pool_size": int(best.get("cem_pool_size", 0) or 0),
+        "cem_units": int(best.get("cem_units", 0) or 0),
+        "cem_budget_mult": float(best.get("cem_budget_mult", 0.0) or 0.0),
+        "cem_unique_proposals": int(best.get("cem_unique_proposals", 0) or 0),
+        "cem_task_beta": float(best.get("cem_task_beta", 0.0) or 0.0),
         "target_global_keep": float(target_global_keep),
         "keep_mean_prunable": float(keep_mean_prunable),
     }
