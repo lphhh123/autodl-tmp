@@ -4,4 +4,5 @@ _base_: configs/vc_phase3_pruningonly_ucf101_A_cem_fast20_k92.yaml
 # ours max_candidates=60 -> this sets max_candidates=90.
 
 alloc_search:
-  max_candidates: 90
+  # 1.5x budget: total_samples=ceil(max_candidates*1.5)=90
+  cem_budget_mult: 1.5

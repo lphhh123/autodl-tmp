@@ -18,13 +18,22 @@ alloc_search:
   sens_ema_alpha: 0.8
   keep_unit: 0.01
   min_keep_floor: 0.25
-  pool_size: 6
+  # Standard CEM: do NOT use sensitivity-based pool. Use all prunable layers.
+  pool_size: 0
   max_candidates: 60
   acc_risk_weight: 0.2
-  max_acc_risk: 0.12
+  # For CEM: max_acc_risk is re-used as a generic task_proxy threshold (L2(delta)/budget).
+  # Set high to avoid filtering unless you want a constraint.
+  max_acc_risk: 1.0
+
+  # Budget multiplier: x1 => total_samples=ceil(max_candidates*1.0)=60
+  cem_budget_mult: 1.0
+
+  # Optional generic "task proxy" weight (no sensitivity): penalize concentrated pruning.
+  # Set to 0.0 to optimize HW-only.
+  cem_task_beta: 0.10
 
   # CEM hyperparams (keep small; budget is fixed by max_candidates)
   cem_iters: 2
   cem_elite_frac: 0.25
-  cem_alpha_strength: 20.0
   cem_smooth: 0.7
