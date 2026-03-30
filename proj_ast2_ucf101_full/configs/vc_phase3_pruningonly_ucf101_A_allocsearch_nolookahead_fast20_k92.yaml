@@ -1,0 +1,10 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k92.yaml
+
+# Ablation: w/o look-ahead
+# - Keep the same candidate generator and apply gate.
+# - Disable long-range 3-point probing on the final remaining range.
+
+alloc_search:
+  # Disable probe path (falls back to direct candidate eval on the stage-limited budget)
+  probe_use_final_range: false
+  probe_points: 0

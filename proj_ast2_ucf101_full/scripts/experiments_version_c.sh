@@ -419,6 +419,15 @@ case "$EXP_ID" in
   EXP-A2p-alloc-fast-k92)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k92.yaml "$(odir EXP-A2p-alloc-fast-k92)"
     ;;
+  EXP-A2p-alloc-nogate-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_allocsearch_nogate_fast20_k92.yaml "$(odir EXP-A2p-alloc-nogate-fast-k92)"
+    ;;
+  EXP-A2p-alloc-norisk-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_allocsearch_norisk_fast20_k92.yaml "$(odir EXP-A2p-alloc-norisk-fast-k92)"
+    ;;
+  EXP-A2p-alloc-nolookahead-fast-k92)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A_allocsearch_nolookahead_fast20_k92.yaml "$(odir EXP-A2p-alloc-nolookahead-fast-k92)"
+    ;;
   EXP-A2p-cem-fast-k92)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_cem_fast20_k92.yaml "$(odir EXP-A2p-cem-fast-k92)"
     ;;
