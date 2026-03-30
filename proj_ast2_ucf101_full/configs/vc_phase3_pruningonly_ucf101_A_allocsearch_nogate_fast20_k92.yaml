@@ -1,0 +1,13 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k92.yaml
+
+# Ablation: w/o gate
+# - Keep alloc-search (including look-ahead probing) unchanged.
+# - Remove the apply gate so the best feasible candidate is always applied.
+#   (Risk constraint remains; only the accept/reject gate is disabled.)
+
+alloc_search:
+  # Keep risk constraint (same as OURS) but remove apply rejection.
+  # - allow negative/near-zero hw gain (no rel-gain gate)
+  min_rel_hw_improve: -1.0
+  # - allow negative total_score (no score gate)
+  min_total_score: -1.0e9

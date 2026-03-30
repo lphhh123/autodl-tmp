@@ -1,0 +1,12 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k92.yaml
+
+# Ablation: w/o risk proxy
+# - Keep candidate generator + look-ahead probing unchanged.
+# - Disable risk-proxy usage in selection (no risk filter / no risk penalty / no risk tie-break).
+
+alloc_search:
+  # hw-only selection without risk tie-break (implemented in trainer as pick_policy=hw_only)
+  pick_policy: hw_only
+  # Disable risk constraint and risk penalty
+  max_acc_risk: 1.0e9
+  acc_risk_weight: 0.0

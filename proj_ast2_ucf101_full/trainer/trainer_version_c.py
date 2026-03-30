@@ -1861,8 +1861,10 @@ def _run_alloc_candidate_search_probe(
             if best_local is None or float(item["total_score"]) > float(best_local["total_score"]) + 1e-12:
                 best_local = item
             elif best_local is not None and abs(float(item["total_score"]) - float(best_local["total_score"])) <= 1e-12:
-                if float(item["acc_risk"]) < float(best_local["acc_risk"]) - 1e-12:
-                    best_local = item
+                # Tie-break on risk only when policy explicitly uses risk.
+                if pick_policy not in ("hw_only",):
+                    if float(item["acc_risk"]) < float(best_local["acc_risk"]) - 1e-12:
+                        best_local = item
         return best_local
 
     if pick_policy in ("cem", "es"):
@@ -2080,15 +2082,18 @@ def _run_alloc_candidate_search_probe(
             best_probe_obj = float(res["probe_objective"])
             continue
 
-        if pick_policy in ("hw", "hw_then_risk", "rel_hw_gain"):
+        if pick_policy in ("hw", "hw_then_risk", "rel_hw_gain", "hw_only"):
             rel_best = (float(base_obj) - float(best_probe_obj)) / max(1.0e-6, abs(float(base_obj)))
             rel_cur = (float(base_obj) - float(res["probe_objective"])) / max(1.0e-6, abs(float(base_obj)))
             if float(rel_cur) > float(rel_best) + 1e-12:
                 best = dict(res)
                 best_probe_obj = float(res["probe_objective"])
-            elif abs(float(rel_cur) - float(rel_best)) <= 1e-12 and float(res["acc_risk"]) < float(best["acc_risk"]) - 1e-12:
-                best = dict(res)
-                best_probe_obj = float(res["probe_objective"])
+            elif abs(float(rel_cur) - float(rel_best)) <= 1e-12:
+                # Tie-break on risk only when policy explicitly uses risk.
+                if pick_policy not in ("hw_only",):
+                    if float(res["acc_risk"]) < float(best["acc_risk"]) - 1e-12:
+                        best = dict(res)
+                        best_probe_obj = float(res["probe_objective"])
         else:
             if float(res["total_score"]) > float(best["total_score"]) + 1e-12:
                 best = dict(res)
@@ -2598,12 +2603,14 @@ def _run_alloc_candidate_search(
                 best = item
                 continue
 
-            if pick_policy in ("hw", "hw_then_risk", "rel_hw_gain"):
+            if pick_policy in ("hw", "hw_then_risk", "rel_hw_gain", "hw_only"):
                 if float(item["rel_hw_gain"]) > float(best["rel_hw_gain"]) + 1e-12:
                     best = item
                 elif abs(float(item["rel_hw_gain"]) - float(best["rel_hw_gain"])) <= 1e-12:
-                    if float(item["acc_risk"]) < float(best["acc_risk"]) - 1e-12:
-                        best = item
+                    # Tie-break on risk only when policy explicitly uses risk.
+                    if pick_policy not in ("hw_only",):
+                        if float(item["acc_risk"]) < float(best["acc_risk"]) - 1e-12:
+                            best = item
             else:
                 if float(item["total_score"]) > float(best["total_score"]) + 1e-12:
                     best = item
