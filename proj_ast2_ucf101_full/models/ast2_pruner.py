@@ -663,6 +663,12 @@ class ASTPruner(nn.Module):
         lambda_ch = loss_cfg.get("lambda_ch", 0.1)
         lambda_block = loss_cfg.get("lambda_block", 0.1)
 
+        # Optional: gate-separation regularizer (deployment-oriented stability).
+        # Encourages channel gates to move away from 0.5 and toward {0,1}.
+        #   L_sep = mean_{l in P, c}( w_{l,c} (1 - w_{l,c}) )
+        # where P is the prunable suffix (after freezing prefix layers).
+        lambda_sep = float(loss_cfg.get("lambda_sep", 0.0) or 0.0)
+
         # -------------------------
         # Channel pruning control (MorphNet-style)
         # -------------------------
@@ -713,7 +719,29 @@ class ASTPruner(nn.Module):
             except Exception:
                 ch_term = sparsity_ch
 
-        return lambda_token * sparsity_token + lambda_head * sparsity_head + lambda_ch * ch_term + lambda_block * sparsity_block
+        L_total = (
+            lambda_token * sparsity_token
+            + lambda_head * sparsity_head
+            + lambda_ch * ch_term
+            + lambda_block * sparsity_block
+        )
+
+        # Add gate-separation regularizer if enabled.
+        if lambda_sep > 0.0 and ch_weights is not None and ch_weights.dim() == 2:
+            try:
+                pr_cfg = self.cfg.get("channel_prune", self.cfg)
+                front_ratio = float(pr_cfg.get("freeze_prefix_ratio", self.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+                front_ratio = float(max(0.0, min(1.0, front_ratio)))
+                k = int(round(float(self.depth) * front_ratio))
+                cw = ch_weights[k:, :] if k > 0 else ch_weights
+                # w(1-w) peaks at w=0.5 and is 0 at w in {0,1}.
+                L_sep = (cw * (1.0 - cw)).mean()
+                L_total = L_total + lambda_sep * L_sep
+            except Exception:
+                # Separation term is optional; never fail the training loop.
+                pass
+
+        return L_total
 
     def forward(self, token_feat: torch.Tensor, modality_slices: Optional[Dict[str, Tuple[int, int]]] = None, token_score: Optional[torch.Tensor] = None) -> ASTOutputs:
         force_dense = bool(self._runtime_force_dense or bool(self.cfg.get("force_dense", False)))
