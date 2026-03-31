@@ -14,14 +14,14 @@ alloc_search:
   pick_policy: hw_then_risk
   max_acc_risk: 0.01
   min_total_score: 0.0
-  min_rel_hw_improve: 0.0001
+  min_rel_hw_improve: 0.0
 
   gate_apply_blend: 1.0
   min_remain_budget: 0.005
-  start_after_prune_epochs: 5
+  start_after_prune_epochs: 8
   budget_frac_start: 0.5
   budget_frac_max: 0.8
-  budget_frac_ramp_epochs: 10
+  budget_frac_ramp_epochs: 7
 
   # long-range 3-point probing (directional probe on final range, stage-limited apply)
   probe_points: 3
