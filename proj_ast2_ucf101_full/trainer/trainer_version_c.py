@@ -2829,32 +2829,8 @@ def _maybe_run_alloc_search_and_apply(
         )
         return
 
-    min_total_score = float(getattr(alloc_cfg, "min_total_score", float("-inf")) or float("-inf"))
-    if float(best.get("total_score", -1.0e18)) < float(min_total_score):
-        run_state["alloc_last_search"] = {
-            "outer": int(outer),
-            "enabled": True,
-            "reason": "below_min_total_score",
-            "alloc_enabled_this_outer": True,
-            "alloc_start_after_prune_epochs": int(start_after_prune_epochs),
-            "alloc_phase_progress": float(phase_state.get("alloc_phase_progress", 0.0)),
-            "alloc_budget_frac": float(alloc_phase_budget_frac),
-            "alloc_remain_budget": float(remain_budget),
-            "alloc_usable_budget": float(usable_budget),
-            "prune_epoch": int(phase_state.get("prune_epoch", -1)),
-            "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
-            "base_objective": float(best["base_objective"]),
-            "best_objective": float(best["objective"]),
-            "rel_hw_gain": float(best["rel_hw_gain"]),
-            "acc_risk": float(best["acc_risk"]),
-            "total_score": float(best["total_score"]),
-            "min_total_score": float(min_total_score),
-        }
-        logger.info(
-            "[AllocSearch] outer=%d skipped apply: total_score=%.6g < min_total_score=%.6g",
-            int(outer), float(best.get("total_score", 0.0)), float(min_total_score)
-        )
-        return
+    # NOTE: Thesis gating rule uses (risk constraint) + (rel_hw_gain >= tau_hw) only.
+    # The legacy min_total_score gate is disabled to avoid code–paper drift.
 
     _apply_layerwise_keep_candidate_to_gates(
         model,
