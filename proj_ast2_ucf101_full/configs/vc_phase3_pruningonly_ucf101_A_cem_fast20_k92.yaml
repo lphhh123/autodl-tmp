@@ -21,9 +21,11 @@ alloc_search:
   # Standard CEM: do NOT use sensitivity-based pool. Use all prunable layers.
   pool_size: 0
   max_candidates: 60
-  acc_risk_weight: 0.2
+  acc_risk_weight: 0.0
   # Accuracy-risk constraint per gate change (<=1% drop budget, shared with OURS)
   max_acc_risk: 0.01
+  # Align rel-gain gate with OURS (k92 data-pack style)
+  min_rel_hw_improve: 2.0e-05
 
   # Budget multiplier: x1 => total_samples=ceil(max_candidates*1.0)=60
   cem_budget_mult: 1.0

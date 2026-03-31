@@ -10,11 +10,12 @@ alloc_search:
   min_keep_floor: 0.25
   pool_size: 6
   max_candidates: 60
+  acc_risk_weight: 0.0
 
   pick_policy: hw_then_risk
   max_acc_risk: 0.01
   min_total_score: 0.0
-  min_rel_hw_improve: 0.0
+  min_rel_hw_improve: 2.0e-05
 
   gate_apply_blend: 1.0
   min_remain_budget: 0.005
