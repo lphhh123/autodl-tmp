@@ -8,5 +8,5 @@ alloc_search:
   # hw-only selection without risk tie-break (implemented in trainer as pick_policy=hw_only)
   pick_policy: hw_only
   # Disable risk constraint and risk penalty
-  max_acc_risk: 1.0e9
+  max_acc_risk: 0.01
   acc_risk_weight: 0.0
