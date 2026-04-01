@@ -10,10 +10,10 @@ alloc_search:
   # match ours
   search_threads_outer: 6
   search_threads_inner: 5
-  start_after_prune_epochs: 5
+  start_after_prune_epochs: 8
   budget_frac_start: 0.5
   budget_frac_max: 0.8
-  budget_frac_ramp_epochs: 10
+  budget_frac_ramp_epochs: 7
 
   sens_ema_alpha: 0.8
   keep_unit: 0.01

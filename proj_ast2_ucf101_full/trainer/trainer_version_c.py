@@ -1771,8 +1771,19 @@ def _run_alloc_candidate_search_probe(
     except Exception:
         keep_end = 1.0
 
-    lookahead_budget = float(max(0.0, keep_mean_prunable - float(keep_end)))
     exec_budget = float(max(0.0, usable_budget))
+    # final remaining range: keep_mean_prunable - keep_end
+    lookahead_budget = float(max(0.0, keep_mean_prunable - float(keep_end)))
+
+    # Allow LOCAL-range probing when probe_use_final_range is False.
+    # This keeps probe_points (e.g., 3-point) for budget comparability,
+    # but removes the long-horizon "final remaining range" look-ahead.
+    alloc_cfg = getattr(cfg, "alloc_search", None)
+    probe_use_final = bool(getattr(alloc_cfg, "probe_use_final_range", True)) if alloc_cfg is not None else True
+    probe_local_mult = float(getattr(alloc_cfg, "probe_local_scale_mult", 2.0) or 2.0) if alloc_cfg is not None else 2.0
+    if not probe_use_final:
+        # local probe range is bounded by O(exec_budget)
+        lookahead_budget = float(min(lookahead_budget, max(0.0, probe_local_mult * exec_budget)))
     if lookahead_budget <= 1e-8 or exec_budget <= 1e-8:
         return None
 
@@ -2284,8 +2295,10 @@ def _run_alloc_candidate_search(
 
     alloc_cfg = getattr(cfg, "alloc_search", None)
     probe_points = int(getattr(alloc_cfg, "probe_points", 0) or 0) if alloc_cfg is not None else 0
-    probe_use_final = bool(getattr(alloc_cfg, "probe_use_final_range", False)) if alloc_cfg is not None else False
-    if probe_points >= 2 and probe_use_final:
+    # Probe search supports both:
+    #  - final-range probing (probe_use_final_range=True): lookahead_budget = keep_mean - keep_end
+    #  - local-range probing (probe_use_final_range=False): lookahead_budget ~= O(usable_budget)
+    if probe_points >= 2:
         return _run_alloc_candidate_search_probe(
             model=model,
             cfg=cfg,

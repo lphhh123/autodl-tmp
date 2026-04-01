@@ -5,6 +5,10 @@ _base_: configs/vc_phase3_pruningonly_ucf101_A_allocsearch_fast20_k92.yaml
 # - Disable long-range 3-point probing on the final remaining range.
 
 alloc_search:
-  # Disable probe path (falls back to direct candidate eval on the stage-limited budget)
+  # Keep 3-point probing for budget comparability, but switch to LOCAL-range probing
+  # (i.e., no final-range/remaining-budget look-ahead).
   probe_use_final_range: false
-  probe_points: 0
+  probe_points: 3
+  # LOCAL probe range ~= probe_local_scale_mult * usable_budget
+  # 2.0 means probe points explore up to ~2x the stage-limited execution step.
+  probe_local_scale_mult: 2.0
