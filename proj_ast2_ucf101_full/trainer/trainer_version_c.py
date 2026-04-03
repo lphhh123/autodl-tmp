@@ -1795,6 +1795,7 @@ def _build_alloc_direction_pool(
     max_directions: int,
     candidate_strategy: str,
     direction_orders: Optional[List[str]] = None,
+    rng_seed: Optional[int] = None,
 ) -> List[List[Tuple[int, float]]]:
     depth = int(keep_now.numel())
     k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
@@ -1807,6 +1808,7 @@ def _build_alloc_direction_pool(
     strategy = str(candidate_strategy or "sens_pool").lower().strip()
     if strategy == "uniform_all":
         pool = list(prunable)
+        random.Random(int(rng_seed) if rng_seed is not None else 0).shuffle(pool)
     else:
         prunable_sorted = sorted(prunable, key=lambda i: float(sens_norm[i].item()))
         p = int(pool_size)
@@ -2108,6 +2110,7 @@ def _run_alloc_candidate_search_probe(
             search_threads=int(max(1, int(search_threads))),
             max_acc_risk=float(max_acc_risk),
             pick_policy=str(pick_policy),
+            rng_seed=int(outer) + 100003 * int(seed),
         )
 
     if pick_policy in ("cem", "es"):
@@ -2266,6 +2269,7 @@ def _run_alloc_candidate_search_probe(
         max_directions=int(dirs_total),
         candidate_strategy=str(candidate_strategy),
         direction_orders=list(direction_orders) if direction_orders is not None else None,
+        rng_seed=int(rng_seed) if rng_seed is not None else 0,
     )
 
     if not dirs:
@@ -2436,6 +2440,7 @@ def _run_alloc_candidate_search(
     acc_risk_weight: float,
     pick_policy: str = "total_score",
     max_acc_risk: float = float("inf"),
+    rng_seed: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     eff_specs_cpu = _to_cpu_tensor_dict(eff_specs)
     alpha_cpu = alpha.detach().cpu() if torch.is_tensor(alpha) else alpha
@@ -3012,6 +3017,7 @@ def _maybe_run_alloc_search_and_apply(
             lookahead_budget = float(max(0.0, usable_budget))
 
         dirs_total = int(max(1, int(getattr(alloc_cfg, "max_candidates", 60)) // int(max(1, alloc_probe_points))))
+        alloc_rng_seed = int(outer) + 100003 * int(seed)
         dirs = _build_alloc_direction_pool(
             keep_now=keep_now,
             sens=sens,
@@ -3020,6 +3026,7 @@ def _maybe_run_alloc_search_and_apply(
             max_directions=int(dirs_total),
             candidate_strategy=str(candidate_strategy),
             direction_orders=list(direction_orders) if direction_orders is not None else None,
+            rng_seed=int(alloc_rng_seed),
         )
 
         if lookahead_budget > 1e-8 and usable_budget > 1e-8 and dirs:
@@ -4210,6 +4217,10 @@ def train_version_c(
             if best_from_ckpt is not None:
                 best_acc1 = float(best_from_ckpt)
             global_step = int(start_outer) * int(steps_per_outer)
+            ch3_ref_lat = os.environ.get("HW_REF_LAT_MS", "")
+            ch3_ref_mem = os.environ.get("HW_REF_MEM_MB", "")
+            ch3_ref_comm = os.environ.get("HW_REF_COMM_MS", "")
+            logger.info("[CH3 common refs] lat=%s mem=%s comm=%s", ch3_ref_lat, ch3_ref_mem, ch3_ref_comm)
             for outer in range(start_outer, cfg.training.outer_epochs):
                 assert_cfg_sealed_or_violate(cfg, seal_digest, trace_events_path, step=outer)
                 backbone_trainable_now = bool(int(outer) >= int(freeze_backbone_epochs))

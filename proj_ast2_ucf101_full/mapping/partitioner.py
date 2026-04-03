@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -116,6 +117,27 @@ class PartitionPlanner:
             ref_latency_ms = float(getattr(self.cfg, "ref_latency_ms", 1.0) or 1.0)
             ref_mem_mb = float(getattr(self.cfg, "ref_mem_mb", 1.0) or 1.0)
             ref_comm_ms = float(getattr(self.cfg, "ref_comm_ms", 1.0) or 1.0)
+
+            def _env_pos_float(name: str) -> Optional[float]:
+                raw = os.environ.get(name, None)
+                if raw is None:
+                    return None
+                try:
+                    val = float(str(raw).strip())
+                except Exception:
+                    return None
+                return float(val) if val > 0.0 else None
+
+            env_ref_latency_ms = _env_pos_float("HW_REF_LAT_MS")
+            env_ref_mem_mb = _env_pos_float("HW_REF_MEM_MB")
+            env_ref_comm_ms = _env_pos_float("HW_REF_COMM_MS")
+            if env_ref_latency_ms is not None:
+                ref_latency_ms = float(env_ref_latency_ms)
+            if env_ref_mem_mb is not None:
+                ref_mem_mb = float(env_ref_mem_mb)
+            if env_ref_comm_ms is not None:
+                ref_comm_ms = float(env_ref_comm_ms)
+
             w_latency_norm = float(getattr(self.cfg, "w_latency_norm", 1.0) or 1.0)
             w_mem_norm = float(getattr(self.cfg, "w_mem_norm", 1.0) or 1.0)
             w_comm_norm = float(getattr(self.cfg, "w_comm_norm", 1.0) or 1.0)
@@ -142,6 +164,9 @@ class PartitionPlanner:
             "lat_norm": float(lat_norm),
             "mem_norm": float(mem_norm),
             "comm_norm": float(comm_norm),
+            "ref_latency_ms": float(ref_latency_ms) if objective_mode == "common_norm_lmc" else None,
+            "ref_mem_mb": float(ref_mem_mb) if objective_mode == "common_norm_lmc" else None,
+            "ref_comm_ms": float(ref_comm_ms) if objective_mode == "common_norm_lmc" else None,
         }
         return objective, stats
 

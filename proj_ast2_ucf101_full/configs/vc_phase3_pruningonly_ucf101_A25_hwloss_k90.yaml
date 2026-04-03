@@ -28,6 +28,7 @@ stable_hw:
     lambda_hw_max: 0.60
 
 hw:
+  common_objective_only: true
   surrogate_grad:
     enabled: false
 
