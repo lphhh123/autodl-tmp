@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 import hashlib
 import json
 import math
+import os
 
 import numpy as np
 import torch
@@ -470,6 +471,22 @@ def compute_hw_loss(
     no_drift_enabled = _as_enabled(no_drift_cfg, default=True)
     stable_hw_state["no_drift_enabled"] = no_drift_enabled
 
+
+
+    def _positive_env_float(name: str) -> Optional[float]:
+        raw = os.environ.get(name, None)
+        if raw is None:
+            return None
+        try:
+            v = float(str(raw).strip())
+        except Exception:
+            return None
+        return float(v) if v > 0.0 else None
+
+    env_ref_T = _positive_env_float("HW_REF_LAT_MS")
+    env_ref_M = _positive_env_float("HW_REF_MEM_MB")
+    env_ref_C = _positive_env_float("HW_REF_COMM_MS")
+
     def _pos_ref(stable_hw_state: dict, key: str, default_ref: float, no_drift_enabled: bool) -> float:
         cur = stable_hw_state.get(key, None)
         if cur is None:
@@ -486,15 +503,18 @@ def compute_hw_loss(
         cur = float(cur)
         return cur if cur > 0 else 1.0
 
-    ref_T = _pos_ref(stable_hw_state, "ref_T", getattr(hw_cfg, "latency_ref_ms", 1.0), no_drift_enabled)
+    ref_T_default = float(env_ref_T) if env_ref_T is not None else float(getattr(hw_cfg, "latency_ref_ms", 1.0))
+    ref_T = _pos_ref(stable_hw_state, "ref_T", ref_T_default, no_drift_enabled)
+    ref_M_default = float(env_ref_M) if env_ref_M is not None else float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0)))
     ref_M = _pos_ref(
         stable_hw_state,
         "ref_M",
-        getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0)),
+        ref_M_default,
         no_drift_enabled,
     )
     ref_E = _pos_ref(stable_hw_state, "ref_E", getattr(hw_cfg, "energy_ref_mj", 1.0), no_drift_enabled)
-    ref_C = _pos_ref(stable_hw_state, "ref_C", getattr(hw_cfg, "comm_ref_ms", 1.0), no_drift_enabled)
+    ref_C_default = float(env_ref_C) if env_ref_C is not None else float(getattr(hw_cfg, "comm_ref_ms", 1.0))
+    ref_C = _pos_ref(stable_hw_state, "ref_C", ref_C_default, no_drift_enabled)
     ref_A = _pos_ref(stable_hw_state, "ref_A", getattr(hw_cfg, "area_ref_mm2", 1.0), no_drift_enabled)
     ref_B = _pos_ref(stable_hw_state, "ref_B", getattr(hw_cfg, "bw_ref_gbps", 1.0), no_drift_enabled)
     ref_P = _pos_ref(stable_hw_state, "ref_P", getattr(hw_cfg, "power_ref_w", 1.0), no_drift_enabled)
@@ -787,10 +807,10 @@ def compute_hw_loss(
             stable_hw_state[key] = float(v)
             return float(v)
 
-        T_ref = _ref_from_state("ref_T", float(getattr(hw_cfg, "latency_ref_ms", 1.0)))
+        T_ref = _ref_from_state("ref_T", float(env_ref_T) if env_ref_T is not None else float(getattr(hw_cfg, "latency_ref_ms", 1.0)))
         E_ref = _ref_from_state("ref_E", float(getattr(hw_cfg, "energy_ref_mj", 1.0)))
-        M_ref = _ref_from_state("ref_M", float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0))))
-        C_ref = _ref_from_state("ref_C", float(getattr(hw_cfg, "comm_ref_ms", 1.0)))
+        M_ref = _ref_from_state("ref_M", float(env_ref_M) if env_ref_M is not None else float(getattr(hw_cfg, "memory_ref_mb", getattr(hw_cfg, "mem_ref_mb", 1.0))))
+        C_ref = _ref_from_state("ref_C", float(env_ref_C) if env_ref_C is not None else float(getattr(hw_cfg, "comm_ref_ms", 1.0)))
 
         # IMPORTANT: use clamped-positive tensors so negative proxy cannot be rewarded
         latency_term_t = _term_t(latency_ms_pos, T_ref, tT, do_hinge=True)
@@ -815,7 +835,11 @@ def compute_hw_loss(
 
     # v5.4: area/layout 必须保持 Tensor（禁止 float(L_area) / float(L_layout)）
     extra_penalty_t = torch.as_tensor(float(extra_penalty), device=device, dtype=latency_ms_pos.dtype)
-    L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout) + extra_penalty_t
+    common_objective_only = bool(getattr(hw_cfg, "common_objective_only", False))
+    if common_objective_only:
+        L_hw_total_t = L_hw_norm_t
+    else:
+        L_hw_total_t = L_hw_norm_t + L_chip + _as_t(L_area) + _as_t(L_layout) + extra_penalty_t
 
     # ---- Non-finite guard (prevents NaN from propagating into training) ----
     hw_loss_nonfinite = (not torch.isfinite(L_hw_total_t).all()) or (not torch.isfinite(L_hw_norm_t).all())
@@ -876,6 +900,10 @@ def compute_hw_loss(
             "L_hw_norm": float(L_hw_norm_t.detach().cpu().item()),
             "L_hw_common": float(L_hw_norm_t.detach().cpu().item()),
             "L_hw_total": float(L_hw_total_t.detach().cpu().item()),
+            "common_objective_only": bool(common_objective_only),
+            "ref_latency_ms": float(T_ref),
+            "ref_mem_mb": float(M_ref),
+            "ref_comm_ms": float(C_ref),
         }
     )
 

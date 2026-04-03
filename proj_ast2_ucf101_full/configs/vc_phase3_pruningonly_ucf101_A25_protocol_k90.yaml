@@ -26,9 +26,9 @@ alloc_search:
 
 partition:
   objective_mode: common_norm_lmc
-  ref_latency_ms: 2.20
-  ref_mem_mb: 230.0
-  ref_comm_ms: 0.0055
+  ref_latency_ms: 1.0
+  ref_mem_mb: 1.0
+  ref_comm_ms: 1.0
   w_latency_norm: 1.0
   w_mem_norm: 1.0
   w_comm_norm: 1.0

@@ -9,6 +9,7 @@ GPU_GROUP_B="${GPU_GROUP_B:-3,4,5}"
 SEEDS_STR="${SEEDS_STR:-0 1 2}"
 RUN_TAG="${RUN_TAG:-ch3newours25}"
 INSTANCE="${INSTANCE:-base}"
+REF_STATS_RANGE="${REF_STATS_RANGE:-0-4}"
 
 WARMUP_EXP="EXP-A2p25-warm15-prep-k90"
 EXPS=(
@@ -25,6 +26,15 @@ EXPS=(
 echo "[CH3-NEWOURS] GPU_GROUP_A=${GPU_GROUP_A} GPU_GROUP_B=${GPU_GROUP_B}"
 echo "[CH3-NEWOURS] SEEDS=${SEEDS_STR} RUN_TAG=${RUN_TAG} INSTANCE=${INSTANCE}"
 
+parse_ref_range() {
+  local s="$1"
+  if [[ "$s" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+  else
+    echo "0 4"
+  fi
+}
+
 run_one() {
   local exp="$1"
   local seed="$2"
@@ -40,6 +50,9 @@ run_one() {
     export AUTO_RESUME=0
     export FRESH_RUN=1
     export RUN_TAG="${RUN_TAG}"
+    export HW_REF_LAT_MS="${HW_REF_LAT_MS}"
+    export HW_REF_MEM_MB="${HW_REF_MEM_MB}"
+    export HW_REF_COMM_MS="${HW_REF_COMM_MS}"
     INSTANCE="${INSTANCE}" bash scripts/experiments_version_c.sh "${exp}" "${seed}"
   )
 }
@@ -67,6 +80,21 @@ for SEED in ${SEEDS_STR}; do
     echo "[ERROR] warmup checkpoint missing: ${ckpt}"
     exit 2
   fi
+
+  warm_log="${warm_out}/stdout.log"
+  if [[ ! -f "${warm_log}" ]]; then
+    echo "[ERROR] warmup stdout log missing: ${warm_log}"
+    exit 2
+  fi
+
+  read REF_EPOCH_MIN REF_EPOCH_MAX < <(parse_ref_range "${REF_STATS_RANGE}")
+  ref_exports="$(python scripts/extract_ch3_common_refs.py \
+      --log_path "${warm_log}" \
+      --epoch_min "${REF_EPOCH_MIN}" \
+      --epoch_max "${REF_EPOCH_MAX}" \
+      --format shell)"
+  eval "${ref_exports}"
+  echo "[SEED ${SEED}] refs from warmup: lat=${HW_REF_LAT_MS} mem=${HW_REF_MEM_MB} comm=${HW_REF_COMM_MS} range=${REF_STATS_RANGE}"
 
   for wave in 0 1 2 3; do
     idx_a=$((wave * 2))
