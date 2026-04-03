@@ -648,6 +648,75 @@ def maybe_auto_resume_version_c(out_dir: Path, model, ema_model, optimizer, scal
         logger.warning(f"[AUTO_RESUME] failed to load {ckpt_path}: {e}. Start from scratch.")
         return 0, None
 
+
+def maybe_init_from_checkpoint_version_c(
+    init_ckpt_path: Optional[str],
+    model,
+    ema_model,
+    logger,
+    use_resume_epoch: bool = True,
+    load_ema: bool = True,
+) -> Tuple[int, Optional[float]]:
+    path = str(init_ckpt_path or os.environ.get("INIT_CKPT_PATH", "") or "").strip()
+    if not path:
+        return 0, None
+    ckpt_path = Path(path)
+    if not ckpt_path.exists():
+        logger.warning("[INIT_CKPT] not found: %s", str(ckpt_path))
+        return 0, None
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state_dict = None
+        if isinstance(ckpt, dict):
+            if isinstance(ckpt.get("model", None), dict):
+                state_dict = ckpt.get("model")
+            elif isinstance(ckpt.get("state_dict", None), dict):
+                state_dict = ckpt.get("state_dict")
+        if state_dict is None:
+            state_dict = ckpt
+
+        missing, unexpected = unwrap_model(model).load_state_dict(state_dict, strict=False)
+        logger.info(
+            "[INIT_CKPT] loaded %s (missing=%d unexpected=%d)",
+            str(ckpt_path),
+            int(len(missing) if isinstance(missing, list) else 0),
+            int(len(unexpected) if isinstance(unexpected, list) else 0),
+        )
+
+        if ema_model is not None:
+            ema_state = ckpt.get("ema", None) if isinstance(ckpt, dict) else None
+            if bool(load_ema) and isinstance(ema_state, dict):
+                try:
+                    ema_model.ema.load_state_dict(ema_state, strict=False)
+                    logger.info("[INIT_CKPT] EMA loaded from checkpoint.")
+                except Exception as exc:
+                    logger.warning("[INIT_CKPT] failed to load EMA from checkpoint: %s", str(exc))
+                    ema_model.ema.load_state_dict(unwrap_model(model).state_dict(), strict=False)
+            else:
+                ema_model.ema.load_state_dict(unwrap_model(model).state_dict(), strict=False)
+
+        start_outer = 0
+        if bool(use_resume_epoch) and isinstance(ckpt, dict) and ckpt.get("epoch", None) is not None:
+            start_outer = max(0, int(ckpt.get("epoch", -1)) + 1)
+
+        best_acc1 = None
+        if isinstance(ckpt, dict) and ckpt.get("best_acc1", None) is not None:
+            try:
+                best_acc1 = float(ckpt.get("best_acc1"))
+            except Exception:
+                best_acc1 = None
+
+        logger.info(
+            "[INIT_CKPT] start_outer=%d (use_resume_epoch=%s) best_acc1=%s",
+            int(start_outer),
+            bool(use_resume_epoch),
+            str(best_acc1),
+        )
+        return int(start_outer), best_acc1
+    except Exception as e:
+        logger.warning("[INIT_CKPT] failed to load %s: %s", str(ckpt_path), str(e))
+        return 0, None
+
 from utils.trace_contract_v54 import (
     REQUIRED_GATING_KEYS,
     REQUIRED_PROXY_SANITIZE_KEYS,
@@ -1717,6 +1786,210 @@ def _interp_keep_scaled(
     return _quantize_keep_vec(cand, k_freeze=int(k_freeze), u=float(u), floor=float(floor))
 
 
+def _build_alloc_direction_pool(
+    *,
+    keep_now: torch.Tensor,
+    sens: torch.Tensor,
+    freeze_prefix_ratio: float,
+    pool_size: int,
+    max_directions: int,
+    candidate_strategy: str,
+    direction_orders: Optional[List[str]] = None,
+) -> List[List[Tuple[int, float]]]:
+    depth = int(keep_now.numel())
+    k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
+    prunable = list(range(k_freeze, depth))
+    if not prunable:
+        return []
+
+    sens_norm = sens.clone().float()
+    sens_norm = sens_norm / (float(sens_norm.mean().item()) + 1e-6)
+    strategy = str(candidate_strategy or "sens_pool").lower().strip()
+    if strategy == "uniform_all":
+        pool = list(prunable)
+    else:
+        prunable_sorted = sorted(prunable, key=lambda i: float(sens_norm[i].item()))
+        p = int(pool_size)
+        if p <= 0:
+            p = len(prunable_sorted)
+        pool = prunable_sorted[: min(int(p), len(prunable_sorted))]
+    if not pool:
+        return []
+
+    dirs_total = int(max(1, int(max_directions)))
+    orders = set(str(x).lower().strip() for x in (direction_orders or ["single", "pair", "tri"]))
+    dirs: List[List[Tuple[int, float]]] = []
+    seen_dir = set()
+
+    def _push_dir(items: List[Tuple[int, float]]):
+        items2 = [(int(i), float(w)) for i, w in items if float(w) > 0.0]
+        s = sum(w for _, w in items2)
+        if s <= 1e-12:
+            return
+        items2 = [(i, float(w) / float(s)) for i, w in items2]
+        key = tuple((i, round(w, 4)) for i, w in sorted(items2))
+        if key in seen_dir:
+            return
+        seen_dir.add(key)
+        dirs.append(items2)
+
+    if "single" in orders:
+        for i in pool:
+            _push_dir([(int(i), 1.0)])
+            if len(dirs) >= dirs_total:
+                return dirs
+
+    if "pair" in orders and len(dirs) < dirs_total:
+        pair_ratios = [(0.75, 0.25), (0.5, 0.5), (0.25, 0.75)]
+        for i, j in itertools.combinations(pool, 2):
+            for r1, r2 in pair_ratios:
+                _push_dir([(int(i), float(r1)), (int(j), float(r2))])
+                if len(dirs) >= dirs_total:
+                    return dirs
+
+    if "tri" in orders and len(dirs) < dirs_total:
+        tri_ratios = [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.34, 0.33, 0.33)]
+        for combo in itertools.combinations(pool, 3):
+            for rs in tri_ratios:
+                _push_dir([(int(combo[0]), float(rs[0])), (int(combo[1]), float(rs[1])), (int(combo[2]), float(rs[2]))])
+                if len(dirs) >= dirs_total:
+                    return dirs
+    return dirs
+
+
+def _eval_alloc_direction_probe(
+    *,
+    direction_items: List[Tuple[int, float]],
+    keep_now: torch.Tensor,
+    base_obj: float,
+    usable_budget: float,
+    lookahead_budget: float,
+    probe_points: int,
+    probe_alphas: List[float],
+    probe_use_final_range: bool,
+    keep_unit: float,
+    min_keep_floor: float,
+    freeze_prefix_ratio: float,
+    sens: torch.Tensor,
+    model: torch.nn.Module,
+    cfg,
+    hw_proxy,
+    wafer_layout,
+    eff_specs_cpu,
+    alpha_cpu,
+    last_info: Optional[Dict[str, Any]],
+    fine_split_threads: int,
+    search_threads: int,
+    max_acc_risk: float,
+    pick_policy: str,
+) -> Optional[Dict[str, Any]]:
+    del probe_use_final_range  # included for logging/call compatibility
+    depth = int(keep_now.numel())
+    k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
+    sens_norm = sens.clone().float()
+    sens_norm = sens_norm / (float(sens_norm.mean().item()) + 1e-6)
+    u = float(max(1e-4, keep_unit))
+    floor = float(max(0.05, min(0.95, min_keep_floor)))
+
+    def _acc_risk_for_apply(keep_apply: torch.Tensor) -> float:
+        return float((sens_norm * (keep_now - keep_apply).abs()).sum().item() / max(1.0e-6, float(usable_budget)))
+
+    alphas = [float(x) for x in list(probe_alphas)[: max(1, int(probe_points))]]
+    probes = []
+    apply_keeps = []
+    apply_risks = []
+    for a in alphas:
+        delta_mag = float(a) * float(lookahead_budget)
+        keep_probe = _apply_sparse_direction(
+            keep_now,
+            items=direction_items,
+            delta_mag=float(delta_mag),
+            k_freeze=int(k_freeze),
+            u=float(u),
+            floor=float(floor),
+        )
+        scale = 1.0 if delta_mag <= 1e-12 else min(1.0, float(usable_budget) / float(delta_mag))
+        keep_apply = _interp_keep_scaled(
+            keep_now,
+            keep_probe=keep_probe,
+            scale=float(scale),
+            k_freeze=int(k_freeze),
+            u=float(u),
+            floor=float(floor),
+        )
+        probes.append(keep_probe)
+        apply_keeps.append(keep_apply)
+        apply_risks.append(float(_acc_risk_for_apply(keep_apply)))
+
+    with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
+        futs = [
+            ex.submit(
+                _eval_single_alloc_candidate,
+                kp,
+                model=model,
+                last_info=last_info,
+                cfg=cfg,
+                hw_proxy=hw_proxy,
+                wafer_layout=wafer_layout,
+                eff_specs=eff_specs_cpu,
+                alpha=alpha_cpu,
+                fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+            )
+            for kp in probes
+        ]
+        outs = [f.result() for f in futs]
+
+    best_local = None
+    for idx, (a, out, keep_apply, r) in enumerate(zip(alphas, outs, apply_keeps, apply_risks)):
+        if max_acc_risk > 0.0 and math.isfinite(max_acc_risk) and float(r) > float(max_acc_risk):
+            continue
+        probe_obj = float(out.get("objective", 1.0e18))
+        probe_rel_hw_gain = (float(base_obj) - float(probe_obj)) / max(1.0e-6, abs(float(base_obj)))
+        item = {
+            "direction_items": [(int(i), float(w)) for i, w in direction_items],
+            "keep_probe": probes[int(idx)],
+            "keep_apply": keep_apply,
+            "probe_alpha": float(a),
+            "probe_objective": float(probe_obj),
+            "probe_rel_hw_gain": float(probe_rel_hw_gain),
+            "acc_risk": float(r),
+            "total_score": float(probe_rel_hw_gain),
+            "probe_raw": out,
+        }
+        if best_local is None or float(item["total_score"]) > float(best_local["total_score"]) + 1e-12:
+            best_local = item
+        elif best_local is not None and abs(float(item["total_score"]) - float(best_local["total_score"])) <= 1e-12:
+            if pick_policy not in ("hw_only",) and float(item["acc_risk"]) < float(best_local["acc_risk"]) - 1e-12:
+                best_local = item
+    if best_local is None:
+        return None
+
+    apply_out = _eval_single_alloc_candidate(
+        best_local["keep_apply"],
+        model=model,
+        last_info=last_info,
+        cfg=cfg,
+        hw_proxy=hw_proxy,
+        wafer_layout=wafer_layout,
+        eff_specs=eff_specs_cpu,
+        alpha=alpha_cpu,
+        fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+    )
+    apply_obj = float(apply_out.get("objective", 1.0e18))
+    rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
+    best_local.update(
+        {
+            "keep_cand": best_local["keep_apply"],
+            "objective": float(apply_obj),
+            "base_objective": float(base_obj),
+            "rel_hw_gain": float(rel_hw_gain_apply),
+            "total_score": float(rel_hw_gain_apply),
+            "raw": apply_out,
+        }
+    )
+    return best_local
+
+
 def _run_alloc_candidate_search_probe(
     *,
     model: torch.nn.Module,
@@ -1755,6 +2028,8 @@ def _run_alloc_candidate_search_probe(
     probe_alphas = [float(x) for x in list(probe_alphas)[: max(1, probe_points)]]
 
     probe_apply_check = bool(getattr(alloc_cfg, "probe_apply_check", True)) if alloc_cfg is not None else True
+    candidate_strategy = str(getattr(alloc_cfg, "candidate_strategy", "sens_pool") or "sens_pool") if alloc_cfg is not None else "sens_pool"
+    direction_orders = getattr(alloc_cfg, "direction_orders", None) if alloc_cfg is not None else None
 
     depth = int(keep_now.numel())
     k_freeze = int(round(float(depth) * float(max(0.0, min(1.0, freeze_prefix_ratio)))))
@@ -1809,74 +2084,31 @@ def _run_alloc_candidate_search_probe(
         return float(rel_hw_gain_probe)
 
     def _probe_direction(items: List[Tuple[int, float]]) -> Optional[Dict[str, Any]]:
-        probes = []
-        apply_keeps = []
-        apply_risks = []
-        for a in probe_alphas:
-            delta_mag = float(a) * float(lookahead_budget)
-            keep_probe = _apply_sparse_direction(
-                keep_now,
-                items=items,
-                delta_mag=float(delta_mag),
-                k_freeze=int(k_freeze),
-                u=float(u),
-                floor=float(floor),
-            )
-            scale = 1.0 if delta_mag <= 1e-12 else min(1.0, float(exec_budget) / float(delta_mag))
-            keep_apply = _interp_keep_scaled(
-                keep_now,
-                keep_probe=keep_probe,
-                scale=float(scale),
-                k_freeze=int(k_freeze),
-                u=float(u),
-                floor=float(floor),
-            )
-            r = _acc_risk_for_apply(keep_apply)
-            probes.append(keep_probe)
-            apply_keeps.append(keep_apply)
-            apply_risks.append(float(r))
-
-        with ThreadPoolExecutor(max_workers=max(1, int(search_threads))) as ex:
-            futs = [
-                ex.submit(
-                    _eval_single_alloc_candidate,
-                    kp,
-                    model=model,
-                    last_info=last_info,
-                    cfg=cfg,
-                    hw_proxy=hw_proxy,
-                    wafer_layout=wafer_layout,
-                    eff_specs=eff_specs_cpu,
-                    alpha=alpha_cpu,
-                    fine_split_threads=int(max(1, int(fine_split_threads or 1))),
-                )
-                for kp in probes
-            ]
-            outs = [f.result() for f in futs]
-
-        best_local = None
-        for idx, (a, out, keep_apply, r) in enumerate(zip(probe_alphas, outs, apply_keeps, apply_risks)):
-            if max_acc_risk > 0.0 and math.isfinite(max_acc_risk) and float(r) > float(max_acc_risk):
-                continue
-            obj_probe = float(out.get("objective", 1.0e18))
-            score = _dir_score(obj_probe)
-            item = {
-                "probe_alpha": float(a),
-                "probe_objective": float(obj_probe),
-                "probe_raw": out,
-                "keep_probe": probes[int(idx)],
-                "keep_apply": keep_apply,
-                "acc_risk": float(r),
-                "total_score": float(score),
-            }
-            if best_local is None or float(item["total_score"]) > float(best_local["total_score"]) + 1e-12:
-                best_local = item
-            elif best_local is not None and abs(float(item["total_score"]) - float(best_local["total_score"])) <= 1e-12:
-                # Tie-break on risk only when policy explicitly uses risk.
-                if pick_policy not in ("hw_only",):
-                    if float(item["acc_risk"]) < float(best_local["acc_risk"]) - 1e-12:
-                        best_local = item
-        return best_local
+        return _eval_alloc_direction_probe(
+            direction_items=items,
+            keep_now=keep_now,
+            base_obj=float(base_obj),
+            usable_budget=float(exec_budget),
+            lookahead_budget=float(lookahead_budget),
+            probe_points=int(probe_points),
+            probe_alphas=list(probe_alphas),
+            probe_use_final_range=bool(probe_use_final),
+            keep_unit=float(keep_unit),
+            min_keep_floor=float(min_keep_floor),
+            freeze_prefix_ratio=float(freeze_prefix_ratio),
+            sens=sens,
+            model=model,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs_cpu=eff_specs_cpu,
+            alpha_cpu=alpha_cpu,
+            last_info=last_info,
+            fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+            search_threads=int(max(1, int(search_threads))),
+            max_acc_risk=float(max_acc_risk),
+            pick_policy=str(pick_policy),
+        )
 
     if pick_policy in ("cem", "es"):
         pool = list(prunable)
@@ -2026,56 +2258,15 @@ def _run_alloc_candidate_search_probe(
         )
         return best
 
-    prunable_sorted = sorted(prunable, key=lambda i: float(sens_norm[i].item()))
-    pool = prunable_sorted[: min(int(pool_size), len(prunable_sorted))]
-    if not pool:
-        return None
-
-    dirs: List[List[Tuple[int, float]]] = []
-    seen_dir = set()
-
-    def _push_dir(items: List[Tuple[int, float]]):
-        items2 = [(int(i), float(w)) for i, w in items if float(w) > 0.0]
-        s = sum(w for _, w in items2)
-        if s <= 1e-12:
-            return
-        items2 = [(i, float(w) / float(s)) for i, w in items2]
-        key = tuple((i, round(w, 4)) for i, w in sorted(items2))
-        if key in seen_dir:
-            return
-        seen_dir.add(key)
-        dirs.append(items2)
-
-    for i in pool:
-        _push_dir([(int(i), 1.0)])
-        if len(dirs) >= dirs_total:
-            break
-
-    if len(dirs) < dirs_total:
-        pair_ratios = [(0.75, 0.25), (0.5, 0.5), (0.25, 0.75)]
-        for i, j in itertools.combinations(pool, 2):
-            for r1, r2 in pair_ratios:
-                _push_dir([(int(i), float(r1)), (int(j), float(r2))])
-                if len(dirs) >= dirs_total:
-                    break
-            if len(dirs) >= dirs_total:
-                break
-
-    if len(dirs) < dirs_total:
-        tri_ratios = [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.34, 0.33, 0.33)]
-        for combo in itertools.combinations(pool, 3):
-            for rs in tri_ratios:
-                _push_dir(
-                    [
-                        (int(combo[0]), float(rs[0])),
-                        (int(combo[1]), float(rs[1])),
-                        (int(combo[2]), float(rs[2])),
-                    ]
-                )
-                if len(dirs) >= dirs_total:
-                    break
-            if len(dirs) >= dirs_total:
-                break
+    dirs = _build_alloc_direction_pool(
+        keep_now=keep_now,
+        sens=sens,
+        freeze_prefix_ratio=float(freeze_prefix_ratio),
+        pool_size=int(pool_size),
+        max_directions=int(dirs_total),
+        candidate_strategy=str(candidate_strategy),
+        direction_orders=list(direction_orders) if direction_orders is not None else None,
+    )
 
     if not dirs:
         return None
@@ -2113,30 +2304,8 @@ def _run_alloc_candidate_search_probe(
     if best is None:
         return None
 
-    keep_apply = best["keep_apply"]
-    apply_out = _eval_single_alloc_candidate(
-        keep_apply,
-        model=model,
-        last_info=last_info,
-        cfg=cfg,
-        hw_proxy=hw_proxy,
-        wafer_layout=wafer_layout,
-        eff_specs=eff_specs_cpu,
-        alpha=alpha_cpu,
-        fine_split_threads=int(max(1, int(fine_split_threads or 1))),
-    )
-    apply_obj = float(apply_out.get("objective", 1.0e18))
-    rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
-    total_score_apply = float(rel_hw_gain_apply)
-
     best.update(
         {
-            "keep_cand": keep_apply,
-            "objective": float(apply_obj),
-            "base_objective": float(base_obj),
-            "rel_hw_gain": float(rel_hw_gain_apply),
-            "total_score": float(total_score_apply),
-            "raw": apply_out,
             "policy": "heuristic_probe",
             "eval_budget_total": int(1 + used_probe + (1 if probe_apply_check else 0)),
             "eval_budget_candidates": int(used_probe + (1 if probe_apply_check else 0)),
@@ -2763,29 +2932,246 @@ def _maybe_run_alloc_search_and_apply(
 
     max_acc_risk = float(getattr(alloc_cfg, "max_acc_risk", float("inf")) or float("inf"))
     pick_policy = str(getattr(alloc_cfg, "pick_policy", "hw_then_risk") or "hw_then_risk")
+    controller = str(getattr(alloc_cfg, "controller", "legacy") or "legacy").lower().strip()
+    candidate_strategy = str(getattr(alloc_cfg, "candidate_strategy", "sens_pool") or "sens_pool").lower().strip()
+    if controller == "ds_fixed":
+        candidate_strategy = "uniform_all"
+    if controller == "new_ours" and candidate_strategy not in ("sens_pool", "uniform_all"):
+        candidate_strategy = "sens_pool"
+    direction_orders = getattr(alloc_cfg, "direction_orders", None)
 
-    best = _run_alloc_candidate_search(
-        model=model,
-        cfg=cfg,
-        hw_proxy=hw_proxy,
-        wafer_layout=wafer_layout,
-        eff_specs=eff_specs,
-        alpha=alpha,
-        last_info=last_info,
-        keep_now=keep_now,
-        sens=sens,
-        usable_budget=usable_budget,
-        search_threads=max(1, int(outer_threads)),
-        fine_split_threads=max(1, int(inner_threads)),
-        freeze_prefix_ratio=freeze_prefix_ratio,
-        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
-        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
-        pool_size=int(getattr(alloc_cfg, "pool_size", 6)),
-        max_candidates=int(getattr(alloc_cfg, "max_candidates", 60)),
-        acc_risk_weight=float(getattr(alloc_cfg, "acc_risk_weight", 0.2)),
-        max_acc_risk=float(max_acc_risk),
-        pick_policy=str(pick_policy),
-    )
+    common_meta = {
+        "alloc_controller": str(controller),
+        "alloc_selected_source": "",
+        "alloc_selected_long_gain": 0.0,
+        "alloc_selected_apply_gain": 0.0,
+        "alloc_inc_long_gain": 0.0,
+        "alloc_best_ch_long_gain": 0.0,
+        "alloc_switched": False,
+        "alloc_inc_age": 0,
+        "alloc_candidate_strategy": str(candidate_strategy),
+        "alloc_decision_basis": "",
+    }
+
+    best = None
+    if controller == "legacy":
+        best = _run_alloc_candidate_search(
+            model=model,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs=eff_specs,
+            alpha=alpha,
+            last_info=last_info,
+            keep_now=keep_now,
+            sens=sens,
+            usable_budget=usable_budget,
+            search_threads=max(1, int(outer_threads)),
+            fine_split_threads=max(1, int(inner_threads)),
+            freeze_prefix_ratio=freeze_prefix_ratio,
+            keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+            min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+            pool_size=int(getattr(alloc_cfg, "pool_size", 6)),
+            max_candidates=int(getattr(alloc_cfg, "max_candidates", 60)),
+            acc_risk_weight=float(getattr(alloc_cfg, "acc_risk_weight", 0.2)),
+            max_acc_risk=float(max_acc_risk),
+            pick_policy=str(pick_policy),
+        )
+    else:
+        eff_specs_cpu = _to_cpu_tensor_dict(eff_specs)
+        alpha_cpu = alpha.detach().cpu() if torch.is_tensor(alpha) else alpha
+        base_eval = _eval_single_alloc_candidate(
+            keep_now,
+            model=model,
+            last_info=last_info,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs=eff_specs_cpu,
+            alpha=alpha_cpu,
+            fine_split_threads=max(1, int(inner_threads)),
+        )
+        base_obj = float(base_eval.get("objective", 1.0e18))
+        alloc_probe_points = int(getattr(alloc_cfg, "probe_points", 1) or 1)
+        alloc_probe_alphas = [float(x) for x in list(getattr(alloc_cfg, "probe_alphas", [1.0]) or [1.0])[: max(1, alloc_probe_points)]]
+        alloc_probe_use_final = bool(getattr(alloc_cfg, "probe_use_final_range", True))
+        alloc_probe_local_mult = float(getattr(alloc_cfg, "probe_local_scale_mult", 2.0) or 2.0)
+        keep_end = 1.0
+        try:
+            sched = getattr(getattr(cfg, "ast", None), "schedule", None)
+            keep_end = float(getattr(sched, "ch_keep_end", 1.0) or 1.0)
+        except Exception:
+            keep_end = 1.0
+        lookahead_budget = float(max(0.0, keep_mean_prunable - float(keep_end)))
+        if not alloc_probe_use_final:
+            lookahead_budget = float(min(lookahead_budget, max(0.0, alloc_probe_local_mult * float(usable_budget))))
+        if controller == "ds_fixed":
+            alloc_probe_points = 1
+            alloc_probe_alphas = [1.0]
+            alloc_probe_use_final = False
+            lookahead_budget = float(max(0.0, usable_budget))
+
+        dirs_total = int(max(1, int(getattr(alloc_cfg, "max_candidates", 60)) // int(max(1, alloc_probe_points))))
+        dirs = _build_alloc_direction_pool(
+            keep_now=keep_now,
+            sens=sens,
+            freeze_prefix_ratio=float(freeze_prefix_ratio),
+            pool_size=int(getattr(alloc_cfg, "pool_size", 6)),
+            max_directions=int(dirs_total),
+            candidate_strategy=str(candidate_strategy),
+            direction_orders=list(direction_orders) if direction_orders is not None else None,
+        )
+
+        if lookahead_budget > 1e-8 and usable_budget > 1e-8 and dirs:
+            if controller == "new_ours":
+                inc_eval = None
+                incumbent = run_state.get("alloc_incumbent_direction", None)
+                keep_incumbent = bool(getattr(alloc_cfg, "keep_incumbent", True))
+                if keep_incumbent and isinstance(incumbent, dict) and incumbent.get("direction_items", None):
+                    inc_eval = _eval_alloc_direction_probe(
+                        direction_items=incumbent["direction_items"],
+                        keep_now=keep_now,
+                        base_obj=float(base_obj),
+                        usable_budget=float(usable_budget),
+                        lookahead_budget=float(lookahead_budget),
+                        probe_points=int(alloc_probe_points),
+                        probe_alphas=list(alloc_probe_alphas),
+                        probe_use_final_range=bool(alloc_probe_use_final),
+                        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+                        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+                        freeze_prefix_ratio=float(freeze_prefix_ratio),
+                        sens=sens,
+                        model=model,
+                        cfg=cfg,
+                        hw_proxy=hw_proxy,
+                        wafer_layout=wafer_layout,
+                        eff_specs_cpu=eff_specs_cpu,
+                        alpha_cpu=alpha_cpu,
+                        last_info=last_info,
+                        fine_split_threads=max(1, int(inner_threads)),
+                        search_threads=max(1, int(outer_threads)),
+                        max_acc_risk=float(max_acc_risk),
+                        pick_policy=str(pick_policy),
+                    )
+                best_ch = None
+                for items in dirs:
+                    res = _eval_alloc_direction_probe(
+                        direction_items=items,
+                        keep_now=keep_now,
+                        base_obj=float(base_obj),
+                        usable_budget=float(usable_budget),
+                        lookahead_budget=float(lookahead_budget),
+                        probe_points=int(alloc_probe_points),
+                        probe_alphas=list(alloc_probe_alphas),
+                        probe_use_final_range=bool(alloc_probe_use_final),
+                        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+                        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+                        freeze_prefix_ratio=float(freeze_prefix_ratio),
+                        sens=sens,
+                        model=model,
+                        cfg=cfg,
+                        hw_proxy=hw_proxy,
+                        wafer_layout=wafer_layout,
+                        eff_specs_cpu=eff_specs_cpu,
+                        alpha_cpu=alpha_cpu,
+                        last_info=last_info,
+                        fine_split_threads=max(1, int(inner_threads)),
+                        search_threads=max(1, int(outer_threads)),
+                        max_acc_risk=float(max_acc_risk),
+                        pick_policy=str(pick_policy),
+                    )
+                    if res is None:
+                        continue
+                    if best_ch is None or float(res.get("probe_rel_hw_gain", -1.0e18)) > float(best_ch.get("probe_rel_hw_gain", -1.0e18)) + 1e-12:
+                        best_ch = res
+
+                inc_gain = float(inc_eval.get("probe_rel_hw_gain", 0.0)) if isinstance(inc_eval, dict) else 0.0
+                ch_gain = float(best_ch.get("probe_rel_hw_gain", 0.0)) if isinstance(best_ch, dict) else 0.0
+                common_meta["alloc_inc_long_gain"] = float(inc_gain)
+                common_meta["alloc_best_ch_long_gain"] = float(ch_gain)
+                common_meta["alloc_decision_basis"] = "long_gain_only"
+
+                selected = None
+                selected_source = "none"
+                if max(inc_gain, ch_gain) > 0.0:
+                    if float(ch_gain) > float(inc_gain):
+                        selected = best_ch
+                        selected_source = "challenger"
+                    else:
+                        selected = inc_eval
+                        selected_source = "incumbent"
+
+                if selected is not None:
+                    best = dict(selected)
+                    common_meta["alloc_selected_source"] = str(selected_source)
+                    common_meta["alloc_selected_long_gain"] = float(selected.get("probe_rel_hw_gain", 0.0) or 0.0)
+                    common_meta["alloc_selected_apply_gain"] = float(selected.get("rel_hw_gain", 0.0) or 0.0)
+                    if selected_source == "challenger":
+                        if keep_incumbent:
+                            run_state["alloc_incumbent_direction"] = {
+                                "direction_items": [(int(i), float(w)) for i, w in selected.get("direction_items", [])],
+                                "age": 1,
+                                "last_source": "challenger",
+                            }
+                        else:
+                            run_state["alloc_incumbent_direction"] = None
+                        common_meta["alloc_switched"] = True
+                    else:
+                        prev_age = 0
+                        if isinstance(incumbent, dict):
+                            prev_age = int(incumbent.get("age", 0) or 0)
+                        if keep_incumbent:
+                            run_state["alloc_incumbent_direction"] = {
+                                "direction_items": [(int(i), float(w)) for i, w in selected.get("direction_items", [])],
+                                "age": int(prev_age) + 1,
+                                "last_source": "incumbent",
+                            }
+                        else:
+                            run_state["alloc_incumbent_direction"] = None
+                    common_meta["alloc_inc_age"] = int((run_state.get("alloc_incumbent_direction") or {}).get("age", 0))
+                else:
+                    run_state["alloc_incumbent_direction"] = None
+            elif controller == "ds_fixed":
+                best_ch = None
+                for items in dirs:
+                    res = _eval_alloc_direction_probe(
+                        direction_items=items,
+                        keep_now=keep_now,
+                        base_obj=float(base_obj),
+                        usable_budget=float(usable_budget),
+                        lookahead_budget=float(lookahead_budget),
+                        probe_points=1,
+                        probe_alphas=[1.0],
+                        probe_use_final_range=False,
+                        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+                        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+                        freeze_prefix_ratio=float(freeze_prefix_ratio),
+                        sens=sens,
+                        model=model,
+                        cfg=cfg,
+                        hw_proxy=hw_proxy,
+                        wafer_layout=wafer_layout,
+                        eff_specs_cpu=eff_specs_cpu,
+                        alpha_cpu=alpha_cpu,
+                        last_info=last_info,
+                        fine_split_threads=max(1, int(inner_threads)),
+                        search_threads=max(1, int(outer_threads)),
+                        max_acc_risk=float(max_acc_risk),
+                        pick_policy=str(pick_policy),
+                    )
+                    if res is None:
+                        continue
+                    if best_ch is None or float(res.get("probe_rel_hw_gain", -1.0e18)) > float(best_ch.get("probe_rel_hw_gain", -1.0e18)) + 1e-12:
+                        best_ch = res
+                if isinstance(best_ch, dict) and float(best_ch.get("probe_rel_hw_gain", 0.0)) > 0.0:
+                    best = dict(best_ch)
+                    common_meta["alloc_selected_source"] = "challenger"
+                    common_meta["alloc_selected_long_gain"] = float(best.get("probe_rel_hw_gain", 0.0))
+                    common_meta["alloc_selected_apply_gain"] = float(best.get("rel_hw_gain", 0.0))
+                common_meta["alloc_best_ch_long_gain"] = float(best_ch.get("probe_rel_hw_gain", 0.0)) if isinstance(best_ch, dict) else 0.0
+                common_meta["alloc_decision_basis"] = "long_gain_only"
+                run_state["alloc_incumbent_direction"] = None
+
     if best is None:
         run_state["alloc_last_search"] = {
             "outer": int(outer),
@@ -2806,11 +3192,12 @@ def _maybe_run_alloc_search_and_apply(
             "alloc_epoch": int(phase_state.get("alloc_epoch", -1)),
             "target_global_keep": float(target_global_keep),
             "keep_mean_prunable": float(keep_mean_prunable),
+            **common_meta,
         }
         return
 
     min_rel_hw_improve = float(getattr(alloc_cfg, "min_rel_hw_improve", 0.0))
-    if float(best["rel_hw_gain"]) < float(min_rel_hw_improve):
+    if controller == "legacy" and float(best["rel_hw_gain"]) < float(min_rel_hw_improve):
         run_state["alloc_last_search"] = {
             "outer": int(outer),
             "enabled": True,
@@ -2835,6 +3222,7 @@ def _maybe_run_alloc_search_and_apply(
             "total_score": float(best["total_score"]),
             "target_global_keep": float(target_global_keep),
             "keep_mean_prunable": float(keep_mean_prunable),
+            **common_meta,
         }
         logger.info(
             "[AllocSearch] outer=%d skipped apply: rel_hw_gain=%.6g < min_rel_hw_improve=%.6g",
@@ -2890,6 +3278,7 @@ def _maybe_run_alloc_search_and_apply(
         "probe_objective": float(best.get("probe_objective", 0.0) or 0.0),
         "target_global_keep": float(target_global_keep),
         "keep_mean_prunable": float(keep_mean_prunable),
+        **common_meta,
     }
 
     logger.info(
@@ -3789,6 +4178,7 @@ def train_version_c(
             "alloc_layer_sens_ema": None,
             "alloc_last_keep_applied": None,
             "alloc_last_search": None,
+            "alloc_incumbent_direction": None,
         }
         last_acc1: Optional[float] = None
         best_acc1: Optional[float] = None
@@ -3802,7 +4192,21 @@ def train_version_c(
         freeze_epochs = 0
         total_epochs = 0
         try:
-            start_outer, best_from_ckpt = maybe_auto_resume_version_c(out_dir, model, ema_model, optimizer, scaler, logger)
+            init_ckpt_cfg_path = str(getattr(getattr(cfg, "training", None), "init_ckpt_path", "") or "")
+            init_use_resume_epoch = bool(getattr(getattr(cfg, "training", None), "init_ckpt_use_resume_epoch", True))
+            init_load_ema = bool(getattr(getattr(cfg, "training", None), "init_ckpt_load_ema", True))
+            start_outer_init, best_from_init = maybe_init_from_checkpoint_version_c(
+                init_ckpt_cfg_path,
+                model,
+                ema_model,
+                logger,
+                use_resume_epoch=bool(init_use_resume_epoch),
+                load_ema=bool(init_load_ema),
+            )
+            start_outer_resume, best_from_ckpt = maybe_auto_resume_version_c(out_dir, model, ema_model, optimizer, scaler, logger)
+            start_outer = int(max(int(start_outer_init), int(start_outer_resume)))
+            if best_from_init is not None:
+                best_acc1 = float(best_from_init)
             if best_from_ckpt is not None:
                 best_acc1 = float(best_from_ckpt)
             global_step = int(start_outer) * int(steps_per_outer)
@@ -5243,6 +5647,16 @@ def train_version_c(
                             "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
                             "alloc_acc_risk": float(alloc_last.get("acc_risk", 0.0)),
                             "alloc_total_score": float(alloc_last.get("total_score", 0.0)),
+                            "alloc_controller": str(alloc_last.get("alloc_controller", "")),
+                            "alloc_selected_source": str(alloc_last.get("alloc_selected_source", "")),
+                            "alloc_selected_long_gain": float(alloc_last.get("alloc_selected_long_gain", 0.0)),
+                            "alloc_selected_apply_gain": float(alloc_last.get("alloc_selected_apply_gain", 0.0)),
+                            "alloc_inc_long_gain": float(alloc_last.get("alloc_inc_long_gain", 0.0)),
+                            "alloc_best_ch_long_gain": float(alloc_last.get("alloc_best_ch_long_gain", 0.0)),
+                            "alloc_switched": bool(alloc_last.get("alloc_switched", False)),
+                            "alloc_inc_age": int(alloc_last.get("alloc_inc_age", 0) or 0),
+                            "alloc_candidate_strategy": str(alloc_last.get("alloc_candidate_strategy", "")),
+                            "alloc_decision_basis": str(alloc_last.get("alloc_decision_basis", "")),
                         }
                         if (not log_slim) and hw_stats:
                             stats.update(hw_stats)
@@ -5563,6 +5977,16 @@ def train_version_c(
                     "alloc_rel_hw_gain": float(alloc_last_eval.get("rel_hw_gain", 0.0)),
                     "alloc_acc_risk": float(alloc_last_eval.get("acc_risk", 0.0)),
                     "alloc_total_score": float(alloc_last_eval.get("total_score", 0.0)),
+                    "alloc_controller": str(alloc_last_eval.get("alloc_controller", "")),
+                    "alloc_selected_source": str(alloc_last_eval.get("alloc_selected_source", "")),
+                    "alloc_selected_long_gain": float(alloc_last_eval.get("alloc_selected_long_gain", 0.0)),
+                    "alloc_selected_apply_gain": float(alloc_last_eval.get("alloc_selected_apply_gain", 0.0)),
+                    "alloc_inc_long_gain": float(alloc_last_eval.get("alloc_inc_long_gain", 0.0)),
+                    "alloc_best_ch_long_gain": float(alloc_last_eval.get("alloc_best_ch_long_gain", 0.0)),
+                    "alloc_switched": bool(alloc_last_eval.get("alloc_switched", False)),
+                    "alloc_inc_age": int(alloc_last_eval.get("alloc_inc_age", 0) or 0),
+                    "alloc_candidate_strategy": str(alloc_last_eval.get("alloc_candidate_strategy", "")),
+                    "alloc_decision_basis": str(alloc_last_eval.get("alloc_decision_basis", "")),
                 }
                 with epoch_audit_path.open("a", encoding="utf-8") as f:
                     f.write(safe_dumps(epoch_audit_record) + "\n")

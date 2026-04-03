@@ -78,6 +78,7 @@ class PartitionPlanner:
         lat_ms = float(mapping_obj.get("total_latency_ms", 0.0) or 0.0)
         comm_ms = float(mapping_obj.get("comm_ms", 0.0) or 0.0)
         per_slot_time = mapping_obj.get("per_slot_time_ms", {}) or {}
+        objective_mode = str(getattr(self.cfg, "objective_mode", "legacy") or "legacy")
         w_lat = getattr(self.cfg, "w_latency", 1.0)
         w_comm = getattr(self.cfg, "w_comm", 1e-3)
         w_balance = getattr(self.cfg, "w_balance", 0.0)
@@ -108,13 +109,39 @@ class PartitionPlanner:
             mem_mb = 0.0
             energy_mj = 0.0
 
-        objective = w_lat * float(lat_ms) + w_comm * float(comm_ms) + w_balance * float(imbalance)
+        lat_norm = 0.0
+        mem_norm = 0.0
+        comm_norm = 0.0
+        if objective_mode == "common_norm_lmc":
+            ref_latency_ms = float(getattr(self.cfg, "ref_latency_ms", 1.0) or 1.0)
+            ref_mem_mb = float(getattr(self.cfg, "ref_mem_mb", 1.0) or 1.0)
+            ref_comm_ms = float(getattr(self.cfg, "ref_comm_ms", 1.0) or 1.0)
+            w_latency_norm = float(getattr(self.cfg, "w_latency_norm", 1.0) or 1.0)
+            w_mem_norm = float(getattr(self.cfg, "w_mem_norm", 1.0) or 1.0)
+            w_comm_norm = float(getattr(self.cfg, "w_comm_norm", 1.0) or 1.0)
+            use_balance = bool(getattr(self.cfg, "use_balance_in_objective", False))
+            lat_norm = float(lat_ms) / max(ref_latency_ms, 1e-6)
+            mem_norm = float(mem_mb) / max(ref_mem_mb, 1e-6)
+            comm_norm = float(comm_ms) / max(ref_comm_ms, 1e-6)
+            objective = (
+                w_latency_norm * float(lat_norm)
+                + w_mem_norm * float(mem_norm)
+                + w_comm_norm * float(comm_norm)
+            )
+            if use_balance:
+                objective += float(w_balance) * float(imbalance)
+        else:
+            objective = w_lat * float(lat_ms) + w_comm * float(comm_ms) + w_balance * float(imbalance)
         stats = {
+            "objective_mode": str(objective_mode),
             "latency_ms": float(lat_ms),
             "comm_ms": float(comm_ms),
             "mem_mb": float(mem_mb),
             "energy_mj": float(energy_mj),
             "imbalance": float(imbalance),
+            "lat_norm": float(lat_norm),
+            "mem_norm": float(mem_norm),
+            "comm_norm": float(comm_norm),
         }
         return objective, stats
 

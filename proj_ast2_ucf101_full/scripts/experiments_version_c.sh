@@ -449,6 +449,33 @@ case "$EXP_ID" in
   EXP-A2p-hwsurr-fast-k92)
     run_vc configs/vc_phase3_pruningonly_ucf101_A_hwsurr_fast20_k92.yaml "$(odir EXP-A2p-hwsurr-fast-k92)"
     ;;
+  EXP-A2p25-warm15-prep-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_warm15_prep_k90.yaml "$(odir EXP-A2p25-warm15-prep-k90)"
+    ;;
+  EXP-A2p25-base-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_base_k90.yaml "$(odir EXP-A2p25-base-k90)"
+    ;;
+  EXP-A2p25-hwloss-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_hwloss_k90.yaml "$(odir EXP-A2p25-hwloss-k90)"
+    ;;
+  EXP-A2p25-cem60-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_cem60_k90.yaml "$(odir EXP-A2p25-cem60-k90)"
+    ;;
+  EXP-A2p25-dsfixed-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_dsfixed_k90.yaml "$(odir EXP-A2p25-dsfixed-k90)"
+    ;;
+  EXP-A2p25-newours-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_newours_k90.yaml "$(odir EXP-A2p25-newours-k90)"
+    ;;
+  EXP-A2p25-ab-nomemory-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nomemory_k90.yaml "$(odir EXP-A2p25-ab-nomemory-k90)"
+    ;;
+  EXP-A2p25-ab-nolookahead-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nolookahead_k90.yaml "$(odir EXP-A2p25-ab-nolookahead-k90)"
+    ;;
+  EXP-A2p25-ab-nocandsel-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nocandsel_k90.yaml "$(odir EXP-A2p25-ab-nocandsel-k90)"
+    ;;
   EXP-A4-fast)
     run_vc configs/vc_phase3_full_ucf101_A_main_fast20.yaml "$(odir EXP-A4-fast)"
     ;;

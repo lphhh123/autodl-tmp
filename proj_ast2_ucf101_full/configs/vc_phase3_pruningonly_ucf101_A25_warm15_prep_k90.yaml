@@ -1,0 +1,16 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A25_protocol_k90.yaml
+
+training:
+  outer_epochs: 15
+
+alloc_search:
+  enabled: false
+
+stable_hw:
+  enabled: false
+
+loss:
+  lambda_hw: 0.0
+
+hw:
+  lambda_hw: 0.0

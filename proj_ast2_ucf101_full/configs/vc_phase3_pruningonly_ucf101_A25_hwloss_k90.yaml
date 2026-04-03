@@ -1,0 +1,35 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A25_protocol_k90.yaml
+
+alloc_search:
+  enabled: false
+
+stable_hw:
+  enabled: true
+  no_double_scale:
+    enabled: true
+  normalize:
+    enabled: true
+    mode: ratio
+    weights:
+      wT: 1.0
+      wE: 0.0
+      wM: 1.0
+      wC: 1.0
+    ref:
+      target_ratio_T: 1.0
+      target_ratio_E: 1.0
+      target_ratio_M: 1.0
+      target_ratio_C: 1.0
+  lambda_hw_schedule:
+    enabled: true
+    warmup_epochs: 15
+    ramp_epochs: 10
+    lambda_hw_min: 0.60
+    lambda_hw_max: 0.60
+
+hw:
+  surrogate_grad:
+    enabled: false
+
+training:
+  hw_term_ratio_cap: 0.50
