@@ -1,0 +1,7 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A25_newours_k90.yaml
+
+alloc_search:
+  probe_points: 1
+  probe_alphas: [1.0]
+  probe_use_final_range: false
+  probe_local_scale_mult: 1.0

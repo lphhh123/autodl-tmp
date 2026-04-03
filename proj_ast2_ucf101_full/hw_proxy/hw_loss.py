@@ -874,6 +874,7 @@ def compute_hw_loss(
         {
             "hw_loss_nonfinite": bool(hw_loss_nonfinite),
             "L_hw_norm": float(L_hw_norm_t.detach().cpu().item()),
+            "L_hw_common": float(L_hw_norm_t.detach().cpu().item()),
             "L_hw_total": float(L_hw_total_t.detach().cpu().item()),
         }
     )

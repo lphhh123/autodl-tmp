@@ -1,0 +1,5 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A25_newours_k90.yaml
+
+alloc_search:
+  candidate_strategy: uniform_all
+  pool_size: 0
