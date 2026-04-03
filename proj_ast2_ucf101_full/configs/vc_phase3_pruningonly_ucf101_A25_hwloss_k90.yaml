@@ -5,8 +5,16 @@ alloc_search:
 
 stable_hw:
   enabled: true
+  force_disable_ok: false
+  accuracy_guard:
+    enabled: true
+  locked_acc_ref:
+    enabled: true
+  no_drift:
+    enabled: true
   no_double_scale:
     enabled: true
+  min_latency_ms: 0.001
   normalize:
     enabled: true
     mode: ratio
@@ -27,7 +35,11 @@ stable_hw:
     lambda_hw_min: 0.60
     lambda_hw_max: 0.60
 
+loss:
+  lambda_hw: 0.0
+
 hw:
+  lambda_hw: 0.0
   common_objective_only: true
   surrogate_grad:
     enabled: false
