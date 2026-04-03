@@ -222,6 +222,33 @@ def _ast_interp(a: float, b: float, t: float, curve: str = "linear") -> float:
     return float(a + (b - a) * tt)
 
 
+def _compute_ch_keep_target_stepwise(cfg, epoch: int) -> float:
+    """Return channel keep target with stepwise post-warmup semantics."""
+    ast = getattr(cfg, "ast", None)
+    sched = getattr(ast, "schedule", None) if ast is not None else None
+    if sched is None:
+        return 1.0
+
+    warmup_epochs = int(getattr(sched, "warmup_epochs", 0) or 0)
+    force_dense_epochs = int(getattr(sched, "force_dense_epochs", warmup_epochs) or warmup_epochs)
+    warm_eff = max(int(warmup_epochs), int(force_dense_epochs))
+
+    ch_keep_start = float(getattr(sched, "ch_keep_start", 1.0) or 1.0)
+    ch_keep_end = float(getattr(sched, "ch_keep_end", 1.0) or 1.0)
+    ch_ramp = int(getattr(sched, "ch_ramp_epochs", getattr(sched, "ramp_epochs", 0)) or getattr(sched, "ramp_epochs", 0) or 0)
+    curve = str(getattr(sched, "curve", "cosine") or "cosine")
+
+    if int(epoch) < int(warm_eff):
+        return 1.0
+    if ch_ramp <= 0:
+        return float(ch_keep_end)
+
+    step_idx = int(epoch) - int(warm_eff) + 1
+    t_ch = float(step_idx) / float(ch_ramp)
+    t_ch = float(max(0.0, min(1.0, t_ch)))
+    return float(_ast_interp(ch_keep_start, ch_keep_end, t_ch, curve=curve))
+
+
 def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
     """Compute per-epoch AST (token gating) schedule without mutating cfg.
 
@@ -277,9 +304,7 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
     ch_ramp = int(getattr(sched, "ch_ramp_epochs", ramp) or ramp)
 
     if ramp <= 0:
-        # token schedule has no ramp; still provide ch_keep_target
-        t_ch = 1.0 if ch_ramp <= 0 else 0.0
-        ch_keep_target = _ast_interp(ch_keep_start, ch_keep_end, t_ch, curve=curve) if ch_keep_end != ch_keep_start else float(ch_keep_end)
+        ch_keep_target = _compute_ch_keep_target_stepwise(cfg, int(epoch))
         return {
             "phase": "stabilize",
             "t": 1.0,
@@ -297,13 +322,8 @@ def compute_ast_schedule_effective(cfg, epoch: int) -> dict:
     t = float(max(0.0, min(1.0, t)))
     phase = "ramp" if t < 1.0 else "stabilize"
 
-    # Channel keep schedule uses its own ramp length (defaults to ramp).
-    if ch_ramp <= 0:
-        t_ch = 1.0
-    else:
-        t_ch = float(epoch - warm_eff) / float(ch_ramp)
-        t_ch = float(max(0.0, min(1.0, t_ch)))
-    ch_keep_target = _ast_interp(ch_keep_start, ch_keep_end, t_ch, curve=curve)
+    # Channel keep schedule uses strict stepwise post-warmup semantics.
+    ch_keep_target = _compute_ch_keep_target_stepwise(cfg, int(epoch))
     return {
         "phase": phase,
         "t": t,
@@ -383,6 +403,7 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
     tr_delta_up = float(_oc_select(cfg, "stable_hw.accuracy_guard.controller.trust_region.delta_up", 0.02) or 0.02)
     tr_delta_down = max(0.0, float(tr_delta_down))
     tr_delta_up = max(0.0, float(tr_delta_up))
+    affect_ch_keep_target = bool(_oc_select(cfg, "stable_hw.affect_ch_keep_target", True))
 
     # Soft recovery: instead of hard force-dense, gently roll back pruning target when violating accuracy.
     sr_enabled = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.soft_recovery.enabled", True))
@@ -455,6 +476,7 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
         rho_hold = min(1.0, max(0.0, rho_prev + relax))
 
         guard_mode = str(stable_state.get("guard_mode", "")).upper()
+        base_ch_keep = _compute_ch_keep_target_stepwise(cfg, int(outer))
         last_keep = float(stable_state.get("ch_keep_target_last", frozen.get("ch_keep_target", 1.0) if isinstance(frozen, dict) else 1.0) or 1.0)
 
         if sr_enabled and guard_mode in ("VIOLATE", "RECOVERY"):
@@ -475,11 +497,14 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
             else:
                 desired = float(last_keep)
 
-            # Trust region clamp (avoid oscillation): allow limited up/down adjustments.
-            lo = float(last_keep) - float(tr_delta_down)
-            hi = float(last_keep) + float(tr_delta_up)
-            new_keep = float(max(lo, min(hi, float(desired))))
-            new_keep = float(max(0.0, min(1.0, new_keep)))
+            if affect_ch_keep_target:
+                # Trust region clamp (avoid oscillation): allow limited up/down adjustments.
+                lo = float(last_keep) - float(tr_delta_down)
+                hi = float(last_keep) + float(tr_delta_up)
+                new_keep = float(max(lo, min(hi, float(desired))))
+                new_keep = float(max(0.0, min(1.0, new_keep)))
+            else:
+                new_keep = float(base_ch_keep)
 
             stable_state["soft_recovery_rollbacks"] = int(rollbacks)
             stable_state["soft_recovery_hold_until"] = int(hold_until)
@@ -496,7 +521,8 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
                 frozen["force_dense"] = True
                 frozen["rho_token"] = 1.0
                 frozen["token_temperature"] = float(temp_prev)
-                frozen["ch_keep_target"] = 1.0
+                if affect_ch_keep_target:
+                    frozen["ch_keep_target"] = 1.0
         else:
             # Legacy behavior: optionally hard force-dense on VIOLATE/RECOVERY.
             force_dense_on_violate = bool(_oc_select(cfg, "stable_hw.accuracy_guard.controller.force_dense_on_violate", False))
@@ -504,8 +530,9 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
                 frozen["force_dense"] = True
                 frozen["rho_token"] = 1.0
                 frozen["token_temperature"] = float(temp_prev)
-                frozen["ch_keep_target"] = 1.0
-                stable_state["ch_keep_target_last"] = 1.0
+                if affect_ch_keep_target:
+                    frozen["ch_keep_target"] = 1.0
+                    stable_state["ch_keep_target_last"] = 1.0
             else:
                 frozen["force_dense"] = bool(frozen.get("force_dense", False))
                 frozen["rho_token"] = float(rho_hold)
@@ -513,6 +540,9 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
 
         # Disable AST auxiliary loss during recovery to reduce extra instability.
         frozen["lambda_ast"] = 0.0
+        if not affect_ch_keep_target:
+            frozen["ch_keep_target"] = float(base_ch_keep)
+            stable_state["ch_keep_target_last"] = float(base_ch_keep)
 
         stable_state["ast_sched_frozen"] = dict(frozen)
         stable_state["ast_sched_frozen_outer"] = int(outer)
@@ -529,14 +559,19 @@ def compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_state: Dict
 
     # Apply trust-region to ch_keep_target to prevent abrupt pruning jumps.
     if isinstance(ast_sched, dict) and ("ch_keep_target" in ast_sched) and (ast_sched.get("ch_keep_target") is not None):
-        base_keep = float(ast_sched.get("ch_keep_target", 1.0) or 1.0)
-        prev_keep = float(stable_state.get("ch_keep_target_last", base_keep) or base_keep)
-        lo = float(prev_keep) - float(tr_delta_down)
-        hi = float(prev_keep) + float(tr_delta_up)
-        keep_eff = float(max(lo, min(hi, float(base_keep))))
-        keep_eff = float(max(0.0, min(1.0, keep_eff)))
-        ast_sched["ch_keep_target"] = float(keep_eff)
-        stable_state["ch_keep_target_last"] = float(keep_eff)
+        if affect_ch_keep_target:
+            base_keep = float(ast_sched.get("ch_keep_target", 1.0) or 1.0)
+            prev_keep = float(stable_state.get("ch_keep_target_last", base_keep) or base_keep)
+            lo = float(prev_keep) - float(tr_delta_down)
+            hi = float(prev_keep) + float(tr_delta_up)
+            keep_eff = float(max(lo, min(hi, float(base_keep))))
+            keep_eff = float(max(0.0, min(1.0, keep_eff)))
+            ast_sched["ch_keep_target"] = float(keep_eff)
+            stable_state["ch_keep_target_last"] = float(keep_eff)
+        else:
+            base_keep = _compute_ch_keep_target_stepwise(cfg, int(outer))
+            ast_sched["ch_keep_target"] = float(base_keep)
+            stable_state["ch_keep_target_last"] = float(base_keep)
 
     # Leaving recovery: clear soft-recovery counters (schedule backoff already handled above).
     stable_state.pop("soft_recovery_hold_until", None)
@@ -1607,6 +1642,41 @@ def _build_eval_model_info_with_ch_override(
 def _safe_logit_scalar(p: float, eps: float = 1e-4) -> float:
     p = float(max(eps, min(1.0 - eps, p)))
     return float(math.log(p / (1.0 - p)))
+
+
+def _structural_gate_open_logit(cfg) -> tuple[float, float, float]:
+    ast_cfg = getattr(cfg, "ast", None)
+    pruner_cfg = getattr(ast_cfg, "pruner", None) if ast_cfg is not None else None
+    gate_init_open = float(getattr(pruner_cfg, "gate_init_open", 0.99) if pruner_cfg is not None else 0.99)
+    head_init_open = float(getattr(pruner_cfg, "head_init_open", gate_init_open) if pruner_cfg is not None else gate_init_open)
+    ch_init_open = float(getattr(pruner_cfg, "ch_init_open", gate_init_open) if pruner_cfg is not None else gate_init_open)
+    block_init_open = float(getattr(pruner_cfg, "block_init_open", gate_init_open) if pruner_cfg is not None else gate_init_open)
+    return (_safe_logit_scalar(head_init_open), _safe_logit_scalar(ch_init_open), _safe_logit_scalar(block_init_open))
+
+
+def _force_open_structural_gates_(model, cfg) -> None:
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return
+    head_l, ch_l, block_l = _structural_gate_open_logit(cfg)
+    with torch.no_grad():
+        if hasattr(pruner, "g_head"):
+            pruner.g_head.data.fill_(float(head_l))
+        if hasattr(pruner, "g_ch"):
+            pruner.g_ch.data.fill_(float(ch_l))
+        if hasattr(pruner, "g_block"):
+            pruner.g_block.data.fill_(float(block_l))
+
+
+def _zero_structural_gate_grads_(model) -> None:
+    pruner = _get_ast_pruner(model)
+    if pruner is None:
+        return
+    for name in ("g_head", "g_ch", "g_block"):
+        if hasattr(pruner, name):
+            grad = getattr(getattr(pruner, name), "grad", None)
+            if grad is not None:
+                grad.zero_()
 
 
 def _apply_layerwise_keep_candidate_to_gates(
@@ -3612,6 +3682,9 @@ def train_version_c(
         log_slim = bool(int(os.environ.get("LOG_SLIM", "1")))
         log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
         log_interval_steps = max(1, int(log_interval_steps))
+        force_dense_freeze_structural_gates = bool(
+            _oc_select(cfg, "training.force_dense_freeze_structural_gates", False)
+        )
         # Reduce log bloat from repeated per-step warnings in long Version-C runs.
         # - train.warn_every_steps (or WARN_EVERY_STEPS env) controls how often repeated WARN lines are emitted.
         # - We still count all events and print a per-outer summary (so issues remain auditable).
@@ -4372,11 +4445,18 @@ def train_version_c(
                 stable_hw_state["ast_sched_epoch_used"] = int(ast_epoch_used)
 
                 lambda_ast_eff = float(getattr(getattr(cfg, "loss", None), "lambda_AST", 1.0) or 1.0)
+                freeze_structural_gates_now = False
                 if isinstance(ast_sched, dict) and ast_sched.get("phase") != "disabled":
                     lambda_ast_eff = float(ast_sched.get("lambda_ast", lambda_ast_eff))
                     _apply_ast_runtime_overrides_to_model(model, cfg, ast_sched)
                     if ema_model is not None:
                         _apply_ast_runtime_overrides_to_model(ema_model.ema, cfg, ast_sched)
+
+                    freeze_structural_gates_now = bool(ast_sched.get("force_dense", False)) and bool(force_dense_freeze_structural_gates)
+                    if freeze_structural_gates_now:
+                        _force_open_structural_gates_(model, cfg)
+                        if ema_model is not None:
+                            _force_open_structural_gates_(ema_model.ema, cfg)
 
                     try:
                         _maybe_run_alloc_search_and_apply(
@@ -5543,6 +5623,9 @@ def train_version_c(
                             pass
                         continue
 
+                    if freeze_structural_gates_now:
+                        _zero_structural_gate_grads_(model)
+
                     if grad_clip_norm > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                     scaler.step(optimizer_model)
@@ -5555,6 +5638,10 @@ def train_version_c(
                         # If HW enabled but still no grads, keep silent (avoid log bloat); audit is via stats/trace.
                     # v5.4: forbidden (P0-3) — layout must be updated via discrete assign-only agent + cache
                     scaler.update()
+                    if freeze_structural_gates_now:
+                        _force_open_structural_gates_(model, cfg)
+                        if ema_model is not None:
+                            _force_open_structural_gates_(ema_model.ema, cfg)
                     repaired = _repair_nonfinite_params_(model)
                     if update_alpha:
                         repaired = _repair_nonfinite_params_(chiplet_slots) or repaired
@@ -5609,164 +5696,102 @@ def train_version_c(
                         if not isinstance(alloc_last, dict):
                             alloc_last = {}
 
-                        stats = {
+                        stats_full = {
                             "outer": outer,
                             "step": step,
                             "loss": loss.item(),
                             "acc1": acc1.item(),
-                            # Masking-based pruning compute estimates (theoretical; does not claim real speedup).
                             "token_keep": _to_pyfloat(model_info.get("token_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
-                            "head_keep": _to_pyfloat(model_info.get("head_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
-                            "ch_keep": _to_pyfloat(model_info.get("ch_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
+                            "head_keep_real_mean": _to_pyfloat(model_info.get("head_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
                             "ch_keep_real_mean": float(keep_summary.get("ch_keep_real_mean", 1.0)),
                             "ch_keep_real_min": float(keep_summary.get("ch_keep_real_min", 1.0)),
                             "ch_keep_real_max": float(keep_summary.get("ch_keep_real_max", 1.0)),
                             "ch_keep_prunable_mean": float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
-                            "ch_prune_ratio_logged": _to_pyfloat(model_info.get("ch_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
-                            "block_keep": _to_pyfloat(model_info.get("block_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
+                            "ch_prune_ratio_real": 1.0 - float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
+                            "block_keep_real_mean": _to_pyfloat(model_info.get("block_keep", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
                             "ch_keep_target": float(ast_sched.get("ch_keep_target", 1.0)) if isinstance(ast_sched, dict) else 1.0,
                             "force_dense": bool(ast_sched.get("force_dense", False)) if isinstance(ast_sched, dict) else False,
-                            "seq_len_total": _to_pyfloat(model_info.get("seq_len_total", 0.0), 0.0) if isinstance(model_info, dict) else 0.0,
-                            "seq_len_effective": _to_pyfloat(model_info.get("seq_len_effective", 0.0), 0.0) if isinstance(model_info, dict) else 0.0,
-                            "est_attn_flops_ratio": _to_pyfloat(model_info.get("est_attn_flops_ratio", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
-                            "est_token_linear_flops_ratio": _to_pyfloat(model_info.get("est_token_linear_flops_ratio", 1.0), 1.0) if isinstance(model_info, dict) else 1.0,
                             "lambda_hw": float(lambda_hw_eff),
-                            "acho_lambda": float(stable_hw_state.get("acho_lambda", 0.0)) if stable_hw_enabled else 0.0,
-                            "acho_action": str(stable_hw_state.get("acho_action", "")) if stable_hw_enabled else "",
-                            "roi_cd_until": int(stable_hw_state.get("roi_cooldown_until", -1) or -1) if stable_hw_enabled else -1,
                             "guard_mode": str(stable_hw_state.get("guard_mode", "")) if stable_hw_enabled else "",
                             "freeze_schedule": bool(stable_hw_state.get("freeze_schedule", False)) if stable_hw_enabled else False,
-                            "sr_rollbacks": int(stable_hw_state.get("soft_recovery_rollbacks", 0) or 0) if stable_hw_enabled else 0,
-                            "sr_hold_until": int(stable_hw_state.get("soft_recovery_hold_until", -1) or -1) if stable_hw_enabled else -1,
                             "allow_discrete_updates": bool(allow_discrete),
+                            "alloc_enabled_this_outer": bool(alloc_last.get("alloc_enabled_this_outer", False)),
+                            "alloc_applied": bool(alloc_last.get("alloc_applied", False)),
                             "mapping_updated": step_mapping_updated,
                             "layout_updated": step_layout_updated,
                             "mapping_cache_hit": not step_mapping_updated,
                             "layout_cache_hit": not step_layout_updated,
                             "mapping_signature": cache["mapping_signature"],
                             "layout_signature": cache["layout_signature"],
-                            "alloc_enabled_this_outer": bool(alloc_last.get("alloc_enabled_this_outer", False)),
-                            "alloc_start_after_prune_epochs": int(alloc_last.get("alloc_start_after_prune_epochs", -1)),
-                            "alloc_phase_progress": float(alloc_last.get("alloc_phase_progress", 0.0)),
-                            "alloc_phase_budget_frac": float(alloc_last.get("alloc_phase_budget_frac", 0.0)),
-                            "alloc_budget_frac": float(alloc_last.get("alloc_budget_frac", 0.0)),
-                            "alloc_applied": bool(alloc_last.get("alloc_applied", False)),
-                            "alloc_usable_budget": float(alloc_last.get("alloc_usable_budget", 0.0)),
-                            "alloc_remain_budget": float(alloc_last.get("alloc_remain_budget", 0.0)),
-                            "alloc_base_objective": float(alloc_last.get("base_objective", 0.0)),
-                            "alloc_best_objective": float(alloc_last.get("best_objective", 0.0)),
-                            "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
-                            "alloc_acc_risk": float(alloc_last.get("acc_risk", 0.0)),
-                            "alloc_total_score": float(alloc_last.get("total_score", 0.0)),
-                            "alloc_controller": str(alloc_last.get("alloc_controller", "")),
-                            "alloc_selected_source": str(alloc_last.get("alloc_selected_source", "")),
-                            "alloc_selected_long_gain": float(alloc_last.get("alloc_selected_long_gain", 0.0)),
-                            "alloc_selected_apply_gain": float(alloc_last.get("alloc_selected_apply_gain", 0.0)),
-                            "alloc_inc_long_gain": float(alloc_last.get("alloc_inc_long_gain", 0.0)),
-                            "alloc_best_ch_long_gain": float(alloc_last.get("alloc_best_ch_long_gain", 0.0)),
-                            "alloc_switched": bool(alloc_last.get("alloc_switched", False)),
-                            "alloc_inc_age": int(alloc_last.get("alloc_inc_age", 0) or 0),
-                            "alloc_candidate_strategy": str(alloc_last.get("alloc_candidate_strategy", "")),
-                            "alloc_decision_basis": str(alloc_last.get("alloc_decision_basis", "")),
                         }
-                        if (not log_slim) and hw_stats:
-                            stats.update(hw_stats)
-                        elif hw_stats:
-                            # slim mode: keep only a tiny, stable subset
+                        if stats_full["alloc_enabled_this_outer"]:
+                            stats_full.update(
+                                {
+                                    "alloc_controller": str(alloc_last.get("alloc_controller", "")),
+                                    "alloc_selected_source": str(alloc_last.get("alloc_selected_source", "")),
+                                    "alloc_selected_long_gain": float(alloc_last.get("alloc_selected_long_gain", 0.0)),
+                                    "alloc_selected_apply_gain": float(alloc_last.get("alloc_selected_apply_gain", 0.0)),
+                                    "alloc_switched": bool(alloc_last.get("alloc_switched", False)),
+                                    "alloc_inc_age": int(alloc_last.get("alloc_inc_age", 0) or 0),
+                                }
+                            )
+                        if hw_stats:
+                            stats_full.update(hw_stats)
+
+                        stats_console = {
+                            "outer": stats_full["outer"],
+                            "step": stats_full["step"],
+                            "loss": stats_full["loss"],
+                            "acc1": stats_full["acc1"],
+                            "token_keep": stats_full["token_keep"],
+                            "head_keep_real_mean": stats_full["head_keep_real_mean"],
+                            "ch_keep_real_mean": stats_full["ch_keep_real_mean"],
+                            "ch_keep_real_min": stats_full["ch_keep_real_min"],
+                            "ch_keep_real_max": stats_full["ch_keep_real_max"],
+                            "ch_keep_prunable_mean": stats_full["ch_keep_prunable_mean"],
+                            "ch_prune_ratio_real": stats_full["ch_prune_ratio_real"],
+                            "block_keep_real_mean": stats_full["block_keep_real_mean"],
+                            "ch_keep_target": stats_full["ch_keep_target"],
+                            "force_dense": stats_full["force_dense"],
+                            "lambda_hw": stats_full["lambda_hw"],
+                            "guard_mode": stats_full["guard_mode"],
+                            "freeze_schedule": stats_full["freeze_schedule"],
+                            "allow_discrete_updates": stats_full["allow_discrete_updates"],
+                            "alloc_enabled_this_outer": stats_full["alloc_enabled_this_outer"],
+                            "alloc_applied": stats_full["alloc_applied"],
+                        }
+                        if stats_full["alloc_enabled_this_outer"]:
                             for _k in (
-                                "L_hw_total",
-                                "L_hw_norm",
-                                "raw_latency_ms",
-                                "raw_energy_mj",
-                                "raw_mem_mb",
-                                "raw_comm_ms",
-                                "latency_ms",
-                                "energy_mj",
-                                "mem_mb",
-                                "comm_ms",
-                                "proxy_invalid_count",
-                                "proxy_sanitize_count",
-                                "hw_loss_nonfinite",
+                                "alloc_controller",
+                                "alloc_selected_source",
+                                "alloc_selected_long_gain",
+                                "alloc_selected_apply_gain",
+                                "alloc_switched",
+                                "alloc_inc_age",
                             ):
-                                if _k in hw_stats:
-                                    stats[_k] = hw_stats[_k]
-                        log_stats(logger, stats)
+                                if _k in stats_full:
+                                    stats_console[_k] = stats_full[_k]
+
+                        hw_console_enabled = bool(hw_stats) and (float(lambda_hw_eff) > 0.0 or bool(_oc_select(cfg, "stable_hw.enabled", False)))
+                        if hw_console_enabled:
+                            stats_console["L_hw_total"] = float(hw_stats.get("L_hw_total", 0.0))
+                            stats_console["raw_latency_ms"] = float(hw_stats.get("raw_latency_ms", hw_stats.get("latency_ms", 0.0)))
+                            stats_console["mem_mb"] = float(hw_stats.get("mem_mb", hw_stats.get("raw_mem_mb", 0.0)))
+                            stats_console["comm_ms"] = float(hw_stats.get("comm_ms", hw_stats.get("raw_comm_ms", 0.0)))
+
+                        log_stats(logger, stats_console)
                         with log_path.open("a", encoding="utf-8") as f:
                             if log_slim:
-                                # Minimal per-step record (keeps files small & easy to grep).
-                                f.write(
-                                    safe_dumps(
-                                        {
-                                            "step": int(global_step),
-                                            "outer": int(outer),
-                                            "loss": float(loss.item()),
-                                            "acc1": float(acc1.item()),
-                                            "lambda_hw": float(lambda_hw_eff),
-                                            "lat_ms": float(
-                                                hw_stats.get("raw_latency_ms", hw_stats.get("latency_ms", 0.0)) if hw_stats else 0.0
-                                            ),
-                                            "energy_mj": float(hw_stats.get("energy_mj", 0.0) if hw_stats else 0.0),
-                                            "mem_mb": float(hw_stats.get("mem_mb", 0.0) if hw_stats else 0.0),
-                                            "comm_ms": float(hw_stats.get("comm_ms", 0.0) if hw_stats else 0.0),
-                                            "hw_loss": float(hw_stats.get("L_hw_total", 0.0) if hw_stats else 0.0),
-                                            "mapping_cache_hit": (not step_mapping_updated),
-                                            "layout_cache_hit": (not step_layout_updated),
-                                            "ch_keep_real_mean": float(keep_summary.get("ch_keep_real_mean", 1.0)),
-                                            "ch_keep_prunable_mean": float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
-                                            "alloc_phase_budget_frac": float(alloc_last.get("alloc_phase_budget_frac", 0.0)),
-                                            "alloc_budget_frac": float(alloc_last.get("alloc_budget_frac", 0.0)),
-                                            "alloc_applied": bool(alloc_last.get("alloc_applied", False)),
-                                            "alloc_usable_budget": float(alloc_last.get("alloc_usable_budget", 0.0)),
-                                            "alloc_remain_budget": float(alloc_last.get("alloc_remain_budget", 0.0)),
-                                            "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
-                                        }
-                                    )
-                                    + "\n"
-                                )
+                                payload = dict(stats_console)
+                                payload["step"] = int(global_step)
+                                payload["outer"] = int(outer)
+                                f.write(safe_dumps(payload) + "\n")
                             else:
-                                f.write(
-                                    safe_dumps(
-                                        {
-                                            "step": int(global_step),
-                                            "outer": int(outer),
-                                            "loss": float(loss.item()),
-                                            "lat_ms": float(
-                                                hw_stats.get(
-                                                    "raw_latency_ms",
-                                                    hw_stats.get("proxy_raw_latency_ms", hw_stats.get("latency_ms", 0.0)),
-                                                )
-                                            ),
-                                            "energy_mj": float(hw_stats.get("energy_mj", 0.0)),
-                                            "mem_mb": float(hw_stats.get("mem_mb", 0.0)),
-                                            "lambda_hw": float(lambda_hw_eff),
-                                            "stable_hw": stable_hw_log_fields(stable_hw_state, cfg),
-                                            "mapping_updated": step_mapping_updated,
-                                            "layout_updated": step_layout_updated,
-                                            "mapping_cache_hit": (not step_mapping_updated),
-                                            "layout_cache_hit": (not step_layout_updated),
-                                            "mapping_signature": cache["mapping_signature"],
-                                            "layout_signature": cache["layout_signature"],
-                                            "ch_keep_real_mean": float(keep_summary.get("ch_keep_real_mean", 1.0)),
-                                            "ch_keep_real_min": float(keep_summary.get("ch_keep_real_min", 1.0)),
-                                            "ch_keep_real_max": float(keep_summary.get("ch_keep_real_max", 1.0)),
-                                            "ch_keep_prunable_mean": float(keep_summary.get("ch_keep_prunable_mean", 1.0)),
-                                            "alloc_enabled_this_outer": bool(alloc_last.get("alloc_enabled_this_outer", False)),
-                                            "alloc_start_after_prune_epochs": int(alloc_last.get("alloc_start_after_prune_epochs", -1)),
-                                            "alloc_phase_progress": float(alloc_last.get("alloc_phase_progress", 0.0)),
-                                            "alloc_phase_budget_frac": float(alloc_last.get("alloc_phase_budget_frac", 0.0)),
-                                            "alloc_budget_frac": float(alloc_last.get("alloc_budget_frac", 0.0)),
-                                            "alloc_applied": bool(alloc_last.get("alloc_applied", False)),
-                                            "alloc_usable_budget": float(alloc_last.get("alloc_usable_budget", 0.0)),
-                                            "alloc_remain_budget": float(alloc_last.get("alloc_remain_budget", 0.0)),
-                                            "alloc_base_objective": float(alloc_last.get("base_objective", 0.0)),
-                                            "alloc_best_objective": float(alloc_last.get("best_objective", 0.0)),
-                                            "alloc_rel_hw_gain": float(alloc_last.get("rel_hw_gain", 0.0)),
-                                            "alloc_acc_risk": float(alloc_last.get("acc_risk", 0.0)),
-                                            "alloc_total_score": float(alloc_last.get("total_score", 0.0)),
-                                        }
-                                    )
-                                    + "\n"
-                                )
+                                payload = dict(stats_full)
+                                payload["step"] = int(global_step)
+                                payload["outer"] = int(outer)
+                                payload["stable_hw"] = stable_hw_log_fields(stable_hw_state, cfg)
+                                f.write(safe_dumps(payload) + "\n")
                     global_step += 1
 
                 # Step B: alpha refinement (only meaningful when HW term enabled)
