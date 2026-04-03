@@ -2,6 +2,7 @@ _base_: configs/vc_phase3_pruningonly_ucf101_A25_protocol_k90.yaml
 
 training:
   outer_epochs: 15
+  force_dense_freeze_structural_gates: true
 
 alloc_search:
   enabled: false

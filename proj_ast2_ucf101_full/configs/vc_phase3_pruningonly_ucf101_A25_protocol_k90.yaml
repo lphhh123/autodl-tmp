@@ -6,6 +6,7 @@ training:
   init_ckpt_path: ""
   init_ckpt_use_resume_epoch: true
   init_ckpt_load_ema: true
+  force_dense_freeze_structural_gates: true
 
 train:
   warmup_epochs: 15
@@ -38,3 +39,6 @@ hw:
   latency_ref_ms: 2.20
   memory_ref_mb: 230.0
   comm_ref_ms: 0.0055
+
+stable_hw:
+  affect_ch_keep_target: false

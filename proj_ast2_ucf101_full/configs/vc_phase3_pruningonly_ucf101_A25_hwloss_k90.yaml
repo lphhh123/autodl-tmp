@@ -5,6 +5,7 @@ alloc_search:
 
 stable_hw:
   enabled: true
+  affect_ch_keep_target: false
   force_disable_ok: false
   accuracy_guard:
     enabled: true
