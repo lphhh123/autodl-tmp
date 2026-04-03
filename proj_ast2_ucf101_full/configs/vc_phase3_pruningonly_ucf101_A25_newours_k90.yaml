@@ -22,3 +22,11 @@ alloc_search:
   probe_apply_check: true
   search_threads_outer: 6
   search_threads_inner: 5
+
+stable_hw:
+  enabled: false
+  enable_guard_controls: false
+
+hw:
+  use_hw_loss: false
+  lambda_hw: 0.0
