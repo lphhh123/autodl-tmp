@@ -10,4 +10,5 @@ loss:
   lambda_hw: 0.0
 
 hw:
+  use_hw_loss: false
   lambda_hw: 0.0

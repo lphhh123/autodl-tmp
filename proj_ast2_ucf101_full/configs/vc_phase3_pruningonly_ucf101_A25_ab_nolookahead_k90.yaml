@@ -5,3 +5,11 @@ alloc_search:
   probe_alphas: [1.0]
   probe_use_final_range: false
   probe_local_scale_mult: 1.0
+
+stable_hw:
+  enabled: false
+  enable_guard_controls: false
+
+hw:
+  use_hw_loss: false
+  lambda_hw: 0.0

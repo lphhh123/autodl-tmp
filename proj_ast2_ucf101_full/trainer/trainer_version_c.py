@@ -348,6 +348,12 @@ def _stablehw_freeze_ast_now(stable_state: Dict[str, Any]) -> bool:
     )
 
 
+def _stable_hw_guard_controls_enabled(cfg) -> bool:
+    if bool(_oc_select(cfg, "suite_cleanup.disable_stable_hw_guard_controls", False)):
+        return False
+    return bool(_oc_select(cfg, "stable_hw.enable_guard_controls", True))
+
+
 def _apply_ast_runtime_overrides_to_model(model: torch.nn.Module, cfg, ast_sched: dict) -> Optional[dict]:
     """Apply AST schedule to a model's pruner (if present) without mutating cfg."""
     model_u = unwrap_model(model)
@@ -3682,6 +3688,24 @@ def train_version_c(
         log_slim = bool(int(os.environ.get("LOG_SLIM", "1")))
         log_interval_steps = int(os.environ.get("LOG_INTERVAL_STEPS", default=(200 if log_slim else 10)))
         log_interval_steps = max(1, int(log_interval_steps))
+        suite_cleanup_enabled = bool(_oc_select(cfg, "suite_cleanup.enabled", False))
+        disable_stable_hw_guard_controls = bool(
+            _oc_select(cfg, "suite_cleanup.disable_stable_hw_guard_controls", False)
+        )
+        suppress_stable_hw_epoch_summary = bool(
+            _oc_select(cfg, "suite_cleanup.suppress_stable_hw_epoch_summary", False)
+        )
+        suppress_stable_hw_debug_lines = bool(
+            _oc_select(cfg, "suite_cleanup.suppress_stable_hw_debug_lines", False)
+        )
+        suppress_alloc_fields_when_disabled = bool(
+            _oc_select(cfg, "suite_cleanup.suppress_alloc_fields_when_disabled", False)
+        )
+        suppress_hw_fields_when_zero = bool(_oc_select(cfg, "suite_cleanup.suppress_hw_fields_when_zero", False))
+        suppress_head_block_keep_console = bool(
+            _oc_select(cfg, "suite_cleanup.suppress_head_block_keep_console", False)
+        )
+        slim_console_log = bool(_oc_select(cfg, "suite_cleanup.slim_console_log", False))
         force_dense_freeze_structural_gates = bool(
             _oc_select(cfg, "training.force_dense_freeze_structural_gates", False)
         )
@@ -4319,6 +4343,7 @@ def train_version_c(
                 nan_loss_total_before = int(run_state.get("warn_nan_total_loss_total", 0))
                 nan_loss_logged_before = int(run_state.get("warn_nan_total_loss_logged", 0))
                 stable_hw_enabled = bool(getattr(stable_hw_cfg, "enabled", True)) if stable_hw_cfg else False
+                guard_controls_enabled = bool(stable_hw_enabled and _stable_hw_guard_controls_enabled(cfg))
                 if stable_hw_enabled:
                     legacy_loss_lambda = float(getattr(getattr(cfg, "loss", None), "lambda_hw", 0.0) or 0.0)
                     legacy_hw_lambda = float(getattr(getattr(cfg, "hw", None), "lambda_hw", 0.0) or 0.0)
@@ -4349,20 +4374,25 @@ def train_version_c(
 
                     # IMPORTANT: even when prev_val is None (first epoch), apply_accuracy_guard()
                     # will set guard_mode=WARMUP and allow_discrete_updates=True by contract.
-                    stable_decision, allow_discrete = apply_accuracy_guard(
-                        epoch=outer,
-                        stable_hw_cfg=cfg,
-                        stable_hw_state=stable_hw_state,
-                        val_metric_or_none=float(prev_val) if (not use_train_ema and prev_val is not None) else None,
-                        has_val_this_epoch=bool((not use_train_ema) and (prev_val is not None)),
-                        train_ema_or_none=float(prev_train_ema) if (use_train_ema and prev_train_ema is not None) else None,
-                    )
-                    stable_hw_state = stable_decision.state
-                    stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
-                    if str(stable_hw_state.get("guard_mode", "")).upper() != "HW_OPT":
-                        gating_epochs += 1
-                    if not bool(stable_hw_state.get("allow_discrete_updates", True)):
-                        freeze_epochs += 1
+                    if guard_controls_enabled:
+                        stable_decision, allow_discrete = apply_accuracy_guard(
+                            epoch=outer,
+                            stable_hw_cfg=cfg,
+                            stable_hw_state=stable_hw_state,
+                            val_metric_or_none=float(prev_val) if (not use_train_ema and prev_val is not None) else None,
+                            has_val_this_epoch=bool((not use_train_ema) and (prev_val is not None)),
+                            train_ema_or_none=float(prev_train_ema) if (use_train_ema and prev_train_ema is not None) else None,
+                        )
+                        stable_hw_state = stable_decision.state
+                        stable_hw_state["allow_discrete_updates"] = bool(allow_discrete)
+                        if str(stable_hw_state.get("guard_mode", "")).upper() != "HW_OPT":
+                            gating_epochs += 1
+                        if not bool(stable_hw_state.get("allow_discrete_updates", True)):
+                            freeze_epochs += 1
+                    else:
+                        stable_hw_state["allow_discrete_updates"] = True
+                        stable_hw_state["guard_mode"] = "HW_OPT"
+                        stable_hw_state["freeze_schedule"] = False
                     # ---- invariants (v5.4) ----
                     if stable_hw_state.get("acc_ref") is not None:
                         cur = float(stable_hw_state["acc_ref"])
@@ -4401,7 +4431,7 @@ def train_version_c(
                 # stable_hw disabled: fallback to legacy cfg.hw.lambda_hw (for ablations/baselines)
                 if stable_hw_enabled:
                     kill_rem = int(stable_hw_state.get("hw_kill_remaining", 0) or 0)
-                    if kill_rem > 0:
+                    if guard_controls_enabled and kill_rem > 0:
                         stable_hw_state["hw_kill_remaining"] = kill_rem - 1
                         stable_hw_state["lambda_hw_effective"] = 0.0
                         stable_hw_state["allow_discrete_updates"] = False
@@ -4420,7 +4450,7 @@ def train_version_c(
                 rem_rec = int(run_state.get("user_recovery_remaining", 0) or 0)
                 user_rec_active = (rem_rec > 0) and (int(outer) >= int(start_rec))
                 run_state["user_recovery_active"] = bool(user_rec_active)
-                if user_rec_active:
+                if guard_controls_enabled and user_rec_active:
                     stable_hw_state["freeze_schedule"] = True
                     stable_hw_state["in_recovery"] = True
                     stable_hw_state["guard_mode"] = "USER_RECOVERY"
@@ -4440,7 +4470,7 @@ def train_version_c(
                 # Ensure the virtual epoch is aligned to resume start point.
                 stable_hw_state.setdefault("ast_sched_virtual_epoch", int(outer))
                 ast_sched, ast_epoch_used = compute_ast_schedule_effective_with_stable_hw_freeze(cfg, stable_hw_state, int(outer))
-                freeze_now = bool(_stablehw_freeze_ast_now(stable_hw_state)) if stable_hw_enabled else False
+                freeze_now = bool(_stablehw_freeze_ast_now(stable_hw_state)) if guard_controls_enabled else False
                 stable_hw_state["freeze_ast_schedule"] = bool(freeze_now)
                 stable_hw_state["ast_sched_epoch_used"] = int(ast_epoch_used)
 
@@ -4509,7 +4539,7 @@ def train_version_c(
                             getattr(sched0, "curve", None),
                         )
                 allow_discrete_updates = (
-                    bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
+                    bool(stable_hw_state.get("allow_discrete_updates", True)) if guard_controls_enabled else True
                 )
                 # v5 discrete update gating (allow_discrete_updates=False in RECOVERY):
                 #   - partition/mapping updates
@@ -4526,7 +4556,7 @@ def train_version_c(
                 )
                 stable_hw_state["discrete_frozen_init_mapping"] = False
 
-                if (not allow_discrete_updates) and (cache.get("mapping") is None or cache.get("layout") is None):
+                if guard_controls_enabled and (not allow_discrete_updates) and (cache.get("mapping") is None or cache.get("layout") is None):
                     gm = str(stable_hw_state.get("guard_mode", "")).upper()
 
                     # Only allow cache init during WARMUP (Acc-First, no HW influence anyway)
@@ -4576,9 +4606,9 @@ def train_version_c(
                     and int(outer) < int(hw_first_outer) + int(hw_stabilize_epochs)
                 )
 
-                if in_hw_stabilize:
+                if guard_controls_enabled and in_hw_stabilize:
                     # disable discrete updates and alpha step; reuse cached mapping/layout only
-                    if allow_discrete_updates or update_alpha:
+                    if (allow_discrete_updates or update_alpha) and (not suppress_stable_hw_debug_lines):
                         logger.warning(
                             "[HWGuard] stabilize window active (outer=%s first=%s len=%s): disable discrete updates + alpha",
                             int(outer),
@@ -4616,9 +4646,10 @@ def train_version_c(
                         need_update_mapping = need_update_mapping and (cache["mapping"] is None)
                         need_update_layout = need_update_layout and (cache["layout"] is None)
 
-                    if (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
+                    if guard_controls_enabled and (need_update_mapping or need_update_layout) and (not allow_discrete_updates):
                         stable_hw_state["gating_reason_code"] = "discrete_updates_blocked"
-                        print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
+                        if not suppress_stable_hw_debug_lines:
+                            print("[StableHW] Discrete updates frozen; reuse cached mapping/layout this step.")
                         need_update_mapping = False
                         need_update_layout = False
 
@@ -5738,28 +5769,63 @@ def train_version_c(
                         if hw_stats:
                             stats_full.update(hw_stats)
 
-                        stats_console = {
-                            "outer": stats_full["outer"],
-                            "step": stats_full["step"],
-                            "loss": stats_full["loss"],
-                            "acc1": stats_full["acc1"],
-                            "token_keep": stats_full["token_keep"],
-                            "head_keep_real_mean": stats_full["head_keep_real_mean"],
-                            "ch_keep_real_mean": stats_full["ch_keep_real_mean"],
-                            "ch_keep_real_min": stats_full["ch_keep_real_min"],
-                            "ch_keep_real_max": stats_full["ch_keep_real_max"],
-                            "ch_keep_prunable_mean": stats_full["ch_keep_prunable_mean"],
-                            "ch_prune_ratio_real": stats_full["ch_prune_ratio_real"],
-                            "block_keep_real_mean": stats_full["block_keep_real_mean"],
-                            "ch_keep_target": stats_full["ch_keep_target"],
-                            "force_dense": stats_full["force_dense"],
-                            "lambda_hw": stats_full["lambda_hw"],
-                            "guard_mode": stats_full["guard_mode"],
-                            "freeze_schedule": stats_full["freeze_schedule"],
-                            "allow_discrete_updates": stats_full["allow_discrete_updates"],
-                            "alloc_enabled_this_outer": stats_full["alloc_enabled_this_outer"],
-                            "alloc_applied": stats_full["alloc_applied"],
-                        }
+                        if suite_cleanup_enabled and slim_console_log:
+                            stats_console = {
+                                "outer": stats_full["outer"],
+                                "step": stats_full["step"],
+                                "loss": stats_full["loss"],
+                                "acc1": stats_full["acc1"],
+                                "token_keep": stats_full["token_keep"],
+                                "ch_keep_real_mean": stats_full["ch_keep_real_mean"],
+                                "ch_keep_real_min": stats_full["ch_keep_real_min"],
+                                "ch_keep_real_max": stats_full["ch_keep_real_max"],
+                                "ch_keep_prunable_mean": stats_full["ch_keep_prunable_mean"],
+                                "ch_prune_ratio_real": stats_full["ch_prune_ratio_real"],
+                                "ch_keep_target": stats_full["ch_keep_target"],
+                                "lambda_hw": stats_full["lambda_hw"],
+                            }
+                            if not suppress_head_block_keep_console:
+                                stats_console["head_keep_real_mean"] = stats_full["head_keep_real_mean"]
+                                stats_console["block_keep_real_mean"] = stats_full["block_keep_real_mean"]
+                            alloc_is_active = bool(stats_full["alloc_enabled_this_outer"])
+                            if alloc_is_active:
+                                stats_console["alloc_applied"] = stats_full["alloc_applied"]
+                                for _k in (
+                                    "alloc_controller",
+                                    "alloc_selected_source",
+                                    "alloc_selected_long_gain",
+                                    "alloc_selected_apply_gain",
+                                    "alloc_switched",
+                                    "alloc_inc_age",
+                                ):
+                                    if _k in stats_full:
+                                        stats_console[_k] = stats_full[_k]
+                            elif not suppress_alloc_fields_when_disabled:
+                                stats_console["alloc_enabled_this_outer"] = stats_full["alloc_enabled_this_outer"]
+                                stats_console["alloc_applied"] = stats_full["alloc_applied"]
+                        else:
+                            stats_console = {
+                                "outer": stats_full["outer"],
+                                "step": stats_full["step"],
+                                "loss": stats_full["loss"],
+                                "acc1": stats_full["acc1"],
+                                "token_keep": stats_full["token_keep"],
+                                "head_keep_real_mean": stats_full["head_keep_real_mean"],
+                                "ch_keep_real_mean": stats_full["ch_keep_real_mean"],
+                                "ch_keep_real_min": stats_full["ch_keep_real_min"],
+                                "ch_keep_real_max": stats_full["ch_keep_real_max"],
+                                "ch_keep_prunable_mean": stats_full["ch_keep_prunable_mean"],
+                                "ch_prune_ratio_real": stats_full["ch_prune_ratio_real"],
+                                "block_keep_real_mean": stats_full["block_keep_real_mean"],
+                                "ch_keep_target": stats_full["ch_keep_target"],
+                                "force_dense": stats_full["force_dense"],
+                                "lambda_hw": stats_full["lambda_hw"],
+                                "guard_mode": stats_full["guard_mode"],
+                                "freeze_schedule": stats_full["freeze_schedule"],
+                                "allow_discrete_updates": stats_full["allow_discrete_updates"],
+                                "alloc_enabled_this_outer": stats_full["alloc_enabled_this_outer"],
+                                "alloc_applied": stats_full["alloc_applied"],
+                            }
                         if stats_full["alloc_enabled_this_outer"]:
                             for _k in (
                                 "alloc_controller",
@@ -5772,7 +5838,19 @@ def train_version_c(
                                 if _k in stats_full:
                                     stats_console[_k] = stats_full[_k]
 
-                        hw_console_enabled = bool(hw_stats) and (float(lambda_hw_eff) > 0.0 or bool(_oc_select(cfg, "stable_hw.enabled", False)))
+                        hw_console_enabled = bool(hw_stats) and (
+                            float(lambda_hw_eff) > 0.0 or bool(_oc_select(cfg, "stable_hw.enabled", False))
+                        )
+                        if suite_cleanup_enabled and suppress_hw_fields_when_zero:
+                            hw_console_enabled = bool(hw_stats) and (float(lambda_hw_eff) > 0.0) and any(
+                                float(hw_stats.get(_k, hw_stats.get(_fallback, 0.0)) or 0.0) != 0.0
+                                for _k, _fallback in (
+                                    ("L_hw_total", "L_hw"),
+                                    ("raw_latency_ms", "latency_ms"),
+                                    ("mem_mb", "raw_mem_mb"),
+                                    ("comm_ms", "raw_comm_ms"),
+                                )
+                            )
                         if hw_console_enabled:
                             stats_console["L_hw_total"] = float(hw_stats.get("L_hw_total", 0.0))
                             stats_console["raw_latency_ms"] = float(hw_stats.get("raw_latency_ms", hw_stats.get("latency_ms", 0.0)))
@@ -6071,7 +6149,7 @@ def train_version_c(
                         run_state["user_recovery_remaining"] = int(rem - 1)
                         if int(rem - 1) == 0:
                             logger.info("[UserRecovery] finished at outer=%d", int(outer))
-                if stable_hw_enabled:
+                if stable_hw_enabled and guard_controls_enabled:
                     stable_decision, _ = apply_accuracy_guard(
                         epoch=outer,
                         stable_hw_cfg=cfg,
@@ -6242,6 +6320,15 @@ def train_version_c(
                                         "If this is unexpected, inspect locked_acc_ref/curve settings."
                                     )
                                     stable_hw_state["_acc_ref_once"] = cur
+                elif stable_hw_enabled:
+                    class _StableFallbackDecision:
+                        lambda_hw_effective = float(stable_hw_state.get("lambda_hw_effective", 0.0) or 0.0)
+                        guard_mode = "HW_OPT"
+                        lambda_hw_base = float(stable_hw_state.get("lambda_hw_base", 0.0) or 0.0)
+                        reason = {}
+                        stop_training = False
+
+                    stable_decision = _StableFallbackDecision()
 
                 if stable_hw_enabled:
                     # v5.4: always call; stable_hw decides freeze vs ema-fallback internally
@@ -6296,24 +6383,25 @@ def train_version_c(
                 allow_discrete = (
                     bool(stable_hw_state.get("allow_discrete_updates", True)) if stable_hw_enabled else True
                 )
-                print(
-                    f"[StableHW] epoch={outer} mode={guard_mode} "
-                    f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
-                )
-                logger.info(
-                    f"[StableHW][epoch={outer}] "
-                    f"mode={stable_hw_state.get('guard_mode')} "
-                    f"acc_used_raw={stable_hw_state.get('acc_used_raw')} "
-                    f"acc_used_ema={stable_hw_state.get('acc_used_enter')} "
-                    f"acc_ref={stable_hw_state.get('acc_ref_value', stable_hw_state.get('acc_ref'))} "
-                    f"eps={stable_hw_state.get('eps_enter')} "
-                    f"drop={stable_hw_state.get('acc_drop_enter')} "
-                    f"below={stable_hw_state.get('below_cnt')}/{stable_hw_state.get('k_enter')} "
-                    f"lambda_base={stable_hw_state.get('lambda_hw_base')} "
-                    f"lambda_eff={stable_hw_state.get('lambda_hw_effective')} "
-                    f"allow_discrete={stable_hw_state.get('allow_discrete_updates')} "
-                    f"freeze_schedule={stable_hw_state.get('freeze_schedule')}"
-                )
+                if not suppress_stable_hw_epoch_summary:
+                    print(
+                        f"[StableHW] epoch={outer} mode={guard_mode} "
+                        f"lambda_hw_eff={lambda_hw_eff:.6g} allow_discrete={allow_discrete}"
+                    )
+                    logger.info(
+                        f"[StableHW][epoch={outer}] "
+                        f"mode={stable_hw_state.get('guard_mode')} "
+                        f"acc_used_raw={stable_hw_state.get('acc_used_raw')} "
+                        f"acc_used_ema={stable_hw_state.get('acc_used_enter')} "
+                        f"acc_ref={stable_hw_state.get('acc_ref_value', stable_hw_state.get('acc_ref'))} "
+                        f"eps={stable_hw_state.get('eps_enter')} "
+                        f"drop={stable_hw_state.get('acc_drop_enter')} "
+                        f"below={stable_hw_state.get('below_cnt')}/{stable_hw_state.get('k_enter')} "
+                        f"lambda_base={stable_hw_state.get('lambda_hw_base')} "
+                        f"lambda_eff={stable_hw_state.get('lambda_hw_effective')} "
+                        f"allow_discrete={stable_hw_state.get('allow_discrete_updates')} "
+                        f"freeze_schedule={stable_hw_state.get('freeze_schedule')}"
+                    )
                 # ---- v5.4: auditable acc source for gating / locked ref (SPEC_C) ----
                 acc_used_source = stable_hw_state.get("acc_used_source", None)
                 acc_used_value = stable_hw_state.get(

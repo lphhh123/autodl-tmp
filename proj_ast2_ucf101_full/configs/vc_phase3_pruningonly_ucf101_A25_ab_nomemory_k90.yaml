@@ -2,3 +2,11 @@ _base_: configs/vc_phase3_pruningonly_ucf101_A25_newours_k90.yaml
 
 alloc_search:
   keep_incumbent: false
+
+stable_hw:
+  enabled: false
+  enable_guard_controls: false
+
+hw:
+  use_hw_loss: false
+  lambda_hw: 0.0
