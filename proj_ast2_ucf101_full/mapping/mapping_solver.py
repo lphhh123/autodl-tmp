@@ -486,10 +486,14 @@ class MappingSolver:
             mem_mat = cost["mem_mb"]
             power_mat = cost["power_w"]
             K, S = mem_mat.shape
+            # Keep memory semantics consistent with hw_proxy/hw_loss.py and
+            # mapping/partitioner.py:
+            # accumulate per-segment memory on each slot, then take the maximum
+            # slot usage as peak memory.
             per_slot_mem = {s: 0.0 for s in range(S)}
             for k in range(min(K, len(mapping), len(segments))):
                 d = int(mapping[k])
-                per_slot_mem[d] = max(per_slot_mem[d], float(mem_mat[k, d]))
+                per_slot_mem[d] += float(mem_mat[k, d])
                 energy_mj += float(power_mat[k, d]) * float(cost["lat_ms"][k, d]) / 1000.0
             mem_mb = max(per_slot_mem.values()) if per_slot_mem else 0.0
         return {
@@ -592,9 +596,11 @@ class MappingSolver:
         tmp_map = mapping.copy()
         tmp_map[k_idx] = new_d
         S = eff_specs["mem_gb"].shape[0]
+        # Use the same peak-memory definition as training-time HW loss:
+        # per-slot accumulated memory, not per-slot max-single-segment memory.
         usage = [0.0 for _ in range(S)]
         for k, d in enumerate(tmp_map):
-            usage[d] = max(usage[d], float(mem_mb[k, d]))
+            usage[d] += float(mem_mb[k, d])
         for s in range(S):
             limit = _to_pyfloat(eff_specs["mem_gb"][s]) * 1024 * self.mem_limit_factor
             if usage[s] > limit:
