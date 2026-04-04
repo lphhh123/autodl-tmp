@@ -80,7 +80,21 @@ class ChipletSlots(nn.Module):
         self.tau = tau
 
     def forward(self, hard: bool = False) -> Dict[str, torch.Tensor]:
-        alpha = F.gumbel_softmax(self.logits, tau=self.tau, hard=hard, dim=-1)
+        # IMPORTANT:
+        # - hard=False is used throughout training/eval/planning/audit/cache paths.
+        # - Using gumbel_softmax even when hard=False injects fresh random noise at every call,
+        #   so step HW loss, cached mapping/layout, and epoch-end audit may observe different
+        #   alpha / eff_specs within the same outer epoch.
+        # - This causes unstable slot_enabled sets and large end_mem jumps (e.g. ~230MB vs ~469MB).
+        #
+        # Therefore:
+        # - hard=True  : keep stochastic/discrete Gumbel-Softmax behavior
+        # - hard=False : use deterministic softmax relaxation
+        tau = max(float(self.tau), 1e-6)
+        if hard:
+            alpha = F.gumbel_softmax(self.logits, tau=tau, hard=True, dim=-1)
+        else:
+            alpha = F.softmax(self.logits / tau, dim=-1)
         specs = self._expected_specs(alpha)
         return {"alpha": alpha, "eff_specs": specs}
 
