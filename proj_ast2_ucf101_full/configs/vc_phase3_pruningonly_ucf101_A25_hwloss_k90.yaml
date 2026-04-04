@@ -36,6 +36,11 @@ stable_hw:
     ramp_epochs: 10
     lambda_hw_min: 0.60
     lambda_hw_max: 0.60
+  discrete_isolation:
+    mapping_update_every_epochs: 1
+    layout_update_every_epochs: 1
+    use_cached_mapping_for_inner_steps: true
+    use_cached_layout_for_inner_steps: true
 
 loss:
   lambda_hw: 0.0

@@ -265,9 +265,18 @@ def build_layer_nodes_from_model(model: VideoViT, model_info: Optional[Dict[str,
         attn_flops = attn_base_flops * (token_keep**2) * head_keep * block_keep
         mlp_flops = mlp_base_flops * token_keep * ch_keep * block_keep
 
-        attn_bytes = seq_len * embed_dim * bytes_per_elem * token_keep
-        mlp_bytes = seq_len * embed_dim * bytes_per_elem * token_keep
+        # IMPORTANT:
+        # - Channel pruning must affect not only flops, but also MLP activation/workspace bytes.
+        # - Otherwise mem/comm stay nearly constant and end_hw_obj becomes almost flat for BASE.
+        # - Keep attention bytes mainly tied to token_keep, but include block_keep for consistency.
+        # - Make MLP bytes explicitly sensitive to ch_keep and block_keep.
+        attn_bytes = seq_len * embed_dim * bytes_per_elem * token_keep * block_keep
 
+        mlp_hidden_dim = embed_dim * mlp_ratio * ch_keep
+        mlp_bytes = seq_len * mlp_hidden_dim * bytes_per_elem * token_keep * block_keep
+
+        # traffic_in_bytes / traffic_out_bytes inherit the ch_keep-sensitive mlp_bytes,
+        # so communication and memory-related audit terms can respond to channel pruning.
         nodes.append(
             LayerNode(
                 id=idx,
