@@ -3968,8 +3968,22 @@ def train_version_c(
                     bool(amp_enabled), str(amp_dtype_str), str(amp_dtype).replace("torch.", ""), bool(use_scaler))
 
         library = ChipletLibrary(cfg.hw.gpu_yaml)
-        chiplet_slots = ChipletSlots(library, cfg.chiplet.candidate_types, cfg.hw.num_slots, cfg.chiplet.tau_init).to(device)
-        optimizer_alpha = torch.optim.Adam(chiplet_slots.parameters(), lr=lr)
+        chiplet_slots = ChipletSlots(
+            library,
+            cfg.chiplet.candidate_types,
+            cfg.hw.num_slots,
+            cfg.chiplet.tau_init,
+        ).to(device)
+
+        # Chapter-3 fairness:
+        # all methods must share the same fixed hardware-slot substrate.
+        # chiplet_slots can be READ to produce alpha / eff_specs,
+        # but must not be TRAINED by any method (including HWLOSS).
+        for p in chiplet_slots.parameters():
+            p.requires_grad_(False)
+
+        optimizer_alpha = None
+        logger.info("[ChipletSlots] trainable=%s policy=%s", False, "fixed_for_ch3_fairness")
 
         label_smoothing = float(getattr(cfg.train, "label_smoothing", 0.0) or 0.0)
         mixup_alpha = float(getattr(cfg.train, "mixup_alpha", 0.0) or 0.0)
@@ -5190,10 +5204,12 @@ def train_version_c(
                         lr_cur = _compute_lr(global_step)
                         for pg in optimizer_model.param_groups:
                             pg["lr"] = lr_cur * float(pg.get("lr_scale", 1.0) or 1.0)
-                        for pg in optimizer_alpha.param_groups:
-                            pg["lr"] = lr_cur
+                        if optimizer_alpha is not None:
+                            for pg in optimizer_alpha.param_groups:
+                                pg["lr"] = lr_cur
                     optimizer_model.zero_grad()
-                    optimizer_alpha.zero_grad()
+                    if optimizer_alpha is not None:
+                        optimizer_alpha.zero_grad()
                     with autocast(device_type, enabled=amp_enabled, dtype=amp_dtype):
                         if model_type == "video_audio":
                             if audio is None:
@@ -5257,7 +5273,8 @@ def train_version_c(
                             run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
                             logger.warning("[NaNGuard] non-finite logits detected (outer=%s step=%s); skipping step.", outer, step)
                             optimizer_model.zero_grad(set_to_none=True)
-                            optimizer_alpha.zero_grad(set_to_none=True)
+                            if optimizer_alpha is not None:
+                                optimizer_alpha.zero_grad(set_to_none=True)
                             continue
                         if mixup_enabled:
                             L_task = (
@@ -5553,7 +5570,8 @@ def train_version_c(
                             run_state["nan_guard_skipped_steps"] = int(run_state.get("nan_guard_skipped_steps", 0)) + 1
                             logger.warning("[NaNGuard] non-finite L_hw detected (outer=%s step=%s); skipping step.", outer, step)
                             optimizer_model.zero_grad(set_to_none=True)
-                            optimizer_alpha.zero_grad(set_to_none=True)
+                            if optimizer_alpha is not None:
+                                optimizer_alpha.zero_grad(set_to_none=True)
                             continue
                         loss = acc_part_t + hw_term
                         # DP: if any term was gathered as a vector (e.g., shape [ngpu]), loss becomes non-scalar.
@@ -5608,7 +5626,8 @@ def train_version_c(
                             first_n=3,
                         )
                         optimizer_model.zero_grad(set_to_none=True)
-                        optimizer_alpha.zero_grad(set_to_none=True)
+                        if optimizer_alpha is not None:
+                            optimizer_alpha.zero_grad(set_to_none=True)
                         continue
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer_model)
@@ -5628,7 +5647,7 @@ def train_version_c(
                             bad_grad = True
                             break
 
-                    if (not twostage) and update_alpha and (float(lambda_hw_eff) > 0.0) and _optimizer_has_any_grad(optimizer_alpha):
+                    if (not twostage) and (optimizer_alpha is not None) and update_alpha and (float(lambda_hw_eff) > 0.0) and _optimizer_has_any_grad(optimizer_alpha):
                         scaler.unscale_(optimizer_alpha)
                         for p in chiplet_slots.parameters():
                             if p.grad is not None and (not torch.isfinite(p.grad).all()):
@@ -5652,7 +5671,8 @@ def train_version_c(
                             first_n=3,
                         )
                         optimizer_model.zero_grad(set_to_none=True)
-                        optimizer_alpha.zero_grad(set_to_none=True)
+                        if optimizer_alpha is not None:
+                            optimizer_alpha.zero_grad(set_to_none=True)
                         # IMPORTANT: unscale_ was called; must call scaler.update() before continuing
                         # to reset GradScaler per-optimizer state and (if inf detected) reduce the scale.
                         try:
@@ -5667,8 +5687,8 @@ def train_version_c(
                     if grad_clip_norm > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                     scaler.step(optimizer_model)
-                    if (not twostage) and update_alpha and (float(lambda_hw_eff) > 0.0):
-                        # Only attempt alpha step when HW term is actually enabled (lambda_hw_eff>0).
+                    if (not twostage) and (optimizer_alpha is not None) and update_alpha and (float(lambda_hw_eff) > 0.0):
+                        # Chapter-3 fairness: optimizer_alpha is disabled by default.
                         if _optimizer_has_any_grad(optimizer_alpha):
                             if grad_clip_norm > 0.0:
                                 torch.nn.utils.clip_grad_norm_(chiplet_slots.parameters(), grad_clip_norm)
@@ -5880,7 +5900,7 @@ def train_version_c(
                     global_step += 1
 
                 # Step B: alpha refinement (only meaningful when HW term enabled)
-                if update_alpha and (float(lambda_hw_eff) > 0.0):
+                if (optimizer_alpha is not None) and update_alpha and (float(lambda_hw_eff) > 0.0):
                     for _ in range(cfg.training.inner_steps_alpha):
                         model_info = {}
                         last_info = run_state.get("last_model_info")
