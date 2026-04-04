@@ -6029,34 +6029,42 @@ def train_version_c(
                         )
 
                 val_agg = str(getattr(getattr(cfg, "data", object()), "eval_aggregate", "clip"))
-                eval_model = ema_model.ema if (ema_model is not None and ema_eval) else model
+                acc_eval_model = ema_model.ema if (ema_model is not None and ema_eval) else model
+                hw_audit_model = model
+
                 val_acc1 = eval_acc1(
-                    eval_model,
+                    acc_eval_model,
                     val_loader,
                     device,
                     model_type=str(getattr(cfg.training, "model_type", "video")),
                     max_batches=max_eval_batches_for_eval,
                     aggregate=val_agg,
                 )
-                pruner_eval = _get_ast_pruner(eval_model)
+
+                pruner_eval = _get_ast_pruner(hw_audit_model)
                 if pruner_eval is not None:
                     try:
                         pr_cfg_eval = pruner_eval.cfg.get("channel_prune", pruner_eval.cfg)
-                        freeze_prefix_ratio_eval = float(pr_cfg_eval.get("freeze_prefix_ratio", pruner_eval.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0)
+                        freeze_prefix_ratio_eval = float(
+                            pr_cfg_eval.get("freeze_prefix_ratio", pruner_eval.cfg.get("ch_freeze_prefix_ratio", 0.0)) or 0.0
+                        )
                         freeze_prefix_ratio_eval = float(max(0.0, min(1.0, freeze_prefix_ratio_eval)))
                     except Exception:
                         freeze_prefix_ratio_eval = 0.0
                 else:
                     freeze_prefix_ratio_eval = 0.0
 
-                keep_now_eval = _get_layer_ch_keep_now(eval_model)
+                # IMPORTANT:
+                # - accuracy is evaluated on EMA (if enabled)
+                # - pruning-state summary and hardware audit must reflect the current raw model
+                keep_now_eval = _get_layer_ch_keep_now(hw_audit_model)
                 keep_summary_eval = _summarize_layer_ch_keep(
                     keep_now_eval,
                     freeze_prefix_ratio=freeze_prefix_ratio_eval,
                 )
 
                 epoch_end_hw = _eval_epoch_end_hw_snapshot(
-                    model=eval_model,
+                    model=hw_audit_model,
                     cfg=cfg,
                     run_state=run_state,
                     hw_proxy=hw_proxy,
@@ -6071,6 +6079,8 @@ def train_version_c(
                 epoch_audit_record = {
                     "outer": int(outer),
                     "eval_mode": "ema" if (ema_model is not None and ema_eval) else "raw",
+                    "acc_eval_mode": "ema" if (ema_model is not None and ema_eval) else "raw",
+                    "hw_eval_mode": "raw",
                     "val_acc1": float(val_acc1) if val_acc1 is not None else None,
                     "ch_keep_real_mean": float(keep_summary_eval.get("ch_keep_real_mean", 1.0)),
                     "ch_keep_real_min": float(keep_summary_eval.get("ch_keep_real_min", 1.0)),
@@ -6122,7 +6132,7 @@ def train_version_c(
                     val_mode = "fast"
                 if val_acc1 is not None:
                     logger.info(
-                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f real_ch_keep=%.4f prunable_ch_keep=%.4f end_hw_obj=%.6g end_lat=%.4f end_mem=%.4f end_comm=%.4f alloc_frac=%.3f (pref=%s eval_model=%s)",
+                        "[val] epoch=%s mode=%s acc_clip=%.4f acc_video=%.4f real_ch_keep=%.4f prunable_ch_keep=%.4f end_hw_obj=%.6g end_lat=%.4f end_mem=%.4f end_comm=%.4f alloc_frac=%.3f (pref=%s acc_model=%s hw_model=%s)",
                         int(outer),
                         str(val_mode),
                         float(val_acc1),
@@ -6136,6 +6146,7 @@ def train_version_c(
                         float(alloc_last_eval.get("alloc_budget_frac", 0.0)),
                         str(val_agg),
                         "ema" if (ema_model is not None and ema_eval) else "raw",
+                        "raw",
                     )
 
                 try:
