@@ -2091,6 +2091,7 @@ def _run_alloc_candidate_search_probe(
     acc_risk_weight: float,
     pick_policy: str,
     max_acc_risk: float,
+    rng_seed: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Directional long-range probing (N points on final range) + stage-limited apply.
     Shared probe logic for OURS and CEM; only direction generation differs.
@@ -2162,6 +2163,7 @@ def _run_alloc_candidate_search_probe(
         return float(rel_hw_gain_probe)
 
     def _probe_direction(items: List[Tuple[int, float]]) -> Optional[Dict[str, Any]]:
+        dir_rng_seed = int(rng_seed) if rng_seed is not None else 0
         return _eval_alloc_direction_probe(
             direction_items=items,
             keep_now=keep_now,
@@ -2186,7 +2188,7 @@ def _run_alloc_candidate_search_probe(
             search_threads=int(max(1, int(search_threads))),
             max_acc_risk=float(max_acc_risk),
             pick_policy=str(pick_policy),
-            rng_seed=int(outer) + 100003 * int(seed),
+            rng_seed=int(dir_rng_seed),
         )
 
     if pick_policy in ("cem", "es"):
@@ -2571,6 +2573,7 @@ def _run_alloc_candidate_search(
             acc_risk_weight=float(acc_risk_weight),
             pick_policy=str(pick_policy),
             max_acc_risk=float(max_acc_risk),
+            rng_seed=rng_seed,
         )
 
     # ------------------------------------------------------------
@@ -2886,6 +2889,7 @@ def _maybe_run_alloc_search_and_apply(
     cfg,
     run_state: Dict[str, Any],
     outer: int,
+    seed: int,
     ast_sched: Dict[str, Any],
     hw_proxy,
     wafer_layout,
@@ -3036,6 +3040,7 @@ def _maybe_run_alloc_search_and_apply(
 
     best = None
     if controller == "legacy":
+        alloc_rng_seed = int(outer) + 100003 * int(seed)
         best = _run_alloc_candidate_search(
             model=model,
             cfg=cfg,
@@ -3057,6 +3062,7 @@ def _maybe_run_alloc_search_and_apply(
             acc_risk_weight=float(getattr(alloc_cfg, "acc_risk_weight", 0.2)),
             max_acc_risk=float(max_acc_risk),
             pick_policy=str(pick_policy),
+            rng_seed=int(alloc_rng_seed),
         )
     else:
         eff_specs_cpu = _to_cpu_tensor_dict(eff_specs)
@@ -4494,6 +4500,7 @@ def train_version_c(
                             cfg=cfg,
                             run_state=run_state,
                             outer=int(outer),
+                            seed=int(seed),
                             ast_sched=ast_sched,
                             hw_proxy=hw_proxy,
                             wafer_layout=wafer_layout,

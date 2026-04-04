@@ -404,10 +404,12 @@ def stable_hw_schedule(
     st["lambda_hw_effective"] = float(lam)
 
     # ===== v5.4 LockedAccRef guard: 未锁定 acc_ref 前，硬件项必须强制关闭 =====
-    # 目的：acc_ref 必须是“纯精度参考”，不能被硬件项污染
+    # 但当当前 suite 已显式关闭 guard controls、希望把 HWLOSS 作为“固定 lambda 的纯 HW loss 基线”时，
+    # 不应再因为 acc_ref 为空而把 lambda_hw_effective 强行压成 0。
     lock_cfg = _get_locked_cfg(stable_hw_cfg)
     lock_enabled = _as_enabled(lock_cfg, default=True)
-    if lock_enabled and (st.get("acc_ref", None) is None):
+    guard_controls_enabled = bool(_cfg_get(stable_hw_cfg, "enable_guard_controls", True))
+    if lock_enabled and guard_controls_enabled and (st.get("acc_ref", None) is None):
         st["lambda_hw_effective"] = 0.0
     return st
 
