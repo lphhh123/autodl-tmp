@@ -81,14 +81,14 @@ class ChipletSlots(nn.Module):
 
     def forward(self, hard: bool = False) -> Dict[str, torch.Tensor]:
         # IMPORTANT:
-        # - hard=False is used throughout training/eval/planning/audit/cache paths.
-        # - Using gumbel_softmax even when hard=False injects fresh random noise at every call,
-        #   so step HW loss, cached mapping/layout, and epoch-end audit may observe different
-        #   alpha / eff_specs within the same outer epoch.
-        # - This causes unstable slot_enabled sets and large end_mem jumps (e.g. ~230MB vs ~469MB).
+        # - hard=False is used in training-time HW loss, cache refresh, alloc search,
+        #   epoch-end hardware audit, and export/layout-related paths.
+        # - If hard=False still uses gumbel_softmax, every call injects fresh noise and
+        #   different code paths within the same outer epoch can observe different
+        #   alpha / eff_specs / enabled-slot sets.
         #
         # Therefore:
-        # - hard=True  : keep stochastic/discrete Gumbel-Softmax behavior
+        # - hard=True  : keep stochastic discrete Gumbel-Softmax behavior
         # - hard=False : use deterministic softmax relaxation
         tau = max(float(self.tau), 1e-6)
         if hard:
