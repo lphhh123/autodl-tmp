@@ -14,7 +14,7 @@ alloc_search:
   min_keep_floor: 0.25
   pool_size: 6
   max_candidates: 60
-  max_acc_risk: 0.01
+  max_acc_risk: 1000000000.0
   min_rel_hw_improve: 0.0
   probe_points: 3
   probe_alphas: [0.3333333333, 0.6666666667, 1.0]
