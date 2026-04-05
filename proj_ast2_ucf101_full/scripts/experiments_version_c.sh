@@ -476,6 +476,12 @@ case "$EXP_ID" in
   EXP-A2p25-ab-nocandsel-k90)
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nocandsel_k90.yaml "$(odir EXP-A2p25-ab-nocandsel-k90)"
     ;;
+  EXP-A2p25-newours-tiebreak-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_newours_tiebreak_k90.yaml "$(odir EXP-A2p25-newours-tiebreak-k90)"
+    ;;
+  EXP-A2p25-ab-notiebreak-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_notiebreak_k90.yaml "$(odir EXP-A2p25-ab-notiebreak-k90)"
+    ;;
   EXP-A4-fast)
     run_vc configs/vc_phase3_full_ucf101_A_main_fast20.yaml "$(odir EXP-A4-fast)"
     ;;
