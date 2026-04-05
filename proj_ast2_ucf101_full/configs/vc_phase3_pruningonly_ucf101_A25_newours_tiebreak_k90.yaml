@@ -29,6 +29,8 @@ alloc_search:
   tie_risk_abs: 0.10
   tie_risk_rel: 0.15
   tie_sens_rel: 0.10
+  tie_perturb_rel: 0.10
+  tie_sens_worst_weight: 0.20
 
 stable_hw:
   enabled: false
