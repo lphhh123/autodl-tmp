@@ -1935,6 +1935,77 @@ def _build_alloc_direction_pool(
     return dirs
 
 
+def _alloc_candidate_sens_score(
+    *,
+    keep_now: torch.Tensor,
+    keep_apply: torch.Tensor,
+    sens_norm: torch.Tensor,
+) -> float:
+    delta = (keep_now - keep_apply).abs().float()
+    delta_sum = float(delta.sum().item())
+    if delta_sum <= 1.0e-12:
+        return 1.0e18
+    return float((sens_norm * delta).sum().item() / max(1.0e-12, delta_sum))
+
+
+def _alloc_select_candidates_tiebreak(
+    candidates: List[Dict[str, Any]],
+    *,
+    decision_rule: str,
+    tie_apply_abs: float,
+    tie_apply_rel: float,
+    tie_risk_abs: float,
+    tie_risk_rel: float,
+    tie_sens_rel: float,
+) -> Optional[Dict[str, Any]]:
+    valid = [c for c in candidates if isinstance(c, dict) and c.get("rel_hw_gain", None) is not None]
+    if not valid:
+        return None
+
+    rule = str(decision_rule or "").lower().strip()
+    if rule == "apply_only":
+        return max(
+            valid,
+            key=lambda x: (
+                float(x.get("rel_hw_gain", -1.0e18)),
+                -float(x.get("acc_risk", 1.0e18)),
+                -float(x.get("cand_sens", 1.0e18)),
+                float(x.get("probe_rel_hw_gain", -1.0e18)),
+            ),
+        )
+
+    if rule != "apply_risk_sens_then_long":
+        rule = "apply_risk_sens_then_long"
+
+    best_apply = max(float(x.get("rel_hw_gain", -1.0e18)) for x in valid)
+    apply_tol = max(float(tie_apply_abs), abs(float(best_apply)) * float(tie_apply_rel))
+    pool_apply = [x for x in valid if float(x.get("rel_hw_gain", -1.0e18)) >= float(best_apply) - float(apply_tol)]
+    if not pool_apply:
+        return None
+
+    best_risk = min(float(x.get("acc_risk", 1.0e18)) for x in pool_apply)
+    risk_tol = max(float(tie_risk_abs), abs(float(best_risk)) * float(tie_risk_rel))
+    pool_risk = [x for x in pool_apply if float(x.get("acc_risk", 1.0e18)) <= float(best_risk) + float(risk_tol)]
+    if not pool_risk:
+        return None
+
+    best_sens = min(float(x.get("cand_sens", 1.0e18)) for x in pool_risk)
+    sens_tol = max(1.0e-8, abs(float(best_sens)) * float(tie_sens_rel))
+    pool_sens = [x for x in pool_risk if float(x.get("cand_sens", 1.0e18)) <= float(best_sens) + float(sens_tol)]
+    if not pool_sens:
+        return None
+
+    return max(
+        pool_sens,
+        key=lambda x: (
+            float(x.get("probe_rel_hw_gain", -1.0e18)),
+            -float(x.get("acc_risk", 1.0e18)),
+            -float(x.get("cand_sens", 1.0e18)),
+            float(x.get("rel_hw_gain", -1.0e18)),
+        ),
+    )
+
+
 def _eval_alloc_direction_probe(
     *,
     direction_items: List[Tuple[int, float]],
@@ -1960,6 +2031,12 @@ def _eval_alloc_direction_probe(
     search_threads: int,
     max_acc_risk: float,
     pick_policy: str,
+    decision_rule: str = "legacy_long_gain",
+    tie_apply_abs: float = 0.0,
+    tie_apply_rel: float = 0.0,
+    tie_risk_abs: float = 0.0,
+    tie_risk_rel: float = 0.0,
+    tie_sens_rel: float = 0.0,
 ) -> Optional[Dict[str, Any]]:
     del probe_use_final_range  # included for logging/call compatibility
     depth = int(keep_now.numel())
@@ -2017,55 +2094,70 @@ def _eval_alloc_direction_probe(
         ]
         outs = [f.result() for f in futs]
 
-    best_local = None
+    items_full = []
     for idx, (a, out, keep_apply, r) in enumerate(zip(alphas, outs, apply_keeps, apply_risks)):
         if max_acc_risk > 0.0 and math.isfinite(max_acc_risk) and float(r) > float(max_acc_risk):
             continue
         probe_obj = float(out.get("objective", 1.0e18))
         probe_rel_hw_gain = (float(base_obj) - float(probe_obj)) / max(1.0e-6, abs(float(base_obj)))
+        cand_sens = _alloc_candidate_sens_score(
+            keep_now=keep_now,
+            keep_apply=keep_apply,
+            sens_norm=sens_norm,
+        )
+        apply_out = _eval_single_alloc_candidate(
+            keep_apply,
+            model=model,
+            last_info=last_info,
+            cfg=cfg,
+            hw_proxy=hw_proxy,
+            wafer_layout=wafer_layout,
+            eff_specs=eff_specs_cpu,
+            alpha=alpha_cpu,
+            fine_split_threads=int(max(1, int(fine_split_threads or 1))),
+        )
+        apply_obj = float(apply_out.get("objective", 1.0e18))
+        rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
         item = {
             "direction_items": [(int(i), float(w)) for i, w in direction_items],
             "keep_probe": probes[int(idx)],
             "keep_apply": keep_apply,
+            "keep_cand": keep_apply,
             "probe_alpha": float(a),
             "probe_objective": float(probe_obj),
             "probe_rel_hw_gain": float(probe_rel_hw_gain),
             "acc_risk": float(r),
-            "total_score": float(probe_rel_hw_gain),
-            "probe_raw": out,
-        }
-        if best_local is None or float(item["total_score"]) > float(best_local["total_score"]) + 1e-12:
-            best_local = item
-        elif best_local is not None and abs(float(item["total_score"]) - float(best_local["total_score"])) <= 1e-12:
-            if pick_policy not in ("hw_only",) and float(item["acc_risk"]) < float(best_local["acc_risk"]) - 1e-12:
-                best_local = item
-    if best_local is None:
-        return None
-
-    apply_out = _eval_single_alloc_candidate(
-        best_local["keep_apply"],
-        model=model,
-        last_info=last_info,
-        cfg=cfg,
-        hw_proxy=hw_proxy,
-        wafer_layout=wafer_layout,
-        eff_specs=eff_specs_cpu,
-        alpha=alpha_cpu,
-        fine_split_threads=int(max(1, int(fine_split_threads or 1))),
-    )
-    apply_obj = float(apply_out.get("objective", 1.0e18))
-    rel_hw_gain_apply = (float(base_obj) - float(apply_obj)) / max(1.0e-6, abs(float(base_obj)))
-    best_local.update(
-        {
-            "keep_cand": best_local["keep_apply"],
+            "cand_sens": float(cand_sens),
             "objective": float(apply_obj),
             "base_objective": float(base_obj),
             "rel_hw_gain": float(rel_hw_gain_apply),
             "total_score": float(rel_hw_gain_apply),
+            "probe_raw": out,
             "raw": apply_out,
         }
-    )
-    return best_local
+        items_full.append(item)
+    if not items_full:
+        return None
+
+    best_local = None
+    if str(decision_rule or "legacy_long_gain").lower().strip() == "legacy_long_gain":
+        for item in items_full:
+            if best_local is None or float(item.get("probe_rel_hw_gain", -1.0e18)) > float(best_local.get("probe_rel_hw_gain", -1.0e18)) + 1e-12:
+                best_local = item
+            elif best_local is not None and abs(float(item.get("probe_rel_hw_gain", -1.0e18)) - float(best_local.get("probe_rel_hw_gain", -1.0e18))) <= 1e-12:
+                if pick_policy not in ("hw_only",) and float(item.get("acc_risk", 1.0e18)) < float(best_local.get("acc_risk", 1.0e18)) - 1e-12:
+                    best_local = item
+    else:
+        best_local = _alloc_select_candidates_tiebreak(
+            items_full,
+            decision_rule=str(decision_rule),
+            tie_apply_abs=float(tie_apply_abs),
+            tie_apply_rel=float(tie_apply_rel),
+            tie_risk_abs=float(tie_risk_abs),
+            tie_risk_rel=float(tie_risk_rel),
+            tie_sens_rel=float(tie_sens_rel),
+        )
+    return dict(best_local) if isinstance(best_local, dict) else None
 
 
 def _run_alloc_candidate_search_probe(
@@ -3023,6 +3115,14 @@ def _maybe_run_alloc_search_and_apply(
         candidate_strategy = "uniform_all"
     if controller == "new_ours" and candidate_strategy not in ("sens_pool", "uniform_all"):
         candidate_strategy = "sens_pool"
+    if controller == "new_ours_tiebreak" and candidate_strategy not in ("sens_pool", "uniform_all"):
+        candidate_strategy = "uniform_all"
+    tie_mode = str(getattr(alloc_cfg, "tiebreak_mode", "legacy_long_gain") or "legacy_long_gain").lower().strip()
+    tie_apply_abs = float(getattr(alloc_cfg, "tie_apply_abs", 0.0) or 0.0)
+    tie_apply_rel = float(getattr(alloc_cfg, "tie_apply_rel", 0.0) or 0.0)
+    tie_risk_abs = float(getattr(alloc_cfg, "tie_risk_abs", 0.0) or 0.0)
+    tie_risk_rel = float(getattr(alloc_cfg, "tie_risk_rel", 0.0) or 0.0)
+    tie_sens_rel = float(getattr(alloc_cfg, "tie_sens_rel", 0.0) or 0.0)
     direction_orders = getattr(alloc_cfg, "direction_orders", None)
 
     common_meta = {
@@ -3141,6 +3241,7 @@ def _maybe_run_alloc_search_and_apply(
                         search_threads=max(1, int(outer_threads)),
                         max_acc_risk=float(max_acc_risk),
                         pick_policy=str(pick_policy),
+                        decision_rule="legacy_long_gain",
                     )
                 best_ch = None
                 for items in dirs:
@@ -3168,6 +3269,7 @@ def _maybe_run_alloc_search_and_apply(
                         search_threads=max(1, int(outer_threads)),
                         max_acc_risk=float(max_acc_risk),
                         pick_policy=str(pick_policy),
+                        decision_rule="legacy_long_gain",
                     )
                     if res is None:
                         continue
@@ -3220,6 +3322,135 @@ def _maybe_run_alloc_search_and_apply(
                     common_meta["alloc_inc_age"] = int((run_state.get("alloc_incumbent_direction") or {}).get("age", 0))
                 else:
                     run_state["alloc_incumbent_direction"] = None
+            elif controller == "new_ours_tiebreak":
+                incumbent = run_state.get("alloc_incumbent_direction", None)
+                keep_incumbent = bool(getattr(alloc_cfg, "keep_incumbent", True))
+                all_candidates = []
+                inc_eval = None
+                if keep_incumbent and isinstance(incumbent, dict) and incumbent.get("direction_items", None):
+                    inc_eval = _eval_alloc_direction_probe(
+                        direction_items=incumbent["direction_items"],
+                        keep_now=keep_now,
+                        base_obj=float(base_obj),
+                        usable_budget=float(usable_budget),
+                        lookahead_budget=float(lookahead_budget),
+                        probe_points=int(alloc_probe_points),
+                        probe_alphas=list(alloc_probe_alphas),
+                        probe_use_final_range=bool(alloc_probe_use_final),
+                        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+                        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+                        freeze_prefix_ratio=float(freeze_prefix_ratio),
+                        sens=sens,
+                        model=model,
+                        cfg=cfg,
+                        hw_proxy=hw_proxy,
+                        wafer_layout=wafer_layout,
+                        eff_specs_cpu=eff_specs_cpu,
+                        alpha_cpu=alpha_cpu,
+                        last_info=last_info,
+                        fine_split_threads=max(1, int(inner_threads)),
+                        search_threads=max(1, int(outer_threads)),
+                        max_acc_risk=float(max_acc_risk),
+                        pick_policy=str(pick_policy),
+                        decision_rule=str(tie_mode),
+                        tie_apply_abs=float(tie_apply_abs),
+                        tie_apply_rel=float(tie_apply_rel),
+                        tie_risk_abs=float(tie_risk_abs),
+                        tie_risk_rel=float(tie_risk_rel),
+                        tie_sens_rel=float(tie_sens_rel),
+                    )
+                    if isinstance(inc_eval, dict):
+                        inc_item = dict(inc_eval)
+                        inc_item["_candidate_source"] = "incumbent"
+                        all_candidates.append(inc_item)
+                challenger_candidates = []
+                for items in dirs:
+                    res = _eval_alloc_direction_probe(
+                        direction_items=items,
+                        keep_now=keep_now,
+                        base_obj=float(base_obj),
+                        usable_budget=float(usable_budget),
+                        lookahead_budget=float(lookahead_budget),
+                        probe_points=int(alloc_probe_points),
+                        probe_alphas=list(alloc_probe_alphas),
+                        probe_use_final_range=bool(alloc_probe_use_final),
+                        keep_unit=float(getattr(alloc_cfg, "keep_unit", 0.01)),
+                        min_keep_floor=float(getattr(alloc_cfg, "min_keep_floor", 0.25)),
+                        freeze_prefix_ratio=float(freeze_prefix_ratio),
+                        sens=sens,
+                        model=model,
+                        cfg=cfg,
+                        hw_proxy=hw_proxy,
+                        wafer_layout=wafer_layout,
+                        eff_specs_cpu=eff_specs_cpu,
+                        alpha_cpu=alpha_cpu,
+                        last_info=last_info,
+                        fine_split_threads=max(1, int(inner_threads)),
+                        search_threads=max(1, int(outer_threads)),
+                        max_acc_risk=float(max_acc_risk),
+                        pick_policy=str(pick_policy),
+                        decision_rule=str(tie_mode),
+                        tie_apply_abs=float(tie_apply_abs),
+                        tie_apply_rel=float(tie_apply_rel),
+                        tie_risk_abs=float(tie_risk_abs),
+                        tie_risk_rel=float(tie_risk_rel),
+                        tie_sens_rel=float(tie_sens_rel),
+                    )
+                    if not isinstance(res, dict):
+                        continue
+                    ch_item = dict(res)
+                    ch_item["_candidate_source"] = "challenger"
+                    challenger_candidates.append(ch_item)
+                    all_candidates.append(ch_item)
+
+                common_meta["alloc_inc_long_gain"] = float(inc_eval.get("probe_rel_hw_gain", 0.0)) if isinstance(inc_eval, dict) else 0.0
+                common_meta["alloc_best_ch_long_gain"] = max(float(x.get("probe_rel_hw_gain", 0.0)) for x in challenger_candidates) if challenger_candidates else 0.0
+                common_meta["alloc_decision_basis"] = str(tie_mode)
+
+                selected = _alloc_select_candidates_tiebreak(
+                    all_candidates,
+                    decision_rule=str(tie_mode),
+                    tie_apply_abs=float(tie_apply_abs),
+                    tie_apply_rel=float(tie_apply_rel),
+                    tie_risk_abs=float(tie_risk_abs),
+                    tie_risk_rel=float(tie_risk_rel),
+                    tie_sens_rel=float(tie_sens_rel),
+                )
+                selected_source = str(selected.get("_candidate_source", "none")) if isinstance(selected, dict) else "none"
+                if not isinstance(selected, dict):
+                    run_state["alloc_incumbent_direction"] = None
+                elif float(selected.get("rel_hw_gain", 0.0) or 0.0) <= 0.0:
+                    run_state["alloc_incumbent_direction"] = None
+                else:
+                    best = dict(selected)
+                    if selected_source == "challenger":
+                        if keep_incumbent:
+                            run_state["alloc_incumbent_direction"] = {
+                                "direction_items": [(int(i), float(w)) for i, w in selected.get("direction_items", [])],
+                                "age": 1,
+                                "last_source": "challenger",
+                            }
+                        else:
+                            run_state["alloc_incumbent_direction"] = None
+                        common_meta["alloc_switched"] = True
+                    elif selected_source == "incumbent":
+                        prev_age = 0
+                        if isinstance(incumbent, dict):
+                            prev_age = int(incumbent.get("age", 0) or 0)
+                        if keep_incumbent:
+                            run_state["alloc_incumbent_direction"] = {
+                                "direction_items": [(int(i), float(w)) for i, w in selected.get("direction_items", [])],
+                                "age": int(prev_age) + 1,
+                                "last_source": "incumbent",
+                            }
+                        else:
+                            run_state["alloc_incumbent_direction"] = None
+                    else:
+                        run_state["alloc_incumbent_direction"] = None
+                    common_meta["alloc_selected_source"] = str(selected_source)
+                    common_meta["alloc_selected_long_gain"] = float(selected.get("probe_rel_hw_gain", 0.0) or 0.0)
+                    common_meta["alloc_selected_apply_gain"] = float(selected.get("rel_hw_gain", 0.0) or 0.0)
+                common_meta["alloc_inc_age"] = int((run_state.get("alloc_incumbent_direction") or {}).get("age", 0))
             elif controller == "ds_fixed":
                 best_ch = None
                 for items in dirs:
@@ -3247,6 +3478,7 @@ def _maybe_run_alloc_search_and_apply(
                         search_threads=max(1, int(outer_threads)),
                         max_acc_risk=float(max_acc_risk),
                         pick_policy=str(pick_policy),
+                        decision_rule="legacy_long_gain",
                     )
                     if res is None:
                         continue
