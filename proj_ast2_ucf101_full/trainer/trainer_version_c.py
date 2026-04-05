@@ -1964,15 +1964,7 @@ def _alloc_select_candidates_tiebreak(
 
     rule = str(decision_rule or "").lower().strip()
     if rule == "apply_only":
-        return max(
-            valid,
-            key=lambda x: (
-                float(x.get("rel_hw_gain", -1.0e18)),
-                -float(x.get("acc_risk", 1.0e18)),
-                -float(x.get("cand_sens", 1.0e18)),
-                float(x.get("probe_rel_hw_gain", -1.0e18)),
-            ),
-        )
+        return max(valid, key=lambda x: float(x.get("rel_hw_gain", -1.0e18)))
 
     if rule != "apply_risk_sens_then_long":
         rule = "apply_risk_sens_then_long"
