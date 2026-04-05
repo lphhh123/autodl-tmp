@@ -1940,12 +1940,33 @@ def _alloc_candidate_sens_score(
     keep_now: torch.Tensor,
     keep_apply: torch.Tensor,
     sens_norm: torch.Tensor,
+    worst_weight: float = 0.20,
 ) -> float:
     delta = (keep_now - keep_apply).abs().float()
     delta_sum = float(delta.sum().item())
     if delta_sum <= 1.0e-12:
         return 1.0e18
-    return float((sens_norm * delta).sum().item() / max(1.0e-12, delta_sum))
+
+    s_mean = float((sens_norm * delta).sum().item() / max(1.0e-12, delta_sum))
+    active = delta > 1.0e-12
+    if bool(active.any().item()):
+        s_max = float(sens_norm[active].max().item())
+    else:
+        s_max = float(s_mean)
+
+    w = float(max(0.0, min(1.0, worst_weight)))
+    return float((1.0 - w) * s_mean + w * s_max)
+
+
+def _alloc_candidate_perturb_score(
+    *,
+    keep_now: torch.Tensor,
+    keep_apply: torch.Tensor,
+) -> float:
+    delta = (keep_now - keep_apply).abs().float()
+    if delta.numel() == 0:
+        return 1.0e18
+    return float(delta.max().item())
 
 
 def _alloc_select_candidates_tiebreak(
@@ -1957,6 +1978,7 @@ def _alloc_select_candidates_tiebreak(
     tie_risk_abs: float,
     tie_risk_rel: float,
     tie_sens_rel: float,
+    tie_perturb_rel: float,
 ) -> Optional[Dict[str, Any]]:
     valid = [c for c in candidates if isinstance(c, dict) and c.get("rel_hw_gain", None) is not None]
     if not valid:
@@ -1987,10 +2009,20 @@ def _alloc_select_candidates_tiebreak(
     if not pool_sens:
         return None
 
+    best_perturb = min(float(x.get("cand_perturb", 1.0e18)) for x in pool_sens)
+    perturb_tol = max(1.0e-8, abs(float(best_perturb)) * float(tie_perturb_rel))
+    pool_perturb = [
+        x for x in pool_sens
+        if float(x.get("cand_perturb", 1.0e18)) <= float(best_perturb) + float(perturb_tol)
+    ]
+    if not pool_perturb:
+        pool_perturb = pool_sens
+
     return max(
-        pool_sens,
+        pool_perturb,
         key=lambda x: (
             float(x.get("probe_rel_hw_gain", -1.0e18)),
+            -float(x.get("cand_perturb", 1.0e18)),
             -float(x.get("acc_risk", 1.0e18)),
             -float(x.get("cand_sens", 1.0e18)),
             float(x.get("rel_hw_gain", -1.0e18)),
@@ -2029,6 +2061,8 @@ def _eval_alloc_direction_probe(
     tie_risk_abs: float = 0.0,
     tie_risk_rel: float = 0.0,
     tie_sens_rel: float = 0.0,
+    tie_perturb_rel: float = 0.0,
+    tie_sens_worst_weight: float = 0.20,
 ) -> Optional[Dict[str, Any]]:
     del probe_use_final_range  # included for logging/call compatibility
     depth = int(keep_now.numel())
@@ -2096,6 +2130,11 @@ def _eval_alloc_direction_probe(
             keep_now=keep_now,
             keep_apply=keep_apply,
             sens_norm=sens_norm,
+            worst_weight=float(tie_sens_worst_weight),
+        )
+        cand_perturb = _alloc_candidate_perturb_score(
+            keep_now=keep_now,
+            keep_apply=keep_apply,
         )
         apply_out = _eval_single_alloc_candidate(
             keep_apply,
@@ -2120,6 +2159,7 @@ def _eval_alloc_direction_probe(
             "probe_rel_hw_gain": float(probe_rel_hw_gain),
             "acc_risk": float(r),
             "cand_sens": float(cand_sens),
+            "cand_perturb": float(cand_perturb),
             "objective": float(apply_obj),
             "base_objective": float(base_obj),
             "rel_hw_gain": float(rel_hw_gain_apply),
@@ -2148,6 +2188,7 @@ def _eval_alloc_direction_probe(
             tie_risk_abs=float(tie_risk_abs),
             tie_risk_rel=float(tie_risk_rel),
             tie_sens_rel=float(tie_sens_rel),
+            tie_perturb_rel=float(tie_perturb_rel),
         )
     return dict(best_local) if isinstance(best_local, dict) else None
 
@@ -3115,6 +3156,8 @@ def _maybe_run_alloc_search_and_apply(
     tie_risk_abs = float(getattr(alloc_cfg, "tie_risk_abs", 0.0) or 0.0)
     tie_risk_rel = float(getattr(alloc_cfg, "tie_risk_rel", 0.0) or 0.0)
     tie_sens_rel = float(getattr(alloc_cfg, "tie_sens_rel", 0.0) or 0.0)
+    tie_perturb_rel = float(getattr(alloc_cfg, "tie_perturb_rel", 0.10) or 0.10)
+    tie_sens_worst_weight = float(getattr(alloc_cfg, "tie_sens_worst_weight", 0.20) or 0.20)
     direction_orders = getattr(alloc_cfg, "direction_orders", None)
 
     common_meta = {
@@ -3350,6 +3393,8 @@ def _maybe_run_alloc_search_and_apply(
                         tie_risk_abs=float(tie_risk_abs),
                         tie_risk_rel=float(tie_risk_rel),
                         tie_sens_rel=float(tie_sens_rel),
+                        tie_perturb_rel=float(tie_perturb_rel),
+                        tie_sens_worst_weight=float(tie_sens_worst_weight),
                     )
                     if isinstance(inc_eval, dict):
                         inc_item = dict(inc_eval)
@@ -3387,6 +3432,8 @@ def _maybe_run_alloc_search_and_apply(
                         tie_risk_abs=float(tie_risk_abs),
                         tie_risk_rel=float(tie_risk_rel),
                         tie_sens_rel=float(tie_sens_rel),
+                        tie_perturb_rel=float(tie_perturb_rel),
+                        tie_sens_worst_weight=float(tie_sens_worst_weight),
                     )
                     if not isinstance(res, dict):
                         continue
@@ -3407,6 +3454,7 @@ def _maybe_run_alloc_search_and_apply(
                     tie_risk_abs=float(tie_risk_abs),
                     tie_risk_rel=float(tie_risk_rel),
                     tie_sens_rel=float(tie_sens_rel),
+                    tie_perturb_rel=float(tie_perturb_rel),
                 )
                 selected_source = str(selected.get("_candidate_source", "none")) if isinstance(selected, dict) else "none"
                 if not isinstance(selected, dict):
