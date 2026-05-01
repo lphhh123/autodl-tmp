@@ -264,7 +264,7 @@ run_vc () {
 }
 
 is_ch3_a2p25_k90() { [[ "${EXP_ID}" == EXP-A2p25-*-k90 ]]; }
-is_ch3_warm()      { [[ "${EXP_ID}" == EXP-A2p25-warm15-prep-k90 ]]; }
+is_ch3_warm()      { [[ "${EXP_ID}" == EXP-A2p25-warm15-prep-k90 || "${EXP_ID}" == EXP-A2p25-warm15-prep-timeformer-k90 ]]; }
 
 ch3_require_protocol_or_die() {
   if ! is_ch3_a2p25_k90 || is_ch3_warm; then return 0; fi
@@ -275,6 +275,7 @@ ch3_require_protocol_or_die() {
   if [[ -z "${INIT_CKPT_PATH:-}" ]]; then
     echo "[ERROR][CH3 STRICT] INIT_CKPT_PATH is empty. You MUST continue from warm15-prep (start_outer=15)."
     echo "  Hint: set INIT_CKPT_PATH to outputs/EXP-A2p25-warm15-prep-k90-<tag>/seed0/checkpoints/last.pth"
+    echo "  Hint: TimeSformer uses outputs/EXP-A2p25-warm15-prep-timeformer-k90-<tag>/seed0/checkpoints/last.pth"
     exit 3
   fi
   if [[ ! -f "${INIT_CKPT_PATH}" ]]; then
@@ -495,6 +496,26 @@ case "$EXP_ID" in
     ;;
   EXP-A2p25-warm15-prep-k90)
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_warm15_prep_k90.yaml "$(odir EXP-A2p25-warm15-prep-k90)"
+    ;;
+
+  EXP-A2p25-warm15-prep-timeformer-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_warm15_prep_timeformer_k90.yaml "$(odir EXP-A2p25-warm15-prep-timeformer-k90)"
+    ;;
+  EXP-A2p25-base-timeformer-k90)
+    ch3_require_protocol_or_die
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_base_timeformer_k90.yaml "$(odir EXP-A2p25-base-timeformer-k90)"
+    ;;
+  EXP-A2p25-newours-tiebreak-timeformer-k90)
+    ch3_require_protocol_or_die
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_newours_tiebreak_timeformer_k90.yaml "$(odir EXP-A2p25-newours-tiebreak-timeformer-k90)"
+    ;;
+  EXP-A2p25-ab-nolookahead-timeformer-k90)
+    ch3_require_protocol_or_die
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nolookahead_timeformer_k90.yaml "$(odir EXP-A2p25-ab-nolookahead-timeformer-k90)"
+    ;;
+  EXP-A2p25-ab-nocandsel-timeformer-k90)
+    ch3_require_protocol_or_die
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nocandsel_timeformer_k90.yaml "$(odir EXP-A2p25-ab-nocandsel-timeformer-k90)"
     ;;
   EXP-A2p25-base-k90)
     ch3_require_protocol_or_die

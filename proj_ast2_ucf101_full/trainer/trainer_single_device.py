@@ -684,6 +684,7 @@ def train_single_device(
             drop_path_rate=cfg.model.drop_path_rate,
             use_ast_prune=cfg.ast.use_ast_prune,
             ast_cfg=cfg.ast,
+            attn_type=str(getattr(cfg.model, "attn_type", "per_frame") or "per_frame"),
         ).to(device)
     else:
         model = VideoViT(
