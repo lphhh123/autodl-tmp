@@ -21,6 +21,11 @@ sanitize_tag() {
 for SEED in ${SEEDS_STR}; do
   echo "[ch3-timeformer] seed=${SEED} instance=${INSTANCE} gpus=${GPU_IDS}"
   export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
+  TF_PER_GPU_BS="${TF_PER_GPU_BS:-}"
+  if [[ -n "${TF_PER_GPU_BS}" ]]; then
+    export TRAIN_BATCH_SIZE="${TF_PER_GPU_BS}"
+    echo "[ch3-timeformer] override via env: TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} (DP_SCALE_BATCH=1)"
+  fi
   export USE_DP=1 DP_SCALE_BATCH=1 DP_SCALE_LR=linear AUTO_RESUME=0 FRESH_RUN=1
   export INSTANCE RUN_TAG STDOUT_AGG_DIR
 

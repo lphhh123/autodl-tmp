@@ -1,3 +1,6 @@
 _base_: configs/vc_phase3_pruningonly_ucf101_A25_warm15_prep_k90.yaml
 model:
   attn_type: "timeformer_divided"
+# DP_SCALE_BATCH=1 时，3卡总 batch=42；如需 45 改为 15
+train:
+  batch_size: 14
