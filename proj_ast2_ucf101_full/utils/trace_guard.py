@@ -219,6 +219,30 @@ def _make_min_row(
 def _read_last_csv_row(csv_path: Path) -> Optional[dict]:
     if not csv_path.exists():
         return None
+    try:
+        header_line = ""
+        with csv_path.open("r", encoding="utf-8", newline="") as hf:
+            header_line = hf.readline()
+        if not header_line:
+            return None
+        headers = next(csv.reader([header_line]))
+        with csv_path.open("rb") as bf:
+            bf.seek(0, 2)
+            size = bf.tell()
+            if size <= 0:
+                return None
+            read_len = min(size, 65536)
+            bf.seek(-read_len, 2)
+            chunk = bf.read(read_len).decode("utf-8", errors="ignore")
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        if lines:
+            last_line = lines[-1]
+            vals = next(csv.reader([last_line]))
+            if len(vals) < len(headers):
+                vals = vals + [""] * (len(headers) - len(vals))
+            return {str(k): vals[i] if i < len(vals) else "" for i, k in enumerate(headers)}
+    except Exception:
+        pass
     last = None
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)

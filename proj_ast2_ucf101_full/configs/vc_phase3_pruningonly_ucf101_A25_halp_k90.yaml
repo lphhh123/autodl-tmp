@@ -1,0 +1,28 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A25_protocol_k90.yaml
+alloc_search:
+  enabled: true
+  controller: halp_knapsack
+  candidate_strategy: sens_pool
+  keep_incumbent: false
+  start_after_prune_epochs: 0
+  budget_frac_start: 1.0
+  budget_frac_max: 1.0
+  budget_frac_ramp_epochs: 1
+  min_remain_budget: 1.0e-6
+  keep_unit: 0.01
+  min_keep_floor: 0.25
+  max_candidates: 60
+  max_acc_risk: 1000000000.0
+  probe_points: 1
+  probe_alphas: [1.0]
+  probe_use_final_range: false
+  probe_local_scale_mult: 1.0
+  probe_apply_check: false
+  search_threads_outer: 6
+  search_threads_inner: 5
+stable_hw:
+  enabled: false
+  enable_guard_controls: false
+hw:
+  use_hw_loss: false
+  lambda_hw: 0.0

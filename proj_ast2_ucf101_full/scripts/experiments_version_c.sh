@@ -464,6 +464,9 @@ case "$EXP_ID" in
   EXP-A2p25-dsfixed-k90)
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_dsfixed_k90.yaml "$(odir EXP-A2p25-dsfixed-k90)"
     ;;
+  EXP-A2p25-halp-k90)
+    run_vc configs/vc_phase3_pruningonly_ucf101_A25_halp_k90.yaml "$(odir EXP-A2p25-halp-k90)"
+    ;;
   EXP-A2p25-newours-k90)
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_newours_k90.yaml "$(odir EXP-A2p25-newours-k90)"
     ;;
@@ -596,12 +599,20 @@ case "$EXP_ID" in
     _CFG="${STD_BUDGETAWARE_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_std_budgetaware_nollm_exp.yaml}"
     run_layout_multi run_layout "${_CFG}" EXP-B2-std-budgetaware
     ;;
+  EXP-B2-taos-style)
+    _CFG="${TAOS_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_taos_style_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-taos-style
+    ;;
   # Main method (default): BC^2-CEC + stage probes + atomic counterfactual baseline
   # Allow overriding configs per sweep without editing code:
   #   BC2CEC_CFG=... BC2CEC_RAW_CFG=... BC2CEC_NOPROBE_CFG=... RUN_TAG_PREFIX=... bash scripts/launch_B_grid_parallel.sh
   EXP-B2-bc2cec)
     _CFG="${BC2CEC_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_nollm_exp.yaml}"
     run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec
+    ;;
+  EXP-B2-bc2cec-nolong)
+    _CFG="${BC2CEC_NOLONG_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_nolong_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-nolong
     ;;
   # Ablations to keep story clean (run only when needed)
   EXP-B2-bc2cec-noprobe)
