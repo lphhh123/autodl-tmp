@@ -15,6 +15,11 @@ INSTANCE_LIST_DEFAULT=("chain_skip" "chain_skip_randw" "cluster4")
 BUDGET="${BUDGET:-10k}"
 # Optional tag appended to output directories/log symlinks to avoid collisions in sweeps
 RUN_TAG="${RUN_TAG:-}"
+GPU_IDS="${GPU_IDS:-}"
+if [[ -n "${GPU_IDS}" ]]; then
+  export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
+  echo "[GPU] forced CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (from GPU_IDS=${GPU_IDS})"
+fi
 
 sanitize_tag() {
   local s="${1:-}"
@@ -244,6 +249,45 @@ run_vc () {
     SMOKE="${SMOKE}" python -m scripts.run_version_c --cfg "$cfg" --out_dir "$out" --seed "$SEED" > "$out/stdout.log" 2>&1
     echo "[INFO] logs -> $out/stdout.log"
   fi
+
+  if is_ch3_a2p25_k90 && ! is_ch3_warm && [[ "${CH3_ALLOW_FRESH_FROM0:-0}" != "1" ]]; then
+    if ! grep -q "start_outer=15" "$out/stdout.log"; then
+      echo "[ERROR][CH3 STRICT] Protocol mismatch: expected start_outer=15 in $out/stdout.log"
+      echo "  This usually means INIT_CKPT_PATH was not loaded correctly."
+      exit 3
+    fi
+    if grep -q "\\[CH3 common refs\\] lat= mem= comm=" "$out/stdout.log"; then
+      echo "[ERROR][CH3 STRICT] Protocol mismatch: empty CH3 common refs in log."
+      exit 3
+    fi
+  fi
+}
+
+is_ch3_a2p25_k90() { [[ "${EXP_ID}" == EXP-A2p25-*-k90 ]]; }
+is_ch3_warm()      { [[ "${EXP_ID}" == EXP-A2p25-warm15-prep-k90 ]]; }
+
+ch3_require_protocol_or_die() {
+  if ! is_ch3_a2p25_k90 || is_ch3_warm; then return 0; fi
+  if [[ "${CH3_ALLOW_FRESH_FROM0:-0}" == "1" ]]; then
+    echo "[CH3 STRICT] disabled by CH3_ALLOW_FRESH_FROM0=1"
+    return 0
+  fi
+  if [[ -z "${INIT_CKPT_PATH:-}" ]]; then
+    echo "[ERROR][CH3 STRICT] INIT_CKPT_PATH is empty. You MUST continue from warm15-prep (start_outer=15)."
+    echo "  Hint: set INIT_CKPT_PATH to outputs/EXP-A2p25-warm15-prep-k90-<tag>/seed0/checkpoints/last.pth"
+    exit 3
+  fi
+  if [[ ! -f "${INIT_CKPT_PATH}" ]]; then
+    echo "[ERROR][CH3 STRICT] INIT_CKPT_PATH not found: ${INIT_CKPT_PATH}"
+    exit 3
+  fi
+  if [[ -z "${HW_REF_LAT_MS:-}" || -z "${HW_REF_MEM_MB:-}" || -z "${HW_REF_COMM_MS:-}" ]]; then
+    echo "[ERROR][CH3 STRICT] Missing HW refs. Need all: HW_REF_LAT_MS, HW_REF_MEM_MB, HW_REF_COMM_MS"
+    echo "  Hint: eval \"\$(python scripts/extract_ch3_common_refs.py --log_path <warm_stdout.log> --epoch_min 0 --epoch_max 4 --format shell)\""
+    exit 3
+  fi
+  echo "[CH3 STRICT] INIT_CKPT_PATH=${INIT_CKPT_PATH}"
+  echo "[CH3 STRICT] HW_REF_LAT_MS=${HW_REF_LAT_MS} HW_REF_MEM_MB=${HW_REF_MEM_MB} HW_REF_COMM_MS=${HW_REF_COMM_MS}"
 }
 
 run_layout () {
@@ -453,36 +497,47 @@ case "$EXP_ID" in
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_warm15_prep_k90.yaml "$(odir EXP-A2p25-warm15-prep-k90)"
     ;;
   EXP-A2p25-base-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_base_k90.yaml "$(odir EXP-A2p25-base-k90)"
     ;;
   EXP-A2p25-hwloss-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_hwloss_k90.yaml "$(odir EXP-A2p25-hwloss-k90)"
     ;;
   EXP-A2p25-cem60-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_cem60_k90.yaml "$(odir EXP-A2p25-cem60-k90)"
     ;;
   EXP-A2p25-dsfixed-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_dsfixed_k90.yaml "$(odir EXP-A2p25-dsfixed-k90)"
     ;;
   EXP-A2p25-halp-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_halp_k90.yaml "$(odir EXP-A2p25-halp-k90)"
     ;;
   EXP-A2p25-newours-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_newours_k90.yaml "$(odir EXP-A2p25-newours-k90)"
     ;;
   EXP-A2p25-ab-nomemory-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nomemory_k90.yaml "$(odir EXP-A2p25-ab-nomemory-k90)"
     ;;
   EXP-A2p25-ab-nolookahead-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nolookahead_k90.yaml "$(odir EXP-A2p25-ab-nolookahead-k90)"
     ;;
   EXP-A2p25-ab-nocandsel-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_nocandsel_k90.yaml "$(odir EXP-A2p25-ab-nocandsel-k90)"
     ;;
   EXP-A2p25-newours-tiebreak-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_newours_tiebreak_k90.yaml "$(odir EXP-A2p25-newours-tiebreak-k90)"
     ;;
   EXP-A2p25-ab-notiebreak-k90)
+    ch3_require_protocol_or_die
     run_vc configs/vc_phase3_pruningonly_ucf101_A25_ab_notiebreak_k90.yaml "$(odir EXP-A2p25-ab-notiebreak-k90)"
     ;;
   EXP-A4-fast)
