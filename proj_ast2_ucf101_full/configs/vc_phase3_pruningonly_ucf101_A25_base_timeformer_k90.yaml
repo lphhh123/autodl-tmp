@@ -1,0 +1,3 @@
+_base_: configs/vc_phase3_pruningonly_ucf101_A25_base_k90.yaml
+model:
+  attn_type: "timeformer_divided"

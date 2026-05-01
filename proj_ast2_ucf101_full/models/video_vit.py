@@ -42,6 +42,7 @@ class VideoViTConfig:
     drop_path_rate: float = 0.0
     use_ast_prune: bool = False
     ast_cfg: Optional[Dict] = None
+    attn_type: str = "per_frame"
 
 
 class DropPath(nn.Module):
@@ -141,6 +142,7 @@ class VideoViT(nn.Module):
         self.num_tokens = num_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, cfg.embed_dim))
+        self.temporal_embed = nn.Parameter(torch.zeros(1, cfg.num_frames, cfg.embed_dim))
         self.pos_drop = nn.Dropout(cfg.drop_rate)
 
         dpr = torch.linspace(0, cfg.drop_path_rate, cfg.depth).tolist()
@@ -230,6 +232,94 @@ class VideoViT(nn.Module):
         logits = logits.view(b, t, -1).mean(dim=1)  # aggregate over frames
         return logits, head_w, ch_w, block_w, sparsity
 
+
+    def _forward_tokens_timeformer_divided(self, tokens: torch.Tensor, ast_out: Optional[ASTOutputs], b: int, t: int):
+        n = self.num_tokens
+        cls = self.cls_token.expand(b, -1, -1)
+        spatial_pos = self.pos_embed[:, 1 : 1 + n, :].unsqueeze(1)
+        temporal_pos = self.temporal_embed[:, :t, :].unsqueeze(2)
+        tok = tokens + spatial_pos + temporal_pos
+
+        strict_masking = False
+        keep_mask_patch = tok.new_ones((b, t, n))
+        if ast_out is not None:
+            strict_masking = bool(_cfg_get(self.ast_cfg, "strict_masking", True))
+            if strict_masking:
+                keep_mask_patch = ast_out.token_mask.to(dtype=tok.dtype).view(b, t, n)
+                tok = tok * keep_mask_patch.unsqueeze(-1)
+
+        if ast_out is None:
+            head_w = [torch.ones(self.cfg.num_heads, device=tokens.device) for _ in range(len(self.blocks))]
+            ch_w = [torch.ones(int(self.cfg.embed_dim * self.cfg.mlp_ratio), device=tokens.device) for _ in range(len(self.blocks))]
+            block_w = [torch.tensor(1.0, device=tokens.device) for _ in range(len(self.blocks))]
+            sparsity = {}
+        else:
+            head_w = ast_out.head_weights
+            ch_w = ast_out.ch_weights
+            block_w = ast_out.block_weights
+            sparsity = ast_out.sparsity
+
+        cls = cls + self.pos_embed[:, :1, :]
+        tok = self.pos_drop(tok)
+        cls = self.pos_drop(cls)
+
+        for idx, blk in enumerate(self.blocks):
+            head_scale = head_w[idx].mean()
+            bw = block_w[idx]
+            # temporal attention (per spatial index)
+            x_t = tok.permute(0, 2, 1, 3).reshape(b * n, t, -1)
+            if strict_masking:
+                km_t = keep_mask_patch.permute(0, 2, 1).reshape(b * n, t)
+                x_t = x_t * km_t.unsqueeze(-1)
+                kpm_t = (km_t <= 0.0)
+                h_t, _ = blk.attn(blk.norm1(x_t), blk.norm1(x_t), blk.norm1(x_t), key_padding_mask=kpm_t)
+                h_t = h_t * km_t.unsqueeze(-1)
+            else:
+                x_tn = blk.norm1(x_t)
+                h_t, _ = blk.attn(x_tn, x_tn, x_tn)
+            tok = tok + blk.drop_path(bw * (head_scale * h_t.reshape(b, n, t, -1).permute(0, 2, 1, 3)))
+            if strict_masking:
+                tok = tok * keep_mask_patch.unsqueeze(-1)
+
+            # spatial attention (per frame with replicated cls)
+            cls_rep = cls.unsqueeze(1).expand(-1, t, -1, -1)
+            seq_s = torch.cat([cls_rep, tok], dim=2).reshape(b * t, 1 + n, -1)
+            if strict_masking:
+                km_s = torch.cat([tok.new_ones((b, t, 1)), keep_mask_patch], dim=2).reshape(b * t, 1 + n)
+                seq_s = seq_s * km_s.unsqueeze(-1)
+                kpm_s = (km_s <= 0.0)
+                kpm_s[:, 0] = False
+                s_norm = blk.norm1(seq_s)
+                h_s, _ = blk.attn(s_norm, s_norm, s_norm, key_padding_mask=kpm_s)
+                h_s = h_s * km_s.unsqueeze(-1)
+            else:
+                s_norm = blk.norm1(seq_s)
+                h_s, _ = blk.attn(s_norm, s_norm, s_norm)
+            h_s = h_s.reshape(b, t, 1 + n, -1)
+            cls_delta = h_s[:, :, 0, :].mean(dim=1)
+            tok_delta = h_s[:, :, 1:, :]
+            cls = cls + blk.drop_path(bw * (head_scale * cls_delta))
+            tok = tok + blk.drop_path(bw * (head_scale * tok_delta))
+            if strict_masking:
+                tok = tok * keep_mask_patch.unsqueeze(-1)
+
+            seq_g = torch.cat([cls.unsqueeze(1), tok.reshape(b, t * n, -1)], dim=1)
+            keep_seq = None
+            if strict_masking:
+                keep_seq = torch.cat([tok.new_ones((b, 1)), keep_mask_patch.reshape(b, t * n)], dim=1)
+                seq_g = seq_g * keep_seq.unsqueeze(-1)
+            mlp_out = blk.mlp(blk.norm2(seq_g), ch_w[idx])
+            seq_g = seq_g + blk.drop_path(bw * mlp_out)
+            if keep_seq is not None:
+                seq_g = seq_g * keep_seq.unsqueeze(-1)
+            cls = seq_g[:, 0, :]
+            tok = seq_g[:, 1:, :].reshape(b, t, n, -1)
+
+        seq_final = torch.cat([cls.unsqueeze(1), tok.reshape(b, t * n, -1)], dim=1)
+        seq_final = self.norm(seq_final)
+        logits = self.head(seq_final[:, 0])
+        return logits, head_w, ch_w, block_w, sparsity
+
     def forward(self, x: torch.Tensor, return_intermediate: bool = False):
         b, t, c, h, w = x.shape
         assert t == self.num_frames, f"Expected num_frames={self.num_frames}, got {t}"
@@ -265,7 +355,11 @@ class VideoViT(nn.Module):
             token_mask = ast_out.token_mask
             token_mask = torch.nan_to_num(token_mask, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
             tokens = tokens * token_mask.to(dtype=tokens.dtype).unsqueeze(-1)
-        logits, head_w, ch_w, block_w, sparsity = self._forward_tokens(tokens, ast_out, b, t)
+        attn_type = str(getattr(self.cfg, "attn_type", "per_frame") or "per_frame").lower()
+        if attn_type in {"timeformer_divided", "timesformer"}:
+            logits, head_w, ch_w, block_w, sparsity = self._forward_tokens_timeformer_divided(tokens, ast_out, b, t)
+        else:
+            logits, head_w, ch_w, block_w, sparsity = self._forward_tokens(tokens, ast_out, b, t)
 
         if not return_intermediate:
             return logits
@@ -382,16 +476,17 @@ class VideoViT(nn.Module):
                 "precision": 1,
             }
 
+        num_tokens_total = self.num_tokens * t if attn_type in {"timeformer_divided", "timesformer"} else self.num_tokens
         if dp_safe:
-            seq_len_total = tokens.new_tensor(float(self.num_tokens + 1))
-            seq_len_effective = tokens.new_tensor(1.0) + token_keep_s * float(self.num_tokens)
+            seq_len_total = tokens.new_tensor(float(num_tokens_total + 1))
+            seq_len_effective = tokens.new_tensor(1.0) + token_keep_s * float(num_tokens_total)
             est_attn_flops_ratio = (seq_len_effective / seq_len_total).pow(2)
             est_token_linear_flops_ratio = (seq_len_effective / seq_len_total)
         else:
-            seq_len_total = float(self.num_tokens + 1)
-            seq_len_effective = float(1.0 + token_keep * self.num_tokens)
-            est_attn_flops_ratio = float(((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1)) ** 2)
-            est_token_linear_flops_ratio = float((1.0 + token_keep * self.num_tokens) / (self.num_tokens + 1))
+            seq_len_total = float(num_tokens_total + 1)
+            seq_len_effective = float(1.0 + token_keep * num_tokens_total)
+            est_attn_flops_ratio = float(((1.0 + token_keep * num_tokens_total) / (num_tokens_total + 1)) ** 2)
+            est_token_linear_flops_ratio = float((1.0 + token_keep * num_tokens_total) / (num_tokens_total + 1))
         info = {
             "L_AST": L_ast_val,
             "token_feat": tokens,
