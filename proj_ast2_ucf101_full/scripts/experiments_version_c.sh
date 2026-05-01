@@ -669,6 +669,14 @@ case "$EXP_ID" in
     _CFG="${BC2CEC_NOLONG_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_nolong_nollm_exp.yaml}"
     run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-nolong
     ;;
+  EXP-B2-bc2cec-shiftm005)
+    _CFG="${BC2CEC_SHIFTM_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_shiftm005_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-shiftm005
+    ;;
+  EXP-B2-bc2cec-shiftp005)
+    _CFG="${BC2CEC_SHIFTP_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_best_shiftp005_nollm_exp.yaml}"
+    run_layout_multi run_layout "${_CFG}" EXP-B2-bc2cec-shiftp005
+    ;;
   # Ablations to keep story clean (run only when needed)
   EXP-B2-bc2cec-noprobe)
     _CFG="${BC2CEC_NOPROBE_CFG:-configs/layout_agent/layout_L4_region_pareto_llm_mpvs_bc2cec_noprobe_nollm_exp.yaml}"
