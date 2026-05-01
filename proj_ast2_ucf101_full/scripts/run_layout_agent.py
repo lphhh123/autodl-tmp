@@ -207,89 +207,69 @@ def parse_llm_usage(llm_usage_path: Path) -> dict:
 
 
 def _append_trace_events_from_csv(trace_events_path: Path, trace_csv: Path, run_id: str) -> int:
+    if str(os.environ.get("TRACE_EVENTS_FROM_CSV_DISABLE", "0")).strip() == "1":
+        return 0
     if not trace_csv.exists():
         return 0
+    try:
+        stride = max(1, int(os.environ.get("TRACE_EVENTS_FROM_CSV_STRIDE", "1") or 1))
+    except Exception:
+        stride = 1
     added = 0
+
+    def _num(val, default=0.0):
+        try:
+            if val is None or val == "":
+                return default
+            return float(val)
+        except Exception:
+            return default
+
+    def _int(val, default=0):
+        try:
+            if val is None or val == "":
+                return default
+            return int(float(val))
+        except Exception:
+            return default
+
+    lines = []
     with trace_csv.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for idx, row in enumerate(reader):
+            if idx % stride != 0:
+                continue
             stage = str(row.get("stage", "") or "")
             if stage in {"init", "finalize"}:
                 continue
-
-            def _num(val, default=0.0):
-                try:
-                    if val is None or val == "":
-                        return default
-                    return float(val)
-                except Exception:
-                    return default
-
-            def _int(val, default=0):
-                try:
-                    if val is None or val == "":
-                        return default
-                    return int(float(val))
-                except Exception:
-                    return default
-
             iter_id = _int(row.get("iter", 0), 0)
             comm_norm = _num(row.get("comm_norm", 0.0), 0.0)
             therm_norm = _num(row.get("therm_norm", 0.0), 0.0)
 
-            append_trace_event_v54(
-                trace_events_path,
-                "layout_step",
-                payload={
-                    "iter": int(iter_id),
-                    "stage": stage,
-                    "op": str(row.get("op", "")),
-                    "op_args_json": str(row.get("op_args_json", "")),
-                    "accepted": _int(row.get("accepted", 0), 0),
-                    "total_scalar": _num(row.get("total_scalar", 0.0), 0.0),
-                    "comm_norm": comm_norm,
-                    "therm_norm": therm_norm,
-                    "pareto_added": _int(row.get("pareto_added", 0), 0),
-                    "duplicate_penalty": _num(row.get("duplicate_penalty", 0.0), 0.0),
-                    "boundary_penalty": _num(row.get("boundary_penalty", 0.0), 0.0),
-                    "seed_id": _int(row.get("seed_id", 0), 0),
-                    "time_ms": _int(row.get("time_ms", 0.0), 0),
-                    "signature": str(row.get("signature", "")),
-                },
-                run_id=str(run_id),
-                step=int(iter_id),
-            )
-            append_trace_event_v54(
-                trace_events_path,
-                "proxy_sanitize",
-                payload={
-                    "candidate_id": int(iter_id),
-                    "outer_iter": int(iter_id),
-                    "inner_step": int(iter_id),
-                    "metric": "comm",
-                    "raw_value": float(comm_norm),
-                    "used_value": float(comm_norm),
-                    "penalty_added": 0.0,
-                },
-                run_id=str(run_id),
-                step=int(iter_id),
-            )
-            append_trace_event_v54(
-                trace_events_path,
-                "proxy_sanitize",
-                payload={
-                    "candidate_id": int(iter_id),
-                    "outer_iter": int(iter_id),
-                    "inner_step": int(iter_id),
-                    "metric": "therm",
-                    "raw_value": float(therm_norm),
-                    "used_value": float(therm_norm),
-                    "penalty_added": 0.0,
-                },
-                run_id=str(run_id),
-                step=int(iter_id),
-            )
+            payload_layout = {
+                "iter": int(iter_id), "stage": stage, "op": str(row.get("op", "")), "op_args_json": str(row.get("op_args_json", "")),
+                "accepted": _int(row.get("accepted", 0), 0), "total_scalar": _num(row.get("total_scalar", 0.0), 0.0),
+                "comm_norm": comm_norm, "therm_norm": therm_norm, "pareto_added": _int(row.get("pareto_added", 0), 0),
+                "duplicate_penalty": _num(row.get("duplicate_penalty", 0.0), 0.0), "boundary_penalty": _num(row.get("boundary_penalty", 0.0), 0.0),
+                "seed_id": _int(row.get("seed_id", 0), 0), "time_ms": _int(row.get("time_ms", 0.0), 0), "signature": str(row.get("signature", "")),
+            }
+            TraceContractV54.validate_event("layout_step", payload_layout)
+            evt_layout = {"event": "layout_step", "payload": payload_layout, "run_id": str(run_id), "step": int(iter_id), "timestamp": float(time.time())}
+            lines.append(json.dumps(evt_layout, ensure_ascii=False) + "\n")
+
+            for metric, rawv in (("comm", comm_norm), ("therm", therm_norm)):
+                payload_proxy = {
+                    "candidate_id": int(iter_id), "outer_iter": int(iter_id), "inner_step": int(iter_id),
+                    "metric": metric, "raw_value": float(rawv), "used_value": float(rawv), "penalty_added": 0.0,
+                }
+                TraceContractV54.validate_event("proxy_sanitize", payload_proxy)
+                evt_proxy = {"event": "proxy_sanitize", "payload": payload_proxy, "run_id": str(run_id), "step": int(iter_id), "timestamp": float(time.time())}
+                lines.append(json.dumps(evt_proxy, ensure_ascii=False) + "\n")
             added += 1
+    if lines:
+        trace_events_path.parent.mkdir(parents=True, exist_ok=True)
+        with trace_events_path.open("a", encoding="utf-8") as fw:
+            fw.writelines(lines)
     return added
 
 def _parse_segments(raw_segments) -> list[Segment]:

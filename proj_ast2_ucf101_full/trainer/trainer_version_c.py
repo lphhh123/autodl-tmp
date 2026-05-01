@@ -3246,7 +3246,101 @@ def _maybe_run_alloc_search_and_apply(
             rng_seed=int(alloc_rng_seed),
         )
 
-        if lookahead_budget > 1e-8 and usable_budget > 1e-8 and dirs:
+        if controller in ("halp_knapsack", "halp", "halp_style"):
+            keep_unit = float(getattr(alloc_cfg, "keep_unit", 0.01))
+            min_keep_floor = float(getattr(alloc_cfg, "min_keep_floor", 0.25))
+            floor = torch.full_like(keep_now, float(min_keep_floor))
+            floor[:k_freeze] = keep_now[:k_freeze]
+            sens_mean = float(sens.mean().item()) if float(sens.mean().item()) > 1e-12 else 1.0
+            sens_norm = sens / sens_mean
+            total_units = max(1, int(round(float(usable_budget) / max(float(keep_unit), 1.0e-8))))
+            rel_gain_by_layer = {}
+            any_pos = False
+            for li in range(int(k_freeze), int(depth)):
+                cap = float(max(0.0, float(keep_now[li].item()) - float(floor[li].item())))
+                if cap + 1.0e-12 < float(keep_unit):
+                    continue
+                keep_i = keep_now.clone()
+                keep_i[li] = max(float(floor[li].item()), float(keep_i[li].item()) - float(keep_unit))
+                obj_i = float(_eval_single_alloc_candidate(
+                    keep_i,
+                    model=model,
+                    last_info=last_info,
+                    cfg=cfg,
+                    hw_proxy=hw_proxy,
+                    wafer_layout=wafer_layout,
+                    eff_specs=eff_specs_cpu,
+                    alpha=alpha_cpu,
+                    fine_split_threads=max(1, int(inner_threads)),
+                ).get("objective", 1.0e18))
+                rel_gain_unit = float(base_obj - obj_i) / max(1.0e-12, abs(float(base_obj)))
+                rel_gain_by_layer[int(li)] = rel_gain_unit
+                if rel_gain_unit > 0.0:
+                    any_pos = True
+            scores = {}
+            for li in range(int(k_freeze), int(depth)):
+                if li not in rel_gain_by_layer:
+                    continue
+                if any_pos:
+                    scores[int(li)] = float(rel_gain_by_layer[int(li)]) / (float(sens_norm[li].item()) + 1.0e-6)
+                else:
+                    scores[int(li)] = -float(sens_norm[li].item())
+
+            keep_cand = keep_now.clone()
+            for _ in range(int(total_units)):
+                best_li = None
+                best_score = -1.0e30
+                for li, score in scores.items():
+                    cap = float(max(0.0, float(keep_cand[li].item()) - float(floor[li].item())))
+                    if cap + 1.0e-12 < float(keep_unit):
+                        continue
+                    if score > best_score:
+                        best_score = float(score)
+                        best_li = int(li)
+                if best_li is None:
+                    break
+                keep_cand[best_li] = max(float(floor[best_li].item()), float(keep_cand[best_li].item()) - float(keep_unit))
+
+            cand_eval = _eval_single_alloc_candidate(
+                keep_cand,
+                model=model,
+                last_info=last_info,
+                cfg=cfg,
+                hw_proxy=hw_proxy,
+                wafer_layout=wafer_layout,
+                eff_specs=eff_specs_cpu,
+                alpha=alpha_cpu,
+                fine_split_threads=max(1, int(inner_threads)),
+            )
+            cand_obj = float(cand_eval.get("objective", 1.0e18))
+            rel_hw_gain = float(base_obj - cand_obj) / max(1.0e-12, abs(float(base_obj)))
+            delta = torch.clamp(keep_now - keep_cand, min=0.0)
+            delta_sum = float(delta.sum().item())
+            direction_items = []
+            if delta_sum > 1.0e-12:
+                for li in range(int(k_freeze), int(depth)):
+                    d = float(delta[li].item())
+                    if d > 0.0:
+                        direction_items.append((int(li), float(d / delta_sum)))
+            acc_risk = float((sens_norm * torch.abs(keep_now - keep_cand)).sum().item()) / max(float(usable_budget), 1.0e-8)
+            best = {
+                "keep_cand": keep_cand,
+                "base_objective": float(base_obj),
+                "objective": float(cand_obj),
+                "rel_hw_gain": float(rel_hw_gain),
+                "acc_risk": float(acc_risk),
+                "total_score": float(cand_eval.get("total_score", cand_eval.get("objective", cand_obj))),
+                "policy": "halp_knapsack",
+                "probe_points": 0,
+                "probe_dirs": 0,
+                "probe_alpha": 0.0,
+                "direction_items": direction_items,
+            }
+            common_meta["alloc_decision_basis"] = "halp_knapsack"
+            common_meta["alloc_selected_source"] = "halp"
+            common_meta["alloc_selected_long_gain"] = float(best.get("rel_hw_gain", 0.0) or 0.0)
+            common_meta["alloc_selected_apply_gain"] = float(best.get("rel_hw_gain", 0.0) or 0.0)
+        elif lookahead_budget > 1e-8 and usable_budget > 1e-8 and dirs:
             if controller == "new_ours":
                 inc_eval = None
                 incumbent = run_state.get("alloc_incumbent_direction", None)

@@ -1,0 +1,22 @@
+_base_: layout_L4_region_pareto_llm_mpvs_bc2cec_best_nollm_exp.yaml
+detailed_place:
+  mpvs:
+    macros:
+      probe:
+        enabled: true
+        weight_metric: raw
+        cf_discount: 0.0
+        cf_discount_by_stage: {early: 0.0, mid: 0.0, late: 0.0}
+        update_weight: false
+        weight_use_ewma: false
+        shrinkage:
+          enabled: false
+      decision:
+        mode: burst
+        burst_calls_frac: 0.06
+        burst_calls_min: 1200
+        burst_calls_late_cap: 2400
+    controller:
+      ewma_alpha_long: 0.0
+      cec:
+        enabled: false

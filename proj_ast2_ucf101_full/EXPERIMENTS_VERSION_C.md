@@ -15,7 +15,7 @@ python -m scripts.run_version_c --cfg configs/smoke_version_c_ucf101.yaml
 ```bash
 RUN_CTL_EVIDENCE=0 \
 RUN_ABLATIONS=0 \
-EXPS_MAIN="EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-bc2cec EXP-B3" \
+EXPS_MAIN="EXP-B1 EXP-B2-mpvs-only EXP-B2-std-budgetaware EXP-B2-taos-style EXP-B2-bc2cec EXP-B2-bc2cec-nolong EXP-B3" \
 INSTANCES="cluster4 chain_skip chain_skip_randw" \
 BUDGETS="50k 100k 150k 200k" \
 WEIGHT_PAIRS="0.3,0.7" \
