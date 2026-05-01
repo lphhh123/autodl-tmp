@@ -760,11 +760,19 @@ def run_detailed_place(
                 f3 = round(float(f3_raw) / float(grid)) * float(grid)
                 fracs = [float(f1), float(f2), float(f3), float(f4)]
                 fracs = sorted({float(min(0.99, max(0.01, x))) for x in fracs})
-                probe_cfg["trigger_fracs"] = fracs
-                mpvs_stats["probe_trigger_fracs"] = fracs
                 mpvs_stats["probe_trigger_mode"] = "auto_k4"
             else:
                 fracs = list(fracs_raw or [])
+                mpvs_stats["probe_trigger_mode"] = "manual"
+
+            trigger_shift = float(_cfg_get(probe_cfg, "trigger_shift", 0.0) or 0.0)
+            if fracs and abs(trigger_shift) > 0.0:
+                fracs = sorted({float(min(0.99, max(0.01, float(x) + trigger_shift))) for x in fracs})
+
+            probe_cfg["trigger_fracs"] = fracs
+            mpvs_stats["probe_trigger_fracs"] = fracs
+            mpvs_stats["probe_trigger_shift"] = trigger_shift
+
             calls_abs = list(_cfg_get(probe_cfg, "trigger_calls", []) or [])
             trig = []
             for x in fracs:

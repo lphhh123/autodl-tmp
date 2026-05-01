@@ -1,7 +1,13 @@
+# Clean no-long ablation: keep probe-CF + short-term safe updates, remove long-horizon release/tickets/AOS
 _base_: layout_L4_region_pareto_llm_mpvs_bc2cec_best_nollm_exp.yaml
 detailed_place:
   mpvs:
     controller:
       ewma_alpha_long: 0.0
       cec:
-        enabled: false
+        enabled: true
+        candidate_release: false
+        sponsor_stages: []                # disable sponsor on-ramp and sponsored tickets
+        direct_pass_trial_stages: []      # disable direct-pass seed trials
+        aos:
+          enabled: false                  # disable controller AOS family selection (keep probe-CF in macro engine)

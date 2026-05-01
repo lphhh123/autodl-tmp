@@ -1,0 +1,7 @@
+# Stage-trigger sensitivity: shift auto_k4 fracs by ±0.05 (clamped to [0.01,0.99])
+_base_: layout_L4_region_pareto_llm_mpvs_bc2cec_best_nollm_exp.yaml
+detailed_place:
+  mpvs:
+    macros:
+      probe:
+        trigger_shift: 0.05
