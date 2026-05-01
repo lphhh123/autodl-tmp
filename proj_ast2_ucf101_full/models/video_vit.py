@@ -235,7 +235,7 @@ class VideoViT(nn.Module):
 
     def _forward_tokens_timeformer_divided(self, tokens: torch.Tensor, ast_out: Optional[ASTOutputs], b: int, t: int):
         n = self.num_tokens
-        cls = self.cls_token.expand(b, -1, -1)
+        cls = self.cls_token.expand(b, -1, -1).squeeze(1)
         spatial_pos = self.pos_embed[:, 1 : 1 + n, :].unsqueeze(1)
         temporal_pos = self.temporal_embed[:, :t, :].unsqueeze(2)
         tok = tokens + spatial_pos + temporal_pos
@@ -259,7 +259,7 @@ class VideoViT(nn.Module):
             block_w = ast_out.block_weights
             sparsity = ast_out.sparsity
 
-        cls = cls + self.pos_embed[:, :1, :]
+        cls = cls + self.pos_embed[:, 0, :]
         tok = self.pos_drop(tok)
         cls = self.pos_drop(cls)
 
@@ -282,7 +282,7 @@ class VideoViT(nn.Module):
                 tok = tok * keep_mask_patch.unsqueeze(-1)
 
             # spatial attention (per frame with replicated cls)
-            cls_rep = cls.unsqueeze(1).expand(-1, t, -1, -1)
+            cls_rep = cls[:, None, None, :].expand(b, t, 1, -1)
             seq_s = torch.cat([cls_rep, tok], dim=2).reshape(b * t, 1 + n, -1)
             if strict_masking:
                 km_s = torch.cat([tok.new_ones((b, t, 1)), keep_mask_patch], dim=2).reshape(b * t, 1 + n)
