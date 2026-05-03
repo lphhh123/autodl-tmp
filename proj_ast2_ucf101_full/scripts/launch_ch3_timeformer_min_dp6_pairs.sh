@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-WARM_GPU_IDS="${WARM_GPU_IDS:-0,1,2}"
+WARM_GPU_IDS="${WARM_GPU_IDS:-0,1,2,3,4,5}"
 GPU_IDS_A="${GPU_IDS_A:-0,1,2}"
 GPU_IDS_B="${GPU_IDS_B:-3,4,5}"
 SEEDS_STR="${SEEDS_STR:-0}"

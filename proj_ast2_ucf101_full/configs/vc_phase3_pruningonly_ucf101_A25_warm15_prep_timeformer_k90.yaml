@@ -4,3 +4,7 @@ model:
 # DP_SCALE_BATCH=1 时，3卡总 batch=42；如需 45 改为 15
 train:
   batch_size: 14
+
+data:
+  # warmup only: use larger train subset for a more stable init checkpoint
+  subset_ratio_train: 0.30
