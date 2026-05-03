@@ -4,3 +4,9 @@ model:
 # DP_SCALE_BATCH=1 时，3卡总 batch=42；如需 45 改为 15
 train:
   batch_size: 14
+
+ast:
+  schedule:
+    # Align pruning schedule to start_outer=8 for timeformer suite
+    warmup_epochs: 8
+    force_dense_epochs: 8

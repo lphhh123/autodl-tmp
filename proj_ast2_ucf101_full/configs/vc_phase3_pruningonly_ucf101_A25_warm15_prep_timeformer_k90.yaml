@@ -12,3 +12,9 @@ data:
 training:
   # timeformer warmup: stop at outer=8
   outer_epochs: 8
+
+ast:
+  schedule:
+    # Align pruning schedule to start_outer=8 for timeformer suite
+    warmup_epochs: 8
+    force_dense_epochs: 8
