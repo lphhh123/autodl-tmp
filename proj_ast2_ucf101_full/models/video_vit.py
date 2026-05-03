@@ -92,9 +92,31 @@ class Block(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True, dropout=attn_drop)
+        self.norm_time = nn.LayerNorm(dim)
+        self.attn_time = nn.MultiheadAttention(dim, num_heads, batch_first=True, dropout=attn_drop)
+        self.norm_space = nn.LayerNorm(dim)
+        self.attn_space = nn.MultiheadAttention(dim, num_heads, batch_first=True, dropout=attn_drop)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, mlp_ratio, drop=drop)
         self.drop_path = DropPath(drop_path)
+        self._init_divided_from_shared()
+
+    def _init_divided_from_shared(self) -> None:
+        with torch.no_grad():
+            self.norm_time.weight.copy_(self.norm1.weight)
+            self.norm_time.bias.copy_(self.norm1.bias)
+            self.norm_space.weight.copy_(self.norm1.weight)
+            self.norm_space.bias.copy_(self.norm1.bias)
+
+            self.attn_time.in_proj_weight.copy_(self.attn.in_proj_weight)
+            self.attn_time.in_proj_bias.copy_(self.attn.in_proj_bias)
+            self.attn_time.out_proj.weight.copy_(self.attn.out_proj.weight)
+            self.attn_time.out_proj.bias.copy_(self.attn.out_proj.bias)
+
+            self.attn_space.in_proj_weight.copy_(self.attn.in_proj_weight)
+            self.attn_space.in_proj_bias.copy_(self.attn.in_proj_bias)
+            self.attn_space.out_proj.weight.copy_(self.attn.out_proj.weight)
+            self.attn_space.out_proj.bias.copy_(self.attn.out_proj.bias)
 
     def forward(
         self,
@@ -272,11 +294,12 @@ class VideoViT(nn.Module):
                 km_t = keep_mask_patch.permute(0, 2, 1).reshape(b * n, t)
                 x_t = x_t * km_t.unsqueeze(-1)
                 kpm_t = (km_t <= 0.0)
-                h_t, _ = blk.attn(blk.norm1(x_t), blk.norm1(x_t), blk.norm1(x_t), key_padding_mask=kpm_t)
+                x_tn = blk.norm_time(x_t)
+                h_t, _ = blk.attn_time(x_tn, x_tn, x_tn, key_padding_mask=kpm_t)
                 h_t = h_t * km_t.unsqueeze(-1)
             else:
-                x_tn = blk.norm1(x_t)
-                h_t, _ = blk.attn(x_tn, x_tn, x_tn)
+                x_tn = blk.norm_time(x_t)
+                h_t, _ = blk.attn_time(x_tn, x_tn, x_tn)
             tok = tok + blk.drop_path(bw * (head_scale * h_t.reshape(b, n, t, -1).permute(0, 2, 1, 3)))
             if strict_masking:
                 tok = tok * keep_mask_patch.unsqueeze(-1)
@@ -289,12 +312,12 @@ class VideoViT(nn.Module):
                 seq_s = seq_s * km_s.unsqueeze(-1)
                 kpm_s = (km_s <= 0.0)
                 kpm_s[:, 0] = False
-                s_norm = blk.norm1(seq_s)
-                h_s, _ = blk.attn(s_norm, s_norm, s_norm, key_padding_mask=kpm_s)
+                s_norm = blk.norm_space(seq_s)
+                h_s, _ = blk.attn_space(s_norm, s_norm, s_norm, key_padding_mask=kpm_s)
                 h_s = h_s * km_s.unsqueeze(-1)
             else:
-                s_norm = blk.norm1(seq_s)
-                h_s, _ = blk.attn(s_norm, s_norm, s_norm)
+                s_norm = blk.norm_space(seq_s)
+                h_s, _ = blk.attn_space(s_norm, s_norm, s_norm)
             h_s = h_s.reshape(b, t, 1 + n, -1)
             cls_delta = h_s[:, :, 0, :].mean(dim=1)
             tok_delta = h_s[:, :, 1:, :]
