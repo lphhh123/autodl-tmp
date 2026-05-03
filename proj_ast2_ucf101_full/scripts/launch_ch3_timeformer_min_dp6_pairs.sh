@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+WARM_TF_PER_GPU_BS="${WARM_TF_PER_GPU_BS:-}"
+POST_TF_PER_GPU_BS="${POST_TF_PER_GPU_BS:-10}"
+if [[ -z "${WARM_TF_PER_GPU_BS}" && -n "${TF_PER_GPU_BS:-}" ]]; then
+  WARM_TF_PER_GPU_BS="${TF_PER_GPU_BS}"
+fi
+
 export CH3_EXPECT_START_OUTER="${CH3_EXPECT_START_OUTER:-8}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -17,11 +23,6 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
-
-if [[ -n "${TF_PER_GPU_BS:-}" ]]; then
-  export TRAIN_BATCH_SIZE="${TF_PER_GPU_BS}"
-  echo "[ch3-timeformer-pairs] override via env: TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} (DP_SCALE_BATCH=1)"
-fi
 
 sanitize_tag() {
   local s="${1:-}"
@@ -86,6 +87,11 @@ for SEED in ${SEEDS_STR}; do
   export USE_DP=1 DP_SCALE_BATCH=1 DP_SCALE_LR=linear AUTO_RESUME=0 FRESH_RUN=1
   export INSTANCE RUN_TAG STDOUT_AGG_DIR
 
+  if [[ -n "${WARM_TF_PER_GPU_BS}" ]]; then
+    export TRAIN_BATCH_SIZE="${WARM_TF_PER_GPU_BS}"
+    echo "[ch3-timeformer-pairs] warmup TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}"
+  fi
+
   export CUDA_VISIBLE_DEVICES="${WARM_GPU_IDS}"
   export GPU_IDS="${WARM_GPU_IDS}"
   bash scripts/experiments_version_c.sh EXP-A2p25-warm15-prep-timeformer-k90 "${SEED}"
@@ -108,6 +114,8 @@ for SEED in ${SEEDS_STR}; do
   [[ -n "${HW_REF_LAT_MS:-}" && -n "${HW_REF_MEM_MB:-}" && -n "${HW_REF_COMM_MS:-}" ]] || { echo "[ERROR] missing HW refs from warm log"; exit 3; }
   export HW_REF_LAT_MS HW_REF_MEM_MB HW_REF_COMM_MS
   export INIT_CKPT_PATH="${WARM_CKPT}"
+  export TRAIN_BATCH_SIZE="${POST_TF_PER_GPU_BS}"
+  echo "[ch3-timeformer-pairs] post TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} (avoid OOM when force_dense=False)"
 
   PARALLEL_LOG_DIR="${STDOUT_AGG_DIR}/_parallel"
   mkdir -p "${PARALLEL_LOG_DIR}"
