@@ -15,6 +15,7 @@ INSTANCE_LIST_DEFAULT=("chain_skip" "chain_skip_randw" "cluster4")
 BUDGET="${BUDGET:-10k}"
 # Optional tag appended to output directories/log symlinks to avoid collisions in sweeps
 RUN_TAG="${RUN_TAG:-}"
+CH3_EXPECT_START_OUTER="${CH3_EXPECT_START_OUTER:-15}"
 GPU_IDS="${GPU_IDS:-}"
 if [[ -n "${GPU_IDS}" ]]; then
   export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
@@ -251,8 +252,8 @@ run_vc () {
   fi
 
   if is_ch3_a2p25_k90 && ! is_ch3_warm && [[ "${CH3_ALLOW_FRESH_FROM0:-0}" != "1" ]]; then
-    if ! grep -q "start_outer=15" "$out/stdout.log"; then
-      echo "[ERROR][CH3 STRICT] Protocol mismatch: expected start_outer=15 in $out/stdout.log"
+    if ! grep -q "start_outer=${CH3_EXPECT_START_OUTER}" "$out/stdout.log"; then
+      echo "[ERROR][CH3 STRICT] Protocol mismatch: expected start_outer=${CH3_EXPECT_START_OUTER} in $out/stdout.log"
       echo "  This usually means INIT_CKPT_PATH was not loaded correctly."
       exit 3
     fi
@@ -273,7 +274,7 @@ ch3_require_protocol_or_die() {
     return 0
   fi
   if [[ -z "${INIT_CKPT_PATH:-}" ]]; then
-    echo "[ERROR][CH3 STRICT] INIT_CKPT_PATH is empty. You MUST continue from warm15-prep (start_outer=15)."
+    echo "[ERROR][CH3 STRICT] INIT_CKPT_PATH is empty. You MUST continue from warm-prep (expected start_outer=${CH3_EXPECT_START_OUTER})."
     echo "  Hint: set INIT_CKPT_PATH to outputs/EXP-A2p25-warm15-prep-k90-<tag>/seed0/checkpoints/last.pth"
     echo "  Hint: TimeSformer uses outputs/EXP-A2p25-warm15-prep-timeformer-k90-<tag>/seed0/checkpoints/last.pth"
     exit 3

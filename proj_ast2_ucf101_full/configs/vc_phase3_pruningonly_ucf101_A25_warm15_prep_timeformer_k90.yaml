@@ -8,3 +8,7 @@ train:
 data:
   # warmup only: use larger train subset for a more stable init checkpoint
   subset_ratio_train: 0.30
+
+training:
+  # timeformer warmup: stop at outer=8
+  outer_epochs: 8
