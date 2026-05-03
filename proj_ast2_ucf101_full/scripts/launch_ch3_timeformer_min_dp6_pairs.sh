@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+export CH3_EXPECT_START_OUTER="${CH3_EXPECT_START_OUTER:-8}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
