@@ -141,6 +141,11 @@ def _convert_timm_vit_to_custom_videovit(
                 src = f"blocks.{i}.{n}.{t}"
                 if src in sd:
                     out[src] = sd[src].contiguous()
+        for n in ("norm_time", "norm_space"):
+            for t in ("weight", "bias"):
+                src = f"blocks.{i}.norm1.{t}"
+                if src in sd:
+                    out[f"blocks.{i}.{n}.{t}"] = sd[src].contiguous()
 
         qkv_w = sd.get(f"blocks.{i}.attn.qkv.weight", None)
         qkv_b = sd.get(f"blocks.{i}.attn.qkv.bias", None)
@@ -148,12 +153,20 @@ def _convert_timm_vit_to_custom_videovit(
         proj_b = sd.get(f"blocks.{i}.attn.proj.bias", None)
         if qkv_w is not None:
             out[f"blocks.{i}.attn.in_proj_weight"] = qkv_w.contiguous()
+            out[f"blocks.{i}.attn_time.in_proj_weight"] = qkv_w.contiguous()
+            out[f"blocks.{i}.attn_space.in_proj_weight"] = qkv_w.contiguous()
         if qkv_b is not None:
             out[f"blocks.{i}.attn.in_proj_bias"] = qkv_b.contiguous()
+            out[f"blocks.{i}.attn_time.in_proj_bias"] = qkv_b.contiguous()
+            out[f"blocks.{i}.attn_space.in_proj_bias"] = qkv_b.contiguous()
         if proj_w is not None:
             out[f"blocks.{i}.attn.out_proj.weight"] = proj_w.contiguous()
+            out[f"blocks.{i}.attn_time.out_proj.weight"] = proj_w.contiguous()
+            out[f"blocks.{i}.attn_space.out_proj.weight"] = proj_w.contiguous()
         if proj_b is not None:
             out[f"blocks.{i}.attn.out_proj.bias"] = proj_b.contiguous()
+            out[f"blocks.{i}.attn_time.out_proj.bias"] = proj_b.contiguous()
+            out[f"blocks.{i}.attn_space.out_proj.bias"] = proj_b.contiguous()
 
         fc1_w = sd.get(f"blocks.{i}.mlp.fc1.weight", None)
         fc1_b = sd.get(f"blocks.{i}.mlp.fc1.bias", None)
